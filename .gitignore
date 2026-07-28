@@ -1,0 +1,11 @@
+/build/
+/build-*/
+/firmware/.config
+/firmware/vendor/
+/firmware/build*/
+/firmware/out/*.elf
+/firmware/out/*.hex
+/firmware/out/*.bin
+/firmware/out/*.map
+/out/
+/.cache/

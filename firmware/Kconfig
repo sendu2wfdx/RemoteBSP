@@ -1,0 +1,159 @@
+mainmenu "Remote BSP 工具板固件配置"
+
+choice
+    prompt "目标核心板"
+    default BOARD_STM32F103CBT6
+
+config BOARD_STM32F103CBT6
+    bool "STM32F103CBT6（128KB Flash / 20KB SRAM / bxCAN）"
+
+config BOARD_STM32G431CBU6
+    bool "STM32G431CBU6（128KB Flash / 32KB SRAM / FDCAN）"
+endchoice
+
+config SYSTEM_CLOCK_HZ
+    int "系统时钟频率"
+    default 72000000 if BOARD_STM32F103CBT6
+    default 170000000 if BOARD_STM32G431CBU6
+
+config FIRMWARE_VERSION_MAJOR
+    int "固件主版本号"
+    range 0 65535
+    default 0
+
+config FIRMWARE_VERSION_MINOR
+    int "固件次版本号"
+    range 0 65535
+    default 1
+
+config FIRMWARE_VERSION_PATCH
+    int "固件修订版本号"
+    range 0 65535
+    default 0
+
+config BOARD_TYPE
+    hex "板卡类型编号"
+    default 0x0103CB if BOARD_STM32F103CBT6
+    default 0x0431CB if BOARD_STM32G431CBU6
+
+config NODE_PROVISIONAL_ID
+    int "未分配节点的临时编号"
+    range 1 127
+    default 1
+
+choice
+    prompt "CAN/FDCAN 引脚组"
+    default CAN_PINS_PA11_PA12
+
+config CAN_PINS_PA11_PA12
+    bool "PA11=RX、PA12=TX（推荐，兼容两种核心板）"
+
+config CAN_PINS_PB8_PB9
+    bool "PB8=RX、PB9=TX"
+endchoice
+
+config CAN_NOMINAL_BITRATE
+    int "CAN 仲裁段波特率"
+    range 10000 1000000
+    default 500000
+
+config CAN_FD_ENABLE
+    bool "启用 CAN-FD"
+    default y if BOARD_STM32G431CBU6
+    depends on BOARD_STM32G431CBU6
+
+config CAN_FD_DATA_BITRATE
+    int "CAN-FD 数据段波特率"
+    range 1000000 8000000
+    default 2000000
+    depends on CAN_FD_ENABLE
+
+config CAN_TRANSCEIVER_STB_ENABLE
+    bool "使用 GPIO 控制收发器 STB"
+    default n
+
+config CAN_TRANSCEIVER_STB_PORT
+    string "STB GPIO 端口"
+    default "B"
+    depends on CAN_TRANSCEIVER_STB_ENABLE
+
+config CAN_TRANSCEIVER_STB_PIN
+    int "STB GPIO 引脚号"
+    range 0 15
+    default 0
+    depends on CAN_TRANSCEIVER_STB_ENABLE
+
+config REMOTE_MAX_PACKET_SIZE
+    int "最大远程协议包长度"
+    range 256 2048
+    default 2048 if BOARD_STM32F103CBT6
+    default 2048 if BOARD_STM32G431CBU6
+
+config REMOTE_REQUEST_CACHE_ENTRIES
+    int "请求去重缓存条目数"
+    range 2 32
+    default 8 if BOARD_STM32F103CBT6
+    default 16 if BOARD_STM32G431CBU6
+
+config REMOTE_CACHE_RESPONSE_SIZE
+    int "单条去重缓存的最大响应长度"
+    range 64 512
+    default 256
+    help
+      此长度包含 24 字节远程协议头。会消耗数据或产生副作用的命令，
+      必须把完整响应限制在此长度内，才能保证重试不会重复执行操作。
+
+config REMOTE_REASSEMBLY_SLOTS
+    int "并行分片重组槽数量"
+    range 1 4
+    default 2
+
+config REMOTE_REASSEMBLY_TIMEOUT_MS
+    int "分片重组超时（毫秒）"
+    range 50 5000
+    default 500
+
+config HEARTBEAT_INTERVAL_MS
+    int "心跳间隔（毫秒）"
+    range 100 2000
+    default 500
+
+config GPIO_RESOURCE_COUNT
+    int "暴露的 GPIO 数量"
+    range 1 32
+    default 8
+
+config UART_RESOURCE_COUNT
+    int "暴露的 UART 数量"
+    range 0 8
+    default 1 if BOARD_STM32F103CBT6
+    default 2 if BOARD_STM32G431CBU6
+
+choice F103_UART0_PINS
+    prompt "STM32F103 UART 0 引脚"
+    depends on BOARD_STM32F103CBT6 && UART_RESOURCE_COUNT > 0
+    default UART0_PINS_PA9_PA10
+
+config UART0_PINS_PA9_PA10
+    bool "USART1：PA9(TX) / PA10(RX)"
+
+config UART0_PINS_PB6_PB7
+    bool "USART1 重映射：PB6(TX) / PB7(RX)"
+
+endchoice
+
+config UART_RX_BUFFER_SIZE
+    int "每路 UART RX 缓冲长度"
+    range 64 4096
+    default 256 if BOARD_STM32F103CBT6
+    default 1024 if BOARD_STM32G431CBU6
+
+config UART_TX_BUFFER_SIZE
+    int "每路 UART TX 缓冲长度"
+    range 64 4096
+    default 256 if BOARD_STM32F103CBT6
+    default 1024 if BOARD_STM32G431CBU6
+
+config HARDWARE_ID_ADC
+    bool "启用 ADC 硬件 ID"
+    default n

@@ -1,0 +1,37 @@
+#pragma once
+
+#include "remotebsp_config.h"
+
+/*
+ * PA13/PA14 始终保留为 SWDIO/SWCLK，NRST 也不分配给业务资源。
+ * CAN 引脚只允许选择两颗目标 MCU 都支持的组合。
+ */
+#if defined(CONFIG_CAN_PINS_PA11_PA12)
+#define RBSP_CAN_RX_PORT 'A'
+#define RBSP_CAN_RX_PIN 11U
+#define RBSP_CAN_TX_PORT 'A'
+#define RBSP_CAN_TX_PIN 12U
+#elif defined(CONFIG_CAN_PINS_PB8_PB9)
+#define RBSP_CAN_RX_PORT 'B'
+#define RBSP_CAN_RX_PIN 8U
+#define RBSP_CAN_TX_PORT 'B'
+#define RBSP_CAN_TX_PIN 9U
+#else
+#error "必须选择 CAN 引脚组"
+#endif
+
+#if defined(CONFIG_BOARD_STM32F103CBT6)
+#define RBSP_MCU_NAME "STM32F103CBT6"
+#define RBSP_FLASH_SIZE (128U * 1024U)
+#define RBSP_SRAM_SIZE (20U * 1024U)
+#define RBSP_CAN_MTU 8U
+#define RBSP_CAN_GPIO_ALTERNATE_FUNCTION 0U
+#elif defined(CONFIG_BOARD_STM32G431CBU6)
+#define RBSP_MCU_NAME "STM32G431CBU6"
+#define RBSP_FLASH_SIZE (128U * 1024U)
+#define RBSP_SRAM_SIZE (32U * 1024U)
+#define RBSP_CAN_MTU (CONFIG_CAN_FD_ENABLE ? 64U : 8U)
+#define RBSP_CAN_GPIO_ALTERNATE_FUNCTION 9U
+#else
+#error "必须选择目标核心板"
+#endif
