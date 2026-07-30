@@ -43,6 +43,12 @@ flowchart TD
 SPI、I2C、ADC、PWM、Timer 和 Storage 属于后续资源类型，当前尚未实现。USB
 目前只用于 Katapult 恢复升级和 G431 APP 调试输出，不是 RemoteBSP 业务传输。
 
+下一阶段已经形成智能实时资源设计：Linux 负责多轴轨迹和 TMC 协议，MCU
+负责定时 STEP/DIR/EN、前瞻队列、本地限位联锁和通用 UART/SPI 事务。引脚与
+资源依赖使用可持久化的运行时资源清单，`menuconfig` 只保留固定硬件参数和
+功能裁剪。不同板卡通过主机校准各自时钟，预装运动段后按同一个未来绝对时间
+启动；当前仅完成设计，尚未并入稳定协议和实体固件。
+
 ## 目录
 
 ```text
@@ -187,8 +193,11 @@ CAN 已完全失效时，按住 PA0 并复位也会进入 USB Katapult。F103 �
 
 ## 文档
 
+- [项目概览与当前状态](docs/project-overview.md)
+- [项目待办](TODO.md)
 - [架构与设计说明](docs/architecture.md)
 - [使用场景与需求](docs/use-cases-and-requirements.md)
+- [智能实时资源与多轴运动控制设计](docs/intelligent-motion-resources.md)
 - [libremotebsp 客户端 API](docs/libremotebsp-api.md)
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)

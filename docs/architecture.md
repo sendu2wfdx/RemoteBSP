@@ -2,6 +2,8 @@
 
 详细设备拓扑、故障隔离、多 UART、板级资源适配、固件配置和硬件 ID 需求见
 [使用场景与系统需求](use-cases-and-requirements.md)。
+后续多轴步进、限位联锁、TMC 通信和运行时资源清单见
+[智能实时资源与多轴运动控制设计](intelligent-motion-resources.md)。
 
 Remote BSP 的目标是让 Linux 负责设备协议和业务逻辑，让远端 MCU 只执行
 通用、原子的硬件操作。
@@ -306,3 +308,22 @@ APP USB CDC 调试是协议与 CAN 传输之外的可选旁路。它只发送诊
 启用 USB CDC；其 USB 只在未运行 CAN 的 Katapult Bootloader 阶段使用。
 详细构建、升级和安全边界见
 [Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。
+
+## 后续：智能实时资源层
+
+多轴步进控制不会实现为经 CAN 逐次翻转 GPIO。Linux 将轨迹转换为带绝对执行
+时间的压缩运动段，MCU 使用共同定时器基准驱动 STEP/DIR/EN，并在本地处理
+限位和急停。TMC 型号、寄存器含义和初始化仍属于 Linux；MCU 只提供通用
+UART、半双工 UART 和 SPI 原子事务。
+
+编译期配置与运行时接线配置严格分离。`menuconfig` 负责 MCU、晶振、CAN、
+USB、Bootloader 以及是否链接运动/输入/总线模块；轴引脚、限位、TMC 总线和
+资源依赖保存为带版本、CRC 和 A/B 原子提交的非易失资源清单。详细的队列模型、
+安全状态、资源占用和分阶段实现要求见
+[智能实时资源与多轴运动控制设计](intelligent-motion-resources.md)。
+
+不同板卡上的轴使用 64 位全局运动时间。`toolbusd` 分别估计每块 MCU 的时钟
+偏移和漂移，运动段提前装入所有节点；全部节点报告就绪后，再提交同一个未来
+绝对开始时间。同步不依赖 CAN 包恰好同时到达。任一节点在提交前未就绪，整组
+取消；时钟误差或队列余量越界时，按共同段边界停止。跨板限位仍受总线延迟影响，
+不能替代同板联锁或硬件急停线。
