@@ -4,15 +4,20 @@ set -euo pipefail
 # 为 CANable2 原厂 SLCAN 固件建立经典 CAN SocketCAN 接口。
 # 默认使用稳定的 /dev/serial/by-id 路径，避免 ttyACM 编号变化。
 interface="${1:-can0}"
-bitrate_preset="${2:-6}"
+bitrate_preset="${2:-8}"
 tx_queue_length="${3:-1024}"
+uart_baud="${4:-2000000}"
 
-if ! [[ "${bitrate_preset}" =~ ^[0-9]$ ]]; then
-    printf 'SLCAN 波特率预设必须是 0..9\n' >&2
+if ! [[ "${bitrate_preset}" =~ ^[0-8]$ ]]; then
+    printf 'SLCAN 波特率预设必须是 0..8\n' >&2
     exit 2
 fi
 if ! [[ "${tx_queue_length}" =~ ^[1-9][0-9]*$ ]]; then
     printf '发送队列长度必须是正整数\n' >&2
+    exit 2
+fi
+if ! [[ "${uart_baud}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'SLCAN 串口波特率必须是正整数\n' >&2
     exit 2
 fi
 
@@ -34,7 +39,8 @@ modprobe can
 modprobe can_raw
 modprobe can_dev
 modprobe slcan
-slcand -o -c "-s${bitrate_preset}" "${devices[0]}" "${interface}"
+slcand -o -c "-s${bitrate_preset}" -S "${uart_baud}" \
+    "${devices[0]}" "${interface}"
 
 for _ in {1..20}; do
     if ip link show "${interface}" >/dev/null 2>&1; then

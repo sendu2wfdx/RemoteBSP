@@ -7,6 +7,7 @@
 #define HAL_GPIO_MODULE_ENABLED
 #define HAL_PWR_MODULE_ENABLED
 #define HAL_FDCAN_MODULE_ENABLED
+#define HAL_PCD_MODULE_ENABLED
 
 #define HSE_VALUE 24000000U
 #define HSE_STARTUP_TIMEOUT 100U
@@ -29,5 +30,6 @@
 #include "stm32g4xx_hal_cortex.h"
 #include "stm32g4xx_hal_pwr.h"
 #include "stm32g4xx_hal_fdcan.h"
+#include "stm32g4xx_hal_pcd.h"
 
 #define assert_param(expression) ((void)0U)

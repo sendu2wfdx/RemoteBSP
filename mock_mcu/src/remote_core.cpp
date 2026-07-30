@@ -71,6 +71,9 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request) {
             return handle_get_capability(request);
         case protocol::Command::Ping:
             return handle_ping(request);
+        case protocol::Command::BootloaderEnter:
+        case protocol::Command::BootloaderEnterUsb:
+            return handle_bootloader_enter(request);
         case protocol::Command::ResourceEnum:
             return handle_resource_enum(request);
         case protocol::Command::ResourceDescribe:
@@ -100,6 +103,10 @@ const NodeInfo& RemoteCore::node_info() const noexcept { return node_info_; }
 
 std::uint64_t RemoteCore::capabilities() const noexcept {
     return capabilities_;
+}
+
+bool RemoteCore::bootloader_requested() const noexcept {
+    return bootloader_requested_;
 }
 
 protocol::Packet RemoteCore::make_response(
@@ -154,6 +161,25 @@ protocol::Packet RemoteCore::handle_ping(
     response.payload.insert(response.payload.end(), request.payload.begin(),
                             request.payload.end());
     return response;
+}
+
+protocol::Packet RemoteCore::handle_bootloader_enter(
+    const protocol::Packet& request) {
+    static constexpr std::array<std::uint8_t, 8> confirmation{
+        'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
+    if (request.header.object_id != 0 ||
+        request.payload.size() != confirmation.size() ||
+        !std::equal(request.payload.begin(), request.payload.end(),
+                    confirmation.begin())) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if ((capabilities_ &
+         capability_mask(Capability::Bootloader)) == 0) {
+        return make_response(request,
+                             StatusCode::UnsupportedCapability);
+    }
+    bootloader_requested_ = true;
+    return make_response(request, StatusCode::Ok);
 }
 
 protocol::Packet RemoteCore::handle_resource_enum(

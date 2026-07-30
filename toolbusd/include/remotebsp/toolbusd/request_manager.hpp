@@ -14,8 +14,9 @@ namespace remotebsp::toolbusd {
 
 struct RequestManagerConfig {
     /*
-     * 2048 字节包在 500 kbit/s Classical CAN + SLCAN 上的实测往返
-     * 接近 450 ms。保留调度和总线竞争余量，避免合法响应触发过早重试。
+     * 最大包在 500 kbit/s Classical CAN + SLCAN 上实测接近 450 ms，
+     * 在 1 Mbit/s + 2 Mbaud SLCAN 上约 364 ms。保留调度和总线竞争
+     * 余量，避免合法响应触发过早重试。
      */
     std::chrono::milliseconds timeout{750};
     unsigned maximum_retries{2};

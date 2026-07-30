@@ -11,6 +11,14 @@ config BOARD_STM32G431CBU6
     bool "STM32G431CBU6（128KB Flash / 32KB SRAM / FDCAN）"
 endchoice
 
+config BOARD_WEACT_BLUEPILL_PLUS
+    bool "WeAct Studio BluePill Plus 板级外设"
+    depends on BOARD_STM32F103CBT6
+    default n
+    help
+      PA0 为高电平按下的用户按键，使用 MCU 内部下拉；PB2 为高电平点亮
+      的蓝色 LED；PA11/PA12 分别为 USB DM/DP。
+
 config SYSTEM_CLOCK_HZ
     int "系统时钟频率"
     default 72000000 if BOARD_STM32F103CBT6
@@ -157,3 +165,55 @@ config UART_TX_BUFFER_SIZE
 config HARDWARE_ID_ADC
     bool "启用 ADC 硬件 ID"
     default n
+
+menu "USB 调试"
+
+config USB_DEBUG_CDC
+    bool "启用 USB CDC 非阻塞调试输出"
+    default n
+    depends on BOARD_STM32G431CBU6 && CAN_PINS_PB8_PB9
+    help
+      使用 PA11/PA12 枚举为 USB CDC ACM 虚拟串口。发送采用环形缓冲，
+      缓冲已满时丢弃新的调试字节，不允许调试输出阻塞 CAN 主循环。
+      STM32G431 可与 FDCAN 同时运行，CAN 必须使用 PB8/PB9。
+      STM32F103 的 USB 与 bxCAN 共用 512 字节专用 SRAM，硬件不允许
+      两者同时运行，因此 F103 的 CAN APP 不提供此选项；USB Katapult
+      Bootloader 仍可单独使用。
+
+config USB_DEBUG_TX_BUFFER_SIZE
+    int "USB 调试发送环形缓冲长度"
+    range 128 2048
+    default 1024 if BOARD_STM32G431CBU6
+    depends on USB_DEBUG_CDC
+
+config USB_DEBUG_VID
+    hex "USB VID（开发默认值，产品化前必须替换）"
+    default 0x0483
+    depends on USB_DEBUG_CDC
+
+config USB_DEBUG_PID
+    hex "USB PID（开发默认值，产品化前必须替换）"
+    default 0x5740
+    depends on USB_DEBUG_CDC
+
+endmenu
+
+choice
+    prompt "APP Flash 布局"
+    default APP_LAYOUT_STANDALONE
+    help
+      独立 APP 从 0x08000000 启动，适合使用 ST-Link 直接烧录。
+      Katapult 布局为 Bootloader 保留前 8KiB，APP 从 0x08002000 启动。
+
+config APP_LAYOUT_STANDALONE
+    bool "独立 APP（无 Bootloader，偏移 0）"
+
+config APP_LAYOUT_KATAPULT_8K
+    bool "Katapult Bootloader（保留前 8KiB）"
+
+endchoice
+
+config APPLICATION_FLASH_OFFSET
+    hex
+    default 0x2000 if APP_LAYOUT_KATAPULT_8K
+    default 0x0

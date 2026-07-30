@@ -26,6 +26,7 @@ enum class Capability : std::uint64_t {
     Pwm = 1ULL << 5U,
     Timer = 1ULL << 6U,
     Storage = 1ULL << 7U,
+    Bootloader = 1ULL << 8U,
 };
 
 constexpr std::uint64_t capability_mask(Capability capability) noexcept {
@@ -77,6 +78,7 @@ public:
     protocol::Packet handle(const protocol::Packet& request);
     const NodeInfo& node_info() const noexcept;
     std::uint64_t capabilities() const noexcept;
+    bool bootloader_requested() const noexcept;
 
 private:
     protocol::Packet make_response(const protocol::Packet& request,
@@ -85,6 +87,8 @@ private:
     protocol::Packet handle_get_capability(
         const protocol::Packet& request) const;
     protocol::Packet handle_ping(const protocol::Packet& request) const;
+    protocol::Packet handle_bootloader_enter(
+        const protocol::Packet& request);
     protocol::Packet handle_resource_enum(
         const protocol::Packet& request) const;
     protocol::Packet handle_resource_describe(
@@ -120,6 +124,7 @@ private:
     std::unordered_map<std::uint32_t, GpioObject> gpio_objects_;
     std::unordered_map<std::uint32_t, UartObject> uart_objects_;
     std::uint32_t next_object_id_{1};
+    bool bootloader_requested_{};
 };
 
 }

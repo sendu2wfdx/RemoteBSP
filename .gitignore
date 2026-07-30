@@ -2,10 +2,13 @@
 /build-*/
 /firmware/.config
 /firmware/vendor/
+/katapult/
 /firmware/build*/
 /firmware/out/*.elf
 /firmware/out/*.hex
 /firmware/out/*.bin
 /firmware/out/*.map
+/firmware/out/katapult-*.config
 /out/
 /.cache/
+__pycache__/

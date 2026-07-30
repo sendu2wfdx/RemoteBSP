@@ -106,6 +106,8 @@ void print_usage() {
         << "用法: remote-cli [--socket 路径] [--node 节点ID] <命令> [参数]\n"
         << "命令:\n"
         << "  ping <文本>\n"
+        << "  bootloader-enter\n"
+        << "  bootloader-enter-usb\n"
         << "  node-list\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
@@ -172,6 +174,16 @@ int run(const std::vector<std::string>& arguments,
         const auto output = client.ping(input);
         std::cout << "pong="
                   << std::string(output.begin(), output.end()) << '\n';
+        return 0;
+    }
+    if (name == "bootloader-enter" && arguments.size() == 1) {
+        client.enter_bootloader();
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "bootloader-enter-usb" && arguments.size() == 1) {
+        client.enter_usb_bootloader();
+        std::cout << "ok\n";
         return 0;
     }
     if (name == "get-info" && arguments.size() == 1) {

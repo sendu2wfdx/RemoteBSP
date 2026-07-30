@@ -11,6 +11,8 @@ static uint32_t now_ms;
 static bool gpio_values[256];
 static unsigned gpio_write_count;
 static unsigned uart_read_count;
+static unsigned bootloader_enter_count;
+static rbsp_bootloader_mode_t last_bootloader_mode;
 
 static void put_u16(uint8_t* output, uint16_t value) {
     output[0] = (uint8_t)value;
@@ -124,6 +126,11 @@ static bool fake_uart_write(uint8_t port, const uint8_t* data,
     return port < 2U && data != NULL && length != 0U;
 }
 
+static void fake_enter_bootloader(rbsp_bootloader_mode_t mode) {
+    last_bootloader_mode = mode;
+    ++bootloader_enter_count;
+}
+
 static void feed_packet(rbsp_core_t* core, uint32_t can_id,
                         uint16_t transfer_id, const uint8_t* packet,
                         uint16_t packet_size) {
@@ -222,7 +229,8 @@ int main(void) {
     const rbsp_hal_t hal = {
         fake_can_send, fake_milliseconds,
         fake_gpio_configure, fake_gpio_write, fake_gpio_read,
-        fake_uart_configure, fake_uart_read, fake_uart_write};
+        fake_uart_configure, fake_uart_read, fake_uart_write,
+        fake_enter_bootloader};
     rbsp_node_info_t info = {
         {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
          0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
@@ -333,6 +341,46 @@ int main(void) {
     feed_packet(&core, 0x619U, 11U, request, request_size);
     assert(reassemble_sent(response, 0x599U) == 25U);
     assert(response[24] == 2U && uart_read_count == 1U);
+
+    clear_sent();
+    const uint8_t bootloader_confirmation[] = {
+        'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
+    request_size = make_request(
+        request, 0x0013U, 9U, 0U,
+        bootloader_confirmation,
+        sizeof(bootloader_confirmation));
+    now_ms = 100U;
+    feed_packet(&core, 0x619U, 12U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24] == 0U);
+    assert(core.bootloader_request_pending);
+    assert(bootloader_enter_count == 0U);
+
+    now_ms = 199U;
+    rbsp_core_poll(&core);
+    assert(bootloader_enter_count == 0U);
+    now_ms = 200U;
+    rbsp_core_poll(&core);
+    assert(bootloader_enter_count == 1U);
+    assert(last_bootloader_mode == RBSP_BOOTLOADER_CAN);
+    assert(!core.bootloader_request_pending);
+
+    clear_sent();
+    request_size = make_request(
+        request, 0x0014U, 10U, 0U,
+        bootloader_confirmation,
+        sizeof(bootloader_confirmation));
+    now_ms = 300U;
+    feed_packet(&core, 0x619U, 13U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24] == 0U);
+    assert(core.bootloader_request_pending);
+
+    now_ms = 400U;
+    rbsp_core_poll(&core);
+    assert(bootloader_enter_count == 2U);
+    assert(last_bootloader_mode == RBSP_BOOTLOADER_USB);
+    assert(!core.bootloader_request_pending);
 
     clear_sent();
     now_ms = 500U;

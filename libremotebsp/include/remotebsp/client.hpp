@@ -75,6 +75,8 @@ public:
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     std::optional<protocol::Packet> next_event() const;
+    void enter_bootloader() const;
+    void enter_usb_bootloader() const;
 
     std::vector<protocol::ResourceDescriptor> list_resources() const;
     protocol::ResourceDescriptor describe_resource(

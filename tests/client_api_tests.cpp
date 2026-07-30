@@ -67,4 +67,8 @@ int main(int argc, char** argv) {
         thread.join();
     }
     assert(successes == 8);
+
+    /* 放在最后，模拟真实设备回复后进入 Bootloader 的语义。 */
+    client.enter_bootloader();
+    client.enter_usb_bootloader();
 }

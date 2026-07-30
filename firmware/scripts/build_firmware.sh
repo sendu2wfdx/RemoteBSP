@@ -39,6 +39,18 @@ case "${target}" in
         build_one g431 configs/stm32g431cbu6_defconfig \
             remotebsp-stm32g431cbu6
         ;;
+    bluepill-katapult)
+        build_one f103-bluepill-katapult \
+            configs/stm32f103_bluepill_katapult_defconfig \
+            remotebsp-stm32f103cbt6 \
+            remotebsp-stm32f103-bluepill-katapult
+        ;;
+    g431-katapult)
+        build_one g431-katapult \
+            configs/stm32g431cbu6_katapult_defconfig \
+            remotebsp-stm32g431cbu6 \
+            remotebsp-stm32g431-katapult
+        ;;
     all)
         build_one f103 configs/stm32f103cbt6_defconfig \
             remotebsp-stm32f103cbt6
@@ -49,7 +61,8 @@ case "${target}" in
             remotebsp-stm32g431cbu6
         ;;
     *)
-        printf '用法：%s [f103|bluepill|g431|all]\n' "$0" >&2
+        printf '用法：%s [f103|bluepill|g431|bluepill-katapult|g431-katapult|all]\n' \
+            "$0" >&2
         exit 2
         ;;
 esac

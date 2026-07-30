@@ -132,8 +132,9 @@ CAN 载荷 -> 分片重组 -> 协议解码 -> RemoteCore
 请求 ID 返回缓存结果，而不是再次执行带副作用的操作。
 
 默认单次等待 750 ms。500 kbit/s Classical CAN + SLCAN 上，2048 字节请求和
-响应的实测往返接近 450 ms；750 ms 能覆盖最大合法数据包，并为调度和总线竞争
-保留余量，避免响应仍在重组时过早启动重试。
+响应的实测往返接近 450 ms；Bluepill 提升到 1 Mbit/s、SLCAN 端口参数提升到
+2 Mbaud 后，最大载荷 PING 实测约 364 ms。750 ms 能覆盖最大合法数据包，并为
+调度、总线竞争和较慢适配器保留余量，避免响应仍在重组时过早启动重试。
 
 已经完成或超时的请求会在短时间内保留标识，用于识别迟到或重复响应。该核心
 组件不直接访问 SocketCAN，后续由 `toolbusd` 事件循环负责发送重试帧和向本地
@@ -283,3 +284,25 @@ CAN-FD 都执行该测试。
 
 当前事件通路已经解决持续数据不必反复发送 `UART_READ` 的问题。每资源带宽
 配额、事件优先级和溢出丢弃计数公开仍需后续增强。
+
+## 第十五步：Katapult Bootloader 与 USB 调试旁路
+
+STM32 APP 支持 `BOOTLOADER_ENTER` 和 `BOOTLOADER_ENTER_USB` 两个原子命令，
+分别选择 CAN 和 USB Katapult。载荷必须是固定 8 字节确认串，节点先缓存并
+发送成功响应，再延迟约 100 ms 写入对应的 Katapult RAM 请求签名并复位。
+相同会话 ID 和请求 ID 的重试只返回缓存响应，不能重复执行复位副作用。
+
+Flash 前 8 KiB 分配给 Katapult，APP 和其中断向量表从 `0x08002000` 开始。
+首次烧录使用 Bootloader+APP 合并镜像，后续在线升级只传输带偏移链接的 APP
+镜像。Katapult 作为 GPLv3 独立程序构建，不与 RemoteBSP APP 静态链接。
+F103 和 G431 使用同一套双模式补丁：APP 命令可以选择 CAN 或 USB，复位时
+按住 PA0 或 APP 无效也会选择 USB 应急恢复。两个通信后端同时链接，但运行时
+只初始化一个；F103 因而不会同时启用共享专用 SRAM 的 USB 与 bxCAN。
+
+APP USB CDC 调试是协议与 CAN 传输之外的可选旁路。它只发送诊断文本，使用
+固定环形缓冲和 64 字节 USB 包；未连接、拥塞或初始化失败都不会阻塞 CAN
+接收、心跳或远程 BSP 调度。该旁路当前仅对 STM32G431 开放，并要求 FDCAN
+固定使用 PB8/PB9。STM32F103 的 USB 与 bxCAN 共用专用 SRAM，CAN APP 禁止
+启用 USB CDC；其 USB 只在未运行 CAN 的 Katapult Bootloader 阶段使用。
+详细构建、升级和安全边界见
+[Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。

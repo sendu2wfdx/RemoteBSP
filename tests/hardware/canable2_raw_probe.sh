@@ -5,8 +5,11 @@ set -euo pipefail
 # 运行前必须停止占用该串口的 slcand。
 device="${1:-}"
 frame_count="${2:-1}"
+bitrate_preset="${3:-8}"
+uart_baud="${4:-2000000}"
 if [[ -z "${device}" || ! -e "${device}" ]]; then
-    printf '用法：%s <CANable2 串口设备> [测试帧数量]\n' "$0" >&2
+    printf '用法：%s <CANable2 串口设备> [测试帧数量] [CAN 预设] [串口波特率]\n' \
+        "$0" >&2
     exit 2
 fi
 if ! [[ "${frame_count}" =~ ^[1-9][0-9]*$ ]] ||
@@ -14,12 +17,20 @@ if ! [[ "${frame_count}" =~ ^[1-9][0-9]*$ ]] ||
     printf '测试帧数量必须在 1..100 之间\n' >&2
     exit 2
 fi
+if ! [[ "${bitrate_preset}" =~ ^[0-8]$ ]]; then
+    printf 'SLCAN 波特率预设必须是 0..8\n' >&2
+    exit 2
+fi
+if ! [[ "${uart_baud}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'SLCAN 串口波特率必须是正整数\n' >&2
+    exit 2
+fi
 
-stty -F "${device}" 115200 raw -echo
+stty -F "${device}" "${uart_baud}" raw -echo
 exec 3<>"${device}"
 
-# 关闭通道、设置经典 CAN 500k、正常模式、自动重发，再打开通道。
-printf 'C\rS6\rM0\rA1\rO\r' >&3
+# 关闭通道、设置经典 CAN 速率、正常模式、自动重发，再打开通道。
+printf 'C\rS%s\rM0\rA1\rO\r' "${bitrate_preset}" >&3
 sleep 1
 
 # 查询固件版本，发送一个测试帧，然后读取 CANable2 错误寄存器。

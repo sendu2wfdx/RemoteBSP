@@ -42,10 +42,52 @@ if(NOT RBSP_BOARD_COUNT EQUAL 1)
     message(FATAL_ERROR "配置文件必须且只能选择一块 STM32 目标板")
 endif()
 
+file(STRINGS "${RBSP_CONFIG}" RBSP_APP_OFFSET_LINES
+     REGEX "^CONFIG_APPLICATION_FLASH_OFFSET=0x[0-9A-Fa-f]+$")
+list(LENGTH RBSP_APP_OFFSET_LINES RBSP_APP_OFFSET_COUNT)
+if(NOT RBSP_APP_OFFSET_COUNT EQUAL 1)
+    message(FATAL_ERROR
+        "配置文件必须显式定义一个 CONFIG_APPLICATION_FLASH_OFFSET")
+endif()
+list(GET RBSP_APP_OFFSET_LINES 0 RBSP_APP_OFFSET_LINE)
+string(REGEX REPLACE
+       "^CONFIG_APPLICATION_FLASH_OFFSET=(0x[0-9A-Fa-f]+)$" "\\1"
+       RBSP_APP_FLASH_OFFSET "${RBSP_APP_OFFSET_LINE}")
+
 set(VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 if(NOT EXISTS "${VENDOR_DIR}/cmsis-core/Core/Include/core_cm3.h")
     message(FATAL_ERROR
         "缺少 ST 官方依赖，请先运行 scripts/fetch_stm32_deps.sh")
+endif()
+
+file(STRINGS "${RBSP_CONFIG}" RBSP_USB_DEBUG_LINES
+     REGEX "^CONFIG_USB_DEBUG_CDC=y$")
+set(RBSP_USB_DEBUG_ENABLED OFF)
+set(RBSP_USB_COMMON_SOURCES)
+if(RBSP_USB_DEBUG_LINES)
+    set(RBSP_USB_DEBUG_ENABLED ON)
+    if(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
+        message(FATAL_ERROR
+            "STM32F103 的 USB 与 bxCAN 共用专用 SRAM，CAN APP 不能启用 USB CDC")
+    endif()
+    file(STRINGS "${RBSP_CONFIG}" RBSP_CAN_PB8_PB9_LINES
+         REGEX "^CONFIG_CAN_PINS_PB8_PB9=y$")
+    if(NOT RBSP_CAN_PB8_PB9_LINES)
+        message(FATAL_ERROR
+            "USB CDC 占用 PA11/PA12；同时启用 CAN 时必须选择 PB8/PB9")
+    endif()
+    set(USB_DEVICE_DIR "${VENDOR_DIR}/stm32-mw-usb-device")
+    if(NOT EXISTS "${USB_DEVICE_DIR}/Core/Src/usbd_core.c")
+        message(FATAL_ERROR
+            "启用 USB CDC 时缺少 ST USB Device 中间件，请先运行 scripts/fetch_stm32_deps.sh")
+    endif()
+    list(APPEND RBSP_USB_COMMON_SOURCES
+        src/usb_debug.c
+        "${USB_DEVICE_DIR}/Core/Src/usbd_core.c"
+        "${USB_DEVICE_DIR}/Core/Src/usbd_ctlreq.c"
+        "${USB_DEVICE_DIR}/Core/Src/usbd_ioreq.c"
+        "${USB_DEVICE_DIR}/Class/CDC/Src/usbd_cdc.c"
+    )
 endif()
 
 function(rbsp_common_target target cpu linker_script)
@@ -58,6 +100,7 @@ function(rbsp_common_target target cpu linker_script)
     target_link_options(${target} PRIVATE
         -mcpu=${cpu} -mthumb
         -T${linker_script}
+        -Wl,--defsym=RBSP_APP_FLASH_OFFSET=${RBSP_APP_FLASH_OFFSET}
         --specs=nano.specs --specs=nosys.specs
         -Wl,--gc-sections
         -Wl,-Map=${target}.map
@@ -92,7 +135,19 @@ if(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
         "${HAL_DIR}/Src/stm32f1xx_hal_can.c"
         "${HAL_DIR}/Src/stm32f1xx_hal_uart.c"
         src/byte_ring.c
+        ${RBSP_USB_COMMON_SOURCES}
     )
+    if(RBSP_USB_DEBUG_ENABLED)
+        target_sources(remotebsp-stm32f103cbt6 PRIVATE
+            "${HAL_DIR}/Src/stm32f1xx_hal_pcd.c"
+            "${HAL_DIR}/Src/stm32f1xx_hal_pcd_ex.c"
+            "${HAL_DIR}/Src/stm32f1xx_ll_usb.c"
+        )
+        target_include_directories(remotebsp-stm32f103cbt6 PRIVATE
+            "${USB_DEVICE_DIR}/Core/Inc"
+            "${USB_DEVICE_DIR}/Class/CDC/Inc"
+        )
+    endif()
     target_compile_definitions(remotebsp-stm32f103cbt6 PRIVATE
         USE_HAL_DRIVER STM32F103xB)
     target_compile_options(remotebsp_embedded_core PRIVATE
@@ -120,7 +175,19 @@ else()
         "${HAL_DIR}/Src/stm32g4xx_hal_pwr.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_pwr_ex.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_fdcan.c"
+        ${RBSP_USB_COMMON_SOURCES}
     )
+    if(RBSP_USB_DEBUG_ENABLED)
+        target_sources(remotebsp-stm32g431cbu6 PRIVATE
+            "${HAL_DIR}/Src/stm32g4xx_hal_pcd.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_pcd_ex.c"
+            "${HAL_DIR}/Src/stm32g4xx_ll_usb.c"
+        )
+        target_include_directories(remotebsp-stm32g431cbu6 PRIVATE
+            "${USB_DEVICE_DIR}/Core/Inc"
+            "${USB_DEVICE_DIR}/Class/CDC/Inc"
+        )
+    endif()
     target_compile_definitions(remotebsp-stm32g431cbu6 PRIVATE
         USE_HAL_DRIVER STM32G431xx)
     target_compile_options(remotebsp_embedded_core PRIVATE

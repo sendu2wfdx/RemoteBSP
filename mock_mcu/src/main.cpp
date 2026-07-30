@@ -58,7 +58,8 @@ remotebsp::mock_mcu::RemoteCore make_core(std::uint32_t instance) {
         capability_mask(Capability::Adc) |
         capability_mask(Capability::Pwm) |
         capability_mask(Capability::Timer) |
-        capability_mask(Capability::Storage);
+        capability_mask(Capability::Storage) |
+        capability_mask(Capability::Bootloader);
 
     using remotebsp::protocol::ResourceDescriptor;
     using remotebsp::protocol::ResourceType;

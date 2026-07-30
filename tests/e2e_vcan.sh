@@ -79,7 +79,7 @@ grep -Fq 'firmware=0.1.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
 
 capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
-grep -Fq 'capabilities=0xff' <<<"$capability_output"
+grep -Fq 'capabilities=0x1ff' <<<"$capability_output"
 
 event_output="$("$remote_cli_bin" --socket "$socket_path" event-wait)"
 grep -Fq 'command=0x280 resource_id=0x2000007' <<<"$event_output"

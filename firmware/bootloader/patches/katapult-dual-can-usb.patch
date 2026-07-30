@@ -1,0 +1,438 @@
+diff --git a/src/Kconfig b/src/Kconfig
+index a4f55fd..3f84f35 100644
+--- a/src/Kconfig
++++ b/src/Kconfig
+@@ -40,6 +40,8 @@ config USBSERIAL
+     bool
+ config USBCANBUS
+     bool
++config DUAL_CAN_USB
++    bool
+ config USB
+     bool
+     default y if USBSERIAL || USBCANBUS
+diff --git a/src/bootentry.c b/src/bootentry.c
+index 1325651..17459f5 100644
+--- a/src/bootentry.c
++++ b/src/bootentry.c
+@@ -43,13 +43,24 @@ check_double_reset(void)
+     // Set request signature and delay - this enters the bootloader if
+     // the reset button is double clicked
+     udelay(DOUBLE_CLICK_MIN_US);
+-    set_bootup_code(REQUEST_CANBOOT);
++    set_bootup_code(CONFIG_DUAL_CAN_USB
++                    ? REQUEST_USB_BOOT : REQUEST_CANBOOT);
+     udelay(DOUBLE_CLICK_MAX_US - DOUBLE_CLICK_MIN_US);
+     // No reset, clear the bootup code
+     set_bootup_code(0);
+     return 0;
+ }
+
++static uint8_t boot_interface_usb;
++
++int
++bootentry_is_usb(void)
++{
++    if (CONFIG_DUAL_CAN_USB)
++        return boot_interface_usb;
++    return CONFIG_USBSERIAL;
++}
++
+ // Check if bootloader or application should be started
+ int
+ bootentry_check(void)
+@@ -58,6 +69,20 @@ bootentry_check(void)
+     // - The request signature is set in memory (request from app)
+     // - No application code is present
+     uint64_t bootup_code = get_bootup_code();
++    if (CONFIG_DUAL_CAN_USB) {
++        if (bootup_code == REQUEST_CANBOOT) {
++            boot_interface_usb = 0;
++            set_bootup_code(0);
++            return 1;
++        }
++        if (bootup_code == REQUEST_USB_BOOT || !application_check_valid()
++            || check_button_pressed()) {
++            boot_interface_usb = 1;
++            set_bootup_code(0);
++            return 1;
++        }
++        return check_double_reset();
++    }
+     if (bootup_code == REQUEST_CANBOOT || !application_check_valid()
+         || check_button_pressed()) {
+         // Start bootloader main loop
+diff --git a/src/bootentry.h b/src/bootentry.h
+index 04a9f3b..72a3744 100644
+--- a/src/bootentry.h
++++ b/src/bootentry.h
+@@ -3,5 +3,6 @@
+
+ int bootentry_check(void);
+ int board_check_double_reset(void);
++int bootentry_is_usb(void);
+
+ #endif // bootentry.h
+diff --git a/src/canboot.h b/src/canboot.h
+index a9e8d30..87c18c1 100644
+--- a/src/canboot.h
++++ b/src/canboot.h
+@@ -5,6 +5,7 @@
+
+ #define CANBOOT_SIGNATURE 0x21746f6f426e6143 // CanBoot!
+ #define REQUEST_CANBOOT 0x5984E3FA6CA1589B
++#define REQUEST_USB_BOOT 0x8F3D6A21C457B09E
+ #define REQUEST_START_APP 0x7b06ec45a9a8243d
+
+ uint64_t get_bootup_code(void);
+diff --git a/src/generic/canserial.c b/src/generic/canserial.c
+index 153507c..83a0390 100644
+--- a/src/generic/canserial.c
++++ b/src/generic/canserial.c
+@@ -7,9 +7,11 @@
+ // This file may be distributed under the terms of the GNU GPLv3 license.
+
+ #include <string.h> // memcpy
++#include "autoconf.h" // CONFIG_DUAL_CAN_USB
+ #include "board/io.h" // readb
+ #include "board/irq.h" // irq_save
+ #include "board/misc.h" // console_sendf
++#include "bootentry.h" // bootentry_is_usb
+ #include "canbus.h" // canbus_send
+ #include "canserial.h" // canserial_notify_tx
+ #include "command.h" // DECL_CONSTANT
+@@ -78,8 +80,13 @@ canserial_tx_task(void)
+ DECL_TASK(canserial_tx_task);
+
+ // Encode and transmit a "response" message
++#if CONFIG_DUAL_CAN_USB
++void
++can_console_sendf(const struct command_encoder *ce, va_list args)
++#else
+ void
+ console_sendf(const struct command_encoder *ce, va_list args)
++#endif
+ {
+     // Verify space for message
+     uint32_t tpos = CanData.transmit_pos, tmax = CanData.transmit_max;
+@@ -336,6 +343,8 @@ canserial_set_uuid(uint8_t *raw_uuid, uint32_t raw_uuid_len)
+ void
+ canserial_shutdown(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && bootentry_is_usb())
++        return;
+     canserial_notify_tx();
+     canserial_notify_rx();
+ }
+diff --git a/src/generic/canserial.h b/src/generic/canserial.h
+index e8f3767..ff22685 100644
+--- a/src/generic/canserial.h
++++ b/src/generic/canserial.h
+@@ -1,6 +1,7 @@
+ #ifndef __CANSERIAL_H__
+ #define __CANSERIAL_H__
+
++#include <stdarg.h> // va_list
+ #include <stdint.h> // uint32_t
+
+ #define CANBUS_ID_ADMIN 0x3f0
+@@ -11,5 +12,7 @@ void canserial_notify_tx(void);
+ struct canbus_msg;
+ int canserial_process_data(struct canbus_msg *msg);
+ void canserial_set_uuid(uint8_t *raw_uuid, uint32_t raw_uuid_len);
++struct command_encoder;
++void can_console_sendf(const struct command_encoder *ce, va_list args);
+
+ #endif // canserial.h
+diff --git a/src/generic/dual_interface.c b/src/generic/dual_interface.c
+new file mode 100644
+index 0000000..af4e7e0
+--- /dev/null
++++ b/src/generic/dual_interface.c
+@@ -0,0 +1,33 @@
++// 为 CAN/USB 双模式 Katapult 提供运行时传输接口选择。
++//
++// 本文件可按 GNU GPLv3 许可证发布。
++
++#include <stdarg.h> // va_list
++#include "autoconf.h" // CONFIG_*
++#include "bootentry.h" // bootentry_is_usb
++#include "command.h" // command_encoder
++#include "generic/canserial.h" // can_console_sendf
++#include "generic/usb_cdc.h" // usb_console_sendf
++
++void
++console_sendf(const struct command_encoder *ce, va_list args)
++{
++    if (bootentry_is_usb())
++        usb_console_sendf(ce, args);
++    else
++        can_console_sendf(ce, args);
++}
++
++#if CONFIG_MACH_STM32F1
++void CAN_IRQHandler(void);
++void USB_IRQHandler(void);
++
++void
++dual_usb_can_irq(void)
++{
++    if (bootentry_is_usb())
++        USB_IRQHandler();
++    else
++        CAN_IRQHandler();
++}
++#endif
+diff --git a/src/generic/usb_cdc.c b/src/generic/usb_cdc.c
+index f8a8dd7..5aa8c9c 100644
+--- a/src/generic/usb_cdc.c
++++ b/src/generic/usb_cdc.c
+@@ -6,6 +6,7 @@
+
+ #include <string.h> // memmove
+ #include "autoconf.h" // CONFIG_USB_VENDOR_ID
++#include "bootentry.h" // bootentry_is_usb
+ #include "board/misc.h" // console_sendf
+ #include "board/pgm.h" // PROGMEM
+ #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
+@@ -62,8 +63,13 @@ usb_bulk_in_task(void)
+ DECL_TASK(usb_bulk_in_task);
+
+ // Encode and transmit a "response" message
++#if CONFIG_DUAL_CAN_USB
++void
++usb_console_sendf(const struct command_encoder *ce, va_list args)
++#else
+ void
+ console_sendf(const struct command_encoder *ce, va_list args)
++#endif
+ {
+     // Verify space for message
+     uint_fast8_t tpos = transmit_pos, max_size = READP(ce->max_size);
+@@ -525,6 +531,8 @@ DECL_TASK(usb_ep0_task);
+ void
+ usb_shutdown(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && !bootentry_is_usb())
++        return;
+     usb_notify_bulk_in();
+     usb_notify_bulk_out();
+     usb_notify_ep0();
+diff --git a/src/generic/usb_cdc.h b/src/generic/usb_cdc.h
+index 3c92ef1..2b64275 100644
+--- a/src/generic/usb_cdc.h
++++ b/src/generic/usb_cdc.h
+@@ -1,6 +1,7 @@
+ #ifndef __GENERIC_USB_CDC_H
+ #define __GENERIC_USB_CDC_H
+
++#include <stdarg.h> // va_list
+ #include <stdint.h> // uint_fast8_t
+
+ // endpoint sizes
+@@ -28,5 +29,7 @@ void usb_fill_serial(struct usb_string_descriptor *desc, int strlen, void *id);
+ void usb_notify_bulk_in(void);
+ void usb_notify_bulk_out(void);
+ void usb_notify_ep0(void);
++struct command_encoder;
++void usb_console_sendf(const struct command_encoder *ce, va_list args);
+
+ #endif // usb_cdc.h
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index d45234c..455559c 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -332,6 +332,12 @@ config STM32F0_TRIM
+
+ choice
+     prompt "Communication interface"
++    config STM32_DUAL_CAN_USB_PA11_PA12_PB8_PB9
++        bool "双模式：PA11/PA12 USB 恢复，PB8/PB9 CAN 总线"
++        depends on (MACH_STM32F103 || MACH_STM32G431) && (HAVE_STM32_USBFS || HAVE_STM32_USBOTG)
++        select USBSERIAL
++        select CANSERIAL
++        select DUAL_CAN_USB
+     config STM32_USB_PA11_PA12
+         bool "USB (on PA11/PA12)" if HAVE_STM32_USBFS || HAVE_STM32_USBOTG
+         select USBSERIAL
+@@ -458,7 +464,7 @@ endchoice
+
+ config STM32_CANBUS_PB8_PB9
+     bool
+-    default y if STM32_MMENU_CANBUS_PB8_PB9 || STM32_CMENU_CANBUS_PB8_PB9
++    default y if STM32_MMENU_CANBUS_PB8_PB9 || STM32_CMENU_CANBUS_PB8_PB9 || STM32_DUAL_CAN_USB_PA11_PA12_PB8_PB9
+ config STM32_CANBUS_PI9_PH13
+     bool
+     default y if STM32_MMENU_CANBUS_PI9_PH13 || STM32_CMENU_CANBUS_PI9_PH13
+diff --git a/src/stm32/Makefile b/src/stm32/Makefile
+index eee3526..c218cb2 100644
+--- a/src/stm32/Makefile
++++ b/src/stm32/Makefile
+@@ -58,6 +58,8 @@ canbus-src-y := generic/canserial.c ../lib/fast-hash/fasthash.c
+ canbus-src-$(CONFIG_HAVE_STM32_CANBUS) += stm32/can.c
+ canbus-src-$(CONFIG_HAVE_STM32_FDCANBUS) += stm32/fdcan.c
+ src-$(CONFIG_CANSERIAL) += $(canbus-src-y) generic/canbus.c stm32/chipid.c
++src-$(CONFIG_DUAL_CAN_USB) += generic/dual_interface.c
++src-y := $(sort $(src-y))
+
+ # Flash rules
+ flash: $(OUT)katapult.bin
+diff --git a/src/stm32/can.c b/src/stm32/can.c
+index dc91532..08192de 100644
+--- a/src/stm32/can.c
++++ b/src/stm32/can.c
+@@ -8,7 +8,9 @@
+
+ #include <string.h> // memcpy
+ #include "autoconf.h" // CONFIG_MACH_STM32F1
++#include "board/gpio.h" // gpio_out_setup
+ #include "board/irq.h" // irq_disable
++#include "bootentry.h" // bootentry_is_usb
+ #include "command.h" // DECL_CONSTANT_STR
+ #include "generic/armcm_boot.h" // armcm_enable_irq
+ #include "generic/canbus.h" // canbus_notify_tx
+@@ -94,6 +96,13 @@
+  #error No known CAN device for configured MCU
+ #endif
+
++#if CONFIG_DUAL_CAN_USB && CONFIG_MACH_STM32F1
++void dual_usb_can_irq(void);
++#define CAN_RX0_IRQ_HANDLER dual_usb_can_irq
++#else
++#define CAN_RX0_IRQ_HANDLER CAN_IRQHandler
++#endif
++
+ // Transmit a packet
+ int
+ canhw_send(struct canbus_msg *msg)
+@@ -250,6 +259,12 @@ compute_btr(uint32_t pclock, uint32_t bitrate)
+ void
+ can_init(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && bootentry_is_usb())
++        return;
++#if CONFIG_DUAL_CAN_USB && CONFIG_MACH_STM32F1
++    // CAN 模式运行期间拉低 D+，断开板载外部上拉。
++    gpio_out_setup(GPIO('A', 12), 0);
++#endif
+     // Enable clock
+     enable_pclock((uint32_t)SOC_CAN);
+     if (FILTER_CAN != SOC_CAN)
+@@ -284,7 +299,7 @@ can_init(void)
+     canhw_set_filter(0);
+
+     /*##-3- Configure Interrupts #################################*/
+-    armcm_enable_irq(CAN_IRQHandler, CAN_RX0_IRQn, 0);
++    armcm_enable_irq(CAN_RX0_IRQ_HANDLER, CAN_RX0_IRQn, 0);
+     if (CAN_RX0_IRQn != CAN_RX1_IRQn)
+         armcm_enable_irq(CAN_IRQHandler, CAN_RX1_IRQn, 0);
+     if (CAN_RX0_IRQn != CAN_TX_IRQn)
+diff --git a/src/stm32/chipid.c b/src/stm32/chipid.c
+index e30563c..bda1f56 100644
+--- a/src/stm32/chipid.c
++++ b/src/stm32/chipid.c
+@@ -7,6 +7,7 @@
+ #include "generic/canserial.h" // canserial_set_uuid
+ #include "generic/usb_cdc.h" // usb_fill_serial
+ #include "generic/usbstd.h" // usb_string_descriptor
++#include "bootentry.h" // bootentry_is_usb
+ #include "internal.h" // UID_BASE
+ #include "sched.h" // DECL_INIT
+
+@@ -26,10 +27,12 @@ usbserial_get_serialid(void)
+ void
+ chipid_init(void)
+ {
+-    if (CONFIG_USB_SERIAL_NUMBER_CHIPID)
++    if (CONFIG_USB_SERIAL_NUMBER_CHIPID
++        && (!CONFIG_DUAL_CAN_USB || bootentry_is_usb()))
+         usb_fill_serial(&cdc_chipid.desc, ARRAY_SIZE(cdc_chipid.data)
+                         , (void*)UID_BASE);
+-    if (CONFIG_CANBUS)
++    if (CONFIG_CANBUS
++        && (!CONFIG_DUAL_CAN_USB || !bootentry_is_usb()))
+         canserial_set_uuid((void*)UID_BASE, CHIP_UID_LEN);
+ }
+ DECL_INIT(chipid_init);
+diff --git a/src/stm32/fdcan.c b/src/stm32/fdcan.c
+index 8049451..0b0c0a9 100644
+--- a/src/stm32/fdcan.c
++++ b/src/stm32/fdcan.c
+@@ -6,6 +6,7 @@
+ //
+ // This file may be distributed under the terms of the GNU GPLv3 license.
+
++#include "bootentry.h" // bootentry_is_usb
+ #include "command.h" // DECL_CONSTANT_STR
+ #include "generic/armcm_boot.h" // armcm_enable_irq
+ #include "generic/canbus.h" // canbus_notify_tx
+@@ -275,6 +276,8 @@ compute_btr(uint32_t pclock, uint32_t bitrate)
+ void
+ can_init(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && bootentry_is_usb())
++        return;
+     enable_pclock((uint32_t)SOC_CAN);
+
+     gpio_peripheral(GPIO_Rx, CAN_FUNCTION, 1);
+diff --git a/src/stm32/usbfs.c b/src/stm32/usbfs.c
+index 5385c95..1968e94 100644
+--- a/src/stm32/usbfs.c
++++ b/src/stm32/usbfs.c
+@@ -11,6 +11,7 @@
+ #include "board/io.h" // writeb
+ #include "board/usb_cdc.h" // usb_notify_ep0
+ #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
++#include "bootentry.h" // bootentry_is_usb
+ #include "command.h" // DECL_CONSTANT_STR
+ #include "internal.h" // GPIO
+ #include "sched.h" // DECL_INIT
+@@ -407,10 +408,19 @@ USB_IRQHandler(void)
+
+ DECL_CONSTANT_STR("RESERVE_PINS_USB", "PA11,PA12");
+
++#if CONFIG_DUAL_CAN_USB && CONFIG_MACH_STM32F1
++void dual_usb_can_irq(void);
++#define USB_IRQ_HANDLER dual_usb_can_irq
++#else
++#define USB_IRQ_HANDLER USB_IRQHandler
++#endif
++
+ // Initialize the usb controller
+ void
+ usb_init(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && !bootentry_is_usb())
++        return;
+     if (CONFIG_MACH_STM32F1) {
+         // Pull the D+ pin low briefly to signal a new connection
+         gpio_out_setup(GPIO('A', 12), 0);
+@@ -434,6 +444,6 @@ usb_init(void)
+     USB->DADDR = 0;
+     USB->CNTR = USB_CNTR_RESETM;
+     USB->ISTR = 0;
+-    armcm_enable_irq(USB_IRQHandler, USBx_IRQn, 1);
++    armcm_enable_irq(USB_IRQ_HANDLER, USBx_IRQn, 1);
+ }
+ DECL_INIT(usb_init);
+diff --git a/src/stm32/usbotg.c b/src/stm32/usbotg.c
+index b2d5245..2ec8238 100644
+--- a/src/stm32/usbotg.c
++++ b/src/stm32/usbotg.c
+@@ -10,6 +10,7 @@
+ #include "board/io.h" // writel
+ #include "board/usb_cdc.h" // usb_notify_ep0
+ #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
++#include "bootentry.h" // bootentry_is_usb
+ #include "command.h" // DECL_CONSTANT_STR
+ #include "internal.h" // GPIO
+ #include "sched.h" // DECL_INIT
+@@ -410,6 +411,8 @@ OTG_FS_IRQHandler(void)
+ void
+ usb_init(void)
+ {
++    if (CONFIG_DUAL_CAN_USB && !bootentry_is_usb())
++        return;
+     // Enable USB clock
+ #if CONFIG_MACH_STM32H7
+     if (READ_BIT(PWR->CR3, PWR_CR3_USB33RDY) != (PWR_CR3_USB33RDY)) {

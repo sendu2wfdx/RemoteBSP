@@ -187,6 +187,20 @@ std::uint64_t Client::get_capabilities() const {
     return read_u64(data.data());
 }
 
+void Client::enter_bootloader() const {
+    static constexpr std::array<std::uint8_t, 8> confirmation{
+        'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
+    body(command(protocol::Command::BootloaderEnter,
+                 {confirmation.begin(), confirmation.end()}));
+}
+
+void Client::enter_usb_bootloader() const {
+    static constexpr std::array<std::uint8_t, 8> confirmation{
+        'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
+    body(command(protocol::Command::BootloaderEnterUsb,
+                 {confirmation.begin(), confirmation.end()}));
+}
+
 std::vector<DiscoveredNode> Client::list_nodes() const {
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_node_list_request(socket.get());

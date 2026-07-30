@@ -3,6 +3,9 @@
 #include "remotebsp_embedded/board_config.h"
 #include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
+#ifdef CONFIG_USB_DEBUG_CDC
+#include "remotebsp_embedded/usb_debug.h"
+#endif
 
 #include <string.h>
 
@@ -37,6 +40,11 @@
 
 static CAN_HandleTypeDef can_handle;
 static rbsp_core_t remote_core;
+
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+#define WEACT_BUTTON_ENCODED_PIN 0U
+#define WEACT_LED_ENCODED_PIN 18U
+#endif
 
 #if CONFIG_UART_RESOURCE_COUNT > 0
 static UART_HandleTypeDef uart0_handle;
@@ -75,6 +83,35 @@ static void fatal_error(void) {
     }
 }
 
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+static void board_enter_bootloader(rbsp_bootloader_mode_t mode) {
+    static const uint64_t can_request_signature =
+        UINT64_C(0x5984E3FA6CA1589B);
+    static const uint64_t usb_request_signature =
+        UINT64_C(0x8F3D6A21C457B09E);
+    const uint64_t request_signature =
+        mode == RBSP_BOOTLOADER_USB
+            ? usb_request_signature : can_request_signature;
+    const uint32_t signature_address =
+        *(const volatile uint32_t*)FLASH_BASE;
+    const uint32_t ram_begin = SRAM_BASE;
+    const uint32_t ram_end = SRAM_BASE + (20U * 1024U);
+    if ((signature_address & 7U) != 0U ||
+        signature_address < ram_begin ||
+        signature_address > ram_end - sizeof(request_signature)) {
+        fatal_error();
+    }
+    __disable_irq();
+    *(volatile uint64_t*)(uintptr_t)signature_address =
+        request_signature;
+    __DSB();
+    __ISB();
+    NVIC_SystemReset();
+    for (;;) {
+    }
+}
+#endif
+
 static void system_clock_configure(void) {
     RCC_OscInitTypeDef oscillator = {0};
     RCC_ClkInitTypeDef clock = {0};
@@ -103,6 +140,16 @@ static void system_clock_configure(void) {
     if (HAL_RCC_ClockConfig(&clock, FLASH_LATENCY_2) != HAL_OK) {
         fatal_error();
     }
+
+#ifdef CONFIG_USB_DEBUG_CDC
+    RCC_PeriphCLKInitTypeDef peripheral_clock = {0};
+    peripheral_clock.PeriphClockSelection = RCC_PERIPHCLK_USB;
+    peripheral_clock.UsbClockSelection =
+        RCC_USBCLKSOURCE_PLL_DIV1_5;
+    if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock) != HAL_OK) {
+        fatal_error();
+    }
+#endif
 
     /*
      * 时钟配置与 CAN 位时序不可分离。运行期再次核对，避免以后修改
@@ -164,12 +211,23 @@ static bool gpio_pin_allowed(uint16_t encoded_pin) {
     if (port == 0U && (pin == 13U || pin == 14U)) {
         return false;
     }
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+    /* 板载 USB 接口固定占用 PA11/PA12，不能作为远程 GPIO 重新配置。 */
+    if (port == 0U && (pin == 11U || pin == 12U)) {
+        return false;
+    }
+#endif
 #if defined(CONFIG_CAN_PINS_PA11_PA12)
     if (port == 0U && (pin == 11U || pin == 12U)) {
         return false;
     }
 #else
     if (port == 1U && (pin == 8U || pin == 9U)) {
+        return false;
+    }
+#endif
+#ifdef CONFIG_USB_DEBUG_CDC
+    if (port == 0U && (pin == 11U || pin == 12U)) {
         return false;
     }
 #endif
@@ -226,6 +284,14 @@ static bool board_gpio_configure(uint16_t encoded_pin,
     if (!gpio_pin_allowed(encoded_pin)) {
         return false;
     }
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+    if ((encoded_pin == WEACT_BUTTON_ENCODED_PIN &&
+         direction != RBSP_GPIO_INPUT) ||
+        (encoded_pin == WEACT_LED_ENCODED_PIN &&
+         direction != RBSP_GPIO_OUTPUT)) {
+        return false;
+    }
+#endif
     const uint8_t port_index = (uint8_t)(encoded_pin / 16U);
     const uint8_t pin_index = (uint8_t)(encoded_pin % 16U);
     GPIO_TypeDef* port = gpio_port_from_index(port_index);
@@ -241,6 +307,11 @@ static bool board_gpio_configure(uint16_t encoded_pin,
                     ? GPIO_MODE_OUTPUT_PP
                     : GPIO_MODE_INPUT;
     init.Pull = GPIO_NOPULL;
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+    if (encoded_pin == WEACT_BUTTON_ENCODED_PIN) {
+        init.Pull = GPIO_PULLDOWN;
+    }
+#endif
     init.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(port, &init);
     return true;
@@ -250,6 +321,11 @@ static bool board_gpio_write(uint16_t encoded_pin, bool value) {
     if (!gpio_pin_allowed(encoded_pin)) {
         return false;
     }
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+    if (encoded_pin == WEACT_BUTTON_ENCODED_PIN) {
+        return false;
+    }
+#endif
     GPIO_TypeDef* port =
         gpio_port_from_index((uint8_t)(encoded_pin / 16U));
     HAL_GPIO_WritePin(
@@ -269,6 +345,42 @@ static bool board_gpio_read(uint16_t encoded_pin, bool* value) {
              GPIO_PIN_SET;
     return true;
 }
+
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+static void board_fixed_io_configure(void) {
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    /*
+     * BluePill Plus 的 USB D+ 带硬件上拉。CAN APP 不运行 USB 协议栈时主动
+     * 拉低 PA12，向主机表示 USB 已断开，避免出现“设备描述符请求失败”。
+     * 进入 Katapult 会先复位 MCU，PA12 随后由 USB Bootloader 重新配置。
+     */
+#if defined(CONFIG_CAN_PINS_PB8_PB9)
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+    GPIO_InitTypeDef usb_disconnect = {0};
+    usb_disconnect.Pin = GPIO_PIN_12;
+    usb_disconnect.Mode = GPIO_MODE_OUTPUT_PP;
+    usb_disconnect.Pull = GPIO_NOPULL;
+    usb_disconnect.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &usb_disconnect);
+#endif
+
+    GPIO_InitTypeDef button = {0};
+    button.Pin = GPIO_PIN_0;
+    button.Mode = GPIO_MODE_INPUT;
+    button.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA, &button);
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET);
+    GPIO_InitTypeDef led = {0};
+    led.Pin = GPIO_PIN_2;
+    led.Mode = GPIO_MODE_OUTPUT_PP;
+    led.Pull = GPIO_NOPULL;
+    led.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &led);
+}
+#endif
 
 void HAL_CAN_MspInit(CAN_HandleTypeDef* handle) {
     if (handle->Instance != CAN1) {
@@ -514,12 +626,24 @@ static void make_node_info(rbsp_node_info_t* info) {
 }
 
 int main(void) {
+    SCB->VTOR = FLASH_BASE + CONFIG_APPLICATION_FLASH_OFFSET;
+    __DSB();
+    __ISB();
     HAL_Init();
     system_clock_configure();
     __HAL_RCC_AFIO_CLK_ENABLE();
     __HAL_AFIO_REMAP_SWJ_NOJTAG();
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+    board_fixed_io_configure();
+#endif
     transceiver_enable();
     can_configure();
+#ifdef CONFIG_USB_DEBUG_CDC
+    if (rbsp_usb_debug_init()) {
+        (void)rbsp_usb_debug_write_text(
+            "RemoteBSP STM32F103 APP ready\r\n");
+    }
+#endif
 #if CONFIG_UART_RESOURCE_COUNT > 0
     if (!rbsp_byte_ring_init(&uart0_rx_ring, uart0_rx_storage,
                              sizeof(uart0_rx_storage)) ||
@@ -542,6 +666,9 @@ int main(void) {
         .uart_read = board_uart_read,
         .uart_write = board_uart_write,
 #endif
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+        .enter_bootloader = board_enter_bootloader,
+#endif
     };
     if (!rbsp_core_init(&remote_core, &hal, RBSP_CAN_CLASSICAL,
                         &info)) {
@@ -551,12 +678,25 @@ int main(void) {
     for (;;) {
         receive_can_frames();
         rbsp_core_poll(&remote_core);
+#ifdef CONFIG_USB_DEBUG_CDC
+        rbsp_usb_debug_poll();
+#endif
     }
 }
 
 void SysTick_Handler(void) {
     HAL_IncTick();
 }
+
+#ifdef CONFIG_USB_DEBUG_CDC
+void USB_LP_CAN1_RX0_IRQHandler(void) {
+    rbsp_usb_debug_irq_handler();
+}
+
+void USB_HP_CAN1_TX_IRQHandler(void) {
+    rbsp_usb_debug_irq_handler();
+}
+#endif
 
 #if CONFIG_UART_RESOURCE_COUNT > 0
 void USART1_IRQHandler(void) {

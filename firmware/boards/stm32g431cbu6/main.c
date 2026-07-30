@@ -2,6 +2,9 @@
 
 #include "remotebsp_embedded/board_config.h"
 #include "remotebsp_embedded/core.h"
+#ifdef CONFIG_USB_DEBUG_CDC
+#include "remotebsp_embedded/usb_debug.h"
+#endif
 
 #include <string.h>
 
@@ -42,6 +45,35 @@ static void fatal_error(void) {
     }
 }
 
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+static void board_enter_bootloader(rbsp_bootloader_mode_t mode) {
+    static const uint64_t can_request_signature =
+        UINT64_C(0x5984E3FA6CA1589B);
+    static const uint64_t usb_request_signature =
+        UINT64_C(0x8F3D6A21C457B09E);
+    const uint64_t request_signature =
+        mode == RBSP_BOOTLOADER_USB
+            ? usb_request_signature : can_request_signature;
+    const uint32_t signature_address =
+        *(const volatile uint32_t*)FLASH_BASE;
+    const uint32_t ram_begin = SRAM_BASE;
+    const uint32_t ram_end = SRAM_BASE + (32U * 1024U);
+    if ((signature_address & 7U) != 0U ||
+        signature_address < ram_begin ||
+        signature_address > ram_end - sizeof(request_signature)) {
+        fatal_error();
+    }
+    __disable_irq();
+    *(volatile uint64_t*)(uintptr_t)signature_address =
+        request_signature;
+    __DSB();
+    __ISB();
+    NVIC_SystemReset();
+    for (;;) {
+    }
+}
+#endif
+
 static void system_clock_configure(void) {
     RCC_OscInitTypeDef oscillator = {0};
     RCC_ClkInitTypeDef clock = {0};
@@ -52,6 +84,10 @@ static void system_clock_configure(void) {
     }
 
     oscillator.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+#ifdef CONFIG_USB_DEBUG_CDC
+    oscillator.OscillatorType |= RCC_OSCILLATORTYPE_HSI48;
+    oscillator.HSI48State = RCC_HSI48_ON;
+#endif
     oscillator.HSIState = RCC_HSI_ON;
     oscillator.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
     oscillator.PLL.PLLState = RCC_PLL_ON;
@@ -78,9 +114,26 @@ static void system_clock_configure(void) {
     RCC_PeriphCLKInitTypeDef peripheral_clock = {0};
     peripheral_clock.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
     peripheral_clock.FdcanClockSelection = RCC_FDCANCLKSOURCE_PCLK1;
+#ifdef CONFIG_USB_DEBUG_CDC
+    peripheral_clock.PeriphClockSelection |= RCC_PERIPHCLK_USB;
+    peripheral_clock.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+#endif
     if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock) != HAL_OK) {
         fatal_error();
     }
+#ifdef CONFIG_USB_DEBUG_CDC
+    __HAL_RCC_CRS_CLK_ENABLE();
+    RCC_CRSInitTypeDef crs = {0};
+    crs.Prescaler = RCC_CRS_SYNC_DIV1;
+    crs.Source = RCC_CRS_SYNC_SOURCE_USB;
+    crs.Polarity = RCC_CRS_SYNC_POLARITY_RISING;
+    crs.ReloadValue =
+        __HAL_RCC_CRS_RELOADVALUE_CALCULATE(48000000U, 1000U);
+    crs.ErrorLimitValue = RCC_CRS_ERRORLIMIT_DEFAULT;
+    crs.HSI48CalibrationValue =
+        RCC_CRS_HSI48CALIBRATION_DEFAULT;
+    HAL_RCCEx_CRSConfig(&crs);
+#endif
 }
 
 static GPIO_TypeDef* gpio_port_from_index(uint8_t index) {
@@ -120,6 +173,11 @@ static bool gpio_pin_allowed(uint16_t encoded_pin) {
     }
 #else
     if (port == 1U && (pin == 8U || pin == 9U)) {
+        return false;
+    }
+#endif
+#ifdef CONFIG_USB_DEBUG_CDC
+    if (port == 0U && (pin == 11U || pin == 12U)) {
         return false;
     }
 #endif
@@ -376,10 +434,19 @@ static void make_node_info(rbsp_node_info_t* info) {
 }
 
 int main(void) {
+    SCB->VTOR = FLASH_BASE + CONFIG_APPLICATION_FLASH_OFFSET;
+    __DSB();
+    __ISB();
     HAL_Init();
     system_clock_configure();
     transceiver_enable();
     fdcan_configure();
+#ifdef CONFIG_USB_DEBUG_CDC
+    if (rbsp_usb_debug_init()) {
+        (void)rbsp_usb_debug_write_text(
+            "RemoteBSP STM32G431 APP ready\r\n");
+    }
+#endif
 
     rbsp_node_info_t info;
     make_node_info(&info);
@@ -389,6 +456,9 @@ int main(void) {
         .gpio_configure = board_gpio_configure,
         .gpio_write = board_gpio_write,
         .gpio_read = board_gpio_read,
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+        .enter_bootloader = board_enter_bootloader,
+#endif
     };
 #ifdef CONFIG_CAN_FD_ENABLE
     const rbsp_can_mode_t mode = RBSP_CAN_FD;
@@ -402,9 +472,22 @@ int main(void) {
     for (;;) {
         receive_can_frames();
         rbsp_core_poll(&remote_core);
+#ifdef CONFIG_USB_DEBUG_CDC
+        rbsp_usb_debug_poll();
+#endif
     }
 }
 
 void SysTick_Handler(void) {
     HAL_IncTick();
 }
+
+#ifdef CONFIG_USB_DEBUG_CDC
+void USB_LP_IRQHandler(void) {
+    rbsp_usb_debug_irq_handler();
+}
+
+void USB_HP_IRQHandler(void) {
+    rbsp_usb_debug_irq_handler();
+}
+#endif

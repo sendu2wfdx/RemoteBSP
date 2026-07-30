@@ -29,6 +29,8 @@ enum class Command : std::uint16_t {
     GetInfo = 0x0010,
     GetCapability = 0x0011,
     Ping = 0x0012,
+    BootloaderEnter = 0x0013,
+    BootloaderEnterUsb = 0x0014,
     ResourceEnum = 0x0030,
     ResourceDescribe = 0x0031,
     ResourceStatus = 0x0032,

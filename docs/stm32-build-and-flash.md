@@ -7,10 +7,16 @@
 | 目标 | 总线模式 | 已接通的远程功能 |
 |---|---|---|
 | STM32F103CBT6 | Classical CAN，500 kbit/s | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、UART 0 |
-| STM32G431CBU6 | CAN-FD，500 kbit/s + 2 Mbit/s BRS | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO |
+| STM32F103 BluePill Plus | Classical CAN，1 Mbit/s（实机验证） | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、UART 0、Katapult 入口 |
+| STM32G431CBU6 | CAN-FD，500 kbit/s + 2 Mbit/s BRS | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、Katapult 入口、USB CDC 调试 |
 
 STM32F103 的 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲。G431
 的真实 UART 驱动尚未接入，因此当前 G431 固件仍不会报告 UART 能力。
+F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别通过实体板
+基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN，
+复位时按住 PA0 进入 USB；双模式镜像已交叉编译，尚待下一轮实体板切换验证。
+F103 的 USB 与 bxCAN 共用专用 SRAM，因此 CAN APP 不提供 USB CDC；G431 的
+APP USB CDC 已通过交叉编译与链接检查，G431 实体 CAN-FD 仍需上板验收。
 
 Bluepill 专用配置 `stm32f103_bluepill_defconfig` 把 CAN 重映射到
 PB8/PB9，避开板载 USB 对 PA11/PA12 的占用；UART 0 默认使用
@@ -35,8 +41,8 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/fetch_stm32_deps.sh
 ```
 
-脚本只下载 CMSIS Core、对应 MCU 的 CMSIS Device 和 HAL，不下载 USB、中间件
-或示例工程。
+脚本下载固定版本的 CMSIS Core、对应 MCU 的 CMSIS Device、HAL 和 ST 官方
+USB Device 中间件，不下载板级示例工程。
 
 ## 使用默认配置编译
 
@@ -54,6 +60,9 @@ bash scripts/build_firmware.sh g431
 ```
 
 输出位于 `firmware/out`，包括 ELF、Intel HEX、裸 BIN 和链接 MAP。
+
+带 Katapult 的编译、首次量产镜像、CAN/USB 在线升级和 APP USB 调试方法见
+[Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。
 
 ## 使用 menuconfig
 
@@ -75,9 +84,12 @@ cmake -S . -B build-custom -G Ninja \
 cmake --build build-custom
 ```
 
-目前已验证的位时序是：
+目前的位时序是：
 
-- F103：72 MHz，CAN 外设时钟 36 MHz，500 kbit/s，采样点约 88.9%。
+- F103 通用配置：72 MHz，CAN 外设时钟 36 MHz，500 kbit/s，采样点约
+  88.9%。
+- F103 Bluepill 实机配置：CAN 外设时钟 36 MHz，1 Mbit/s，18 TQ，
+  分频系数 2，采样点约 88.9%。
 - G431：FDCAN 内核时钟 170 MHz，仲裁段 500 kbit/s，数据段 2 Mbit/s，
   两段采样点均约 82.4%。
 
@@ -166,8 +178,9 @@ ST-Link 虚拟串口接线：
 1. 只连接 SWD，确认能够读出芯片 ID、烧录并复位。
 2. 不连接总线时检查 TXD 静态电平和 STB 是否为低。
 3. 接一块 USB-CAN，先只接一个节点并在总线两端各放 120Ω。
-4. F103 配置 Classical CAN 500 kbit/s；G431 配置 CAN-FD、仲裁段
-   500 kbit/s、数据段 2 Mbit/s，并启用 BRS。
+4. F103 通用配置使用 Classical CAN 500 kbit/s；已验证的 Bluepill 配置使用
+   1 Mbit/s。G431 配置 CAN-FD、仲裁段 500 kbit/s、数据段 2 Mbit/s，并启用
+   BRS。
 5. 启动 `toolbusd`，确认节点在 2 秒内被发现且每 500 ms 更新心跳。
 6. 执行 `ping`、`get-info`，最后再创建和读写一个未保留的 GPIO。
 
@@ -175,12 +188,17 @@ ST-Link 虚拟串口接线：
 
 CANable2 重新连接后可能在 `ttyACM0`、`ttyACM1` 等编号之间变化，因此实机
 测试使用 `/dev/serial/by-id` 稳定路径。仓库脚本会自动查找唯一的 CANable2，
-以 500 kbit/s 建立 `can0`，并把发送队列从默认的 10 调整为 1024：
+默认以 1 Mbit/s 建立 `can0`，把 SLCAN USB CDC 端口参数设为 2 Mbaud，并把
+发送队列从默认的 10 调整为 1024：
 
 ```sh
 cd /mnt/d/Documents/RemoteBSP
-sudo bash tests/hardware/start_canable2_slcan.sh can0 6 1024
+sudo bash tests/hardware/start_canable2_slcan.sh can0 8 1024 2000000
 ```
+
+第二个参数是 LAWICEL 速率预设（`6=500 kbit/s`、`8=1 Mbit/s`），第四个参数
+是 SLCAN 串口波特率。1 Mbit/s 对布线长度、支线长度和终端质量更敏感；现场
+拓扑不能满足要求时应退回预设 6。
 
 经典 CAN 的协议包会分成多个 8 字节帧。`NODE_ASSIGN` 当前需要 15 个分片；
 如果保留 slcan 默认的 `txqueuelen=10`，SocketCAN 写入虽然可能返回成功，尾部
@@ -222,5 +240,11 @@ bash tests/hardware/physical_can_stress.sh \
 
 ```sh
 sudo bash tests/hardware/canable2_raw_probe.sh \
-  /dev/serial/by-id/usb-Openlight_Labs_CANable2_* 32
+  /dev/serial/by-id/usb-Openlight_Labs_CANable2_* 32 8 2000000
 ```
+
+2026-07-29 将同一套 Bluepill + TJA1051/3 + CANable2 提升到 1 Mbit/s，
+SLCAN 端口参数提高到 2 Mbaud。顺序 PING、GPIO 往返、并发客户端和 2023
+字节最大载荷均通过；短 PING 为 12～16 ms，2023 字节往返为 364 ms，
+SocketCAN 统计保持 0 错误、0 丢包、0 bus-off。最大载荷提升没有达到线速
+翻倍，主要限制来自原厂 SLCAN 的 ASCII 封装和 USB CDC 路径。

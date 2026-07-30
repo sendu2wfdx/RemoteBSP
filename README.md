@@ -29,6 +29,7 @@ STM32F103CBT6 与 STM32G431CBU6 的接线、固件编译和 SWD 烧录见：
 
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)
+- [Katapult Bootloader 与 USB 调试](docs/bootloader-and-usb-debug.md)
 
 ## 运行 Mock MCU
 
@@ -53,7 +54,7 @@ CAN-FD 模式使用：
 节点 ID 范围为 1～127。
 
 Mock MCU 当前支持 `GET_INFO`、`GET_CAPABILITY`、`PING`、节点发现、节点
-分配、心跳、GPIO 和 UART 原子操作。
+分配、心跳、GPIO、UART 原子操作和模拟进入 Bootloader。
 
 ## 运行完整链路
 
@@ -76,6 +77,8 @@ Mock MCU 当前支持 `GET_INFO`、`GET_CAPABILITY`、`PING`、节点发现、�
 ./build/remote-cli --node 1 ping hello
 ./build/remote-cli --node 1 get-info
 ./build/remote-cli --node 1 get-capability
+./build/remote-cli --node 1 bootloader-enter
+./build/remote-cli --node 1 bootloader-enter-usb
 ./build/remote-cli --node 1 resource-list
 ./build/remote-cli --node 1 resource-describe 0x02000007
 ./build/remote-cli --node 1 resource-status 0x02000007

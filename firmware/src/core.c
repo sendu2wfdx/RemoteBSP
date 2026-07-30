@@ -13,6 +13,8 @@ enum {
     RBSP_COMMAND_GET_INFO = 0x0010,
     RBSP_COMMAND_GET_CAPABILITY = 0x0011,
     RBSP_COMMAND_PING = 0x0012,
+    RBSP_COMMAND_BOOTLOADER_ENTER = 0x0013,
+    RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
     RBSP_COMMAND_GPIO_CREATE = 0x0100,
     RBSP_COMMAND_GPIO_READ = 0x0101,
     RBSP_COMMAND_GPIO_WRITE = 0x0102,
@@ -33,7 +35,11 @@ enum {
     RBSP_FRAGMENT_LAST = 0x02,
     RBSP_FRAGMENT_FLAG_MASK = 0x03,
     RBSP_FRAGMENT_LENGTH_SHIFT = 2,
+    RBSP_BOOTLOADER_RESET_DELAY_MS = 100,
 };
+
+static const uint8_t bootloader_confirmation[8] = {
+    'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
 
 typedef struct {
     uint16_t command;
@@ -317,6 +323,8 @@ static bool process_request(rbsp_core_t* core,
 
     uint16_t response_size = 0U;
     uint8_t* payload = core->tx_packet + RBSP_HEADER_SIZE;
+    bool request_bootloader = false;
+    rbsp_bootloader_mode_t bootloader_mode = RBSP_BOOTLOADER_CAN;
 
     switch (request->command) {
         case RBSP_COMMAND_DISCOVERY_REQUEST:
@@ -390,6 +398,9 @@ static bool process_request(rbsp_core_t* core,
                 capabilities |= 1ULL << 1U;
             }
 #endif
+            if (core->hal.enter_bootloader != NULL) {
+                capabilities |= 1ULL << 8U;
+            }
             put_u64(payload + 1U, capabilities);
             response_size = make_status_response(
                 core, request, RBSP_STATUS_OK, request->object_id,
@@ -407,6 +418,33 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK, request->object_id,
                     request->payload, request->payload_length);
+            }
+            break;
+
+        case RBSP_COMMAND_BOOTLOADER_ENTER:
+        case RBSP_COMMAND_BOOTLOADER_ENTER_USB:
+            if (request->object_id != 0U ||
+                request->payload_length !=
+                    sizeof(bootloader_confirmation) ||
+                memcmp(request->payload, bootloader_confirmation,
+                       sizeof(bootloader_confirmation)) != 0) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (core->hal.enter_bootloader == NULL) {
+                response_size = make_status_response(
+                    core, request,
+                    RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    0U, NULL, 0U);
+                request_bootloader = true;
+                if (request->command ==
+                    RBSP_COMMAND_BOOTLOADER_ENTER_USB) {
+                    bootloader_mode = RBSP_BOOTLOADER_USB;
+                }
             }
             break;
 
@@ -671,9 +709,15 @@ static bool process_request(rbsp_core_t* core,
     }
 
     insert_cache(core, request, core->tx_packet, response_size);
-    return send_packet(core, core->tx_packet, response_size,
-                       allocate_transfer_id(core),
-                       response_can_id(core));
+    const bool sent = send_packet(
+        core, core->tx_packet, response_size,
+        allocate_transfer_id(core), response_can_id(core));
+    if (sent && request_bootloader) {
+        core->bootloader_request_pending = true;
+        core->bootloader_request_ms = core->hal.milliseconds();
+        core->bootloader_request_mode = bootloader_mode;
+    }
+    return sent;
 }
 
 static rbsp_reassembly_slot_t* find_slot(
@@ -725,6 +769,13 @@ void rbsp_core_poll(rbsp_core_t* core) {
         return;
     }
     const uint32_t now = core->hal.milliseconds();
+    if (core->bootloader_request_pending &&
+        (uint32_t)(now - core->bootloader_request_ms) >=
+            RBSP_BOOTLOADER_RESET_DELAY_MS) {
+        core->bootloader_request_pending = false;
+        core->hal.enter_bootloader(core->bootloader_request_mode);
+        return;
+    }
     for (size_t index = 0;
          index < CONFIG_REMOTE_REASSEMBLY_SLOTS; ++index) {
         rbsp_reassembly_slot_t* slot = &core->reassembly[index];

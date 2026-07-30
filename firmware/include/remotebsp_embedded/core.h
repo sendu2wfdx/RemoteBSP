@@ -38,6 +38,11 @@ typedef enum {
     RBSP_GPIO_OUTPUT = 1,
 } rbsp_gpio_direction_t;
 
+typedef enum {
+    RBSP_BOOTLOADER_CAN = 0,
+    RBSP_BOOTLOADER_USB = 1,
+} rbsp_bootloader_mode_t;
+
 typedef struct {
     uint32_t identifier;
     uint8_t length;
@@ -68,6 +73,7 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+    void (*enter_bootloader)(rbsp_bootloader_mode_t mode);
 } rbsp_hal_t;
 
 typedef struct {
@@ -114,6 +120,9 @@ typedef struct {
     uint16_t next_transfer_id;
     uint8_t cache_cursor;
     uint32_t last_heartbeat_ms;
+    uint32_t bootloader_request_ms;
+    rbsp_bootloader_mode_t bootloader_request_mode;
+    bool bootloader_request_pending;
     rbsp_reassembly_slot_t reassembly[CONFIG_REMOTE_REASSEMBLY_SLOTS];
     rbsp_request_cache_entry_t cache[CONFIG_REMOTE_REQUEST_CACHE_ENTRIES];
     rbsp_gpio_object_t gpio_objects[CONFIG_GPIO_RESOURCE_COUNT];

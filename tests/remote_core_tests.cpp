@@ -42,7 +42,9 @@ mock_mcu::RemoteCore make_core() {
     const auto capabilities =
         mock_mcu::capability_mask(mock_mcu::Capability::Gpio) |
         mock_mcu::capability_mask(mock_mcu::Capability::Spi) |
-        mock_mcu::capability_mask(mock_mcu::Capability::I2c);
+        mock_mcu::capability_mask(mock_mcu::Capability::I2c) |
+        mock_mcu::capability_mask(
+            mock_mcu::Capability::Bootloader);
     return mock_mcu::RemoteCore(info, capabilities);
 }
 
@@ -82,7 +84,8 @@ void test_get_capability() {
     check_common_response(response, protocol::Command::GetCapability);
     CHECK(response.payload.size() == 9);
     CHECK(response.payload[1] == 0x0D);
-    for (std::size_t index = 2; index < response.payload.size(); ++index) {
+    CHECK(response.payload[2] == 0x01);
+    for (std::size_t index = 3; index < response.payload.size(); ++index) {
         CHECK(response.payload[index] == 0);
     }
 }
@@ -101,6 +104,36 @@ void test_ping() {
     CHECK(too_large_response.payload ==
           std::vector<std::uint8_t>({static_cast<std::uint8_t>(
               mock_mcu::StatusCode::InvalidPayload)}));
+}
+
+void test_bootloader_enter() {
+    auto request = make_request(protocol::Command::BootloaderEnter);
+    request.header.object_id = 0;
+    request.payload = {'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
+    for (const auto command :
+         {protocol::Command::BootloaderEnter,
+          protocol::Command::BootloaderEnterUsb}) {
+        auto core = make_core();
+        request.header.command = static_cast<std::uint16_t>(command);
+        const auto response = core.handle(request);
+        CHECK(response.header.message_type ==
+              protocol::MessageType::Response);
+        CHECK(response.header.command ==
+              static_cast<std::uint16_t>(command));
+        CHECK(response.header.session_id == 0x11223344);
+        CHECK(response.header.request_id == 0x55667788);
+        CHECK(response.header.object_id == 0);
+        CHECK(response.payload == std::vector<std::uint8_t>({0}));
+        CHECK(core.bootloader_requested());
+    }
+
+    auto invalid = request;
+    invalid.payload.back() = 'X';
+    const auto invalid_response = make_core().handle(invalid);
+    CHECK(invalid_response.payload ==
+          std::vector<std::uint8_t>({
+              static_cast<std::uint8_t>(
+                  mock_mcu::StatusCode::InvalidPayload)}));
 }
 
 void test_errors() {
@@ -135,6 +168,7 @@ int main() {
     test_get_info();
     test_get_capability();
     test_ping();
+    test_bootloader_enter();
     test_errors();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";

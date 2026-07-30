@@ -17,8 +17,22 @@ PA11/PA12 在 F103 上是 bxCAN 默认引脚，在 G431 上可配置为 FDCAN1
 复用功能；不会占用 SWD。PB8/PB9 作为 menuconfig 备选，F103 使用该组时需要
 打开 AFIO CAN 重映射，G431 使用 AF9。
 
-PA11/PA12 会占用 USB D-/D+，当前工具板固件不实现 USB，因此优先保证两种 MCU
-引脚统一。如果将来需要 USB，可以切换到 PB8/PB9。
+PA11/PA12 同时是 USB D-/D+。不启用 USB 的通用配置可以把 CAN 放在
+PA11/PA12。STM32F103 的 USB 与 bxCAN 还共用 512 字节专用 SRAM，即使把 CAN
+改到 PB8/PB9，两者也不能同时运行；因此 F103 双模式 Katapult 根据进入原因
+只初始化 CAN 或 USB，APP 只运行 CAN。STM32G431 的 APP 可以让 USB 使用
+PA11/PA12、FDCAN 使用 PB8/PB9；其双模式 Katapult 为了统一升级工具链，也在
+Bootloader 阶段只启动一个升级接口。Kconfig 会约束这些组合。
+
+当前带 Katapult 的推荐引脚为：
+
+| 功能 | 引脚 |
+|---|---|
+| CAN/FDCAN RX | PB8 |
+| CAN/FDCAN TX | PB9 |
+| USB D- | PA11 |
+| USB D+ | PA12 |
+| USB 恢复键 | PA0，内部下拉、按下为高 |
 
 ## 收发器建议
 
@@ -34,11 +48,13 @@ PA11/PA12 会占用 USB D-/D+，当前工具板固件不实现 USB，因此优�
 
 ## 默认速率
 
-- F103：500 kbit/s Classical CAN。
+- F103 通用配置：500 kbit/s Classical CAN。
+- F103 Bluepill 实机配置：1 Mbit/s Classical CAN。
 - G431：500 kbit/s 仲裁段、2 Mbit/s 数据段 CAN-FD。
 
 速率全部由 menuconfig 设置。实际布线较长、节点较多或隔离器传播延迟较大时，
-需要降低数据段速率并重新计算采样点。
+需要降低速率并重新计算采样点。1 Mbit/s Classical CAN 尤其需要控制主干和
+支线长度，并保证总线只有两个 120Ω 终端。
 
 ## 下载连接
 

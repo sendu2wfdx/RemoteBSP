@@ -46,12 +46,26 @@ client=("${cli}" --socket "${socket_path}" --node "${node_id}")
 declare -a latencies_ms=()
 ping_failures=0
 
+coproc MONOTONIC_CLOCK {
+    python3 -u -c \
+        'import sys, time
+for _ in sys.stdin:
+    print(time.monotonic_ns(), flush=True)'
+}
+
+read_monotonic_ns() {
+    printf '\n' >&"${MONOTONIC_CLOCK[1]}"
+    IFS= read -r monotonic_ns_value <&"${MONOTONIC_CLOCK[0]}"
+}
+
 for ((index = 1; index <= ping_count; ++index)); do
     payload="stress-${index}"
-    started_ns="$(date +%s%N)"
+    read_monotonic_ns
+    started_ns="${monotonic_ns_value}"
     if output="$("${client[@]}" ping "${payload}" 2>&1)" &&
         [[ "${output}" == "pong=${payload}" ]]; then
-        finished_ns="$(date +%s%N)"
+        read_monotonic_ns
+        finished_ns="${monotonic_ns_value}"
         latencies_ms+=("$(((finished_ns - started_ns) / 1000000))")
     else
         ((ping_failures += 1))
@@ -151,10 +165,12 @@ large_payload_failure=0
 if ((large_payload_size > 0)); then
     printf -v large_payload '%*s' "${large_payload_size}" ''
     large_payload="${large_payload// /X}"
-    started_ns="$(date +%s%N)"
+    read_monotonic_ns
+    started_ns="${monotonic_ns_value}"
     if large_output="$("${client[@]}" ping "${large_payload}" 2>&1)" &&
         [[ "${large_output}" == "pong=${large_payload}" ]]; then
-        finished_ns="$(date +%s%N)"
+        read_monotonic_ns
+        finished_ns="${monotonic_ns_value}"
         printf '大载荷 PING：字节=%u 往返延迟=%u ms 结果=成功\n' \
             "${large_payload_size}" \
             "$(((finished_ns - started_ns) / 1000000))"
