@@ -898,6 +898,36 @@ static void board_fixed_io_configure(void) {
     led.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &led);
 }
+
+#ifdef CONFIG_WEACT_BLUEPILL_PLUS_PB2_BREATHING_LED
+static void board_breathing_led_poll(void) {
+    enum {
+        /* PB2 没有可直接使用的硬件 PWM 通道，使用 100Hz、十级软件 PWM。 */
+        BREATH_PWM_PERIOD_MS = 10U,
+        BREATH_PERIOD_MS = 4000U,
+        BREATH_HALF_PERIOD_MS = BREATH_PERIOD_MS / 2U,
+    };
+
+    static uint32_t last_tick = 0xFFFFFFFFU;
+    const uint32_t now = HAL_GetTick();
+    if (now == last_tick) {
+        return;
+    }
+    last_tick = now;
+    const uint32_t phase = now % BREATH_PERIOD_MS;
+    const uint32_t ramp = phase < BREATH_HALF_PERIOD_MS
+                              ? phase
+                              : BREATH_PERIOD_MS - phase;
+    const uint32_t duty_steps = (ramp * BREATH_PWM_PERIOD_MS) /
+                                BREATH_HALF_PERIOD_MS;
+    const uint32_t carrier = now % BREATH_PWM_PERIOD_MS;
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2,
+                      carrier < duty_steps ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+#else
+static void board_breathing_led_poll(void) {
+}
+#endif
 #endif
 
 void HAL_CAN_MspInit(CAN_HandleTypeDef* handle) {
@@ -1346,6 +1376,9 @@ int main(void) {
 #endif
 
     for (;;) {
+#ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
+        board_breathing_led_poll();
+#endif
         receive_can_frames();
         rbsp_core_poll(&remote_core);
 #ifdef CONFIG_USB_DEBUG_CDC

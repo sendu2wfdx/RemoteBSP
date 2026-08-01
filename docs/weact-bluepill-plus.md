@@ -21,7 +21,7 @@
 | CAN RX / TX | PB8 / PB9 | bxCAN 重映射，使用 TJA1051/3 等 3.3 V 逻辑收发器 |
 | USART1 TX / RX | PA9 / PA10 | 中断驱动 RX/TX 环形缓冲 |
 | 用户按键 | PA0 | 高电平按下，固件启用内部下拉 |
-| 指示灯 | PB2 | 高电平点亮 |
+| 指示灯 | PB2 | 高电平点亮；默认启用约 4 秒周期的软件 PWM 呼吸灯 |
 | USB D- / D+ | PA11 / PA12 | Katapult USB 恢复，不作为 APP 业务传输 |
 | SWDIO / SWCLK | PA13 / PA14 | DAPLink 或 ST-Link |
 

@@ -87,6 +87,16 @@ config WEACT_G431_PC6_PWM_BREATHING_LED
       周期缓慢起伏，用于验证定时器、PWM 输出和板载 LED。启用时 PC6
       被该演示独占，不能再作为远程 GPIO 使用；关闭后 PC6 恢复为普通 GPIO。
 
+config WEACT_BLUEPILL_PLUS_PB2_BREATHING_LED
+    bool "WeAct BluePill Plus PB2 软件呼吸灯演示"
+    depends on BOARD_WEACT_BLUEPILL_PLUS
+    default y
+    help
+      使用板载高电平点亮的 PB2 LED。PB2 不具备可直接使用的 PWM 输出通道，
+      固件在主循环中依据 1ms 系统节拍产生约 100Hz 的软件 PWM，并按约 4 秒
+      周期改变占空比。该实现不新增定时器中断，不影响 CAN 接收、UART 中断或
+      可选的运动定时器。关闭后 PB2 保持熄灭，并继续保留为板载 LED。
+
 config SYSTEM_CLOCK_HZ
     int "系统时钟频率"
     default 48000000 if BOARD_STM32F072RBT6
