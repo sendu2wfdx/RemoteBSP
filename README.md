@@ -40,12 +40,16 @@ flowchart TD
 | 远程资源 | GPIO、UART、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
 | 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART；默认示例公开3路运动轴，可由描述扩展 |
-| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
-| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；双模式 Katapult 切换待验收 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；板载 PB2 默认启用约 4 秒周期的软件 PWM 呼吸灯；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；当前未确认可安全占用的板载默认 LED 引脚，故不自动分配呼吸灯；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3 PWM 呼吸灯、PC13 GPIO；实板已验证，USB CDC 与双模式 Katapult 待切换验证 |
 
 SPI、I2C、ADC、通用 PWM/Timer 协议和 Storage 已按当前优先级后置，尚未实现。
-当前已完成 WeAct G431 PC6 的板级 TIM3 PWM 呼吸灯验证。USB
+当前已完成 WeAct G431 PC6 的板级 TIM3 硬件 PWM 呼吸灯和 WeAct BluePill Plus PB2
+软件 PWM 呼吸灯支持。BluePill 的实现只使用主循环的 1ms 系统节拍，不新增定时器
+中断，也不占用可选运动控制使用的 TIM2/TIM3；两种呼吸灯均可在 `menuconfig` 中关闭。
+FLY-D5 不会为演示目的占用加热、风扇、步进或探针资源，待运行时资源清单确认实际指示灯
+引脚后再启用。USB
 目前只用于 Katapult 恢复升级和 G431 APP 调试输出，不是 RemoteBSP 业务传输。
 
 当前主线优先级为智能步进运动、数字孪生、遥测与监控、图形配置器。Mock 已实现
