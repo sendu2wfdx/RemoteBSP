@@ -35,6 +35,11 @@ enum class Command : std::uint16_t {
     ResourceDescribe = 0x0031,
     ResourceStatus = 0x0032,
     ResourceReset = 0x0033,
+    ResourceContract = 0x0034,
+    ResourceAcquire = 0x0035,
+    ResourceRenew = 0x0036,
+    ResourceRelease = 0x0037,
+    ResourceLeaseStatus = 0x0038,
     GpioCreate = 0x0100,
     GpioRead = 0x0101,
     GpioWrite = 0x0102,
@@ -42,6 +47,10 @@ enum class Command : std::uint16_t {
     UartRead = 0x0201,
     UartWrite = 0x0202,
     UartRxEvent = 0x0280,
+    MotionEnqueue = 0x0900,
+    MotionStatus = 0x0901,
+    MotionAbort = 0x0902,
+    MotionClearFault = 0x0903,
 };
 
 struct PacketHeader {

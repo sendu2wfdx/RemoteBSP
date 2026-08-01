@@ -59,6 +59,10 @@ CanFrameException::CanFrameException(CanFrameError code, const char* message)
 CanFrameError CanFrameException::code() const noexcept { return code_; }
 
 can_frame encode_classical_frame(const CanMessage& message) {
+    if (message.bit_rate_switch) {
+        throw CanFrameException(CanFrameError::InvalidFlags,
+                                "Classical CAN 不支持数据段速率切换");
+    }
     if (message.data.size() > CAN_MAX_DLEN) {
         throw CanFrameException(CanFrameError::PayloadTooLarge,
                                 "Classical CAN 数据超过 8 字节");
@@ -87,6 +91,9 @@ canfd_frame encode_fd_frame(const CanMessage& message) {
     }
     canfd_frame frame{};
     frame.can_id = encode_identifier(message);
+    if (message.bit_rate_switch) {
+        frame.flags |= CANFD_BRS;
+    }
     // 真实控制器只接受标准 CAN-FD 长度，空余字节由零初始化补齐。
     frame.len =
         static_cast<__u8>(canonical_fd_length(message.data.size()));
@@ -101,6 +108,7 @@ CanMessage decode_fd_frame(const canfd_frame& frame) {
     }
     CanMessage message = decode_identifier(frame.can_id);
     message.data.assign(frame.data, frame.data + frame.len);
+    message.bit_rate_switch = (frame.flags & CANFD_BRS) != 0U;
     return message;
 }
 

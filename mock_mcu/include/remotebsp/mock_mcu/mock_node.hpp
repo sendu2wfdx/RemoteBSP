@@ -45,6 +45,8 @@ public:
             protocol::Reassembler::Clock::now());
 
     NodeReply make_heartbeat();
+    std::vector<NodeReply> poll_uart_events(
+        std::size_t maximum_payload = 64);
     std::uint16_t allocate_transfer_id();
     std::size_t expire(protocol::Reassembler::TimePoint now =
                            protocol::Reassembler::Clock::now());
@@ -65,7 +67,8 @@ private:
     static bool same_request(const protocol::Packet& left,
                              const protocol::Packet& right) noexcept;
     std::optional<NodeReply> process_request(
-        const protocol::Packet& request);
+        const protocol::Packet& request,
+        protocol::Reassembler::TimePoint now);
     void insert_cache(std::uint64_t key, CachedRequest entry);
 
     RemoteCore core_;

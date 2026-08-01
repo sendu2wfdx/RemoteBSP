@@ -1,11 +1,14 @@
 #pragma once
 
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
+#include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
+#include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -27,6 +30,7 @@ enum class Capability : std::uint64_t {
     Timer = 1ULL << 6U,
     Storage = 1ULL << 7U,
     Bootloader = 1ULL << 8U,
+    Motion = 1ULL << 9U,
 };
 
 constexpr std::uint64_t capability_mask(Capability capability) noexcept {
@@ -57,6 +61,7 @@ struct NodeInfo {
 enum class CoreError {
     NotRequest,
     UnsupportedVersion,
+    InvalidResourceCatalog,
 };
 
 class CoreException : public std::runtime_error {
@@ -70,15 +75,26 @@ private:
 
 class RemoteCore {
 public:
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+
     RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                std::shared_ptr<GpioBsp> gpio_bsp = nullptr,
                std::shared_ptr<UartBsp> uart_bsp = nullptr,
-               std::vector<protocol::ResourceDescriptor> resources = {});
+               std::vector<protocol::ResourceDescriptor> resources = {},
+               std::vector<protocol::ResourceContract> contracts = {},
+               std::shared_ptr<MotionExecutor> motion = nullptr);
 
-    protocol::Packet handle(const protocol::Packet& request);
+    protocol::Packet handle(
+        const protocol::Packet& request,
+        TimePoint now = Clock::now());
     const NodeInfo& node_info() const noexcept;
     std::uint64_t capabilities() const noexcept;
     bool bootloader_requested() const noexcept;
+    std::size_t expire_leases(TimePoint now = Clock::now());
+    std::size_t release_session(std::uint32_t session_id);
+    std::vector<protocol::Packet> poll_uart_events(
+        std::size_t maximum_payload = 64);
 
 private:
     protocol::Packet make_response(const protocol::Packet& request,
@@ -97,12 +113,30 @@ private:
         const protocol::Packet& request) const;
     protocol::Packet handle_resource_reset(
         const protocol::Packet& request);
+    protocol::Packet handle_resource_contract(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_resource_acquire(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_resource_renew(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_resource_release(
+        const protocol::Packet& request);
+    protocol::Packet handle_resource_lease_status(
+        const protocol::Packet& request, TimePoint now) const;
     protocol::Packet handle_gpio_create(const protocol::Packet& request);
     protocol::Packet handle_gpio_read(const protocol::Packet& request) const;
     protocol::Packet handle_gpio_write(const protocol::Packet& request);
     protocol::Packet handle_uart_create(const protocol::Packet& request);
     protocol::Packet handle_uart_read(const protocol::Packet& request);
     protocol::Packet handle_uart_write(const protocol::Packet& request);
+    protocol::Packet handle_motion_enqueue(
+        const protocol::Packet& request);
+    protocol::Packet handle_motion_status(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_motion_abort(
+        const protocol::Packet& request);
+    protocol::Packet handle_motion_clear_fault(
+        const protocol::Packet& request);
     protocol::Packet make_uart_error_response(
         const protocol::Packet& request,
         const std::exception& error) const;
@@ -110,20 +144,56 @@ private:
     struct GpioObject {
         std::uint16_t pin{};
         GpioDirection direction{GpioDirection::Input};
+        std::uint32_t resource_id{};
+        std::uint32_t owner_session_id{};
     };
 
     struct UartObject {
         std::uint8_t port{};
+        std::uint32_t resource_id{};
+        std::uint32_t owner_session_id{};
+        bool streaming{};
+        std::uint32_t event_sequence{};
     };
+
+    struct Lease {
+        std::uint64_t lease_id{};
+        std::uint32_t owner_session_id{};
+        std::uint32_t granted_duration_ms{};
+        protocol::ResourceLeaseMode mode{
+            protocol::ResourceLeaseMode::None};
+        TimePoint expires_at{};
+    };
+
+    const protocol::ResourceDescriptor* find_resource(
+        std::uint32_t resource_id) const noexcept;
+    const protocol::ResourceDescriptor* find_resource(
+        protocol::ResourceType type, std::uint16_t instance) const noexcept;
+    const protocol::ResourceContract* find_contract(
+        std::uint32_t resource_id) const noexcept;
+    bool resource_has_objects(std::uint32_t resource_id) const noexcept;
+    bool session_has_exclusive_lease(
+        std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
+    bool resource_access_allowed(
+        std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
+    void release_resource_objects(std::uint32_t resource_id,
+                                  std::uint32_t owner_session_id);
+    protocol::ResourceLeaseInfo make_lease_info(
+        std::uint32_t resource_id, std::uint32_t requester_session_id,
+        TimePoint now) const;
 
     NodeInfo node_info_;
     std::uint64_t capabilities_;
     std::shared_ptr<GpioBsp> gpio_bsp_;
     std::shared_ptr<UartBsp> uart_bsp_;
+    std::shared_ptr<MotionExecutor> motion_;
     std::vector<protocol::ResourceDescriptor> resources_;
+    std::vector<protocol::ResourceContract> contracts_;
+    std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;
     std::unordered_map<std::uint32_t, GpioObject> gpio_objects_;
     std::unordered_map<std::uint32_t, UartObject> uart_objects_;
     std::uint32_t next_object_id_{1};
+    std::uint64_t next_lease_id_{1};
     bool bootloader_requested_{};
 };
 

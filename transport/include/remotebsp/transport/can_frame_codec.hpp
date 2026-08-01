@@ -12,6 +12,7 @@ enum class CanFrameError {
     PayloadTooLarge,
     InvalidIdentifier,
     InvalidLength,
+    InvalidFlags,
     RemoteTransmissionRequest,
     ErrorFrame,
 };

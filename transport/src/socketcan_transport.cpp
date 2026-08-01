@@ -19,8 +19,42 @@
 namespace remotebsp::transport {
 namespace {
 
+constexpr auto kSendRetryBudget = std::chrono::milliseconds{100};
+constexpr useconds_t kSendRetrySleepUs = 1000U;
+
 [[noreturn]] void throw_system_error(const char* operation) {
     throw std::system_error(errno, std::generic_category(), operation);
+}
+
+/*
+ * CANable 等 USB 适配器常见很浅的内核发送队列。大包在 Classical CAN 下分片后
+ * 可能短暂遇到 ENOBUFS；这不是链路失败，等待一个短时隙后重试即可。重试总时长
+ * 有上界，不能让故障设备无限占用 toolbusd 事件循环。
+ */
+ssize_t write_with_backpressure_retry(int socket, const void* frame,
+                                      std::size_t length) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          kSendRetryBudget;
+    for (;;) {
+        const ssize_t written = ::write(socket, frame, length);
+        if (written >= 0) {
+            return written;
+        }
+        const int error = errno;
+        if (error == EINTR) {
+            continue;
+        }
+        if (error != EAGAIN && error != EWOULDBLOCK && error != ENOBUFS) {
+            errno = error;
+            return -1;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            errno = error;
+            return -1;
+        }
+        /* 即使 POLLOUT 已置位，qdisc 仍可能暂未释放一个 CAN 帧槽位。 */
+        ::usleep(kSendRetrySleepUs);
+    }
 }
 
 }
@@ -86,11 +120,11 @@ void SocketCanTransport::send(const CanMessage& message) {
     if (mode_ == CanMode::Classical) {
         const can_frame frame = encode_classical_frame(message);
         expected = sizeof(frame);
-        written = ::write(socket_, &frame, expected);
+        written = write_with_backpressure_retry(socket_, &frame, expected);
     } else {
         const canfd_frame frame = encode_fd_frame(message);
         expected = sizeof(frame);
-        written = ::write(socket_, &frame, expected);
+        written = write_with_backpressure_retry(socket_, &frame, expected);
     }
     if (written < 0) {
         throw_system_error("发送 CAN 帧失败");

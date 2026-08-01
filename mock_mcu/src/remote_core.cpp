@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 namespace remotebsp::mock_mcu {
 namespace {
+
+constexpr std::uint32_t kMinimumLeaseDurationMs = 100;
+constexpr std::uint32_t kMaximumLeaseDurationMs = 60000;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -42,19 +46,50 @@ CoreError CoreException::code() const noexcept { return code_; }
 RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                        std::shared_ptr<GpioBsp> gpio_bsp,
                        std::shared_ptr<UartBsp> uart_bsp,
-                       std::vector<protocol::ResourceDescriptor> resources)
+                       std::vector<protocol::ResourceDescriptor> resources,
+                       std::vector<protocol::ResourceContract> contracts,
+                       std::shared_ptr<MotionExecutor> motion)
     : node_info_(node_info),
       capabilities_(capabilities),
       gpio_bsp_(std::move(gpio_bsp)),
       uart_bsp_(std::move(uart_bsp)),
-      resources_(std::move(resources)) {
+      motion_(std::move(motion)),
+      resources_(std::move(resources)),
+      contracts_(std::move(contracts)) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
         throw CoreException(CoreError::UnsupportedVersion,
                             "节点协议版本与远程核心不兼容");
     }
+    std::unordered_set<std::uint32_t> resource_ids;
+    for (const auto& resource : resources_) {
+        if (resource.resource_id == 0 ||
+            !resource_ids.insert(resource.resource_id).second) {
+            throw CoreException(CoreError::InvalidResourceCatalog,
+                                "资源目录包含零 ID 或重复 ID");
+        }
+    }
+    std::unordered_set<std::uint32_t> contract_ids;
+    for (const auto& contract : contracts_) {
+        const bool lease_required =
+            (contract.access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_supported =
+            (contract.access_flags &
+             protocol::kResourceAccessLeaseSupported) != 0U;
+        if (contract.resource_id == 0 ||
+            contract.version != protocol::kResourceContractVersion ||
+            resource_ids.find(contract.resource_id) ==
+                resource_ids.end() ||
+            !contract_ids.insert(contract.resource_id).second ||
+            (lease_required && !lease_supported)) {
+            throw CoreException(CoreError::InvalidResourceCatalog,
+                                "资源能力合同与资源目录不一致");
+        }
+    }
 }
 
-protocol::Packet RemoteCore::handle(const protocol::Packet& request) {
+protocol::Packet RemoteCore::handle(const protocol::Packet& request,
+                                    TimePoint now) {
     if (request.header.message_type != protocol::MessageType::Request) {
         throw CoreException(CoreError::NotRequest,
                             "远程核心只接受请求消息");
@@ -63,6 +98,7 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request) {
         throw CoreException(CoreError::UnsupportedVersion,
                             "请求协议版本不受支持");
     }
+    expire_leases(now);
 
     switch (static_cast<protocol::Command>(request.header.command)) {
         case protocol::Command::GetInfo:
@@ -82,6 +118,16 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request) {
             return handle_resource_status(request);
         case protocol::Command::ResourceReset:
             return handle_resource_reset(request);
+        case protocol::Command::ResourceContract:
+            return handle_resource_contract(request);
+        case protocol::Command::ResourceAcquire:
+            return handle_resource_acquire(request, now);
+        case protocol::Command::ResourceRenew:
+            return handle_resource_renew(request, now);
+        case protocol::Command::ResourceRelease:
+            return handle_resource_release(request);
+        case protocol::Command::ResourceLeaseStatus:
+            return handle_resource_lease_status(request, now);
         case protocol::Command::GpioCreate:
             return handle_gpio_create(request);
         case protocol::Command::GpioRead:
@@ -94,6 +140,14 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request) {
             return handle_uart_read(request);
         case protocol::Command::UartWrite:
             return handle_uart_write(request);
+        case protocol::Command::MotionEnqueue:
+            return handle_motion_enqueue(request);
+        case protocol::Command::MotionStatus:
+            return handle_motion_status(request);
+        case protocol::Command::MotionAbort:
+            return handle_motion_abort(request);
+        case protocol::Command::MotionClearFault:
+            return handle_motion_clear_fault(request);
         default:
             return make_response(request, StatusCode::UnknownCommand);
     }
@@ -107,6 +161,216 @@ std::uint64_t RemoteCore::capabilities() const noexcept {
 
 bool RemoteCore::bootloader_requested() const noexcept {
     return bootloader_requested_;
+}
+
+const protocol::ResourceDescriptor* RemoteCore::find_resource(
+    std::uint32_t resource_id) const noexcept {
+    const auto found = std::find_if(
+        resources_.begin(), resources_.end(),
+        [resource_id](const auto& resource) {
+            return resource.resource_id == resource_id;
+        });
+    return found == resources_.end() ? nullptr : &*found;
+}
+
+const protocol::ResourceDescriptor* RemoteCore::find_resource(
+    protocol::ResourceType type, std::uint16_t instance) const noexcept {
+    const auto found = std::find_if(
+        resources_.begin(), resources_.end(),
+        [type, instance](const auto& resource) {
+            return resource.type == type && resource.instance == instance;
+        });
+    return found == resources_.end() ? nullptr : &*found;
+}
+
+const protocol::ResourceContract* RemoteCore::find_contract(
+    std::uint32_t resource_id) const noexcept {
+    const auto found = std::find_if(
+        contracts_.begin(), contracts_.end(),
+        [resource_id](const auto& contract) {
+            return contract.resource_id == resource_id;
+        });
+    return found == contracts_.end() ? nullptr : &*found;
+}
+
+bool RemoteCore::resource_has_objects(
+    std::uint32_t resource_id) const noexcept {
+    return std::any_of(
+               gpio_objects_.begin(), gpio_objects_.end(),
+               [resource_id](const auto& entry) {
+                   return entry.second.resource_id == resource_id;
+               }) ||
+           std::any_of(
+               uart_objects_.begin(), uart_objects_.end(),
+               [resource_id](const auto& entry) {
+                   return entry.second.resource_id == resource_id;
+               });
+}
+
+bool RemoteCore::session_has_exclusive_lease(
+    std::uint32_t resource_id, std::uint32_t session_id) const noexcept {
+    const auto found = leases_.find(resource_id);
+    if (found == leases_.end()) {
+        return false;
+    }
+    return std::any_of(
+        found->second.begin(), found->second.end(),
+        [session_id](const auto& lease) {
+            return lease.owner_session_id == session_id &&
+                   lease.mode == protocol::ResourceLeaseMode::Exclusive;
+        });
+}
+
+bool RemoteCore::resource_access_allowed(
+    std::uint32_t resource_id, std::uint32_t session_id) const noexcept {
+    const auto found = leases_.find(resource_id);
+    if (found == leases_.end() || found->second.empty()) {
+        return true;
+    }
+    return std::any_of(
+        found->second.begin(), found->second.end(),
+        [session_id](const auto& lease) {
+            return lease.owner_session_id == session_id;
+        });
+}
+
+void RemoteCore::release_resource_objects(
+    std::uint32_t resource_id, std::uint32_t owner_session_id) {
+    const auto* released_resource = find_resource(resource_id);
+    if (released_resource != nullptr &&
+        released_resource->type ==
+            protocol::ResourceType::StepgenAxis &&
+        motion_ != nullptr) {
+        const auto motion_status = motion_->status();
+        if (motion_status.state == MotionState::Armed ||
+            motion_status.state == MotionState::Running) {
+            try {
+                static_cast<void>(motion_->abort(
+                    motion_status.node_time_ns, MotionFault::Aborted));
+            } catch (const std::exception&) {
+                // 运动租约释放必须继续完成，即使执行器已被其它安全源停机。
+            }
+        }
+    }
+    for (auto iterator = gpio_objects_.begin();
+         iterator != gpio_objects_.end();) {
+        const auto& object = iterator->second;
+        if (object.resource_id != resource_id ||
+            object.owner_session_id != owner_session_id) {
+            ++iterator;
+            continue;
+        }
+        if (gpio_bsp_ && object.direction == GpioDirection::Output) {
+            try {
+                gpio_bsp_->write(object.pin, false);
+            } catch (const std::exception&) {
+                // 释放路径必须继续清理对象，底层故障由资源状态另行报告。
+            }
+        }
+        iterator = gpio_objects_.erase(iterator);
+    }
+
+    for (auto iterator = uart_objects_.begin();
+         iterator != uart_objects_.end();) {
+        const auto& object = iterator->second;
+        if (object.resource_id != resource_id ||
+            object.owner_session_id != owner_session_id) {
+            ++iterator;
+            continue;
+        }
+        if (uart_bsp_) {
+            try {
+                uart_bsp_->reset(object.port);
+            } catch (const std::exception&) {
+                // 与 GPIO 相同，资源释放不能被后端异常阻塞。
+            }
+        }
+        iterator = uart_objects_.erase(iterator);
+    }
+}
+
+std::size_t RemoteCore::expire_leases(TimePoint now) {
+    std::size_t expired = 0;
+    for (auto map_iterator = leases_.begin();
+         map_iterator != leases_.end();) {
+        const auto resource_id = map_iterator->first;
+        auto& entries = map_iterator->second;
+        for (auto iterator = entries.begin(); iterator != entries.end();) {
+            if (iterator->expires_at > now) {
+                ++iterator;
+                continue;
+            }
+            release_resource_objects(resource_id,
+                                     iterator->owner_session_id);
+            iterator = entries.erase(iterator);
+            ++expired;
+        }
+        if (entries.empty()) {
+            map_iterator = leases_.erase(map_iterator);
+        } else {
+            ++map_iterator;
+        }
+    }
+    return expired;
+}
+
+std::size_t RemoteCore::release_session(std::uint32_t session_id) {
+    std::size_t released = 0;
+    for (auto map_iterator = leases_.begin();
+         map_iterator != leases_.end();) {
+        const auto resource_id = map_iterator->first;
+        auto& entries = map_iterator->second;
+        for (auto iterator = entries.begin(); iterator != entries.end();) {
+            if (iterator->owner_session_id != session_id) {
+                ++iterator;
+                continue;
+            }
+            release_resource_objects(resource_id, session_id);
+            iterator = entries.erase(iterator);
+            ++released;
+        }
+        if (entries.empty()) {
+            map_iterator = leases_.erase(map_iterator);
+        } else {
+            ++map_iterator;
+        }
+    }
+    return released;
+}
+
+protocol::ResourceLeaseInfo RemoteCore::make_lease_info(
+    std::uint32_t resource_id, std::uint32_t requester_session_id,
+    TimePoint now) const {
+    protocol::ResourceLeaseInfo info;
+    info.resource_id = resource_id;
+    const auto found = leases_.find(resource_id);
+    if (found == leases_.end() || found->second.empty()) {
+        return info;
+    }
+
+    info.active_lease_count = static_cast<std::uint16_t>(
+        std::min<std::size_t>(found->second.size(), 0xFFFFU));
+    const auto owned = std::find_if(
+        found->second.begin(), found->second.end(),
+        [requester_session_id](const auto& lease) {
+            return lease.owner_session_id == requester_session_id;
+        });
+    const auto selected =
+        owned == found->second.end() ? found->second.begin() : owned;
+    info.owner_session_id = selected->owner_session_id;
+    info.granted_duration_ms = selected->granted_duration_ms;
+    info.mode = selected->mode;
+    if (owned != found->second.end()) {
+        info.lease_id = selected->lease_id;
+    }
+    if (selected->expires_at > now) {
+        const auto remaining = std::chrono::duration_cast<
+            std::chrono::milliseconds>(selected->expires_at - now).count();
+        info.remaining_ms = static_cast<std::uint32_t>(
+            std::min<std::int64_t>(
+                remaining, std::numeric_limits<std::uint32_t>::max()));
+    }
+    return info;
 }
 
 protocol::Packet RemoteCore::make_response(
@@ -276,6 +540,18 @@ protocol::Packet RemoteCore::handle_resource_status(
             status.error_flags |= protocol::kResourceErrorBackendFailure;
             status.health = protocol::ResourceHealth::Failed;
         }
+    } else if (found->type ==
+                   protocol::ResourceType::StepgenAxis &&
+               motion_) {
+        const auto motion_status = motion_->status();
+        if (motion_status.fault != MotionFault::None) {
+            status.error_flags |=
+                protocol::kResourceErrorBackendFailure;
+            status.health = protocol::ResourceHealth::Failed;
+        } else if (motion_status.state == MotionState::Armed ||
+                   motion_status.state == MotionState::Running) {
+            status.health = protocol::ResourceHealth::Busy;
+        }
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
     const auto encoded = protocol::encode_resource_status(status);
@@ -298,6 +574,27 @@ protocol::Packet RemoteCore::handle_resource_reset(
     if (found == resources_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
+    if (!resource_access_allowed(resource_id,
+                                 request.header.session_id) ||
+        (leases_.find(resource_id) != leases_.end() &&
+         !session_has_exclusive_lease(resource_id,
+                                      request.header.session_id))) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (found->type == protocol::ResourceType::StepgenAxis && motion_) {
+        try {
+            const auto motion_status = motion_->status();
+            if (motion_status.state == MotionState::Armed ||
+                motion_status.state == MotionState::Running) {
+                static_cast<void>(motion_->abort(
+                    motion_status.node_time_ns, MotionFault::Aborted));
+            }
+            motion_->clear_fault();
+        } catch (const std::exception&) {
+            return make_response(request, StatusCode::ResourceFailed);
+        }
+        return make_response(request, StatusCode::Ok);
+    }
     if (found->type != protocol::ResourceType::Uart || !uart_bsp_ ||
         found->instance > std::numeric_limits<std::uint8_t>::max()) {
         return make_response(request,
@@ -309,6 +606,223 @@ protocol::Packet RemoteCore::handle_resource_reset(
         return make_uart_error_response(request, error);
     }
     return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_resource_contract(
+    const protocol::Packet& request) const {
+    if (request.header.object_id != 0 || request.payload.size() != 4) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    if (find_resource(resource_id) == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = find_contract(resource_id);
+    if (contract == nullptr) {
+        return make_response(request,
+                             StatusCode::UnsupportedCapability);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_resource_contract(*contract);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_resource_acquire(
+    const protocol::Packet& request, TimePoint now) {
+    if (request.header.object_id != 0 ||
+        request.header.session_id == 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::ResourceLeaseRequest lease_request;
+    try {
+        lease_request =
+            protocol::decode_resource_lease_request(request.payload);
+    } catch (const protocol::ResourcePayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (lease_request.duration_ms < kMinimumLeaseDurationMs ||
+        lease_request.duration_ms > kMaximumLeaseDurationMs) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (find_resource(lease_request.resource_id) == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = find_contract(lease_request.resource_id);
+    if (contract == nullptr ||
+        (contract->access_flags &
+         protocol::kResourceAccessLeaseSupported) == 0U) {
+        return make_response(request,
+                             StatusCode::UnsupportedCapability);
+    }
+    if (lease_request.mode == protocol::ResourceLeaseMode::SharedRead &&
+        (contract->access_flags &
+         protocol::kResourceAccessSharedRead) == 0U) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+
+    auto& entries = leases_[lease_request.resource_id];
+    const bool session_already_owns = std::any_of(
+        entries.begin(), entries.end(),
+        [&](const auto& lease) {
+            return lease.owner_session_id ==
+                   request.header.session_id;
+        });
+    const bool has_exclusive = std::any_of(
+        entries.begin(), entries.end(),
+        [](const auto& lease) {
+            return lease.mode ==
+                   protocol::ResourceLeaseMode::Exclusive;
+        });
+    if (session_already_owns ||
+        (lease_request.mode == protocol::ResourceLeaseMode::Exclusive &&
+         (!entries.empty() ||
+          resource_has_objects(lease_request.resource_id))) ||
+        (lease_request.mode == protocol::ResourceLeaseMode::SharedRead &&
+         (has_exclusive ||
+          resource_has_objects(lease_request.resource_id)))) {
+        if (entries.empty()) {
+            leases_.erase(lease_request.resource_id);
+        }
+        return make_response(request, StatusCode::ResourceBusy);
+    }
+
+    const std::uint64_t lease_id = next_lease_id_++;
+    if (next_lease_id_ == 0) {
+        next_lease_id_ = 1;
+    }
+    entries.push_back(
+        {lease_id,
+         request.header.session_id,
+         lease_request.duration_ms,
+         lease_request.mode,
+         now + std::chrono::milliseconds(lease_request.duration_ms)});
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_resource_lease_info(
+        make_lease_info(lease_request.resource_id,
+                        request.header.session_id, now));
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_resource_renew(
+    const protocol::Packet& request, TimePoint now) {
+    if (request.header.object_id != 0 ||
+        request.header.session_id == 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::ResourceLeaseTokenRequest renew;
+    try {
+        renew =
+            protocol::decode_resource_lease_token_request(request.payload);
+    } catch (const protocol::ResourcePayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (renew.lease_id == 0 ||
+        renew.duration_ms < kMinimumLeaseDurationMs ||
+        renew.duration_ms > kMaximumLeaseDurationMs) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (find_resource(renew.resource_id) == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto found = leases_.find(renew.resource_id);
+    if (found == leases_.end()) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    const auto lease = std::find_if(
+        found->second.begin(), found->second.end(),
+        [&](const auto& entry) {
+            return entry.lease_id == renew.lease_id &&
+                   entry.owner_session_id ==
+                       request.header.session_id;
+        });
+    if (lease == found->second.end()) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    lease->granted_duration_ms = renew.duration_ms;
+    lease->expires_at =
+        now + std::chrono::milliseconds(renew.duration_ms);
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_resource_lease_info(
+        make_lease_info(renew.resource_id,
+                        request.header.session_id, now));
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_resource_release(
+    const protocol::Packet& request) {
+    if (request.header.object_id != 0 ||
+        request.header.session_id == 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::ResourceLeaseTokenRequest release;
+    try {
+        release =
+            protocol::decode_resource_lease_token_request(request.payload);
+    } catch (const protocol::ResourcePayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (release.lease_id == 0 || release.duration_ms != 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (find_resource(release.resource_id) == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto found = leases_.find(release.resource_id);
+    if (found == leases_.end()) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    auto& entries = found->second;
+    const auto lease = std::find_if(
+        entries.begin(), entries.end(),
+        [&](const auto& entry) {
+            return entry.lease_id == release.lease_id &&
+                   entry.owner_session_id ==
+                       request.header.session_id;
+        });
+    if (lease == entries.end()) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    release_resource_objects(release.resource_id,
+                             request.header.session_id);
+    entries.erase(lease);
+    if (entries.empty()) {
+        leases_.erase(found);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_resource_lease_status(
+    const protocol::Packet& request, TimePoint now) const {
+    if (request.header.object_id != 0 || request.payload.size() != 4) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    if (find_resource(resource_id) == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = find_contract(resource_id);
+    if (contract == nullptr ||
+        (contract->access_flags &
+         protocol::kResourceAccessLeaseSupported) == 0U) {
+        return make_response(request,
+                             StatusCode::UnsupportedCapability);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    auto lease_info =
+        make_lease_info(resource_id, request.header.session_id, now);
+    // 状态查询不返回能力令牌，租约 ID 只在取得和续租成功时返回。
+    lease_info.lease_id = 0;
+    const auto encoded =
+        protocol::encode_resource_lease_info(lease_info);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
 }
 
 protocol::Packet RemoteCore::handle_gpio_create(
@@ -335,6 +849,34 @@ protocol::Packet RemoteCore::handle_gpio_create(
     const auto direction =
         static_cast<GpioDirection>(request.payload[2]);
     const bool initial_value = request.payload[3] != 0;
+    const bool catalog_has_gpio = std::any_of(
+        resources_.begin(), resources_.end(), [](const auto& resource) {
+            return resource.type == protocol::ResourceType::Gpio;
+        });
+    const auto* resource =
+        find_resource(protocol::ResourceType::Gpio, pin);
+    if (catalog_has_gpio && resource == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    std::uint32_t owner_session_id = 0;
+    if (resource != nullptr) {
+        const auto* contract = find_contract(resource->resource_id);
+        const bool lease_required =
+            contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(resource->resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+        if (session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            owner_session_id = request.header.session_id;
+        }
+    }
     const auto gpio_in_use = std::find_if(
         gpio_objects_.begin(), gpio_objects_.end(),
         [pin](const auto& entry) { return entry.second.pin == pin; });
@@ -344,7 +886,11 @@ protocol::Packet RemoteCore::handle_gpio_create(
     gpio_bsp_->configure(pin, direction, initial_value);
 
     const std::uint32_t object_id = next_object_id_++;
-    gpio_objects_.emplace(object_id, GpioObject{pin, direction});
+    gpio_objects_.emplace(
+        object_id,
+        GpioObject{pin, direction,
+                   resource == nullptr ? 0U : resource->resource_id,
+                   owner_session_id});
     protocol::Packet response = make_response(request, StatusCode::Ok);
     response.header.object_id = object_id;
     return response;
@@ -362,6 +908,10 @@ protocol::Packet RemoteCore::handle_gpio_read(
     const auto found = gpio_objects_.find(request.header.object_id);
     if (found == gpio_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
     response.payload.push_back(gpio_bsp_->read(found->second.pin) ? 1U : 0U);
@@ -382,6 +932,10 @@ protocol::Packet RemoteCore::handle_gpio_write(
     if (found == gpio_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
     if (found->second.direction != GpioDirection::Output) {
         return make_response(request, StatusCode::AccessDenied);
     }
@@ -395,7 +949,8 @@ protocol::Packet RemoteCore::handle_uart_create(
         (capabilities_ & capability_mask(Capability::Uart)) == 0U) {
         return make_response(request, StatusCode::UnsupportedCapability);
     }
-    if (request.header.object_id != 0 || request.payload.size() != 8) {
+    if (request.header.object_id != 0 ||
+        (request.payload.size() != 8 && request.payload.size() != 9)) {
         return make_response(request, StatusCode::InvalidPayload);
     }
     const std::uint32_t baud_rate = read_u32(request.payload.data() + 1);
@@ -404,7 +959,8 @@ protocol::Packet RemoteCore::handle_uart_create(
     const std::uint8_t parity = request.payload[7];
     if (baud_rate == 0 || data_bits < 5 || data_bits > 8 ||
         (stop_bits != 1 && stop_bits != 2) ||
-        parity > static_cast<std::uint8_t>(UartParity::Even)) {
+        parity > static_cast<std::uint8_t>(UartParity::Even) ||
+        (request.payload.size() == 9 && request.payload[8] > 1U)) {
         return make_response(request, StatusCode::InvalidPayload);
     }
     if (next_object_id_ == 0) {
@@ -416,14 +972,29 @@ protocol::Packet RemoteCore::handle_uart_create(
         resources_.begin(), resources_.end(), [](const auto& resource) {
             return resource.type == protocol::ResourceType::Uart;
         });
-    const bool port_is_exposed = std::any_of(
-        resources_.begin(), resources_.end(),
-        [port](const auto& resource) {
-            return resource.type == protocol::ResourceType::Uart &&
-                   resource.instance == port;
-        });
-    if (catalog_has_uart && !port_is_exposed) {
+    const auto* resource =
+        find_resource(protocol::ResourceType::Uart, port);
+    if (catalog_has_uart && resource == nullptr) {
         return make_response(request, StatusCode::ObjectNotFound);
+    }
+    std::uint32_t owner_session_id = 0;
+    if (resource != nullptr) {
+        const auto* contract = find_contract(resource->resource_id);
+        const bool lease_required =
+            contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(resource->resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+        if (session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            owner_session_id = request.header.session_id;
+        }
     }
     const auto uart_in_use = std::find_if(
         uart_objects_.begin(), uart_objects_.end(),
@@ -439,7 +1010,14 @@ protocol::Packet RemoteCore::handle_uart_create(
         return make_uart_error_response(request, error);
     }
     const std::uint32_t object_id = next_object_id_++;
-    uart_objects_.emplace(object_id, UartObject{port});
+    uart_objects_.emplace(
+        object_id,
+        UartObject{port,
+                   resource == nullptr ? 0U : resource->resource_id,
+                   owner_session_id,
+                   request.payload.size() == 9 &&
+                       request.payload[8] == 1U,
+                   0U});
     protocol::Packet response = make_response(request, StatusCode::Ok);
     response.header.object_id = object_id;
     return response;
@@ -465,6 +1043,13 @@ protocol::Packet RemoteCore::handle_uart_read(
     if (found == uart_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (found->second.streaming) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
     protocol::Packet response = make_response(request, StatusCode::Ok);
     std::vector<std::uint8_t> data;
     try {
@@ -480,6 +1065,41 @@ protocol::Packet RemoteCore::handle_uart_read(
     return response;
 }
 
+std::vector<protocol::Packet> RemoteCore::poll_uart_events(
+    std::size_t maximum_payload) {
+    if (maximum_payload == 0 ||
+        maximum_payload > protocol::kMaximumPayloadSize) {
+        throw std::invalid_argument("UART 事件载荷长度无效");
+    }
+    std::vector<protocol::Packet> events;
+    if (!uart_bsp_) {
+        return events;
+    }
+    for (auto& [object_id, object] : uart_objects_) {
+        if (!object.streaming) {
+            continue;
+        }
+        std::vector<std::uint8_t> data;
+        try {
+            data = uart_bsp_->read(object.port, maximum_payload);
+        } catch (const UartException&) {
+            continue;
+        }
+        if (data.empty()) {
+            continue;
+        }
+        protocol::Packet event;
+        event.header.message_type = protocol::MessageType::Event;
+        event.header.command = static_cast<std::uint16_t>(
+            protocol::Command::UartRxEvent);
+        event.header.request_id = ++object.event_sequence;
+        event.header.object_id = object_id;
+        event.payload = std::move(data);
+        events.push_back(std::move(event));
+    }
+    return events;
+}
+
 protocol::Packet RemoteCore::handle_uart_write(
     const protocol::Packet& request) {
     if (!uart_bsp_ ||
@@ -493,10 +1113,166 @@ protocol::Packet RemoteCore::handle_uart_write(
     if (found == uart_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
     try {
         uart_bsp_->write(found->second.port, request.payload);
     } catch (const std::exception& error) {
         return make_uart_error_response(request, error);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_motion_enqueue(
+    const protocol::Packet& request) {
+    if (!motion_ ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::MotionSegmentPayload decoded;
+    try {
+        decoded = protocol::decode_motion_segment(request.payload);
+    } catch (const protocol::MotionPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    for (const auto& axis : decoded.axes) {
+        const auto* resource = find_resource(axis.resource_id);
+        if (resource == nullptr ||
+            resource->type != protocol::ResourceType::StepgenAxis) {
+            return make_response(request, StatusCode::ObjectNotFound);
+        }
+        const auto* contract = find_contract(axis.resource_id);
+        const bool lease_required =
+            contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(axis.resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                axis.resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+    }
+    MotionSegment segment;
+    segment.sequence = decoded.sequence;
+    segment.start_time_ns = decoded.start_time_ns;
+    segment.duration_ns = decoded.duration_ns;
+    segment.final_segment = decoded.final_segment;
+    segment.axes.reserve(decoded.axes.size());
+    for (const auto& axis : decoded.axes) {
+        segment.axes.push_back({axis.resource_id, axis.steps});
+    }
+    try {
+        const auto accepted = motion_->enqueue(
+            std::move(segment), motion_->status().node_time_ns);
+        decoded.start_time_ns = accepted.start_time_ns;
+    } catch (const MotionException& error) {
+        if (error.code() == MotionError::QueueFull) {
+            return make_response(
+                request, StatusCode::ResourceExhausted);
+        }
+        if (error.code() == MotionError::FaultLatched) {
+            return make_response(request, StatusCode::ResourceFailed);
+        }
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_motion_acceptance(
+        {decoded.sequence, decoded.start_time_ns,
+         decoded.duration_ns, decoded.final_segment});
+    response.payload.insert(
+        response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_motion_status(
+    const protocol::Packet& request) const {
+    if (!motion_ ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || !request.payload.empty()) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto source = motion_->status();
+    protocol::MotionStatusPayload status;
+    status.state =
+        static_cast<protocol::MotionStatePayload>(source.state);
+    status.fault =
+        static_cast<protocol::MotionFaultPayload>(source.fault);
+    status.node_time_ns = source.node_time_ns;
+    status.queue_depth =
+        static_cast<std::uint16_t>(source.queue_depth);
+    status.queue_capacity =
+        static_cast<std::uint16_t>(source.queue_capacity);
+    status.last_accepted_sequence = source.last_accepted_sequence;
+    status.last_completed_sequence = source.last_completed_sequence;
+    status.metrics = {
+        source.metrics.accepted_segments,
+        source.metrics.rejected_segments,
+        source.metrics.completed_segments,
+        source.metrics.emitted_edges,
+        source.metrics.emitted_steps,
+        source.metrics.safety_stops,
+        source.metrics.limit_stops,
+        source.metrics.queue_underruns,
+        static_cast<std::uint16_t>(
+            source.metrics.maximum_queue_depth)};
+    status.axes.reserve(source.axes.size());
+    for (const auto& axis : source.axes) {
+        status.axes.push_back(
+            {axis.resource_id, axis.enabled,
+             axis.direction_positive, axis.step_level,
+             axis.position_steps, axis.emitted_steps});
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_motion_status(status);
+    response.payload.insert(
+        response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_motion_abort(
+    const protocol::Packet& request) {
+    if (!motion_ ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || !request.payload.empty()) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    try {
+        static_cast<void>(motion_->abort(
+            motion_->status().node_time_ns, MotionFault::Aborted));
+    } catch (const MotionException& error) {
+        return make_response(
+            request,
+            error.code() == MotionError::FaultLatched
+                ? StatusCode::ResourceFailed
+                : StatusCode::InvalidPayload);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_motion_clear_fault(
+    const protocol::Packet& request) {
+    if (!motion_ ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || !request.payload.empty()) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    try {
+        motion_->clear_fault();
+    } catch (const MotionException&) {
+        return make_response(request, StatusCode::ResourceBusy);
     }
     return make_response(request, StatusCode::Ok);
 }

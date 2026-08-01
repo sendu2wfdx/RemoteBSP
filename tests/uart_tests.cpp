@@ -50,11 +50,15 @@ void check_status(const protocol::Packet& response,
 }
 
 protocol::Packet create_uart(mock_mcu::RemoteCore& core,
-                             std::uint32_t request_id = 1) {
+                             std::uint32_t request_id = 1,
+                             bool streaming = false) {
     auto request = make_request(protocol::Command::UartCreate, request_id);
     request.payload = {2, 0x00, 0xC2, 0x01, 0x00, 8, 1,
                        static_cast<std::uint8_t>(
                            mock_mcu::UartParity::None)};
+    if (streaming) {
+        request.payload.push_back(1U);
+    }
     return core.handle(request);
 }
 
@@ -204,6 +208,42 @@ void test_duplicate_write() {
           std::vector<std::uint8_t>({'A', 'B', 'C'}));
 }
 
+void test_streaming_receive() {
+    auto uart = std::make_shared<mock_mcu::MockUartBsp>();
+    auto core = make_core(uart);
+    const auto created = create_uart(core, 1, true);
+    check_status(created, mock_mcu::StatusCode::Ok);
+
+    uart->inject_rx(2, {'G', 'P', 'S', '\n'});
+    const auto events = core.poll_uart_events(3);
+    CHECK(events.size() == 1);
+    if (!events.empty()) {
+        CHECK(events[0].header.message_type ==
+              protocol::MessageType::Event);
+        CHECK(events[0].header.command ==
+              static_cast<std::uint16_t>(
+                  protocol::Command::UartRxEvent));
+        CHECK(events[0].header.object_id ==
+              created.header.object_id);
+        CHECK(events[0].header.request_id == 1);
+        CHECK(events[0].payload ==
+              std::vector<std::uint8_t>({'G', 'P', 'S'}));
+    }
+    const auto second = core.poll_uart_events(3);
+    CHECK(second.size() == 1);
+    if (!second.empty()) {
+        CHECK(second[0].header.request_id == 2);
+        CHECK(second[0].payload ==
+              std::vector<std::uint8_t>({'\n'}));
+    }
+
+    auto read = make_request(protocol::Command::UartRead, 2,
+                             created.header.object_id);
+    read.payload = {1, 0};
+    check_status(core.handle(read),
+                 mock_mcu::StatusCode::AccessDenied);
+}
+
 }
 
 int main() {
@@ -211,6 +251,7 @@ int main() {
     test_validation();
     test_duplicate_write();
     test_buffer_and_fault_isolation();
+    test_streaming_receive();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";
         return 1;

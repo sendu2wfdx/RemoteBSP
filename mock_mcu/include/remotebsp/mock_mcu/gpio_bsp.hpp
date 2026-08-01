@@ -24,6 +24,7 @@ public:
 enum class MockGpioError {
     PinNotConfigured,
     WriteToInput,
+    InjectToOutput,
 };
 
 class MockGpioException : public std::runtime_error {
@@ -54,6 +55,7 @@ private:
     };
 
     std::unordered_map<std::uint16_t, PinState> pins_;
+    std::unordered_map<std::uint16_t, bool> pending_input_values_;
     std::uint64_t configure_count_{};
     mutable std::uint64_t read_count_{};
     std::uint64_t write_count_{};

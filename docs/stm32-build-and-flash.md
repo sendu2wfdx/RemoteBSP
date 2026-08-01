@@ -6,17 +6,24 @@
 
 | 目标 | 总线模式 | 已接通的远程功能 |
 |---|---|---|
-| STM32F103CBT6 | Classical CAN，500 kbit/s | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、UART 0 |
-| STM32F103 BluePill Plus | Classical CAN，1 Mbit/s（实机验证） | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、UART 0、Katapult 入口 |
-| STM32G431CBU6 | CAN-FD，500 kbit/s + 2 Mbit/s BRS | 发现、分配、心跳、PING、GET_INFO、GET_CAPABILITY、GPIO、Katapult 入口、USB CDC 调试 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；双模式 Katapult 切换待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3 PWM 呼吸灯、PC13 GPIO；实板已验证，USB CDC 与双模式 Katapult 待切换验证 |
 
 STM32F103 的 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲。G431
 的真实 UART 驱动尚未接入，因此当前 G431 固件仍不会报告 UART 能力。
 F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别通过实体板
-基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN，
-复位时按住 PA0 进入 USB；双模式镜像已交叉编译，尚待下一轮实体板切换验证。
+基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN；
+BluePill 复位时按住 PA0、WeAct G431 复位时按住 PC13 进入 USB。双模式镜像
+已交叉编译，G431 的接口切换仍待实板验证。
 F103 的 USB 与 bxCAN 共用专用 SRAM，因此 CAN APP 不提供 USB CDC；G431 的
-APP USB CDC 已通过交叉编译与链接检查，G431 实体 CAN-FD 仍需上板验收。
+APP USB CDC 已通过交叉编译与链接检查；G431 实体 CAN-FD APP 已完成基础验收，
+USB CDC 和双模式 Katapult 切换仍待验证。
+
+WeAct G431 配置默认启用 `CONFIG_WEACT_G431_PC6_PWM_BREATHING_LED`：PC6
+使用 TIM3_CH1（AF2）输出 10 kHz PWM，亮度以约 4 秒周期起伏。该选项用于
+验证板级 PWM，启用时 PC6 被保留，不能由远程 GPIO 创建或写入；关闭后 PC6
+恢复为普通 GPIO。通用 PWM 资源、对象模型和远程命令仍在后续阶段实现。
 
 Bluepill 专用配置 `stm32f103_bluepill_defconfig` 把 CAN 重映射到
 PB8/PB9，避开板载 USB 对 PA11/PA12 的占用；UART 0 默认使用
@@ -51,12 +58,21 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/build_firmware.sh all
 ```
 
+构建脚本默认使用32个并行任务。需要临时调整时使用
+`RBSP_BUILD_JOBS=16 bash scripts/build_firmware.sh all`。
+
 也可以只编译一个目标：
 
 ```sh
 bash scripts/build_firmware.sh f103
-bash scripts/build_firmware.sh bluepill
-bash scripts/build_firmware.sh g431
+bash scripts/build_firmware.sh weact-bluepill-plus
+bash scripts/build_firmware.sh f072
+bash scripts/build_firmware.sh f072-pb
+bash scripts/build_firmware.sh mellow-fly-d5
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core
+bash scripts/build_firmware.sh f103-motion
+bash scripts/build_firmware.sh weact-bluepill-plus-motion
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion-5axis
 ```
 
 输出位于 `firmware/out`，包括 ELF、Intel HEX、裸 BIN 和链接 MAP。
@@ -74,35 +90,87 @@ cp configs/stm32f103cbt6_defconfig .config
 python3 scripts/menuconfig.py
 ```
 
-G431 将第一条命令中的文件改为
+FLY-D5 或 G431 将第一条命令中的文件分别改为
+`configs/stm32f072_fly_d5_defconfig` 或
 `configs/stm32g431cbu6_defconfig`。保存后编译：
 
 ```sh
 cmake -S . -B build-custom -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-toolchain.cmake \
     -DRBSP_CONFIG="$PWD/.config"
-cmake --build build-custom
+cmake --build build-custom --parallel 32
 ```
+
+### 上电IO安全状态
+
+`menuconfig`中的“上电 IO 安全状态”可以填写五类引脚列表：输出低、输出高、
+浮空输入、上拉输入和下拉输入。列表使用`PA0,PB2,PC13`格式，空列表表示不主动
+修改该类引脚。
+
+固件在系统时钟建立后、CAN/UART和Remote Core启动前应用这些状态。输出引脚会
+先写GPIO输出锁存器，再切换为推挽输出，避免使能、阀门或片选线上出现短毛刺。
+同一引脚重复配置、引脚格式错误、封装上不存在的引脚，或与SWD/CAN/USB/UART
+保留引脚冲突，都会让固件停在安全故障状态。
+
+这些选项用于不可晚于通信初始化的板级安全默认值。步进轴、TMC和普通远程资源
+的可修改接线仍由后续NVM资源清单管理；两者冲突时配置器必须在下发前拒绝。
 
 目前的位时序是：
 
+- F072通用配置：HSI48/PCLK 48 MHz，Classical CAN 500 kbit/s，16 TQ，
+  分频系数6，采样点87.5%；默认使用PA11/PA12。
+- FLY-D5：板载 8MHz HSE 经 PLL 到 PCLK 48 MHz，Classical CAN 1 Mbit/s，16 TQ，
+  分频系数 3，采样点 87.5%。
 - F103 通用配置：72 MHz，CAN 外设时钟 36 MHz，500 kbit/s，采样点约
   88.9%。
 - F103 Bluepill 实机配置：CAN 外设时钟 36 MHz，1 Mbit/s，18 TQ，
   分频系数 2，采样点约 88.9%。
-- G431：FDCAN 内核时钟 170 MHz，仲裁段 500 kbit/s，数据段 2 Mbit/s，
+- G431：FDCAN 内核时钟 170 MHz，仲裁段 500 kbit/s，默认数据段 1 Mbit/s，
   两段采样点均约 82.4%。
 
 配置成其他速率时，编译期会检查是否能被当前时序精确生成；不能精确生成就会
 停止编译，而不是悄悄使用错误速率。
 
-F103 的 `STM32F103 UART 0 引脚` 菜单可以在以下两组 USART1 引脚间选择：
+`STM32F072/F103 UART 0 引脚`菜单可以在以下两组 USART1 引脚间选择：
 
 - PA9(TX)/PA10(RX)，默认值。
 - PB6(TX)/PB7(RX)，启用 USART1 重映射。
 
+STM32F072RBT6 MCU 层同样提供这两组 USART1 引脚：PA9/PA10 使用 AF1，PB6/PB7 使用 AF0。
+F072还允许CAN在PA11/PA12与PB8/PB9之间选择。数据手册列出的第三组
+PD0/PD1不在RBT6的LQFP64封装上，因此不会显示为可选项。FLY-D5板型固定选择
+PB8/PB9，并把通用 UART 数量设为 0，避免把 TMC2209 专用单线通讯误报为通用串口。
+
 被 UART 选中的引脚会从通用远程 GPIO 池中保留，不能再通过 `GPIO_CREATE`
 重新配置。
+
+## 增加其他 STM32F072RBT6 板卡
+
+F072固件分为MCU通用层和板型覆盖层。接入另一块RBT6板卡时：
+
+1. 继续选择`CONFIG_BOARD_STM32F072RBT6=y`，不要复制Remote Core或HAL BSP。
+2. 如果现有CAN/UART引脚组合适用，只需新增`configs/<板名>_defconfig`。
+3. 板载USB、LED、按键、收发器STB或禁止复用引脚通过新的板型布尔选项描述。
+4. 在`boards/`增加机器可读资源描述，记录公开资源和内部占用关系。
+5. 如果需要Katapult，再增加与该板恢复方式匹配的独立Bootloader配置。
+
+通用默认配置为
+`firmware/configs/stm32f072rbt6_defconfig`：PA11/PA12 CAN、500 kbit/s、
+PA9/PA10 USART1。`f072-pb`示例配置同时验证PB8/PB9 CAN和PB6/PB7
+USART1。FLY-D5只是同一通用实现的一个板型实例。
+
+`智能步进运动（可选）`菜单当前提供：
+
+- `CONFIG_REMOTEBSP_MOTION`：是否把运动队列核心编译进固件，默认关闭。
+- `CONFIG_MOTION_MAX_AXES`：本板最大轴数，F103 默认保守设为2、G431默认5；两者均可显式配置到当前板级后端的五槽上限。
+- `CONFIG_MOTION_QUEUE_DEPTH`：固定容量运动段队列，默认F103为8、G431为32。
+- `CONFIG_MOTION_MIN_LEAD_TIME_US`：最小排程提前量。
+
+只有启用运动模块时，`motion.c`和`rbsp_core_t`中的轴/队列存储才参与编译。
+因此普通GPIO/UART工具板不会承担运动功能的Flash和RAM成本。上述默认值只是
+初始预算，最终可选上限必须经过实体板持续步频和最坏中断延迟测试。当前C队列
+核心已实现，但STM32定时器STEP输出和远程运动命令尚未接入，不能把打开开关
+理解为实体运动功能已经完成。
 
 ## 使用 ST-Link 烧录
 
@@ -111,6 +179,7 @@ F103 的 `STM32F103 UART 0 引脚` 菜单可以在以下两组 USART1 引脚间�
 ```powershell
 STM32_Programmer_CLI.exe -c port=SWD -w firmware\out\remotebsp-stm32f103cbt6.hex -v -rst
 STM32_Programmer_CLI.exe -c port=SWD -w firmware\out\remotebsp-stm32f103-bluepill-pb8-pb9.hex -v -rst
+STM32_Programmer_CLI.exe -c port=SWD -w firmware\out\remotebsp-stm32f072-fly-d5.hex -v -rst
 STM32_Programmer_CLI.exe -c port=SWD -w firmware\out\remotebsp-stm32g431cbu6.hex -v -rst
 ```
 
@@ -171,7 +240,12 @@ ST-Link 虚拟串口接线：
 - 256 字节 TX 写入被完整拒绝，COM18 收到 0 字节，节点和 CAN 心跳保持正常。
 
 固件会拒绝 CAN/FDCAN 引脚和 SWD 引脚。F103 还会按照 LQFP48 的实际键合
-管脚拒绝不存在的 GPIO；G431 首版保守开放 GPIOA/GPIOB。
+管脚拒绝不存在的 GPIO；FLY-D5 还会保留 PA11/PA12 USB，并按照 LQFP64
+约束仅允许 PD2；WeAct G431 QFN48 开放实际引出的 GPIOA/GPIOB 以及
+PC4/PC6/PC10/PC11/PC13，保留晶振使用的 PF0/PF1 和 PC14/PC15。
+
+FLY-D5 的板级引脚、双模式升级和数字孪生资源说明见
+[Mellow FLY-D5 支持说明](mellow-fly-d5.md)。
 
 ## 首次上板检查顺序
 
@@ -179,12 +253,72 @@ ST-Link 虚拟串口接线：
 2. 不连接总线时检查 TXD 静态电平和 STB 是否为低。
 3. 接一块 USB-CAN，先只接一个节点并在总线两端各放 120Ω。
 4. F103 通用配置使用 Classical CAN 500 kbit/s；已验证的 Bluepill 配置使用
-   1 Mbit/s。G431 配置 CAN-FD、仲裁段 500 kbit/s、数据段 2 Mbit/s，并启用
+   1 Mbit/s。G431 配置 CAN-FD、仲裁段 500 kbit/s、默认数据段 1 Mbit/s，并启用
    BRS。
 5. 启动 `toolbusd`，确认节点在 2 秒内被发现且每 500 ms 更新心跳。
 6. 执行 `ping`、`get-info`，最后再创建和读写一个未保留的 GPIO。
 
-## CANable2 原厂 SLCAN 固件
+2026-08-01 的 WeAct STM32G431CBU6 + TJA1051/3 + CANable2.5 实测中，
+PB8/PB9 上的 CAN-FD 以 500 kbit/s 仲裁段、1 Mbit/s 数据段和 BRS 完成节点
+发现、分配、持续心跳、PING、GET_INFO、GET_CAPABILITY 及 PA5 GPIO 高低电平
+读写，双方实时 TEC/REC 均为 0。相同飞线环境下 2 Mbit/s 数据相位会触发
+Bus-Off，因此 2 Mbit/s 保留为 menuconfig 可选高速档，需在更短支线和更好
+信号完整性条件下重新验收。
+
+G431 的 PB8 同时是 FDCAN_RX 和 BOOT0。使用 PB8/PB9 CAN 时，收发器的空闲
+高电平可能让 MCU 复位进入系统 ROM；量产烧录必须把 Option Bytes 配置为
+BOOT0 来自 nBOOT0 选项且 nBOOT0=1（忽略 PB8 启动电平）。应急 USB 升级由
+双模式 Katapult 的 PC13/命令入口承担。
+
+## CANable2.5 Candlelight/gs_usb 固件（当前推荐）
+
+当前使用的主机适配器是 **CANable2 硬件刷入 CANable2.5 的
+Candlelight/`gs_usb` 固件**。该固件由 Linux `gs_usb` 驱动直接注册为
+SocketCAN `canX` 接口，不经过 USB CDC、`slcand` 或 LAWICEL ASCII 封装；因此
+它是本项目 Classical CAN 与 CAN-FD 实机测试的推荐路径。
+
+先确认接口名称和控制器能力：
+
+```sh
+ip -details link show
+```
+
+Classical CAN 1 Mbit/s 的典型启动方式为：
+
+```sh
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.875 berr-reporting on
+sudo ip link set can0 txqueuelen 1024
+sudo ip link set can0 up
+```
+
+若 `ip -details link show can0` 显示控制器支持 FD，再以 G431 已验证的
+500 kbit/s 仲裁段、1 Mbit/s 数据段和 BRS 启动：
+
+```sh
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 500000 dbitrate 1000000 fd on \
+  sample-point 0.875 dsample-point 0.800 berr-reporting on
+sudo ip link set can0 txqueuelen 1024
+sudo ip link set can0 up
+```
+
+`toolbusd` 直接打开该 `can0`；CAN-FD 使用 `fd` 模式：
+
+```sh
+./build-wsl/toolbusd/toolbusd can0 fd /tmp/toolbusd.sock \
+  --arbitration-bitrate 500000 --data-bitrate 1000000
+```
+
+单节点进入 USB Katapult 后，总线没有其他节点确认周期发现帧时，`gs_usb`
+适配器可能因持续 ACK 错误进入 ERROR-PASSIVE。USB 升级结束后重新启动接口即可：
+
+```sh
+sudo ip link set can0 down
+sudo ip link set can0 up
+```
+
+## CANable2 原厂 SLCAN 固件（旧固件兼容）
 
 CANable2 重新连接后可能在 `ttyACM0`、`ttyACM1` 等编号之间变化，因此实机
 测试使用 `/dev/serial/by-id` 稳定路径。仓库脚本会自动查找唯一的 CANable2，

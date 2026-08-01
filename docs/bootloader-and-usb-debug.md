@@ -8,13 +8,14 @@ GPLv3 Bootloader 构建和烧录，不与 RemoteBSP APP 链接；仓库脚本把
 提交 `ec59b9bb9ad6c2ec8d4dc6831fbc77f0b308e29e`，避免上游变化导致固件不可复现。
 
 项目在固定上游提交之上应用
-`bootloader/patches/katapult-dual-can-usb.patch`，为两颗 MCU 生成一份双模式
+`bootloader/patches/katapult-dual-can-usb.patch`，为三颗 MCU 生成一份双模式
 Katapult：
 
 | 目标 | 正常升级模式 | 应急恢复模式 | APP 起始地址 |
 |---|---|---|---:|
-| STM32F103CBT6 | Classical CAN，PB8/PB9，1 Mbit/s | USB FS，PA11/PA12 | `0x08002000` |
-| STM32G431CBU6 | FDCAN 外设的 Classical CAN，PB8/PB9，500 kbit/s | USB FS，PA11/PA12 | `0x08002000` |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN，PB8/PB9，1 Mbit/s | USB FS，PA11/PA12；双击 RESET | `0x08002000` |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN，PB8/PB9，1 Mbit/s | USB FS，PA11/PA12 | `0x08002000` |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | FDCAN 外设的 Classical CAN，PB8/PB9，500 kbit/s | USB FS，PA11/PA12；PC13 恢复键 | `0x08002000` |
 
 标准 Katapult 的通信接口是编译期单选。项目补丁同时链接 CAN 和 USB 后端，
 但根据进入原因只初始化其中一个：
@@ -23,7 +24,8 @@ Katapult：
   供正常在线升级；
 - APP 收到 `BOOTLOADER_ENTER_USB`：写入项目的 USB 请求签名并进入 USB，
   适合设备安装后不方便操作恢复键的情况；
-- 复位时 PA0 为高电平：进入 USB，供 CAN 通信失效时恢复；
+- 复位时板载恢复键为高电平：进入 USB，供 CAN 通信失效时恢复；BluePill
+  使用 PA0，WeAct STM32G431CBU6 Core 使用 PC13；
 - APP 无效：默认进入 USB；
 - 正常复位：直接启动 APP；
 - 双击 NRST 进入 USB 的逻辑已实现，但默认关闭，避免正常启动增加约 500 ms
@@ -47,7 +49,8 @@ STM32G431 APP 可以同时运行 PB8/PB9 上的 FDCAN 和 PA11/PA12 上的 USB C
 0x08020000  +------------------------------+  128 KiB 末端
 ```
 
-链接脚本、`SCB->VTOR` 和 Katapult 的应用偏移必须同时保持为 `0x2000`。
+链接脚本、中断向量重定位和 Katapult 的应用偏移必须同时保持为 `0x2000`。
+F103/G431 使用 VTOR；没有 VTOR 的 F072 把向量复制到 SRAM 并重映射地址 0。
 `*-katapult.bin` 是只供 Bootloader 在线升级的 APP，不应从 `0x08000000`
 直接烧录。`*-factory.bin` 才是供 ST-Link 首次烧录的 Bootloader+APP 合并镜像。
 
@@ -60,13 +63,15 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/fetch_stm32_deps.sh
 bash scripts/fetch_katapult.sh
 bash scripts/build_bootloader.sh all
-bash scripts/build_firmware.sh bluepill-katapult
-bash scripts/build_firmware.sh g431-katapult
+bash scripts/build_firmware.sh mellow-fly-d5-katapult
+bash scripts/build_firmware.sh weact-bluepill-plus-katapult
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-katapult
 bash scripts/build_factory_images.sh
 ```
 
 主要输出：
 
+- `katapult-stm32f072_dual.bin`
 - `katapult-stm32f103_dual.bin`
 - `katapult-stm32g431_dual.bin`
 - `remotebsp-*-katapult.bin`：APP 在线升级包
@@ -82,6 +87,14 @@ F103 双模式量产镜像：
 ```powershell
 STM32_Programmer_CLI.exe -c port=SWD `
   -w firmware\out\remotebsp-stm32f103-bluepill-katapult-dual-factory.bin 0x08000000 `
+  -v -rst
+```
+
+FLY-D5 双模式量产镜像：
+
+```powershell
+STM32_Programmer_CLI.exe -c port=SWD `
+  -w firmware\out\remotebsp-stm32f072-fly-d5-katapult-dual-factory.bin 0x08000000 `
   -v -rst
 ```
 
@@ -147,11 +160,13 @@ APP 会先通过 CAN 回复 `ok`，约 100 ms 后写入 USB 请求签名并复�
 枚举为 `1d50:6177` Katapult，CAN 心跳暂时停止。该命令同样受请求去重缓存保护，
 主机重试不会重复触发复位。
 
-如果 CAN 已经完全不可用，仍可使用不依赖命令的应急步骤：
+如果 CAN 已经完全不可用，仍可使用不依赖命令的应急步骤。BluePill 的恢复键
+是 PA0，WeAct STM32G431CBU6 Core 的恢复键是 PC13；两者都是高电平有效并使用
+MCU 内部下拉：
 
-1. 按住恢复键 PA0；
+1. 按住对应板卡的恢复键；
 2. 按下并释放 NRST，或重新上电；
-3. USB 枚举为 `1d50:6177` Katapult 后释放 PA0；
+3. USB 枚举为 `1d50:6177` Katapult 后释放恢复键；
 4. 在 Linux 中使用稳定的 `/dev/serial/by-id` 路径升级。
 
 ```sh
@@ -161,8 +176,8 @@ python3 vendor/katapult/scripts/flashtool.py \
 ```
 
 G431 将文件改为 `out/remotebsp-stm32g431-katapult.bin`。CAN 和 USB 模式写入
-同一个 APP 包；区别只在进入原因和传输接口。默认不提供“APP 命令进入 USB”
-命令，避免远程请求意外切断 CAN，USB 是需要物理接触的恢复通道。
+同一个 APP 包；区别只在进入原因和传输接口。项目同时提供受固定确认串和请求
+去重保护的 APP 命令入口，以及不依赖 CAN 的物理恢复键入口。
 
 ## APP 的 USB CDC 调试输出（仅 STM32G431）
 
@@ -234,7 +249,7 @@ VCP 不能替代 MCU 原生 USB。
 双模式补丁已从固定上游提交的干净副本自动应用并交叉编译：
 
 - STM32F103 双模式 Katapult：6740 字节；
-- STM32G431 双模式 Katapult：6344 字节；
+- STM32G431 双模式 Katapult：6392 字节；
 - 两者都小于 8192 字节，APP 起始地址保持 `0x08002000`；
 - 已验证最终 Kconfig 同时启用 `USBSERIAL`、`CANSERIAL` 和
   `DUAL_CAN_USB`；
@@ -264,5 +279,6 @@ VCP 不能替代 MCU 原生 USB。
 仍应增加总线错误监控和自动恢复，不能依赖这一条件。CAN Katapult 会正常 ACK，
 因此 CAN 在线升级过程和升级后的接口都保持 ERROR-ACTIVE。
 
-PA0 物理恢复入口尚未在本轮按键操作中复测；它不影响已经通过的命令 USB 入口。
-STM32G431 双模式仍等待实体板到货后验收。
+BluePill 的 PA0 物理恢复入口尚未在本轮按键操作中复测；它不影响已经通过的
+命令 USB 入口。WeAct STM32G431CBU6 Core 已完成 HSE、CAN-FD APP、PC6 LED 和
+PC13 内部下拉实测；PC13 进入 USB Katapult 及 CAN/USB 升级仍待切换验收。

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/protocol/packet.hpp"
+#include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/resource.hpp"
 
 #include <array>
@@ -29,6 +30,38 @@ struct DiscoveredNode {
     bool ready{};
 };
 
+enum class CanTrafficClass : std::uint8_t {
+    Safety = 0,
+    Motion = 1,
+    System = 2,
+    Interactive = 3,
+    Streaming = 4,
+    Bulk = 5,
+};
+
+struct CanTrafficClassCounters {
+    std::uint64_t admitted_packets{};
+    std::uint64_t rejected_packets{};
+    std::uint64_t admitted_frames{};
+    std::uint64_t estimated_wire_time_ns{};
+};
+
+struct CanTrafficStatus {
+    bool can_fd{};
+    std::uint32_t arbitration_bits_per_second{};
+    std::uint32_t data_bits_per_second{};
+    std::uint16_t maximum_utilization_permille{};
+    std::uint32_t burst_window_ms{};
+    std::uint64_t global_capacity_ns{};
+    std::uint64_t global_available_ns{};
+    std::uint64_t admitted_packets{};
+    std::uint64_t rejected_packets{};
+    std::uint64_t guaranteed_overruns{};
+    std::uint64_t admitted_frames{};
+    std::uint64_t estimated_wire_time_ns{};
+    std::array<CanTrafficClassCounters, 6> classes{};
+};
+
 enum class GpioDirection : std::uint8_t {
     Input = 0,
     Output = 1,
@@ -40,12 +73,24 @@ enum class UartParity : std::uint8_t {
     Even = 2,
 };
 
+enum class UartReceiveMode : std::uint8_t {
+    Polling = 0,
+    Streaming = 1,
+};
+
 struct UartConfig {
     std::uint8_t port{};
     std::uint32_t baud_rate{};
     std::uint8_t data_bits{8};
     std::uint8_t stop_bits{1};
     UartParity parity{UartParity::None};
+    UartReceiveMode receive_mode{UartReceiveMode::Polling};
+};
+
+struct UartStreamChunk {
+    std::vector<std::uint8_t> data;
+    std::uint64_t dropped_bytes{};
+    std::uint64_t lost_events{};
 };
 
 class ClientException : public std::runtime_error {
@@ -74,6 +119,7 @@ public:
     NodeInfo get_info() const;
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
+    CanTrafficStatus traffic_status() const;
     std::optional<protocol::Packet> next_event() const;
     void enter_bootloader() const;
     void enter_usb_bootloader() const;
@@ -84,6 +130,19 @@ public:
     protocol::ResourceStatusPayload resource_status(
         std::uint32_t resource_id) const;
     void reset_resource(std::uint32_t resource_id) const;
+    protocol::ResourceContract resource_contract(
+        std::uint32_t resource_id) const;
+    protocol::ResourceLeaseInfo acquire_resource(
+        std::uint32_t resource_id, std::uint32_t duration_ms,
+        protocol::ResourceLeaseMode mode =
+            protocol::ResourceLeaseMode::Exclusive) const;
+    protocol::ResourceLeaseInfo renew_resource(
+        std::uint32_t resource_id, std::uint64_t lease_id,
+        std::uint32_t duration_ms) const;
+    void release_resource(std::uint32_t resource_id,
+                          std::uint64_t lease_id) const;
+    protocol::ResourceLeaseInfo resource_lease_status(
+        std::uint32_t resource_id) const;
 
     std::uint32_t gpio_create(std::uint16_t pin,
                               GpioDirection direction,
@@ -96,6 +155,19 @@ public:
         std::uint32_t object_id, std::size_t maximum_length) const;
     void uart_write(std::uint32_t object_id,
                     const std::vector<std::uint8_t>& data) const;
+    void uart_write_all(
+        std::uint32_t object_id,
+        const std::vector<std::uint8_t>& data,
+        std::uint32_t timeout_ms = 3000) const;
+    std::optional<UartStreamChunk> uart_stream_read(
+        std::uint32_t object_id, std::size_t maximum_length,
+        std::uint32_t timeout_ms = 1000) const;
+
+    protocol::MotionAcceptancePayload motion_enqueue(
+        const protocol::MotionSegmentPayload& segment) const;
+    protocol::MotionStatusPayload motion_status() const;
+    void motion_abort() const;
+    void motion_clear_fault() const;
 
     protocol::Packet transact(protocol::Packet request) const;
     const std::string& socket_path() const noexcept;

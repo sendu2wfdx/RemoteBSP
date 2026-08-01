@@ -343,6 +343,44 @@ int main(void) {
     assert(response[24] == 2U && uart_read_count == 1U);
 
     clear_sent();
+    uint8_t uart_stream_config[9] = {1U};
+    put_u32(uart_stream_config + 1U, 9600U);
+    uart_stream_config[5] = 8U;
+    uart_stream_config[6] = 1U;
+    uart_stream_config[8] = 1U;
+    request_size = make_request(
+        request, 0x0200U, 20U, 0U, uart_stream_config,
+        sizeof(uart_stream_config));
+    feed_packet(&core, 0x619U, 20U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    const uint32_t uart_stream_object = get_u32(response + 12U);
+    assert(response[24] == 0U && uart_stream_object != 0U);
+
+    clear_sent();
+    now_ms = 10U;
+    rbsp_core_poll(&core);
+    assert(reassemble_sent(response, 0x519U) ==
+           24U + CONFIG_UART_EVENT_CHUNK_SIZE);
+    assert(response[1] == 3U);
+    assert(response[2] == 0x80U && response[3] == 0x02U);
+    assert(get_u32(response + 8U) == 1U);
+    assert(get_u32(response + 12U) == uart_stream_object);
+    for (size_t index = 0;
+         index < CONFIG_UART_EVENT_CHUNK_SIZE; ++index) {
+        assert(response[24U + index] == 0x5AU);
+    }
+
+    clear_sent();
+    put_u16(uart_read_length, 1U);
+    request_size = make_request(
+        request, 0x0201U, 21U, uart_stream_object,
+        uart_read_length, sizeof(uart_read_length));
+    feed_packet(&core, 0x619U, 21U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24] == 4U);
+    core.uart_objects[1].streaming = false;
+
+    clear_sent();
     const uint8_t bootloader_confirmation[] = {
         'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
     request_size = make_request(

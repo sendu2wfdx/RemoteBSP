@@ -9,6 +9,12 @@ MockGpioError MockGpioException::code() const noexcept { return code_; }
 
 void MockGpioBsp::configure(std::uint16_t pin, GpioDirection direction,
                             bool initial_value) {
+    if (direction == GpioDirection::Input) {
+        const auto pending = pending_input_values_.find(pin);
+        if (pending != pending_input_values_.end()) {
+            initial_value = pending->second;
+        }
+    }
     pins_[pin] = {direction, initial_value};
     ++configure_count_;
 }
@@ -40,10 +46,15 @@ void MockGpioBsp::write(std::uint16_t pin, bool value) {
 void MockGpioBsp::set_input_value(std::uint16_t pin, bool value) {
     const auto found = pins_.find(pin);
     if (found == pins_.end()) {
-        throw MockGpioException(MockGpioError::PinNotConfigured,
-                                "GPIO 引脚尚未配置");
+        pending_input_values_[pin] = value;
+        return;
+    }
+    if (found->second.direction != GpioDirection::Input) {
+        throw MockGpioException(MockGpioError::InjectToOutput,
+                                "不能向 GPIO 输出注入输入电平");
     }
     found->second.value = value;
+    pending_input_values_[pin] = value;
 }
 
 std::uint64_t MockGpioBsp::configure_count() const noexcept {

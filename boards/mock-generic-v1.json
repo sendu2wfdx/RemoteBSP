@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "name": "mock-generic-v1",
+  "board_type": 1297040203,
+  "uuid": "524253502d4d4f434b2d4e4f44450000",
+  "firmware_version": [0, 2, 0],
+  "capabilities": ["gpio", "uart", "bootloader", "motion"],
+  "resource_groups": [
+    {
+      "type": "gpio",
+      "first_instance": 0,
+      "count": 16,
+      "id_base": 16777216,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 0,
+      "contract": {
+        "access": [
+          "read",
+          "write",
+          "shared_read",
+          "exclusive_write",
+          "lease_supported"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 100,
+        "maximum_operations_per_second": 10000,
+        "queue_capacity": 0,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 0
+      }
+    },
+    {
+      "type": "uart",
+      "first_instance": 0,
+      "count": 4,
+      "id_base": 33554432,
+      "source": "native",
+      "rx_capacity": 4096,
+      "tx_capacity": 4096,
+      "contract": {
+        "access": [
+          "read",
+          "write",
+          "exclusive_write",
+          "lease_supported"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 500,
+        "maximum_operations_per_second": 5000,
+        "queue_capacity": 4096,
+        "maximum_rx_bits_per_second": 3000000,
+        "maximum_tx_bits_per_second": 3000000
+      }
+    },
+    {
+      "type": "uart",
+      "first_instance": 4,
+      "count": 4,
+      "id_base": 33554436,
+      "source": "expanded",
+      "rx_capacity": 4096,
+      "tx_capacity": 4096,
+      "contract": {
+        "access": [
+          "read",
+          "write",
+          "exclusive_write",
+          "lease_supported"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 500,
+        "maximum_operations_per_second": 5000,
+        "queue_capacity": 4096,
+        "maximum_rx_bits_per_second": 3000000,
+        "maximum_tx_bits_per_second": 3000000
+      }
+    },
+    {
+      "type": "stepgen_axis",
+      "first_instance": 0,
+      "count": 3,
+      "id_base": 150994944,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 0,
+      "contract": {
+        "access": [
+          "write",
+          "exclusive_write",
+          "lease_supported",
+          "lease_required"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 50,
+        "maximum_operations_per_second": 100000,
+        "queue_capacity": 32,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 0
+      }
+    }
+  ],
+  "reserved_resources": [
+    {
+      "type": "spi",
+      "instance": 1,
+      "owner": "expanded-uart-bank-0"
+    }
+  ],
+  "motion_axes": [
+    {
+      "resource_id": 150994944,
+      "maximum_step_rate_hz": 100000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994945,
+      "maximum_step_rate_hz": 100000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994946,
+      "maximum_step_rate_hz": 100000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    }
+  ]
+}

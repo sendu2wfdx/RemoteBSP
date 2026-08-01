@@ -1,4 +1,5 @@
 #include "remotebsp/client.hpp"
+#include "remotebsp/tmc2209.hpp"
 
 #include <cstdint>
 #include <iomanip>
@@ -18,6 +19,41 @@ std::uint32_t parse_u32(const std::string& text, const char* name) {
         throw std::invalid_argument(std::string(name) + " 无效");
     }
     return static_cast<std::uint32_t>(value);
+}
+
+std::uint64_t parse_u64(const std::string& text, const char* name) {
+    std::size_t consumed = 0;
+    const unsigned long long value =
+        std::stoull(text, &consumed, 0);
+    if (consumed != text.size()) {
+        throw std::invalid_argument(std::string(name) + " 无效");
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
+std::int32_t parse_i32(const std::string& text, const char* name) {
+    std::size_t consumed = 0;
+    const long long value = std::stoll(text, &consumed, 0);
+    if (consumed != text.size() ||
+        value < std::numeric_limits<std::int32_t>::min() ||
+        value > std::numeric_limits<std::int32_t>::max()) {
+        throw std::invalid_argument(std::string(name) + " 无效");
+    }
+    return static_cast<std::int32_t>(value);
+}
+
+remotebsp::protocol::MotionAxisMovePayload parse_motion_move(
+    const std::string& text) {
+    const auto delimiter = text.find(':');
+    if (delimiter == std::string::npos || delimiter == 0 ||
+        delimiter + 1U >= text.size() ||
+        text.find(':', delimiter + 1U) != std::string::npos) {
+        throw std::invalid_argument(
+            "运动轴参数必须使用 <资源ID>:<有符号步数>");
+    }
+    return {
+        parse_u32(text.substr(0, delimiter), "运动轴资源 ID"),
+        parse_i32(text.substr(delimiter + 1U), "运动轴步数")};
 }
 
 std::uint8_t parse_hex_digit(char value) {
@@ -59,6 +95,7 @@ const char* resource_type(remotebsp::protocol::ResourceType type) {
         case ResourceType::Pwm: return "pwm";
         case ResourceType::Timer: return "timer";
         case ResourceType::Storage: return "storage";
+        case ResourceType::StepgenAxis: return "stepgen-axis";
     }
     return "unknown";
 }
@@ -101,6 +138,59 @@ void print_hex(const std::vector<std::uint8_t>& data) {
     }
 }
 
+const char* lease_mode_name(
+    remotebsp::protocol::ResourceLeaseMode mode) {
+    using remotebsp::protocol::ResourceLeaseMode;
+    switch (mode) {
+        case ResourceLeaseMode::None: return "none";
+        case ResourceLeaseMode::SharedRead: return "shared-read";
+        case ResourceLeaseMode::Exclusive: return "exclusive";
+    }
+    return "unknown";
+}
+
+const char* traffic_class_name(std::size_t index) {
+    static constexpr const char* names[] = {
+        "safety", "motion", "system",
+        "interactive", "streaming", "bulk"};
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+const char* motion_state_name(
+    remotebsp::protocol::MotionStatePayload state) {
+    using remotebsp::protocol::MotionStatePayload;
+    switch (state) {
+        case MotionStatePayload::Idle: return "idle";
+        case MotionStatePayload::Armed: return "armed";
+        case MotionStatePayload::Running: return "running";
+        case MotionStatePayload::Faulted: return "faulted";
+    }
+    return "unknown";
+}
+
+const char* motion_fault_name(
+    remotebsp::protocol::MotionFaultPayload fault) {
+    using remotebsp::protocol::MotionFaultPayload;
+    switch (fault) {
+        case MotionFaultPayload::None: return "none";
+        case MotionFaultPayload::Aborted: return "aborted";
+        case MotionFaultPayload::LimitTriggered: return "limit";
+        case MotionFaultPayload::QueueUnderrun: return "queue-underrun";
+    }
+    return "unknown";
+}
+
+void print_lease(
+    const remotebsp::protocol::ResourceLeaseInfo& lease) {
+    std::cout << "resource_id=0x" << std::hex << lease.resource_id
+              << " lease_id=0x" << lease.lease_id << std::dec
+              << " owner_session_id=" << lease.owner_session_id
+              << " mode=" << lease_mode_name(lease.mode)
+              << " granted_ms=" << lease.granted_duration_ms
+              << " remaining_ms=" << lease.remaining_ms
+              << " active_count=" << lease.active_lease_count << '\n';
+}
+
 void print_usage() {
     std::cerr
         << "用法: remote-cli [--socket 路径] [--node 节点ID] <命令> [参数]\n"
@@ -109,19 +199,35 @@ void print_usage() {
         << "  bootloader-enter\n"
         << "  bootloader-enter-usb\n"
         << "  node-list\n"
+        << "  traffic-status\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
         << "  resource-list\n"
         << "  resource-describe <资源ID>\n"
         << "  resource-status <资源ID>\n"
         << "  resource-reset <资源ID>\n"
+        << "  resource-contract <资源ID>\n"
+        << "  resource-acquire <资源ID> <毫秒> [exclusive|shared-read]\n"
+        << "  resource-renew <资源ID> <租约ID> <毫秒>\n"
+        << "  resource-release <资源ID> <租约ID>\n"
+        << "  resource-lease-status <资源ID>\n"
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
-        << "  uart-create <端口> <波特率> [数据位] [none|odd|even] [停止位]\n"
+        << "  uart-create <端口> <波特率> [数据位] [none|odd|even] [停止位] [poll|stream]\n"
         << "  uart-read <对象ID> <最大长度>\n"
+        << "  uart-stream-read <对象ID> <最大长度> [超时毫秒]\n"
         << "  uart-write <对象ID> <文本>\n"
-        << "  uart-write-hex <对象ID> <十六进制字节串>\n";
+        << "  uart-write-hex <对象ID> <十六进制字节串>\n"
+        << "  tmc2209-read <UART对象ID> <寄存器> [节点地址]\n"
+        << "  tmc2209-write <UART对象ID> <寄存器> <32位值> [节点地址]\n"
+        << "  uart-write-all <对象ID> <文本> [超时毫秒]\n"
+        << "  uart-write-all-hex <对象ID> <十六进制字节串> [超时毫秒]\n"
+        << "  motion-enqueue <序号> <开始ns|auto> <持续ns> "
+           "<final|more> <资源ID:步数>...\n"
+        << "  motion-status\n"
+        << "  motion-abort\n"
+        << "  motion-clear-fault\n";
 }
 
 int run(const std::vector<std::string>& arguments,
@@ -133,6 +239,44 @@ int run(const std::vector<std::string>& arguments,
     const auto& name = arguments[0];
     remotebsp::Client client(socket_path, node_id);
 
+    if (name == "traffic-status" && arguments.size() == 1) {
+        const auto status = client.traffic_status();
+        const auto available_permille =
+            status.global_capacity_ns == 0
+                ? 0
+                : static_cast<std::uint64_t>(
+                      status.global_available_ns * 1000U /
+                      status.global_capacity_ns);
+        std::cout
+            << "mode=" << (status.can_fd ? "fd" : "classical")
+            << " arbitration_bitrate="
+            << status.arbitration_bits_per_second
+            << " data_bitrate=" << status.data_bits_per_second
+            << " max_utilization_permille="
+            << status.maximum_utilization_permille
+            << " burst_window_ms=" << status.burst_window_ms
+            << " available_permille=" << available_permille
+            << " admitted_packets=" << status.admitted_packets
+            << " rejected_packets=" << status.rejected_packets
+            << " guaranteed_overruns=" << status.guaranteed_overruns
+            << " admitted_frames=" << status.admitted_frames
+            << " estimated_wire_time_ns="
+            << status.estimated_wire_time_ns << '\n';
+        for (std::size_t index = 0; index < status.classes.size();
+             ++index) {
+            const auto& counters = status.classes[index];
+            std::cout << "class=" << traffic_class_name(index)
+                      << " admitted_packets="
+                      << counters.admitted_packets
+                      << " rejected_packets="
+                      << counters.rejected_packets
+                      << " admitted_frames="
+                      << counters.admitted_frames
+                      << " estimated_wire_time_ns="
+                      << counters.estimated_wire_time_ns << '\n';
+        }
+        return 0;
+    }
     if (name == "node-list" && arguments.size() == 1) {
         for (const auto& node : client.list_nodes()) {
             std::cout << "node_id=" << node.node_id
@@ -240,6 +384,66 @@ int run(const std::vector<std::string>& arguments,
         std::cout << "ok\n";
         return 0;
     }
+    if (name == "resource-contract" && arguments.size() == 2) {
+        const auto contract =
+            client.resource_contract(parse_u32(arguments[1], "资源 ID"));
+        std::cout
+            << "resource_id=0x" << std::hex << contract.resource_id
+            << " access_flags=0x" << contract.access_flags << std::dec
+            << " version=" << contract.version
+            << " timing_resolution_ns="
+            << contract.timing_resolution_ns
+            << " worst_case_latency_us="
+            << contract.worst_case_latency_us
+            << " max_operations_per_second="
+            << contract.maximum_operations_per_second
+            << " queue_capacity=" << contract.queue_capacity
+            << " max_rx_bps="
+            << contract.maximum_rx_bits_per_second
+            << " max_tx_bps="
+            << contract.maximum_tx_bits_per_second << '\n';
+        return 0;
+    }
+    if (name == "resource-acquire" &&
+        (arguments.size() == 3 || arguments.size() == 4)) {
+        auto mode =
+            remotebsp::protocol::ResourceLeaseMode::Exclusive;
+        if (arguments.size() == 4) {
+            if (arguments[3] == "exclusive") {
+                mode =
+                    remotebsp::protocol::ResourceLeaseMode::Exclusive;
+            } else if (arguments[3] == "shared-read") {
+                mode =
+                    remotebsp::protocol::ResourceLeaseMode::SharedRead;
+            } else {
+                throw std::invalid_argument(
+                    "租约模式必须是 exclusive 或 shared-read");
+            }
+        }
+        print_lease(client.acquire_resource(
+            parse_u32(arguments[1], "资源 ID"),
+            parse_u32(arguments[2], "租约时长"), mode));
+        return 0;
+    }
+    if (name == "resource-renew" && arguments.size() == 4) {
+        print_lease(client.renew_resource(
+            parse_u32(arguments[1], "资源 ID"),
+            parse_u64(arguments[2], "租约 ID"),
+            parse_u32(arguments[3], "租约时长")));
+        return 0;
+    }
+    if (name == "resource-release" && arguments.size() == 3) {
+        client.release_resource(
+            parse_u32(arguments[1], "资源 ID"),
+            parse_u64(arguments[2], "租约 ID"));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "resource-lease-status" && arguments.size() == 2) {
+        print_lease(client.resource_lease_status(
+            parse_u32(arguments[1], "资源 ID")));
+        return 0;
+    }
     if (name == "gpio-create" &&
         (arguments.size() == 3 || arguments.size() == 4)) {
         const auto pin = parse_u32(arguments[1], "GPIO 引脚");
@@ -287,7 +491,7 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
     if (name == "uart-create" &&
-        arguments.size() >= 3 && arguments.size() <= 6) {
+        arguments.size() >= 3 && arguments.size() <= 7) {
         const auto port = parse_u32(arguments[1], "UART 端口");
         if (port > std::numeric_limits<std::uint8_t>::max()) {
             throw std::invalid_argument("UART 端口超过 8 位范围");
@@ -315,6 +519,18 @@ int run(const std::vector<std::string>& arguments,
             config.stop_bits = static_cast<std::uint8_t>(
                 parse_u32(arguments[5], "UART 停止位"));
         }
+        if (arguments.size() >= 7) {
+            if (arguments[6] == "poll") {
+                config.receive_mode =
+                    remotebsp::UartReceiveMode::Polling;
+            } else if (arguments[6] == "stream") {
+                config.receive_mode =
+                    remotebsp::UartReceiveMode::Streaming;
+            } else {
+                throw std::invalid_argument(
+                    "UART 接收模式必须是 poll 或 stream");
+            }
+        }
         std::cout << "object_id=" << client.uart_create(config) << '\n';
         return 0;
     }
@@ -327,6 +543,24 @@ int run(const std::vector<std::string>& arguments,
         std::cout << '\n';
         return 0;
     }
+    if (name == "uart-stream-read" &&
+        arguments.size() >= 3 && arguments.size() <= 4) {
+        const auto chunk = client.uart_stream_read(
+            parse_u32(arguments[1], "UART 对象 ID"),
+            parse_u32(arguments[2], "UART 最大读取长度"),
+            arguments.size() == 4
+                ? parse_u32(arguments[3], "UART 流读取超时")
+                : 1000U);
+        if (!chunk.has_value()) {
+            std::cout << "timeout\n";
+            return 0;
+        }
+        std::cout << "data_hex=";
+        print_hex(chunk->data);
+        std::cout << " dropped_bytes=" << chunk->dropped_bytes
+                  << " lost_events=" << chunk->lost_events << '\n';
+        return 0;
+    }
     if (name == "uart-write" && arguments.size() == 3) {
         const std::vector<std::uint8_t> data(arguments[2].begin(),
                                              arguments[2].end());
@@ -337,6 +571,143 @@ int run(const std::vector<std::string>& arguments,
     if (name == "uart-write-hex" && arguments.size() == 3) {
         client.uart_write(parse_u32(arguments[1], "UART 对象 ID"),
                           parse_hex(arguments[2]));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "tmc2209-read" &&
+        (arguments.size() == 3 || arguments.size() == 4)) {
+        const auto uart_object_id =
+            parse_u32(arguments[1], "UART 对象 ID");
+        const auto register_value =
+            parse_u32(arguments[2], "TMC2209 寄存器");
+        const auto node_address = arguments.size() == 4
+                                      ? parse_u32(arguments[3], "TMC2209 节点地址")
+                                      : 0U;
+        if (register_value > 0x7fU || node_address > 0x03U) {
+            throw std::invalid_argument("TMC2209 寄存器或节点地址超出范围");
+        }
+        const auto register_address =
+            static_cast<std::uint8_t>(register_value);
+        client.uart_write(
+            uart_object_id,
+            remotebsp::Tmc2209::make_read_request(
+                static_cast<std::uint8_t>(node_address), register_address));
+        const auto response = client.uart_read(uart_object_id, 8U);
+        const auto value = remotebsp::Tmc2209::decode_read_response(
+            response, register_address);
+        std::cout << "value=0x" << std::hex << std::setw(8)
+                  << std::setfill('0') << value << std::setfill(' ')
+                  << std::dec << '\n';
+        return 0;
+    }
+    if (name == "tmc2209-write" &&
+        (arguments.size() == 4 || arguments.size() == 5)) {
+        const auto uart_object_id =
+            parse_u32(arguments[1], "UART 对象 ID");
+        const auto register_value =
+            parse_u32(arguments[2], "TMC2209 寄存器");
+        const auto value = parse_u32(arguments[3], "TMC2209 32位值");
+        const auto node_address = arguments.size() == 5
+                                      ? parse_u32(arguments[4], "TMC2209 节点地址")
+                                      : 0U;
+        if (register_value > 0x7fU || node_address > 0x03U) {
+            throw std::invalid_argument("TMC2209 寄存器或节点地址超出范围");
+        }
+        client.uart_write(
+            uart_object_id,
+            remotebsp::Tmc2209::make_write_request(
+                static_cast<std::uint8_t>(node_address),
+                static_cast<std::uint8_t>(register_value), value));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if ((name == "uart-write-all" ||
+         name == "uart-write-all-hex") &&
+        arguments.size() >= 3 && arguments.size() <= 4) {
+        const auto data =
+            name == "uart-write-all-hex"
+                ? parse_hex(arguments[2])
+                : std::vector<std::uint8_t>(
+                      arguments[2].begin(), arguments[2].end());
+        client.uart_write_all(
+            parse_u32(arguments[1], "UART 对象 ID"), data,
+            arguments.size() == 4
+                ? parse_u32(arguments[3], "UART 写入超时")
+                : 3000U);
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "motion-enqueue" && arguments.size() >= 6) {
+        remotebsp::protocol::MotionSegmentPayload segment;
+        segment.sequence = parse_u32(arguments[1], "运动段序号");
+        segment.start_time_ns =
+            arguments[2] == "auto"
+                ? 0
+                : parse_u64(arguments[2], "运动段开始时间");
+        segment.duration_ns =
+            parse_u64(arguments[3], "运动段持续时间");
+        if (arguments[4] == "final") {
+            segment.final_segment = true;
+        } else if (arguments[4] == "more") {
+            segment.final_segment = false;
+        } else {
+            throw std::invalid_argument(
+                "运动段结束标志必须是 final 或 more");
+        }
+        segment.axes.reserve(arguments.size() - 5U);
+        for (std::size_t index = 5; index < arguments.size(); ++index) {
+            segment.axes.push_back(parse_motion_move(arguments[index]));
+        }
+        const auto accepted = client.motion_enqueue(segment);
+        std::cout << "sequence=" << accepted.sequence
+                  << " start_time_ns=" << accepted.start_time_ns
+                  << " duration_ns=" << accepted.duration_ns
+                  << " final=" << (accepted.final_segment ? 1 : 0)
+                  << " axes=" << segment.axes.size() << '\n';
+        return 0;
+    }
+    if (name == "motion-status" && arguments.size() == 1) {
+        const auto status = client.motion_status();
+        std::cout << "state=" << motion_state_name(status.state)
+                  << " fault=" << motion_fault_name(status.fault)
+                  << " node_time_ns=" << status.node_time_ns
+                  << " queue_depth=" << status.queue_depth
+                  << " queue_capacity=" << status.queue_capacity
+                  << " last_accepted="
+                  << status.last_accepted_sequence
+                  << " last_completed="
+                  << status.last_completed_sequence
+                  << " accepted_segments="
+                  << status.metrics.accepted_segments
+                  << " rejected_segments="
+                  << status.metrics.rejected_segments
+                  << " completed_segments="
+                  << status.metrics.completed_segments
+                  << " emitted_steps=" << status.metrics.emitted_steps
+                  << " safety_stops=" << status.metrics.safety_stops
+                  << " limit_stops=" << status.metrics.limit_stops
+                  << " queue_underruns="
+                  << status.metrics.queue_underruns << '\n';
+        for (const auto& axis : status.axes) {
+            std::cout << "axis=0x" << std::hex << axis.resource_id
+                      << std::dec
+                      << " enabled=" << (axis.enabled ? 1 : 0)
+                      << " direction_positive="
+                      << (axis.direction_positive ? 1 : 0)
+                      << " step=" << (axis.step_level ? 1 : 0)
+                      << " position_steps=" << axis.position_steps
+                      << " emitted_steps=" << axis.emitted_steps
+                      << '\n';
+        }
+        return 0;
+    }
+    if (name == "motion-abort" && arguments.size() == 1) {
+        client.motion_abort();
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "motion-clear-fault" && arguments.size() == 1) {
+        client.motion_clear_fault();
         std::cout << "ok\n";
         return 0;
     }

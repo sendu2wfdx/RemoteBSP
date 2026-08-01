@@ -2,6 +2,7 @@
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
+#include "remotebsp/toolbusd/traffic_control.hpp"
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <poll.h>
@@ -20,6 +21,7 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -39,6 +41,7 @@ constexpr std::uint32_t kNodeHeartbeatBaseCanId = 0x500;
 constexpr std::uint32_t kProvisionalResponseBaseCanId = 0x480;
 constexpr std::uint32_t kMaximumNodeId = 127;
 constexpr std::size_t kMaximumQueuedEventsPerNode = 256;
+constexpr std::size_t kUartStreamBufferCapacity = 64U * 1024U;
 constexpr auto kDiscoveryInterval = std::chrono::milliseconds(2000);
 
 volatile std::sig_atomic_t stop_requested = 0;
@@ -58,6 +61,30 @@ remotebsp::transport::CanMode parse_mode(const std::string& text) {
 std::uint64_t request_key(std::uint32_t session_id,
                           std::uint32_t request_id) {
     return (static_cast<std::uint64_t>(session_id) << 32U) | request_id;
+}
+
+std::uint64_t uart_stream_key(std::uint32_t node_id,
+                              std::uint32_t object_id) {
+    return (static_cast<std::uint64_t>(node_id) << 32U) | object_id;
+}
+
+struct UartStreamBuffer {
+    std::deque<std::uint8_t> bytes;
+    std::uint64_t dropped_bytes{};
+    std::uint64_t lost_events{};
+    std::uint32_t last_sequence{};
+    bool sequence_initialized{};
+};
+
+std::uint32_t parse_positive_u32(const std::string& text,
+                                 const char* name) {
+    std::size_t consumed = 0;
+    const unsigned long value = std::stoul(text, &consumed, 0);
+    if (consumed != text.size() || value == 0 ||
+        value > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument(std::string(name) + " 无效");
+    }
+    return static_cast<std::uint32_t>(value);
 }
 
 std::vector<std::uint8_t> text_body(const std::string& text) {
@@ -80,10 +107,12 @@ class ToolbusDaemon {
 public:
     ToolbusDaemon(const std::string& interface_name,
                   remotebsp::transport::CanMode mode,
-                  std::string socket_path)
+                  std::string socket_path,
+                  remotebsp::toolbusd::TrafficConfig traffic_config)
         : transport_(interface_name, mode),
           fragmenter_(transport_.mtu()),
           reassembler_(transport_.mtu(), std::chrono::milliseconds(500)),
+          traffic_(std::move(traffic_config)),
           socket_path_(std::move(socket_path)) {}
 
     ~ToolbusDaemon() {
@@ -143,8 +172,10 @@ public:
     }
 
 private:
-    void send_packet(const remotebsp::protocol::Packet& packet,
-                     std::uint32_t can_id) {
+    bool send_packet(
+        const remotebsp::protocol::Packet& packet, std::uint32_t can_id,
+        remotebsp::toolbusd::AdmissionPolicy policy =
+            remotebsp::toolbusd::AdmissionPolicy::Enforce) {
         /*
          * 同一把锁同时保护传输 ID 分配和整包发送。这样多个 IPC 客户端
          * 不会竞争 next_transfer_id_，不同远程包的分片也不会相互穿插。
@@ -152,9 +183,29 @@ private:
         std::lock_guard<std::mutex> lock(send_mutex_);
         const auto frames = fragmenter_.split(
             remotebsp::protocol::encode(packet), next_transfer_id_++);
+        std::vector<std::size_t> frame_lengths;
+        frame_lengths.reserve(frames.size());
         for (const auto& frame : frames) {
-            transport_.send({can_id, false, frame});
+            frame_lengths.push_back(frame.size());
         }
+        const auto traffic_class =
+            remotebsp::toolbusd::classify_traffic(packet);
+        if (traffic_class ==
+            remotebsp::toolbusd::TrafficClass::Safety) {
+            policy =
+                remotebsp::toolbusd::AdmissionPolicy::Guaranteed;
+        }
+        if (!traffic_.admit(traffic_class, frame_lengths, policy)) {
+            return false;
+        }
+        const bool bit_rate_switch =
+            transport_.mode() ==
+            remotebsp::transport::CanMode::FlexibleDataRate;
+        for (const auto& frame : frames) {
+            transport_.send(
+                {can_id, false, frame, bit_rate_switch});
+        }
+        return true;
     }
 
     void can_loop() {
@@ -199,7 +250,8 @@ private:
             std::lock_guard<std::mutex> lock(state_mutex_);
             request = nodes_.make_discovery_request(next_control_request_id_++);
         }
-        send_packet(request, kBroadcastRequestCanId);
+        static_cast<void>(
+            send_packet(request, kBroadcastRequestCanId));
     }
 
     void handle_can_message(
@@ -265,6 +317,43 @@ private:
                 }
                 const auto node_id =
                     message.identifier - kNodeHeartbeatBaseCanId;
+                if (packet.header.command ==
+                        static_cast<std::uint16_t>(
+                            remotebsp::protocol::Command::UartRxEvent) &&
+                    packet.header.object_id != 0U) {
+                    auto& stream = uart_stream_buffers_[uart_stream_key(
+                        node_id, packet.header.object_id)];
+                    bool accept = true;
+                    const auto sequence = packet.header.request_id;
+                    if (sequence != 0U) {
+                        if (!stream.sequence_initialized) {
+                            stream.sequence_initialized = true;
+                            stream.last_sequence = sequence;
+                        } else {
+                            const std::uint32_t distance =
+                                sequence - stream.last_sequence;
+                            if (distance == 0U ||
+                                distance >= 0x80000000U) {
+                                accept = false;
+                            } else {
+                                if (distance > 1U) {
+                                    stream.lost_events += distance - 1U;
+                                }
+                                stream.last_sequence = sequence;
+                            }
+                        }
+                    }
+                    if (accept) {
+                        for (const auto byte : packet.payload) {
+                            if (stream.bytes.size() ==
+                                kUartStreamBufferCapacity) {
+                                stream.bytes.pop_front();
+                                ++stream.dropped_bytes;
+                            }
+                            stream.bytes.push_back(byte);
+                        }
+                    }
+                }
                 auto& queue = event_queues_[node_id];
                 if (queue.size() == kMaximumQueuedEventsPerNode) {
                     queue.pop_front();
@@ -298,7 +387,9 @@ private:
             }
         }
         if (assignment.has_value()) {
-            send_packet(*assignment, kBroadcastRequestCanId);
+            static_cast<void>(send_packet(
+                *assignment, kBroadcastRequestCanId,
+                remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
         }
     }
 
@@ -334,7 +425,9 @@ private:
             }
         }
         for (const auto& retry : retries) {
-            send_packet(retry.packet, retry.can_id);
+            static_cast<void>(send_packet(
+                retry.packet, retry.can_id,
+                remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
         }
     }
 
@@ -361,6 +454,19 @@ private:
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_node_list(result));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::TrafficStatus) {
+                remotebsp::toolbusd::TrafficSnapshot snapshot;
+                {
+                    std::lock_guard<std::mutex> lock(send_mutex_);
+                    snapshot = traffic_.snapshot();
+                }
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_traffic_status(
+                        snapshot));
                 return;
             }
             if (ipc_request.kind ==
@@ -402,6 +508,58 @@ private:
                     client, remotebsp::toolbusd::IpcStatus::TimedOut, {});
                 return;
             }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::UartStreamRead) {
+                std::unique_lock<std::mutex> lock(state_mutex_);
+                const auto* node =
+                    nodes_.find_by_node_id(ipc_request.node_id);
+                if (node == nullptr || !node->online ||
+                    !node->assigned) {
+                    throw std::runtime_error(
+                        "目标节点尚未发现或已经离线");
+                }
+                const auto key = uart_stream_key(
+                    ipc_request.node_id, ipc_request.object_id);
+                const bool available = state_changed_.wait_for(
+                    lock,
+                    std::chrono::milliseconds(ipc_request.timeout_ms),
+                    [&] {
+                        const auto found =
+                            uart_stream_buffers_.find(key);
+                        const auto* current =
+                            nodes_.find_by_node_id(ipc_request.node_id);
+                        return !running_ ||
+                               (found != uart_stream_buffers_.end() &&
+                                !found->second.bytes.empty()) ||
+                               current == nullptr || !current->online;
+                    });
+                auto found = uart_stream_buffers_.find(key);
+                if (!available || found == uart_stream_buffers_.end() ||
+                    found->second.bytes.empty()) {
+                    lock.unlock();
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::TimedOut,
+                        {});
+                    return;
+                }
+                remotebsp::toolbusd::UartStreamChunk chunk;
+                chunk.dropped_bytes = found->second.dropped_bytes;
+                chunk.lost_events = found->second.lost_events;
+                const auto count = std::min<std::size_t>(
+                    ipc_request.maximum_length,
+                    found->second.bytes.size());
+                chunk.data.reserve(count);
+                for (std::size_t index = 0; index < count; ++index) {
+                    chunk.data.push_back(found->second.bytes.front());
+                    found->second.bytes.pop_front();
+                }
+                lock.unlock();
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_uart_stream_chunk(
+                        chunk));
+                return;
+            }
             auto request = std::move(ipc_request.packet);
             if (request.header.message_type !=
                 remotebsp::protocol::MessageType::Request) {
@@ -427,10 +585,30 @@ private:
                     submission.request_id)] =
                     kNodeRequestBaseCanId + ipc_request.node_id;
             }
-            send_packet(submission.packet,
-                        kNodeRequestBaseCanId + ipc_request.node_id);
             const auto key = request_key(
                 submission.packet.header.session_id, submission.request_id);
+            const auto traffic_class =
+                remotebsp::toolbusd::classify_traffic(
+                    submission.packet);
+            const auto policy =
+                traffic_class ==
+                        remotebsp::toolbusd::TrafficClass::Safety
+                    ? remotebsp::toolbusd::AdmissionPolicy::Guaranteed
+                    : remotebsp::toolbusd::AdmissionPolicy::Enforce;
+            if (!send_packet(
+                    submission.packet,
+                    kNodeRequestBaseCanId + ipc_request.node_id,
+                    policy)) {
+                {
+                    std::lock_guard<std::mutex> state_lock(state_mutex_);
+                    requests_.cancel(
+                        submission.packet.header.session_id,
+                        submission.request_id);
+                    request_can_ids_.erase(key);
+                }
+                throw std::runtime_error(
+                    "CAN 带宽准入拒绝：当前业务类别预算不足");
+            }
 
             std::unique_lock<std::mutex> lock(state_mutex_);
             state_changed_.wait(lock, [&] {
@@ -531,6 +709,7 @@ private:
     remotebsp::transport::SocketCanTransport transport_;
     remotebsp::protocol::Fragmenter fragmenter_;
     remotebsp::protocol::Reassembler reassembler_;
+    remotebsp::toolbusd::TrafficController traffic_;
     remotebsp::toolbusd::RequestManager requests_;
     remotebsp::toolbusd::NodeRegistry nodes_;
     std::string socket_path_;
@@ -549,6 +728,8 @@ private:
     std::unordered_map<
         std::uint32_t, std::deque<remotebsp::protocol::Packet>>
         event_queues_;
+    std::unordered_map<std::uint64_t, UartStreamBuffer>
+        uart_stream_buffers_;
     std::atomic<std::uint16_t> next_transfer_id_{1};
     std::uint32_t next_control_request_id_{0x80000000U};
     std::uint32_t next_node_id_{1};
@@ -558,16 +739,74 @@ private:
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 4) {
+    if (argc < 3) {
         std::cerr << "用法: toolbusd <SocketCAN接口> <classical|fd> "
-                     "[Unix套接字路径]\n";
+                     "[Unix套接字路径] "
+                     "[--arbitration-bitrate bit/s] "
+                     "[--data-bitrate bit/s] "
+                     "[--max-utilization-permille 1..1000] "
+                     "[--burst-window-ms 毫秒]\n";
         return 2;
     }
     try {
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
-        ToolbusDaemon daemon(argv[1], parse_mode(argv[2]),
-                             argc == 4 ? argv[3] : "/tmp/toolbusd.sock");
+        const auto mode = parse_mode(argv[2]);
+        std::string socket_path = "/tmp/toolbusd.sock";
+        remotebsp::toolbusd::TrafficConfig traffic_config;
+        traffic_config.mode =
+            mode == remotebsp::transport::CanMode::Classical
+                ? remotebsp::toolbusd::TrafficBusMode::Classical
+                : remotebsp::toolbusd::TrafficBusMode::CanFd;
+        traffic_config.arbitration_bits_per_second =
+            mode == remotebsp::transport::CanMode::Classical
+                ? 1000000U
+                : 500000U;
+        traffic_config.data_bits_per_second =
+            mode == remotebsp::transport::CanMode::Classical
+                ? 1000000U
+                : 2000000U;
+        int index = 3;
+        if (index < argc &&
+            std::string(argv[index]).rfind("--", 0) != 0) {
+            socket_path = argv[index++];
+        }
+        while (index < argc) {
+            const std::string option = argv[index++];
+            if (index >= argc) {
+                throw std::invalid_argument(
+                    "toolbusd 选项缺少参数");
+            }
+            const std::uint32_t value =
+                parse_positive_u32(argv[index++], option.c_str());
+            if (option == "--arbitration-bitrate") {
+                traffic_config.arbitration_bits_per_second = value;
+            } else if (option == "--data-bitrate") {
+                traffic_config.data_bits_per_second = value;
+            } else if (option == "--max-utilization-permille") {
+                if (value > 1000U) {
+                    throw std::invalid_argument(
+                        "最大总线利用率必须位于 1～1000 千分比");
+                }
+                traffic_config.maximum_utilization_permille =
+                    static_cast<std::uint16_t>(value);
+            } else if (option == "--burst-window-ms") {
+                if (value > 60000U) {
+                    throw std::invalid_argument(
+                        "突发窗口必须位于 1～60000 ms");
+                }
+                traffic_config.burst_window =
+                    std::chrono::milliseconds(value);
+            } else {
+                throw std::invalid_argument("未知 toolbusd 选项");
+            }
+        }
+        if (mode == remotebsp::transport::CanMode::Classical) {
+            traffic_config.data_bits_per_second =
+                traffic_config.arbitration_bits_per_second;
+        }
+        ToolbusDaemon daemon(argv[1], mode, std::move(socket_path),
+                             traffic_config);
         daemon.run();
     } catch (const std::exception& error) {
         std::cerr << "toolbusd 启动失败: " << error.what() << '\n';

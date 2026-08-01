@@ -1,8 +1,21 @@
-# Remote BSP 项目概览
+# Remote BSP 文档导航与项目状态
 
-> 最后整理：2026-07-31
+> 最后整理：2026-08-02
 >
 > 本文是项目状态入口。功能状态以“已实现、已编译、已实测、仅设计”区分。
+
+## 文档导航
+
+- [系统分层与通信设计](architecture.md)
+- [智能运动、资源模型与路线图](intelligent-motion-resources.md)
+- [板卡资源清单与数字孪生](board-manifest-and-digital-twin.md)
+- [STM32 构建、烧录与验证](stm32-build-and-flash.md)
+- [Katapult 与 USB 调试](bootloader-and-usb-debug.md)
+- [Mellow FLY-D5 板卡说明](mellow-fly-d5.md)
+- [WeAct BluePill Plus 板卡说明](weact-bluepill-plus.md)
+- [WeAct STM32G431CBU6 Core 板卡说明](weact-stm32g431cbu6-core.md)
+- [客户端 API](libremotebsp-api.md)
+- [使用场景与需求](use-cases-and-requirements.md)
 
 ## 一句话说明
 
@@ -59,13 +72,14 @@ MCU 固件禁止包含：
 | 节点发现 | 已实现、已测试 | UUID发现、节点分配、协议版本协商 |
 | 心跳与离线 | 已实现、已测试 | 500 ms心跳、2 s离线判断 |
 | 请求管理 | 已实现、已测试 | 请求ID、750 ms默认超时、重试、响应匹配 |
+| CAN流量准入 | 第一阶段已实现、已测试 | 六类业务、Classical/CAN-FD线时间估算、BRS、令牌桶和统计 |
 | 副作用去重 | 已实现、已测试 | 重试沿用请求ID，MCU返回缓存响应，不重复执行写操作 |
 | 本地IPC | 已实现、已测试 | Unix Domain Socket，多客户端并发 |
-| C++客户端 | 已实现、已测试 | 节点、GPIO、UART、资源状态、事件及Bootloader API |
-| `remote-cli` | 已实现、已测试 | 信息、资源、GPIO、UART和升级入口命令 |
-| Mock MCU | 已实现、已测试 | Classical CAN/CAN-FD、多节点、GPIO、8路UART和RX事件 |
+| C++客户端 | 已实现、已测试 | 节点、GPIO、UART、资源合同/租约、事件及Bootloader API |
+| `remote-cli` | 已实现、已测试 | 信息、资源、合同/租约、GPIO、UART和升级入口命令 |
+| Mock MCU | 已实现、已测试 | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、8路UART、故障注入和租约安全释放 |
 | STM32F103 | 已实现、已实测 | Classical CAN、GPIO、USART1、CAN/USB Katapult |
-| STM32G431 | 已交叉编译 | CAN-FD、GPIO、USB CDC调试、双模式Katapult，等待实板 |
+| STM32G431 | CAN-FD APP 已实测 | 500 kbit/s + 1 Mbit/s BRS、GPIO 已通过；USB CDC和双模式Katapult待切换验证 |
 | SPI/I2C/ADC/PWM/Timer/Storage | 尚未实现 | 仅保留资源类型和后续设计位置 |
 | 智能运动资源 | 仅设计 | 多轴STEP、限位、TMC、跨板同步、遥测尚未进入稳定协议 |
 | 图形资源配置器 | 待办 | 类似CubeMX，管理运行时资源清单和在线监控 |
@@ -84,6 +98,8 @@ MCU 固件禁止包含：
 DISCOVERY_REQUEST / DISCOVERY_RESPONSE / NODE_ASSIGN / HEARTBEAT
 GET_INFO / GET_CAPABILITY / PING
 RESOURCE_ENUM / RESOURCE_DESCRIBE / RESOURCE_STATUS / RESOURCE_RESET
+RESOURCE_CONTRACT / RESOURCE_ACQUIRE / RESOURCE_RENEW
+RESOURCE_RELEASE / RESOURCE_LEASE_STATUS
 GPIO_CREATE / GPIO_READ / GPIO_WRITE
 UART_CREATE / UART_READ / UART_WRITE / UART_RX_EVENT
 BOOTLOADER_ENTER / BOOTLOADER_ENTER_USB
@@ -117,8 +133,9 @@ GPIO编号采用`端口序号 × 16 + 引脚号`，例如PA0为0、PB2为18、PC
 - 每端口独立缓冲、健康状态、溢出计数和资源复位。
 - F103 UART 0使用USART1中断和RX/TX环形缓冲。
 
-Mock MCU暴露16路GPIO、8路UART；UART 0～3标记为原生，UART 4～7标记为
-扩展。扩展UART背后的内部SPI不会重复暴露。
+Mock MCU从`boards/mock-generic-v1.json`加载16路GPIO和8路UART；UART 0～3
+标记为原生，UART 4～7标记为扩展。扩展UART背后的内部SPI作为保留资源记录，
+不会重复暴露。板型对同型号多实例保持不变，实例身份由UUID区分。
 
 ## 当前硬件基线
 
@@ -137,18 +154,36 @@ Mock MCU暴露16路GPIO、8路UART；UART 0～3标记为原生，UART 4～7标�
 F103的USB与bxCAN共享专用SRAM，因此APP只运行CAN；Bootloader根据进入原因
 二选一运行CAN或USB。
 
-### STM32G431CBU6
+### STM32F072RBT6 / Mellow FLY-D5
+
+| 功能 | 当前配置 |
+|---|---|
+| CAN RX/TX | PB8/PB9，Classical CAN 1 Mbit/s |
+| USB D-/D+ | PA11/PA12，仅用于USB Katapult |
+| 系统时钟 | 内部HSI48，48 MHz |
+| SWD | PA13/PA14，建议同时连接NRST |
+| 板载运动接口 | 5路 STEP/DIR/EN 与 TMC2209 单线 UART；五轴转动和五路通讯已实板验证 |
+| 升级 | CAN/USB双模式Katapult，双击RESET进入USB恢复 |
+
+F072 APP、双模式Katapult和工厂镜像已经交叉编译；由于Cortex-M0没有VTOR，
+APP使用SRAM向量表重映射。FLY-D5 的 CAN、五轴运动和五路 TMC2209 通讯已完成
+实体板验收；USB恢复与 CAN 在线升级的双模式切换仍待验收。
+
+### STM32G431CBU6 / WeAct STM32G431CBU6 Core
 
 | 功能 | 当前规划 |
 |---|---|
 | FDCAN RX/TX | PB8/PB9 |
 | USB D-/D+ | PA11/PA12 |
-| CAN-FD速率 | 500 kbit/s仲裁段、2 Mbit/s数据段、BRS |
-| 系统时钟 | 170 MHz |
+| 用户恢复键 | PC13，高电平有效、APP/Katapult 使用内部下拉 |
+| 指示灯 | PC6，高电平点亮 |
+| CAN-FD速率 | 500 kbit/s仲裁段、1 Mbit/s数据段、BRS；2 Mbit/s为待改善布线后复验的可选档 |
+| 系统时钟 | 板载 8 MHz HSE，经 PLL 运行至 170 MHz；PC14/PC15 的 32.768 kHz LSE 预留 |
 | 升级 | CAN/USB双模式Katapult |
 
-G431固件和Bootloader已经编译、链接并生成镜像，但尚未进行实体CAN-FD、USB和
-UART验收。
+G431固件和Bootloader已经编译、链接并生成镜像。实体 8 MHz HSE、CAN-FD
+发现/心跳/PING、PC6 LED GPIO 和 PC13 内部下拉输入已经通过；USB、Bootloader
+模式切换和UART仍待验收。
 
 ### 总线物理层
 
@@ -156,15 +191,16 @@ UART验收。
 - 支线尽量短，中间节点不重复加终端。
 - Classical CAN节点不能正确接收CAN-FD数据帧；若系统需要F103 Classical CAN
   和G431 CAN-FD同时发挥各自带宽，推荐使用两条物理总线和两个主机接口。
-- CANable2类适配器已经测试过原厂SLCAN和CANable2.5/Candlelight `gs_usb`
-  路径。
+- 当前主机适配器基线是刷入 CANable2.5 Candlelight/`gs_usb` 固件的 CANable2：
+  直接作为 SocketCAN `canX` 使用，不经过 SLCAN；原厂 SLCAN 仅保留为兼容路径。
 
 ## Bootloader与升级
 
 - Katapult占用Flash前8 KiB，APP从`0x08002000`启动。
 - 正常情况下由APP命令进入CAN Katapult。
 - CAN可用但希望走USB时，可用`BOOTLOADER_ENTER_USB`命令切换。
-- CAN完全失效时，按住PA0复位进入USB恢复模式。
+- CAN完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Core 按住 PC13，
+  再复位进入USB恢复模式。
 - 工厂镜像由Bootloader和APP合并，后续在线升级只写APP。
 
 F103实板已验证：
@@ -181,7 +217,7 @@ F103实板已验证：
 
 ### 自动测试
 
-构建启用`vcan0`时共注册16项：
+构建启用`vcan0`时共注册27项：
 
 - 协议、CRC、分片和CAN/CAN-FD帧。
 - SocketCAN收发。
@@ -189,13 +225,22 @@ F103实板已验证：
 - Classical CAN和CAN-FD双节点故障隔离。
 - Remote Core、Mock Node、请求管理、发现和心跳。
 - GPIO、UART、资源模型和嵌入式C Remote Core。
+- 资源合同、共享/独占租约、续租、释放、到期和安全清理。
+- 严格板卡描述schema、内部资源占用和数字孪生故障隔离。
+- CAN-FD BRS、六类业务、令牌桶准入和低预算端到端拒绝。
 
 2026-07-31在指定的`Ubuntu` WSL复核：
 
-- 11项不依赖SocketCAN接口的测试全部通过。
-- 5项SocketCAN/vcan测试因当前未创建`vcan0`而不能启动。
-- 创建`vcan0`需要本机sudo密码，本次没有修改系统网络状态。
-- 最近一次具备`vcan0`的完整基线为16/16通过。
+- 描述和数字孪生接入前完整17/17项测试全部通过，0项失败。
+- 统一板卡描述接入后完整18/18项测试全部通过，0项失败。
+- CAN带宽准入接入后完整20/20项测试全部通过，0项失败。
+- Classical CAN与CAN-FD端到端链路均通过。
+- Classical CAN与CAN-FD双节点寻址、状态隔离和单节点掉线测试均通过。
+- 资源合同、CLI/C++租约、冲突、续租、释放、到期和安全清理均通过。
+- 租约专项测试另外连续重复100次通过。
+
+2026-08-02 在已启用 `vcan0` 的 Ubuntu WSL 上复核，完整 27/27 项测试通过，
+包含 SocketCAN、Classical CAN/CAN-FD 单节点与双节点端到端、流量准入测试。
 
 ### F103实体链路
 
@@ -221,6 +266,7 @@ BluePill Plus、TJA1051/3和CANable适配器已经完成：
 - 协议包、请求缓存、重组槽和UART缓冲等静态预算。
 - UART 0引脚选择。
 - 独立APP或保留8 KiB Katapult的Flash布局。
+- 可选运动队列模块、本板最大轴数、队列深度和最小排程提前量；默认关闭。
 
 后续明确分为两类：
 
@@ -228,6 +274,16 @@ BluePill Plus、TJA1051/3和CANable适配器已经完成：
 - 运行时资源清单：STEP/DIR/EN、限位、按钮、TMC UART/SPI和资源依赖。
 
 ## 下一阶段设计
+
+### 已在Mock开始实现的公共基础
+
+- 资源能力合同已经完成协议、Mock、C++ API和CLI第一阶段。
+- 资源共享读/独占租约已经支持冲突、续租、释放、到期和会话清理。
+- 租约释放会删除关联对象，GPIO输出拉低，UART执行资源复位。
+- 本地应用强所有权仍需持久IPC客户端身份或逐操作租约令牌。
+- Mock板型、UUID模板、资源、能力合同和内部占用已改由严格JSON描述加载。
+- 数字孪生支持确定性注入单路UART故障、GPIO输入和节点离线/恢复。
+- `toolbusd`支持发送线时间估算、业务分类、带宽准入和本地统计查询。
 
 ### 智能多轴运动
 
@@ -266,19 +322,16 @@ BluePill Plus、TJA1051/3和CANable适配器已经完成：
   跨板同步误差。
 - GUI、命令行、测试和生产工具共用同一套schema、校验器和配置编译器。
 
-## 建议执行顺序
+## 当前执行顺序
 
-1. 整理并提交当前设计文档，保持主分支状态可追踪。
-2. 为F103/G431划分Bootloader、APP和A/B配置Flash区域。
-3. 冻结运行时资源schema、配置命令和冲突校验规则。
-4. 在Mock MCU实现配置读取、暂存、校验、提交和回滚。
-5. 实现单轴STEP执行器和定时输入采样。
-6. 扩展为同板多轴同步、队列和本地安全联锁。
-7. 实现节点时钟同步及跨板准备/提交协议。
-8. 加入通用半双工UART/SPI和Linux TMC库。
-9. 实现性能遥测。
-10. 在公共配置核心稳定后开发图形化配置器。
-11. G431到货后完成CAN-FD、USB、Bootloader和运动性能实体测试。
+1. 完善已落地的Mock多轴运动段、队列、安全停机和能力准入。
+2. 实现节点时钟模型、跨板`PREPARE/READY/COMMIT`和组故障策略。
+3. 扩展数字孪生：输入采样、TMC模型、时钟漂移、CAN故障和会话重放。
+4. 完善运动队列、CPU/中断、同步精度、CAN负载和资源健康遥测。
+5. 冻结图形配置器共用的资源schema、校验器和工程文件，建立GUI骨架。
+6. 为F103/G431划分配置区并实现实体定时器执行器，实测能力上限。
+7. 完善 TMC2209 专用单线 UART、TMC SPI 事务和 Linux 协议库。
+8. 在以上主线闭环后，再继续通用SPI/I2C/ADC/PWM/Timer/Storage。
 
 ## 已知风险与未完成项
 
@@ -288,8 +341,10 @@ BluePill Plus、TJA1051/3和CANable适配器已经完成：
 - F103只有20 KiB SRAM，当前完整协议配置已使用约10.8 KiB；运动队列必须严格
   预算并实测最大轴数和步频。
 - Classical CAN大包分片开销明显，原厂SLCAN还受到ASCII和USB CDC限制。
-- G431尚未实体测试，不能把交叉编译结果视为硬件完成。
+- G431 的 HSE、CAN-FD APP 和板载 GPIO 已实体测试；USB CDC、双模式
+  Bootloader 切换、UART 与运动定时器仍不能视为硬件完成。
 - 配置Flash区域尚未从链接脚本中正式预留。
+- 当前资源租约只能隔离远端会话，本地应用仍共享`toolbusd`会话身份。
 - 跨板启动偏差、长期漂移和跨板限位停止距离尚无实体测量数据。
 - Bootloader尚无镜像签名、防回滚和生产密钥体系。
 - SPI、I2C、ADC、PWM、Timer、Storage和硬件ID仍未实现。
@@ -301,7 +356,8 @@ BluePill Plus、TJA1051/3和CANable适配器已经完成：
 - 远端已推送提交：
   - `64833f8`：实现STM32双模式Katapult升级。
   - `f8637ca`：完善项目README。
-- 当前智能运动、跨板同步、遥测、图形配置器和本概览仍为本地文档改动，尚未
+  - `e6011af`：整理智能运动规划与项目状态。
+- 当前资源能力合同、会话级租约、相关测试和后续待办更新仍为本地改动，尚未
   提交和推送。
 
 ## 文档入口

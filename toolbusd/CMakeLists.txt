@@ -2,6 +2,7 @@ add_library(remotebsp_request_manager
     src/ipc.cpp
     src/node_registry.cpp
     src/request_manager.cpp
+    src/traffic_control.cpp
 )
 
 target_include_directories(remotebsp_request_manager

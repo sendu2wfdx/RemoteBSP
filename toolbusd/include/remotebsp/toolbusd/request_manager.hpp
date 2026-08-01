@@ -78,6 +78,8 @@ public:
     ResponseResult accept_response(const protocol::Packet& response,
                                    TimePoint now = Clock::now());
     std::vector<RequestEvent> poll(TimePoint now = Clock::now());
+    bool cancel(std::uint32_t session_id,
+                std::uint32_t request_id) noexcept;
 
     std::size_t pending_count() const noexcept;
     std::size_t completed_count() const noexcept;

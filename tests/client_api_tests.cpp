@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     assert(client.get_capabilities() != 0);
 
     const auto resources = client.list_resources();
-    assert(resources.size() == 24);
+    assert(resources.size() == 27);
     const auto descriptor = client.describe_resource(0x02000007);
     assert(descriptor.type ==
            remotebsp::protocol::ResourceType::Uart);
@@ -34,6 +34,23 @@ int main(int argc, char** argv) {
     const auto status = client.resource_status(0x02000007);
     assert(status.health ==
            remotebsp::protocol::ResourceHealth::Normal);
+    const auto contract = client.resource_contract(0x02000007);
+    assert(contract.resource_id == 0x02000007);
+    assert((contract.access_flags &
+            remotebsp::protocol::kResourceAccessLeaseSupported) != 0);
+    const auto lease = client.acquire_resource(
+        0x02000002, 1000,
+        remotebsp::protocol::ResourceLeaseMode::Exclusive);
+    assert(lease.lease_id != 0);
+    assert(lease.active_lease_count == 1);
+    const auto renewed =
+        client.renew_resource(0x02000002, lease.lease_id, 2000);
+    assert(renewed.granted_duration_ms == 2000);
+    assert(client.resource_lease_status(0x02000002)
+               .active_lease_count == 1);
+    client.release_resource(0x02000002, lease.lease_id);
+    assert(client.resource_lease_status(0x02000002)
+               .active_lease_count == 0);
     const auto event = client.next_event();
     assert(event.has_value());
     assert(event->header.command == static_cast<std::uint16_t>(
@@ -49,8 +66,15 @@ int main(int argc, char** argv) {
     remotebsp::UartConfig config;
     config.port = 1;
     config.baud_rate = 115200;
+    config.receive_mode = remotebsp::UartReceiveMode::Streaming;
     const auto uart = client.uart_create(config);
-    client.uart_write(uart, {'l', 'i', 'b'});
+    client.uart_write_all(
+        uart, std::vector<std::uint8_t>(256, 0x5A));
+    const auto uart_chunk = client.uart_stream_read(uart, 64, 2000);
+    assert(uart_chunk.has_value());
+    assert(!uart_chunk->data.empty());
+    assert(uart_chunk->dropped_bytes == 0);
+    assert(uart_chunk->lost_events == 0);
 
     std::atomic<unsigned> successes{0};
     std::vector<std::thread> threads;
@@ -67,6 +91,13 @@ int main(int argc, char** argv) {
         thread.join();
     }
     assert(successes == 8);
+
+    const auto traffic = client.traffic_status();
+    assert(traffic.arbitration_bits_per_second != 0);
+    assert(traffic.data_bits_per_second != 0);
+    assert(traffic.maximum_utilization_permille == 700);
+    assert(traffic.admitted_packets != 0);
+    assert(traffic.admitted_frames != 0);
 
     /* 放在最后，模拟真实设备回复后进入 Bootloader 的语义。 */
     client.enter_bootloader();

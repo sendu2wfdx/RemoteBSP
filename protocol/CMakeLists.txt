@@ -2,6 +2,7 @@ add_library(remotebsp_protocol
     src/crc32.cpp
     src/discovery.cpp
     src/fragmentation.cpp
+    src/motion.cpp
     src/packet.cpp
     src/resource.cpp
 )

@@ -156,12 +156,25 @@ void test_session_and_response_validation() {
           toolbusd::ResponseStatus::Matched);
 }
 
+void test_cancel_unsent_request() {
+    toolbusd::RequestManager manager;
+    const auto submission = manager.submit(make_request());
+    CHECK(manager.pending_count() == 1);
+    CHECK(manager.cancel(submission.packet.header.session_id,
+                         submission.request_id));
+    CHECK(manager.pending_count() == 0);
+    CHECK(!manager.cancel(submission.packet.header.session_id,
+                          submission.request_id));
+    CHECK(manager.completed_count() == 0);
+}
+
 }
 
 int main() {
     test_id_and_matching();
     test_retry_and_timeout();
     test_session_and_response_validation();
+    test_cancel_unsent_request();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";
         return 1;

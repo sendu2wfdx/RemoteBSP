@@ -1,5 +1,6 @@
 add_library(remotebsp
     src/client.cpp
+    src/tmc2209.cpp
 )
 
 target_include_directories(remotebsp

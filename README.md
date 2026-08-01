@@ -7,7 +7,8 @@ Remote BSP 是一个传输无关的远程板级支持框架。Linux 主机通过
 
 当前代码已经打通 Linux 主机、Mock MCU、Classical CAN、CAN-FD 和
 STM32F103 实板链路。STM32F103 的 CAN/USB 双模式 Katapult Bootloader 已完成
-实体板下载验证；STM32G431 固件和双模式 Bootloader 已交叉编译，等待实板验收。
+实体板下载验证；STM32G431 已完成 CAN-FD 发现、心跳、PING、信息查询和 GPIO
+实板验证。STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
 
 ## 架构
 
@@ -35,19 +36,22 @@ flowchart TD
 | 分片层 | Classical CAN 8 字节、CAN-FD 64 字节，最大包 2048 字节，超时、重复和非法分片检查 |
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
-| 远程资源 | GPIO、UART、资源枚举、描述、健康状态和复位 |
-| Mock MCU | Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、UART RX 事件 |
-| STM32F103CBT6 | Classical CAN、GPIO、USART1、双模式 Katapult；实板已验证 |
-| STM32G431CBU6 | CAN-FD、GPIO、USB CDC 调试、双模式 Katapult；等待实板验证 |
+| CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
+| 远程资源 | GPIO、UART、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
+| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART；默认示例公开3路运动轴，可由描述扩展 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；双模式 Katapult 切换待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3 PWM 呼吸灯、PC13 GPIO；实板已验证，USB CDC 与双模式 Katapult 待切换验证 |
 
-SPI、I2C、ADC、PWM、Timer 和 Storage 属于后续资源类型，当前尚未实现。USB
+SPI、I2C、ADC、通用 PWM/Timer 协议和 Storage 已按当前优先级后置，尚未实现。
+当前已完成 WeAct G431 PC6 的板级 TIM3 PWM 呼吸灯验证。USB
 目前只用于 Katapult 恢复升级和 G431 APP 调试输出，不是 RemoteBSP 业务传输。
 
-下一阶段已经形成智能实时资源设计：Linux 负责多轴轨迹和 TMC 协议，MCU
-负责定时 STEP/DIR/EN、前瞻队列、本地限位联锁和通用 UART/SPI 事务。引脚与
-资源依赖使用可持久化的运行时资源清单，`menuconfig` 只保留固定硬件参数和
-功能裁剪。不同板卡通过主机校准各自时钟，预装运动段后按同一个未来绝对时间
-启动；当前仅完成设计，尚未并入稳定协议和实体固件。
+当前主线优先级为智能步进运动、数字孪生、遥测与监控、图形配置器。Mock 已实现
+第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，
+MCU 侧模型独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 的
+首版 STEP 定时器后端已接入；TMC 事务并发、跨板时钟同步、持久配置和图形配置器仍待实现。
 
 ## 目录
 
@@ -57,6 +61,7 @@ transport/      与协议无关的 CAN 传输接口和 SocketCAN 实现
 toolbusd/       Linux 守护进程、本地 IPC、发现、心跳和请求管理
 libremotebsp/   C++ 应用客户端
 mock_mcu/       Linux Mock MCU 与模拟 BSP
+boards/         版本化板卡描述、公开资源和内部占用关系
 firmware/       STM32 Remote Core、板级 BSP、Katapult 配置和构建脚本
 tests/          单元、端到端、vcan 和实体 CAN 测试
 docs/           架构、硬件、构建、升级和 API 文档
@@ -75,7 +80,7 @@ cd /mnt/d/Documents/RemoteBSP
 cmake -S . -B build-wsl -G Ninja \
     -DBUILD_TESTING=ON \
     -DREMOTEBSP_VCAN_INTERFACE=vcan0
-cmake --build build-wsl
+cmake --build build-wsl --parallel 32
 ```
 
 准备 vcan 并运行测试：
@@ -88,9 +93,12 @@ sudo ip link set dev vcan0 up
 ctest --test-dir build-wsl --output-on-failure
 ```
 
-当前自动测试共 16 项，覆盖协议、CRC、分片、CAN/CAN-FD 帧、SocketCAN、
+当前自动测试共 27 项，覆盖协议、CRC、运动线格式、分片、CAN/CAN-FD 帧、SocketCAN、
 发现、心跳、多节点、请求超时与去重、GPIO、UART、资源模型和嵌入式 Remote
-Core。
+Core，并单独测试资源租约冲突、续租、会话释放、到期、安全状态、统一板卡描述、
+数字孪生故障隔离、可变轴数同步边沿、MCU可裁剪运动队列、运动欠载/限位停机、
+CAN-FD BRS、业务分类和
+低带宽准入拒绝。
 
 ## 快速运行完整模拟链路
 
@@ -118,7 +126,13 @@ cd /mnt/d/Documents/RemoteBSP
 ./build-wsl/remote-cli --node 1 ping hello
 ./build-wsl/remote-cli --node 1 get-info
 ./build-wsl/remote-cli --node 1 get-capability
+./build-wsl/remote-cli traffic-status
 ./build-wsl/remote-cli --node 1 resource-list
+./build-wsl/remote-cli --node 1 resource-contract 0x0100000d
+
+# Mock阶段可以先取得GPIO 13的5秒独占租约，命令会返回lease_id。
+./build-wsl/remote-cli --node 1 resource-acquire \
+    0x0100000d 5000 exclusive
 
 ./build-wsl/remote-cli --node 1 gpio-create 13 output 0
 ./build-wsl/remote-cli --node 1 gpio-write 1 1
@@ -127,11 +141,50 @@ cd /mnt/d/Documents/RemoteBSP
 ./build-wsl/remote-cli --node 1 uart-create 0 115200 8 none 1
 ./build-wsl/remote-cli --node 1 uart-write 2 hello
 ./build-wsl/remote-cli --node 1 uart-read 2 64
+
+# GPS等持续输入使用流式对象；对象ID以实际返回值为准。
+./build-wsl/remote-cli --node 1 uart-create 1 115200 8 none 1 stream
+./build-wsl/remote-cli --node 1 uart-stream-read 3 1024 1000
+./build-wsl/remote-cli --node 1 uart-write-all 3 long-message 3000
+
+# 运动轴要求独占租约。默认 Mock 示例的三路资源 ID 如下。
+./build-wsl/remote-cli --node 1 resource-acquire 0x09000000 5000 exclusive
+./build-wsl/remote-cli --node 1 resource-acquire 0x09000001 5000 exclusive
+./build-wsl/remote-cli --node 1 resource-acquire 0x09000002 5000 exclusive
+
+# 自动选择开始时间，1 ms 内让 X 走 +3 步、Y 走 -2 步、Z 不动。
+./build-wsl/remote-cli --node 1 motion-enqueue \
+    1 auto 1000000 final \
+    0x09000000:3 0x09000001:-2 0x09000002:0
+./build-wsl/remote-cli --node 1 motion-status
 ```
 
 CAN-FD 模式下把 Mock MCU 和 `toolbusd` 命令中的 `classical` 都改为 `fd`。
 可使用不同 `--instance 1..127` 同时启动多个 Mock 工具板。增加
-`--uart-stream` 后，Mock MCU 会从逻辑 UART 7 周期发送 RX 事件。
+`--uart-stream` 后，Mock MCU 会保留逻辑UART 7的兼容事件，并向已经创建为
+`stream`模式的UART 0～3注入测试字节，供CLI和C++流式接口端到端验证。
+
+Mock 默认从 [统一板卡描述](boards/mock-generic-v1.json) 加载板型、UUID 模板、
+能力、资源、能力合同和内部占用关系。可用 `--board <JSON>` 加载其他描述，
+用 `--fault-scenario <JSON>` 注入单 UART 故障、GPIO 输入、运动限位或节点
+离线/恢复。
+格式与验证规则见
+[统一板卡描述与数字孪生 Mock](docs/board-manifest-and-digital-twin.md)。
+
+`toolbusd`默认按当前实测基线估算发送方向线时间：Classical CAN为
+1 Mbit/s，CAN-FD为500 kbit/s仲裁段和1 Mbit/s数据段。CAN-FD发送已显式启用
+BRS。实际接口速率不同必须在启动时声明：
+
+```sh
+./build-wsl/toolbusd/toolbusd can0 fd /tmp/toolbusd.sock \
+    --arbitration-bitrate 500000 \
+    --data-bitrate 1000000 \
+    --max-utilization-permille 700 \
+    --burst-window-ms 250
+```
+
+`traffic-status`显示准入、拒绝、保证发送、估算帧数和六类业务统计。当前为发送
+前准入第一阶段，尚未实现可抢占优先级队列和每资源独立配额。
 
 广播发现和节点分配使用 CAN ID `0x700`。分配后，节点 N 使用 `0x600 + N`
 接收请求、`0x580 + N` 返回响应、`0x500 + N` 发送事件和心跳。
@@ -147,13 +200,16 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/fetch_stm32_deps.sh
 bash scripts/fetch_katapult.sh
 bash scripts/build_bootloader.sh all
-bash scripts/build_firmware.sh bluepill-katapult
-bash scripts/build_firmware.sh g431-katapult
+bash scripts/build_firmware.sh f072
+bash scripts/build_firmware.sh mellow-fly-d5-katapult
+bash scripts/build_firmware.sh weact-bluepill-plus-katapult
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-katapult
 bash scripts/build_factory_images.sh
 ```
 
 主要输出位于 `firmware/out`：
 
+- `katapult-stm32f072_dual.bin`
 - `katapult-stm32f103_dual.bin`
 - `katapult-stm32g431_dual.bin`
 - `remotebsp-*-katapult.bin`：供 Katapult 在线更新的 APP
@@ -161,6 +217,11 @@ bash scripts/build_factory_images.sh
 
 APP 从 `0x08002000` 开始，前 8 KiB 保留给 Katapult。构建产物和实体板 Flash
 备份不会提交到 Git。
+
+FLY-D5 的引脚、构建、烧录和当前能力边界见
+[Mellow FLY-D5 支持说明](docs/mellow-fly-d5.md)。
+F072采用“MCU通用层+板型配置”结构；新增其他STM32F072RBT6板卡时复用
+`boards/stm32f072rbt6`，只增加板型选择、默认配置、保留引脚和机器可读板卡描述。
 
 ### 双模式升级
 
@@ -180,7 +241,8 @@ python3 firmware/vendor/katapult/scripts/flashtool.py \
     -f firmware/out/remotebsp-stm32f103-bluepill-katapult.bin
 ```
 
-CAN 已完全失效时，按住 PA0 并复位也会进入 USB Katapult。F103 实板已经验证：
+CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Core 按住 PC13 并
+复位，也会进入 USB Katapult。F103 实板已经验证：
 
 - CAN Katapult UUID：`70fa76b1eae9`
 - USB 枚举：`1d50:6177`
@@ -191,15 +253,22 @@ CAN 已完全失效时，按住 PA0 并复位也会进入 USB Katapult。F103 �
 部分 gs_usb 适配器可能进入 ERROR-PASSIVE。当前可以重启 `can0` 恢复；
 `toolbusd` 的总线状态监测和自动恢复仍待增强。
 
+当前主机适配器基线为：CANable2 硬件刷入 CANable2.5 的 Candlelight/`gs_usb`
+固件。它直接枚举为 SocketCAN `canX`，不使用 `slcand`；接口配置、CAN-FD
+能力检查和恢复步骤见 [STM32 构建、烧录与总线适配器说明](docs/stm32-build-and-flash.md)。
+
 ## 文档
 
-- [项目概览与当前状态](docs/project-overview.md)
+- [文档导航与当前状态](docs/README.md)
 - [项目待办](TODO.md)
 - [架构与设计说明](docs/architecture.md)
 - [使用场景与需求](docs/use-cases-and-requirements.md)
 - [智能实时资源与多轴运动控制设计](docs/intelligent-motion-resources.md)
 - [libremotebsp 客户端 API](docs/libremotebsp-api.md)
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)
+- [Mellow FLY-D5 板卡说明](docs/mellow-fly-d5.md)
+- [WeAct BluePill Plus 板卡说明](docs/weact-bluepill-plus.md)
+- [WeAct STM32G431CBU6 Core 板卡说明](docs/weact-stm32g431cbu6-core.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)
 - [Katapult Bootloader 与 USB 调试](docs/bootloader-and-usb-debug.md)
 

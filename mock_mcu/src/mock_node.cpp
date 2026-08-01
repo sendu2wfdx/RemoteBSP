@@ -42,7 +42,7 @@ std::optional<NodeReply> MockNode::handle_frame(
     }
 
     const protocol::Packet request = protocol::decode(*result.packet);
-    return process_request(request);
+    return process_request(request, now);
 }
 
 NodeReply MockNode::make_heartbeat() {
@@ -62,6 +62,19 @@ NodeReply MockNode::make_heartbeat() {
     return reply;
 }
 
+std::vector<NodeReply> MockNode::poll_uart_events(
+    std::size_t maximum_payload) {
+    std::vector<NodeReply> replies;
+    for (auto& event : core_.poll_uart_events(maximum_payload)) {
+        const std::uint16_t transfer_id = allocate_transfer_id();
+        replies.push_back(
+            {transfer_id,
+             fragmenter_.split(protocol::encode(std::move(event)),
+                               transfer_id)});
+    }
+    return replies;
+}
+
 std::uint16_t MockNode::allocate_transfer_id() {
     const std::uint16_t result = next_outbound_transfer_id_++;
     if (next_outbound_transfer_id_ == 0U) {
@@ -71,7 +84,7 @@ std::uint16_t MockNode::allocate_transfer_id() {
 }
 
 std::size_t MockNode::expire(protocol::Reassembler::TimePoint now) {
-    return reassembler_.expire(now);
+    return reassembler_.expire(now) + core_.expire_leases(now);
 }
 
 std::size_t MockNode::cached_request_count() const noexcept {
@@ -105,6 +118,7 @@ std::size_t MockNode::clear_session(std::uint32_t session_id) {
                                   session_id;
                        }),
         cache_order_.end());
+    removed += core_.release_session(session_id);
     return removed;
 }
 
@@ -126,7 +140,8 @@ bool MockNode::same_request(const protocol::Packet& left,
 }
 
 std::optional<NodeReply> MockNode::process_request(
-    const protocol::Packet& request) {
+    const protocol::Packet& request,
+    protocol::Reassembler::TimePoint now) {
     const auto key =
         request_key(request.header.session_id, request.header.request_id);
     const auto found = cache_.find(key);
@@ -182,7 +197,7 @@ std::optional<NodeReply> MockNode::process_request(
         response.header.object_id = node_id_;
         response.payload = {0};
     } else {
-        response = core_.handle(request);
+        response = core_.handle(request, now);
     }
     std::vector<std::uint8_t> encoded_response = protocol::encode(response);
     ++executed_request_count_;

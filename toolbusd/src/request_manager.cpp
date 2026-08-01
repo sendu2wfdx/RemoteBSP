@@ -113,6 +113,11 @@ std::vector<RequestEvent> RequestManager::poll(TimePoint now) {
     return events;
 }
 
+bool RequestManager::cancel(std::uint32_t session_id,
+                            std::uint32_t request_id) noexcept {
+    return pending_.erase(key(session_id, request_id)) != 0;
+}
+
 std::size_t RequestManager::pending_count() const noexcept {
     return pending_.size();
 }

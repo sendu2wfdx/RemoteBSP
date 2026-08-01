@@ -117,6 +117,11 @@ RESOURCE_ENUM
 RESOURCE_DESCRIBE
 RESOURCE_STATUS
 RESOURCE_RESET
+RESOURCE_CONTRACT
+RESOURCE_ACQUIRE
+RESOURCE_RENEW
+RESOURCE_RELEASE
+RESOURCE_LEASE_STATUS
 ```
 
 资源描述至少包含：
@@ -131,6 +136,11 @@ RESOURCE_RESET
 - 健康状态。
 
 应用层通过逻辑资源 ID 使用资源，不使用 MCU 外设编号或 SPI 芯片寄存器编号。
+
+Mock阶段已经加入资源能力合同和远端会话级租约。能力合同报告定时分辨率、最坏
+延迟、吞吐、队列及访问模式；租约支持共享读、独占、续租、释放和到期安全清理。
+Linux本地不同应用的强所有权还需要持久IPC客户端身份，不能只依赖当前
+`toolbusd`共享的远端会话。
 
 ## 健康监控
 
@@ -203,7 +213,7 @@ RESOURCE_RESET
 - 任一成员未就绪时整组不得启动；运行中掉线按运动安全域策略处理。
 - 限位、急停和 TMC DIAG 能在本地停止相关运动，不等待 Linux 响应。
 - 按钮和普通输入支持定时采样、消抖、边沿和时间戳事件。
-- TMC 通过通用半双工 UART 或 SPI 事务访问，寄存器协议仍在 Linux。
+- TMC2209 通过专用单线 UART 后端访问；其他 TMC 型号后续通过 SPI 事务访问，寄存器协议仍在 Linux。
 - 单个运动组故障不应停止无关组和其他节点。
 
 同板本地限位与跨板限位必须作为不同实时等级。安全关键限位优先接到产生 STEP

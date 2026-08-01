@@ -66,8 +66,8 @@ done
 node1_info="$(cat "$node1_output")"
 node2_info="$(cat "$node2_output")"
 rm -f -- "$node1_output" "$node2_output"
-grep -Eq 'board_type=0x[12]' <<<"$node1_info"
-grep -Eq 'board_type=0x[12]' <<<"$node2_info"
+grep -Fq 'board_type=0x4d4f434b' <<<"$node1_info"
+grep -Fq 'board_type=0x4d4f434b' <<<"$node2_info"
 [[ "$node1_info" != "$node2_info" ]]
 node_list="$("$remote_cli_bin" --socket "$socket_path" node-list)"
 [[ "$(grep -c 'online=1' <<<"$node_list")" -eq 2 ]]
@@ -86,7 +86,7 @@ node2_object="${node2_gpio#object_id=}"
 [[ "$("$remote_cli_bin" --socket "$socket_path" --node 2 \
     gpio-read "$node2_object")" == "value=0" ]]
 
-if grep -Fq 'board_type=0x2' <<<"$node1_info"; then
+if grep -Eq 'uuid=[0-9a-f]{30}02' <<<"$node1_info"; then
     failed_node=1
     healthy_node=2
 else

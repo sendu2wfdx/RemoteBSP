@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "events": [
+    {
+      "at_ms": 100,
+      "action": "uart_failed",
+      "resource_id": 33554433,
+      "value": true
+    },
+    {
+      "at_ms": 200,
+      "action": "uart_failed",
+      "resource_id": 33554433,
+      "value": false
+    },
+    {
+      "at_ms": 300,
+      "action": "node_online",
+      "value": false
+    },
+    {
+      "at_ms": 2300,
+      "action": "node_online",
+      "value": true
+    }
+  ]
+}

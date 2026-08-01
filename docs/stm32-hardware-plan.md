@@ -1,13 +1,17 @@
-# STM32F103CBT6 与 STM32G431CBU6 上板规划
+# 三块 STM32 实体工具板上板规划
+
+适用板卡：STM32F072RBT6 / Mellow FLY-D5、STM32F103CBT6 / WeAct BluePill Plus、
+STM32G431CBU6 / WeAct STM32G431CBU6 Core。
 
 ## 默认引脚
 
-两块核心板默认统一采用：
+通用 MCU 配置可以使用 PA11/PA12 CAN，但当前两块 WeAct 实板为了保留 USB，
+均使用 PB8/PB9：
 
 | 功能 | 引脚 | 说明 |
 |---|---|---|
-| CAN/FDCAN RX | PA11 | 接 TI 收发器 RXD |
-| CAN/FDCAN TX | PA12 | 接 TI 收发器 TXD |
+| CAN/FDCAN RX | PB8 | 接 TI 收发器 RXD |
+| CAN/FDCAN TX | PB9 | 接 TI 收发器 TXD |
 | SWDIO | PA13 | DAPLink/ST-Link |
 | SWCLK | PA14 | DAPLink/ST-Link |
 | NRST | NRST | 建议下载器同时连接 |
@@ -32,7 +36,12 @@ Bootloader 阶段只启动一个升级接口。Kconfig 会约束这些组合。
 | CAN/FDCAN TX | PB9 |
 | USB D- | PA11 |
 | USB D+ | PA12 |
-| USB 恢复键 | PA0，内部下拉、按下为高 |
+| USB 恢复键 | WeAct BluePill Plus 为 PA0；WeAct STM32G431CBU6 Core 为 PC13；均为内部下拉、按下为高 |
+
+WeAct STM32G431CBU6 Core 还固定占用 PF0/PF1 连接 8 MHz HSE、PC14/PC15
+连接 32.768 kHz LSE。PC6 是高电平点亮的板载蓝色 LED。PB8/BOOT0 虽有
+10 kΩ 外部下拉，但 CAN 收发器 RXD 的主动高电平会覆盖该下拉，因此使用
+PB8 FDCAN 时必须通过 Option Bytes 让启动选择忽略 PB8 电平。
 
 ## 收发器建议
 
@@ -49,8 +58,9 @@ Bootloader 阶段只启动一个升级接口。Kconfig 会约束这些组合。
 ## 默认速率
 
 - F103 通用配置：500 kbit/s Classical CAN。
-- F103 Bluepill 实机配置：1 Mbit/s Classical CAN。
-- G431：500 kbit/s 仲裁段、2 Mbit/s 数据段 CAN-FD。
+- STM32F103CBT6 / WeAct BluePill Plus 实机配置：1 Mbit/s Classical CAN。
+- G431：实测默认 500 kbit/s 仲裁段、1 Mbit/s 数据段 CAN-FD；2 Mbit/s
+  保留为改善拓扑和信号完整性后的可选高速档。
 
 速率全部由 menuconfig 设置。实际布线较长、节点较多或隔离器传播延迟较大时，
 需要降低速率并重新计算采样点。1 Mbit/s Classical CAN 尤其需要控制主干和

@@ -30,6 +30,10 @@ clone_component cmsis-device-f1 v4.3.5 \
     https://github.com/STMicroelectronics/cmsis-device-f1.git
 clone_component stm32f1xx-hal-driver v1.1.10 \
     https://github.com/STMicroelectronics/stm32f1xx-hal-driver.git
+clone_component cmsis-device-f0 v2.3.7 \
+    https://github.com/STMicroelectronics/cmsis-device-f0.git
+clone_component stm32f0xx-hal-driver v1.7.8 \
+    https://github.com/STMicroelectronics/stm32f0xx-hal-driver.git
 clone_component cmsis-device-g4 v1.2.6 \
     https://github.com/STMicroelectronics/cmsis-device-g4.git
 clone_component stm32g4xx-hal-driver v1.2.6 \

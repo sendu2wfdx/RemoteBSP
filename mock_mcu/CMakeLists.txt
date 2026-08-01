@@ -1,6 +1,8 @@
 add_library(remotebsp_remote_core
+    src/board_manifest.cpp
     src/gpio_bsp.cpp
     src/mock_node.cpp
+    src/motion_executor.cpp
     src/remote_core.cpp
     src/uart_bsp.cpp
 )
@@ -26,6 +28,10 @@ add_executable(mock_mcu
 target_link_libraries(mock_mcu PRIVATE
     remotebsp_remote_core
     remotebsp_transport
+)
+
+target_compile_definitions(mock_mcu PRIVATE
+    REMOTEBSP_DEFAULT_MOCK_BOARD_MANIFEST=\"${CMAKE_SOURCE_DIR}/boards/mock-generic-v1.json\"
 )
 
 target_compile_options(mock_mcu PRIVATE

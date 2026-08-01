@@ -9,9 +9,11 @@
 
 #include <cerrno>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 namespace remotebsp {
@@ -225,6 +227,43 @@ std::vector<DiscoveredNode> Client::list_nodes() const {
     return result;
 }
 
+CanTrafficStatus Client::traffic_status() const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_traffic_status_request(socket.get());
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto snapshot =
+        toolbusd::decode_ipc_traffic_status(response.body);
+    CanTrafficStatus status;
+    status.can_fd =
+        snapshot.mode == toolbusd::TrafficBusMode::CanFd;
+    status.arbitration_bits_per_second =
+        snapshot.arbitration_bits_per_second;
+    status.data_bits_per_second = snapshot.data_bits_per_second;
+    status.maximum_utilization_permille =
+        snapshot.maximum_utilization_permille;
+    status.burst_window_ms = snapshot.burst_window_ms;
+    status.global_capacity_ns = snapshot.global_capacity_ns;
+    status.global_available_ns = snapshot.global_available_ns;
+    status.admitted_packets = snapshot.admitted_packets;
+    status.rejected_packets = snapshot.rejected_packets;
+    status.guaranteed_overruns = snapshot.guaranteed_overruns;
+    status.admitted_frames = snapshot.admitted_frames;
+    status.estimated_wire_time_ns =
+        snapshot.estimated_wire_time_ns;
+    for (std::size_t index = 0; index < status.classes.size(); ++index) {
+        status.classes[index] = {
+            snapshot.classes[index].admitted_packets,
+            snapshot.classes[index].rejected_packets,
+            snapshot.classes[index].admitted_frames,
+            snapshot.classes[index].estimated_wire_time_ns};
+    }
+    return status;
+}
+
 std::optional<protocol::Packet> Client::next_event() const {
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_next_event_request(socket.get(), node_id_);
@@ -265,6 +304,56 @@ protocol::ResourceStatusPayload Client::resource_status(
 void Client::reset_resource(std::uint32_t resource_id) const {
     body(command(protocol::Command::ResourceReset,
                  protocol::encode_resource_id(resource_id)));
+}
+
+protocol::ResourceContract Client::resource_contract(
+    std::uint32_t resource_id) const {
+    return protocol::decode_resource_contract(body(command(
+        protocol::Command::ResourceContract,
+        protocol::encode_resource_id(resource_id))));
+}
+
+protocol::ResourceLeaseInfo Client::acquire_resource(
+    std::uint32_t resource_id, std::uint32_t duration_ms,
+    protocol::ResourceLeaseMode mode) const {
+    if (duration_ms == 0 ||
+        mode == protocol::ResourceLeaseMode::None) {
+        throw ClientException("资源租约参数无效");
+    }
+    return protocol::decode_resource_lease_info(body(command(
+        protocol::Command::ResourceAcquire,
+        protocol::encode_resource_lease_request(
+            {resource_id, duration_ms, mode}))));
+}
+
+protocol::ResourceLeaseInfo Client::renew_resource(
+    std::uint32_t resource_id, std::uint64_t lease_id,
+    std::uint32_t duration_ms) const {
+    if (lease_id == 0 || duration_ms == 0) {
+        throw ClientException("资源续租参数无效");
+    }
+    return protocol::decode_resource_lease_info(body(command(
+        protocol::Command::ResourceRenew,
+        protocol::encode_resource_lease_token_request(
+            {resource_id, lease_id, duration_ms}))));
+}
+
+void Client::release_resource(std::uint32_t resource_id,
+                              std::uint64_t lease_id) const {
+    if (lease_id == 0) {
+        throw ClientException("资源租约 ID 不能为零");
+    }
+    body(command(
+        protocol::Command::ResourceRelease,
+        protocol::encode_resource_lease_token_request(
+            {resource_id, lease_id, 0})));
+}
+
+protocol::ResourceLeaseInfo Client::resource_lease_status(
+    std::uint32_t resource_id) const {
+    return protocol::decode_resource_lease_info(body(command(
+        protocol::Command::ResourceLeaseStatus,
+        protocol::encode_resource_id(resource_id))));
 }
 
 std::uint32_t Client::gpio_create(std::uint16_t pin,
@@ -309,10 +398,14 @@ void Client::gpio_write(std::uint32_t object_id, bool value) const {
 
 std::uint32_t Client::uart_create(const UartConfig& config) const {
     const auto parity = static_cast<std::uint8_t>(config.parity);
+    const auto receive_mode =
+        static_cast<std::uint8_t>(config.receive_mode);
     if (config.baud_rate == 0 || config.data_bits < 5 ||
         config.data_bits > 8 ||
         (config.stop_bits != 1 && config.stop_bits != 2) ||
-        parity > static_cast<std::uint8_t>(UartParity::Even)) {
+        parity > static_cast<std::uint8_t>(UartParity::Even) ||
+        receive_mode >
+            static_cast<std::uint8_t>(UartReceiveMode::Streaming)) {
         throw ClientException("UART 配置参数无效");
     }
     std::vector<std::uint8_t> payload{config.port};
@@ -320,6 +413,9 @@ std::uint32_t Client::uart_create(const UartConfig& config) const {
     payload.push_back(config.data_bits);
     payload.push_back(config.stop_bits);
     payload.push_back(parity);
+    if (config.receive_mode == UartReceiveMode::Streaming) {
+        payload.push_back(receive_mode);
+    }
     const auto response =
         command(protocol::Command::UartCreate, std::move(payload));
     body(response);
@@ -351,6 +447,114 @@ void Client::uart_write(
         throw ClientException("UART 写入参数无效");
     }
     body(command(protocol::Command::UartWrite, data, object_id));
+}
+
+void Client::uart_write_all(
+    std::uint32_t object_id,
+    const std::vector<std::uint8_t>& data,
+    std::uint32_t timeout_ms) const {
+    if (object_id == 0 || data.empty() || timeout_ms == 0) {
+        throw ClientException("UART 完整写入参数无效");
+    }
+    constexpr std::size_t chunk_size = 64;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeout_ms);
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const auto count =
+            std::min(chunk_size, data.size() - offset);
+        const std::vector<std::uint8_t> chunk(
+            data.begin() + static_cast<std::ptrdiff_t>(offset),
+            data.begin() +
+                static_cast<std::ptrdiff_t>(offset + count));
+        try {
+            uart_write(object_id, chunk);
+            offset += count;
+        } catch (const RemoteException& error) {
+            const bool retryable =
+                error.status() == 5U || error.status() == 7U ||
+                error.status() == 8U;
+            if (!retryable ||
+                std::chrono::steady_clock::now() >= deadline) {
+                throw;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (std::chrono::steady_clock::now() >= deadline &&
+            offset < data.size()) {
+            throw ClientException("UART 完整写入超时");
+        }
+    }
+}
+
+std::optional<UartStreamChunk> Client::uart_stream_read(
+    std::uint32_t object_id, std::size_t maximum_length,
+    std::uint32_t timeout_ms) const {
+    if (object_id == 0 || maximum_length == 0 ||
+        maximum_length > 64U * 1024U - 20U ||
+        maximum_length > std::numeric_limits<std::uint32_t>::max() ||
+        timeout_ms > 60000U) {
+        throw ClientException("UART 流读取参数无效");
+    }
+    SocketHandle socket(connect_socket(socket_path_));
+    const auto receive_timeout =
+        std::chrono::milliseconds(timeout_ms) +
+        std::chrono::milliseconds(2000);
+    const timeval socket_timeout{
+        static_cast<time_t>(receive_timeout.count() / 1000),
+        static_cast<suseconds_t>(
+            (receive_timeout.count() % 1000) * 1000)};
+    if (::setsockopt(socket.get(), SOL_SOCKET, SO_RCVTIMEO,
+                     &socket_timeout, sizeof(socket_timeout)) < 0) {
+        throw std::system_error(
+            errno, std::generic_category(),
+            "设置 UART 流读取超时失败");
+    }
+    toolbusd::write_ipc_uart_stream_read_request(
+        socket.get(), node_id_, object_id,
+        static_cast<std::uint32_t>(maximum_length), timeout_ms);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status == toolbusd::IpcStatus::TimedOut) {
+        return std::nullopt;
+    }
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto ipc_chunk =
+        toolbusd::decode_ipc_uart_stream_chunk(response.body);
+    return UartStreamChunk{ipc_chunk.data, ipc_chunk.dropped_bytes,
+                           ipc_chunk.lost_events};
+}
+
+protocol::MotionAcceptancePayload Client::motion_enqueue(
+    const protocol::MotionSegmentPayload& segment) const {
+    try {
+        return protocol::decode_motion_acceptance(body(command(
+            protocol::Command::MotionEnqueue,
+            protocol::encode_motion_segment(segment))));
+    } catch (const protocol::MotionPayloadException& error) {
+        throw ClientException(
+            std::string("运动段编码或响应无效: ") + error.what());
+    }
+}
+
+protocol::MotionStatusPayload Client::motion_status() const {
+    try {
+        return protocol::decode_motion_status(
+            body(command(protocol::Command::MotionStatus)));
+    } catch (const protocol::MotionPayloadException& error) {
+        throw ClientException(
+            std::string("运动状态响应无效: ") + error.what());
+    }
+}
+
+void Client::motion_abort() const {
+    body(command(protocol::Command::MotionAbort));
+}
+
+void Client::motion_clear_fault() const {
+    body(command(protocol::Command::MotionClearFault));
 }
 
 const std::string& Client::socket_path() const noexcept {

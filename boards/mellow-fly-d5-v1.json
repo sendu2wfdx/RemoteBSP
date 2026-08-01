@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "name": "mellow-fly-d5-v1",
+  "board_type": 15758037,
+  "uuid": "524253502d464c592d44352d56310000",
+  "firmware_version": [0, 1, 0],
+  "capabilities": ["gpio", "bootloader", "motion"],
+  "resource_groups": [
+    {
+      "type": "gpio",
+      "first_instance": 0,
+      "count": 16,
+      "id_base": 16777216,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 0,
+      "contract": {
+        "access": [
+          "read",
+          "write",
+          "shared_read",
+          "exclusive_write",
+          "lease_supported"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 150,
+        "maximum_operations_per_second": 6000,
+        "queue_capacity": 0,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 0
+      }
+    },
+    {
+      "type": "stepgen_axis",
+      "first_instance": 0,
+      "count": 5,
+      "id_base": 150994944,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 0,
+      "contract": {
+        "access": [
+          "write",
+          "exclusive_write",
+          "lease_supported",
+          "lease_required"
+        ],
+        "timing_resolution_ns": 1000,
+        "worst_case_latency_us": 100,
+        "maximum_operations_per_second": 50000,
+        "queue_capacity": 8,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 0
+      }
+    }
+  ],
+  "reserved_resources": [],
+  "motion_axes": [
+    {
+      "resource_id": 150994944,
+      "maximum_step_rate_hz": 50000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994945,
+      "maximum_step_rate_hz": 50000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994946,
+      "maximum_step_rate_hz": 50000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994947,
+      "maximum_step_rate_hz": 50000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    },
+    {
+      "resource_id": 150994948,
+      "maximum_step_rate_hz": 50000,
+      "step_pulse_width_ns": 2000,
+      "minimum_step_low_ns": 2000,
+      "direction_setup_ns": 2000
+    }
+  ]
+}

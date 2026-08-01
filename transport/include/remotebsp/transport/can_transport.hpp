@@ -17,6 +17,7 @@ struct CanMessage {
     std::uint32_t identifier{};
     bool extended_identifier{};
     std::vector<std::uint8_t> data;
+    bool bit_rate_switch{};
 };
 
 class CanTransport {

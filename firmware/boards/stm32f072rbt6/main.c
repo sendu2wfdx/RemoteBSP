@@ -1,0 +1,1413 @@
+#include "stm32f0xx_hal.h"
+
+#include "remotebsp_embedded/board_config.h"
+#include "remotebsp_embedded/byte_ring.h"
+#include "remotebsp_embedded/core.h"
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+#include "remotebsp_embedded/soft_half_duplex_uart.h"
+#endif
+#include "remotebsp_embedded/startup_gpio.h"
+
+#include <string.h>
+
+#if CONFIG_UART_RESOURCE_COUNT > 0 && \
+    !defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+#define RBSP_HARDWARE_UART_ENABLED 1
+#endif
+
+#if CONFIG_SYSTEM_CLOCK_HZ != 48000000
+#error "STM32F072RBT6 当前时钟方案固定为内部 HSI48"
+#endif
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+#if CONFIG_UART_RESOURCE_COUNT > 1
+#error "当前 F072 通用 BSP 只实现 UART 0/USART1"
+#endif
+#if !defined(CONFIG_UART0_PINS_PA9_PA10) && \
+    !defined(CONFIG_UART0_PINS_PB6_PB7)
+#error "启用 F072 UART 时必须选择 USART1 引脚组"
+#endif
+#if CONFIG_UART_RX_BUFFER_SIZE < 2 || CONFIG_UART_TX_BUFFER_SIZE < 2
+#error "UART 环形缓冲至少需要两个字节"
+#endif
+#endif
+
+#if (48000000U % (CONFIG_CAN_NOMINAL_BITRATE * 16U)) != 0
+#error "当前 F072 CAN 位时序无法精确生成所选仲裁段波特率"
+#endif
+
+#define CAN_PRESCALER \
+    (48000000U / (CONFIG_CAN_NOMINAL_BITRATE * 16U))
+#define F072_VECTOR_WORDS 48U
+#define F072_SRAM_SIZE (16U * 1024U)
+
+#if CAN_PRESCALER < 1 || CAN_PRESCALER > 1024
+#error "F072 CAN 分频系数超出硬件范围"
+#endif
+
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+#if CONFIG_UART_RESOURCE_COUNT != 5
+#error "五槽软串口配置必须暴露五路逻辑 UART"
+#endif
+#endif
+
+#ifdef CONFIG_REMOTEBSP_MOTION
+#if (CONFIG_SYSTEM_CLOCK_HZ % CONFIG_MOTION_TIMER_HZ) != 0
+#error "五槽运动定时器频率必须整除系统时钟"
+#endif
+#endif
+
+static CAN_HandleTypeDef can_handle;
+static rbsp_core_t remote_core;
+
+#ifdef CONFIG_REMOTEBSP_MOTION
+#ifdef CONFIG_MOTION_SLOT0_ENABLED
+#define MOTION_SLOT0_AXIS_COUNT 1U
+#else
+#define MOTION_SLOT0_AXIS_COUNT 0U
+#endif
+#ifdef CONFIG_MOTION_SLOT1_ENABLED
+#define MOTION_SLOT1_AXIS_COUNT 1U
+#else
+#define MOTION_SLOT1_AXIS_COUNT 0U
+#endif
+#ifdef CONFIG_MOTION_SLOT2_ENABLED
+#define MOTION_SLOT2_AXIS_COUNT 1U
+#else
+#define MOTION_SLOT2_AXIS_COUNT 0U
+#endif
+#ifdef CONFIG_MOTION_SLOT3_ENABLED
+#define MOTION_SLOT3_AXIS_COUNT 1U
+#else
+#define MOTION_SLOT3_AXIS_COUNT 0U
+#endif
+#ifdef CONFIG_MOTION_SLOT4_ENABLED
+#define MOTION_SLOT4_AXIS_COUNT 1U
+#else
+#define MOTION_SLOT4_AXIS_COUNT 0U
+#endif
+
+#define MOTION_SLOT_AXIS_COUNT \
+    (MOTION_SLOT0_AXIS_COUNT + MOTION_SLOT1_AXIS_COUNT + \
+     MOTION_SLOT2_AXIS_COUNT + MOTION_SLOT3_AXIS_COUNT + \
+     MOTION_SLOT4_AXIS_COUNT)
+
+#if MOTION_SLOT_AXIS_COUNT == 0U
+#error "启用运动模块时至少要启用一个本板运动槽"
+#endif
+#if MOTION_SLOT_AXIS_COUNT > CONFIG_MOTION_MAX_AXES
+#error "已启用的本板运动槽数量不能超过 MOTION_MAX_AXES"
+#endif
+
+typedef struct {
+    uint8_t port;
+    uint8_t pin;
+} motion_pin_t;
+
+typedef struct {
+    motion_pin_t step;
+    motion_pin_t direction;
+    motion_pin_t enable;
+    bool direction_inverted;
+    bool enable_active_low;
+} motion_axis_pins_t;
+
+/* 所有数值均来自 menuconfig 的 MOTION_SLOTn_* 配置，而非板级源码常量。 */
+static const motion_axis_pins_t motion_axis_pins[MOTION_SLOT_AXIS_COUNT] = {
+#ifdef CONFIG_MOTION_SLOT0_ENABLED
+    {{CONFIG_MOTION_SLOT0_STEP_PIN / 16U, CONFIG_MOTION_SLOT0_STEP_PIN % 16U},
+     {CONFIG_MOTION_SLOT0_DIR_PIN / 16U, CONFIG_MOTION_SLOT0_DIR_PIN % 16U},
+     {CONFIG_MOTION_SLOT0_ENABLE_PIN / 16U, CONFIG_MOTION_SLOT0_ENABLE_PIN % 16U},
+#ifdef CONFIG_MOTION_SLOT0_DIR_INVERTED
+     true,
+#else
+     false,
+#endif
+#ifdef CONFIG_MOTION_SLOT0_ENABLE_ACTIVE_LOW
+     true},
+#else
+     false},
+#endif
+#endif
+#ifdef CONFIG_MOTION_SLOT1_ENABLED
+    {{CONFIG_MOTION_SLOT1_STEP_PIN / 16U, CONFIG_MOTION_SLOT1_STEP_PIN % 16U},
+     {CONFIG_MOTION_SLOT1_DIR_PIN / 16U, CONFIG_MOTION_SLOT1_DIR_PIN % 16U},
+     {CONFIG_MOTION_SLOT1_ENABLE_PIN / 16U, CONFIG_MOTION_SLOT1_ENABLE_PIN % 16U},
+#ifdef CONFIG_MOTION_SLOT1_DIR_INVERTED
+     true,
+#else
+     false,
+#endif
+#ifdef CONFIG_MOTION_SLOT1_ENABLE_ACTIVE_LOW
+     true},
+#else
+     false},
+#endif
+#endif
+#ifdef CONFIG_MOTION_SLOT2_ENABLED
+    {{CONFIG_MOTION_SLOT2_STEP_PIN / 16U, CONFIG_MOTION_SLOT2_STEP_PIN % 16U},
+     {CONFIG_MOTION_SLOT2_DIR_PIN / 16U, CONFIG_MOTION_SLOT2_DIR_PIN % 16U},
+     {CONFIG_MOTION_SLOT2_ENABLE_PIN / 16U, CONFIG_MOTION_SLOT2_ENABLE_PIN % 16U},
+#ifdef CONFIG_MOTION_SLOT2_DIR_INVERTED
+     true,
+#else
+     false,
+#endif
+#ifdef CONFIG_MOTION_SLOT2_ENABLE_ACTIVE_LOW
+     true},
+#else
+     false},
+#endif
+#endif
+#ifdef CONFIG_MOTION_SLOT3_ENABLED
+    {{CONFIG_MOTION_SLOT3_STEP_PIN / 16U, CONFIG_MOTION_SLOT3_STEP_PIN % 16U},
+     {CONFIG_MOTION_SLOT3_DIR_PIN / 16U, CONFIG_MOTION_SLOT3_DIR_PIN % 16U},
+     {CONFIG_MOTION_SLOT3_ENABLE_PIN / 16U, CONFIG_MOTION_SLOT3_ENABLE_PIN % 16U},
+#ifdef CONFIG_MOTION_SLOT3_DIR_INVERTED
+     true,
+#else
+     false,
+#endif
+#ifdef CONFIG_MOTION_SLOT3_ENABLE_ACTIVE_LOW
+     true},
+#else
+     false},
+#endif
+#endif
+#ifdef CONFIG_MOTION_SLOT4_ENABLED
+    {{CONFIG_MOTION_SLOT4_STEP_PIN / 16U, CONFIG_MOTION_SLOT4_STEP_PIN % 16U},
+     {CONFIG_MOTION_SLOT4_DIR_PIN / 16U, CONFIG_MOTION_SLOT4_DIR_PIN % 16U},
+     {CONFIG_MOTION_SLOT4_ENABLE_PIN / 16U, CONFIG_MOTION_SLOT4_ENABLE_PIN % 16U},
+#ifdef CONFIG_MOTION_SLOT4_DIR_INVERTED
+     true,
+#else
+     false,
+#endif
+#ifdef CONFIG_MOTION_SLOT4_ENABLE_ACTIVE_LOW
+     true},
+#else
+     false},
+#endif
+#endif
+};
+
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+typedef struct {
+    bool present;
+    motion_pin_t pin;
+} motion_limit_pin_t;
+
+static const motion_limit_pin_t motion_limit_pins[MOTION_SLOT_AXIS_COUNT] = {
+#ifdef CONFIG_MOTION_SLOT0_ENABLED
+    {CONFIG_MOTION_SLOT0_LIMIT_PIN >= 0,
+     {CONFIG_MOTION_SLOT0_LIMIT_PIN / 16U, CONFIG_MOTION_SLOT0_LIMIT_PIN % 16U}},
+#endif
+#ifdef CONFIG_MOTION_SLOT1_ENABLED
+    {CONFIG_MOTION_SLOT1_LIMIT_PIN >= 0,
+     {CONFIG_MOTION_SLOT1_LIMIT_PIN / 16U, CONFIG_MOTION_SLOT1_LIMIT_PIN % 16U}},
+#endif
+#ifdef CONFIG_MOTION_SLOT2_ENABLED
+    {CONFIG_MOTION_SLOT2_LIMIT_PIN >= 0,
+     {CONFIG_MOTION_SLOT2_LIMIT_PIN / 16U, CONFIG_MOTION_SLOT2_LIMIT_PIN % 16U}},
+#endif
+#ifdef CONFIG_MOTION_SLOT3_ENABLED
+    {CONFIG_MOTION_SLOT3_LIMIT_PIN >= 0,
+     {CONFIG_MOTION_SLOT3_LIMIT_PIN / 16U, CONFIG_MOTION_SLOT3_LIMIT_PIN % 16U}},
+#endif
+#ifdef CONFIG_MOTION_SLOT4_ENABLED
+    {CONFIG_MOTION_SLOT4_LIMIT_PIN >= 0,
+     {CONFIG_MOTION_SLOT4_LIMIT_PIN / 16U, CONFIG_MOTION_SLOT4_LIMIT_PIN % 16U}},
+#endif
+};
+#endif
+
+static volatile uint32_t motion_timebase_epochs;
+#endif
+
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+enum {
+    MOTION_SLOT_SOFT_UART_PORTS = 5U,
+};
+
+static rbsp_soft_half_duplex_uart_t soft_uart;
+/* 未选择 TMC2209 的槽不占用其预留 UART GPIO，也不接受 UART 配置请求。 */
+static const bool soft_uart_port_present[MOTION_SLOT_SOFT_UART_PORTS] = {
+#ifdef CONFIG_MOTION_SLOT0_DRIVER_TMC2209_UART
+    true,
+#else
+    false,
+#endif
+#ifdef CONFIG_MOTION_SLOT1_DRIVER_TMC2209_UART
+    true,
+#else
+    false,
+#endif
+#ifdef CONFIG_MOTION_SLOT2_DRIVER_TMC2209_UART
+    true,
+#else
+    false,
+#endif
+#ifdef CONFIG_MOTION_SLOT3_DRIVER_TMC2209_UART
+    true,
+#else
+    false,
+#endif
+#ifdef CONFIG_MOTION_SLOT4_DRIVER_TMC2209_UART
+    true,
+#else
+    false,
+#endif
+};
+static const uint8_t soft_uart_gpio_ports[MOTION_SLOT_SOFT_UART_PORTS] = {
+#ifdef CONFIG_MOTION_SLOT0_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT0_TMC_UART_PIN / 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT1_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT1_TMC_UART_PIN / 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT2_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT2_TMC_UART_PIN / 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT3_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT3_TMC_UART_PIN / 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT4_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT4_TMC_UART_PIN / 16U,
+#else
+    0U,
+#endif
+};
+static const uint8_t soft_uart_gpio_pins[MOTION_SLOT_SOFT_UART_PORTS] = {
+#ifdef CONFIG_MOTION_SLOT0_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT0_TMC_UART_PIN % 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT1_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT1_TMC_UART_PIN % 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT2_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT2_TMC_UART_PIN % 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT3_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT3_TMC_UART_PIN % 16U,
+#else
+    0U,
+#endif
+#ifdef CONFIG_MOTION_SLOT4_DRIVER_TMC2209_UART
+    CONFIG_MOTION_SLOT4_TMC_UART_PIN % 16U,
+#else
+    0U,
+#endif
+};
+#endif
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+static UART_HandleTypeDef uart0_handle;
+static rbsp_byte_ring_t uart0_rx_ring;
+static rbsp_byte_ring_t uart0_tx_ring;
+static uint8_t uart0_rx_storage[CONFIG_UART_RX_BUFFER_SIZE];
+static uint8_t uart0_tx_storage[CONFIG_UART_TX_BUFFER_SIZE];
+static volatile bool uart0_configured;
+#endif
+
+volatile uint32_t rbsp_diag_can_rx_frames;
+volatile uint32_t rbsp_diag_can_tx_frames;
+volatile uint32_t rbsp_diag_can_tx_failures;
+volatile uint32_t rbsp_diag_can_rx_failures;
+#ifdef RBSP_HARDWARE_UART_ENABLED
+volatile uint32_t rbsp_diag_uart_rx_bytes;
+volatile uint32_t rbsp_diag_uart_tx_bytes;
+volatile uint32_t rbsp_diag_uart_rx_overflows;
+volatile uint32_t rbsp_diag_uart_errors;
+#endif
+
+static void put_u32(uint8_t* output, uint32_t value) {
+    output[0] = (uint8_t)value;
+    output[1] = (uint8_t)(value >> 8U);
+    output[2] = (uint8_t)(value >> 16U);
+    output[3] = (uint8_t)(value >> 24U);
+}
+
+static void fatal_error(void) {
+    __disable_irq();
+    for (;;) {
+    }
+}
+
+static void vector_table_relocate(void) {
+    const uint32_t* source = (const uint32_t*)(
+        FLASH_BASE + CONFIG_APPLICATION_FLASH_OFFSET);
+    volatile uint32_t* destination = (volatile uint32_t*)SRAM_BASE;
+
+    __disable_irq();
+    for (uint32_t index = 0U; index < F072_VECTOR_WORDS; ++index) {
+        destination[index] = source[index];
+    }
+    __HAL_RCC_SYSCFG_CLK_ENABLE();
+    __HAL_SYSCFG_REMAPMEMORY_SRAM();
+    __DSB();
+    __ISB();
+    __enable_irq();
+}
+
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+static void board_enter_bootloader(rbsp_bootloader_mode_t mode) {
+    static const uint64_t can_request_signature =
+        UINT64_C(0x5984E3FA6CA1589B);
+    static const uint64_t usb_request_signature =
+        UINT64_C(0x8F3D6A21C457B09E);
+    const uint64_t request_signature =
+        mode == RBSP_BOOTLOADER_USB
+            ? usb_request_signature : can_request_signature;
+    const uint32_t signature_address =
+        *(const volatile uint32_t*)FLASH_BASE;
+    const uint32_t ram_end = SRAM_BASE + F072_SRAM_SIZE;
+
+    if ((signature_address & 7U) != 0U ||
+        signature_address < SRAM_BASE ||
+        signature_address > ram_end - sizeof(request_signature)) {
+        fatal_error();
+    }
+    __disable_irq();
+    *(volatile uint64_t*)(uintptr_t)signature_address =
+        request_signature;
+    __DSB();
+    __ISB();
+    NVIC_SystemReset();
+    for (;;) {
+    }
+}
+#endif
+
+static void system_clock_configure(void) {
+    RCC_OscInitTypeDef oscillator = {0};
+    RCC_ClkInitTypeDef clock = {0};
+
+#ifdef CONFIG_F072_CLOCK_HSE_8MHZ
+    /* 五槽默认映射使用 8MHz 晶振，经 PLL x6 得到精确的 48MHz CAN 时钟。 */
+    oscillator.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    oscillator.HSEState = RCC_HSE_ON;
+    oscillator.PLL.PLLState = RCC_PLL_ON;
+    oscillator.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    oscillator.PLL.PREDIV = RCC_PREDIV_DIV1;
+    oscillator.PLL.PLLMUL = RCC_PLL_MUL6;
+#else
+    /* 通用 F072 板卡使用经工厂校准的 HSI48，直接作为 SYSCLK。 */
+    oscillator.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
+    oscillator.HSI48State = RCC_HSI48_ON;
+    oscillator.PLL.PLLState = RCC_PLL_NONE;
+#endif
+    if (HAL_RCC_OscConfig(&oscillator) != HAL_OK) {
+        fatal_error();
+    }
+
+    clock.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                      RCC_CLOCKTYPE_PCLK1;
+    clock.SYSCLKSource =
+#ifdef CONFIG_F072_CLOCK_HSE_8MHZ
+        RCC_SYSCLKSOURCE_PLLCLK;
+#else
+        RCC_SYSCLKSOURCE_HSI48;
+#endif
+    clock.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    clock.APB1CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&clock, FLASH_LATENCY_1) != HAL_OK) {
+        fatal_error();
+    }
+
+    SystemCoreClockUpdate();
+    if (SystemCoreClock != CONFIG_SYSTEM_CLOCK_HZ ||
+        HAL_RCC_GetPCLK1Freq() != 48000000U) {
+        fatal_error();
+    }
+}
+
+static GPIO_TypeDef* gpio_port_from_index(uint8_t index) {
+    switch (index) {
+        case 0U:
+            return GPIOA;
+        case 1U:
+            return GPIOB;
+        case 2U:
+            return GPIOC;
+        case 3U:
+            return GPIOD;
+        default:
+            return NULL;
+    }
+}
+
+static void enable_gpio_clock(uint8_t index) {
+    switch (index) {
+        case 0U:
+            __HAL_RCC_GPIOA_CLK_ENABLE();
+            break;
+        case 1U:
+            __HAL_RCC_GPIOB_CLK_ENABLE();
+            break;
+        case 2U:
+            __HAL_RCC_GPIOC_CLK_ENABLE();
+            break;
+        case 3U:
+            __HAL_RCC_GPIOD_CLK_ENABLE();
+            break;
+        default:
+            break;
+    }
+}
+
+static bool gpio_pin_present(uint16_t encoded_pin) {
+    const uint8_t port = (uint8_t)(encoded_pin / 16U);
+    const uint8_t pin = (uint8_t)(encoded_pin % 16U);
+
+    if (port > 3U || (port == 3U && pin != 2U)) {
+        return false;
+    }
+    /* SWD 是所有 F072 板卡的生命线。 */
+    if (port == 0U && (pin == 13U || pin == 14U)) {
+        return false;
+    }
+#ifdef CONFIG_F072_RESERVE_USB_PINS
+    /* 按板级配置保留 PA11/PA12 给 USB。 */
+    if (port == 0U && (pin == 11U || pin == 12U)) {
+        return false;
+    }
+#endif
+#if defined(CONFIG_CAN_PINS_PA11_PA12)
+    if (port == 0U && (pin == 11U || pin == 12U)) {
+        return false;
+    }
+#else
+    if (port == 1U && (pin == 8U || pin == 9U)) {
+        return false;
+    }
+#endif
+#ifdef RBSP_HARDWARE_UART_ENABLED
+#if defined(CONFIG_UART0_PINS_PA9_PA10)
+    if (port == 0U && (pin == 9U || pin == 10U)) {
+        return false;
+    }
+#else
+    if (port == 1U && (pin == 6U || pin == 7U)) {
+        return false;
+    }
+#endif
+#endif
+#ifdef CONFIG_CAN_TRANSCEIVER_STB_ENABLE
+    static const char stb_port[] = CONFIG_CAN_TRANSCEIVER_STB_PORT;
+    if (stb_port[0] >= 'A' && stb_port[0] <= 'D' &&
+        port == (uint8_t)(stb_port[0] - 'A') &&
+        pin == CONFIG_CAN_TRANSCEIVER_STB_PIN) {
+        return false;
+    }
+#endif
+    return true;
+}
+
+#ifdef CONFIG_REMOTEBSP_MOTION
+static bool motion_pin_reserved(uint16_t encoded_pin) {
+    const uint8_t port = (uint8_t)(encoded_pin / 16U);
+    const uint8_t pin = (uint8_t)(encoded_pin % 16U);
+    for (uint8_t axis = 0U; axis < MOTION_SLOT_AXIS_COUNT; ++axis) {
+        const motion_axis_pins_t* const pins = &motion_axis_pins[axis];
+        if ((pins->step.port == port && pins->step.pin == pin) ||
+            (pins->direction.port == port && pins->direction.pin == pin) ||
+            (pins->enable.port == port && pins->enable.pin == pin)) {
+            return true;
+        }
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+        if (motion_limit_pins[axis].present &&
+            motion_limit_pins[axis].pin.port == port &&
+            motion_limit_pins[axis].pin.pin == pin) {
+            return true;
+        }
+#endif
+    }
+    return false;
+}
+#endif
+
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+static bool soft_uart_pin_reserved(uint16_t encoded_pin) {
+    for (uint8_t port = 0U;
+         port < CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT &&
+         port < MOTION_SLOT_SOFT_UART_PORTS;
+         ++port) {
+        if (soft_uart_port_present[port] &&
+            encoded_pin == (uint16_t)(soft_uart_gpio_ports[port] * 16U +
+                                      soft_uart_gpio_pins[port])) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+/* 运行时普通 GPIO 不能抢占已启用的板载运动轴。 */
+static bool gpio_pin_allowed(uint16_t encoded_pin) {
+    if (!gpio_pin_present(encoded_pin)) {
+        return false;
+    }
+#ifdef CONFIG_REMOTEBSP_MOTION
+    if (motion_pin_reserved(encoded_pin)) {
+        return false;
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    if (soft_uart_pin_reserved(encoded_pin)) {
+        return false;
+    }
+#endif
+    return true;
+}
+
+#if defined(CONFIG_REMOTEBSP_MOTION) || \
+    defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+/* 所有槽位引脚在启动前一次性声明，拒绝复用、保留引脚和无效封装引脚。 */
+static bool claim_slot_pin(bool used[64], uint16_t encoded_pin) {
+    return encoded_pin < 64U && !used[encoded_pin] &&
+           gpio_pin_present(encoded_pin) &&
+           ((used[encoded_pin] = true), true);
+}
+
+static bool motion_slot_configuration_valid(void) {
+    bool used[64] = {false};
+#ifdef CONFIG_REMOTEBSP_MOTION
+    for (uint8_t axis = 0U; axis < MOTION_SLOT_AXIS_COUNT; ++axis) {
+        const motion_axis_pins_t* const pins = &motion_axis_pins[axis];
+        if (!claim_slot_pin(used, (uint16_t)(pins->step.port * 16U +
+                                             pins->step.pin)) ||
+            !claim_slot_pin(used, (uint16_t)(pins->direction.port * 16U +
+                                             pins->direction.pin)) ||
+            !claim_slot_pin(used, (uint16_t)(pins->enable.port * 16U +
+                                             pins->enable.pin))) {
+            return false;
+        }
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    for (uint8_t port = 0U; port < MOTION_SLOT_SOFT_UART_PORTS; ++port) {
+        if (soft_uart_port_present[port] &&
+            !claim_slot_pin(used, (uint16_t)(
+                soft_uart_gpio_ports[port] * 16U +
+                soft_uart_gpio_pins[port]))) {
+            return false;
+        }
+    }
+#endif
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+    for (uint8_t axis = 0U; axis < MOTION_SLOT_AXIS_COUNT; ++axis) {
+        if (motion_limit_pins[axis].present &&
+            !claim_slot_pin(used, (uint16_t)(
+                motion_limit_pins[axis].pin.port * 16U +
+                motion_limit_pins[axis].pin.pin))) {
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+#endif
+
+static void transceiver_enable(void) {
+#ifdef CONFIG_CAN_TRANSCEIVER_STB_ENABLE
+    static const char stb_port_name[] =
+        CONFIG_CAN_TRANSCEIVER_STB_PORT;
+    if (stb_port_name[0] < 'A' || stb_port_name[0] > 'D' ||
+        CONFIG_CAN_TRANSCEIVER_STB_PIN > 15) {
+        fatal_error();
+    }
+    const uint8_t port_index =
+        (uint8_t)(stb_port_name[0] - 'A');
+    GPIO_TypeDef* port = gpio_port_from_index(port_index);
+    enable_gpio_clock(port_index);
+    HAL_GPIO_WritePin(
+        port, (uint16_t)(1U << CONFIG_CAN_TRANSCEIVER_STB_PIN),
+        GPIO_PIN_RESET);
+    GPIO_InitTypeDef init = {0};
+    init.Pin = (uint16_t)(1U << CONFIG_CAN_TRANSCEIVER_STB_PIN);
+    init.Mode = GPIO_MODE_OUTPUT_PP;
+    init.Pull = GPIO_NOPULL;
+    init.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(port, &init);
+#endif
+}
+
+static bool board_startup_gpio_apply(
+    uint16_t encoded_pin, rbsp_startup_gpio_mode_t mode) {
+    /* 启动安全电平需要配置内部保留的 STEP/DIR/EN 引脚。 */
+    if (!gpio_pin_present(encoded_pin)) {
+        return false;
+    }
+    const uint8_t port_index = (uint8_t)(encoded_pin / 16U);
+    const uint8_t pin_index = (uint8_t)(encoded_pin % 16U);
+    GPIO_TypeDef* port = gpio_port_from_index(port_index);
+    enable_gpio_clock(port_index);
+    const bool output = mode == RBSP_STARTUP_GPIO_OUTPUT_LOW ||
+                        mode == RBSP_STARTUP_GPIO_OUTPUT_HIGH;
+    if (output) {
+        HAL_GPIO_WritePin(
+            port, (uint16_t)(1U << pin_index),
+            mode == RBSP_STARTUP_GPIO_OUTPUT_HIGH
+                ? GPIO_PIN_SET
+                : GPIO_PIN_RESET);
+    }
+    GPIO_InitTypeDef init = {0};
+    init.Pin = (uint16_t)(1U << pin_index);
+    init.Mode = output ? GPIO_MODE_OUTPUT_PP : GPIO_MODE_INPUT;
+    init.Pull = GPIO_NOPULL;
+    if (mode == RBSP_STARTUP_GPIO_INPUT_PULLUP) {
+        init.Pull = GPIO_PULLUP;
+    } else if (mode == RBSP_STARTUP_GPIO_INPUT_PULLDOWN) {
+        init.Pull = GPIO_PULLDOWN;
+    } else if (!output && mode != RBSP_STARTUP_GPIO_INPUT_FLOATING) {
+        return false;
+    }
+    init.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(port, &init);
+    return true;
+}
+
+static void startup_gpio_configure(void) {
+    if (!rbsp_startup_gpio_apply(
+            CONFIG_STARTUP_GPIO_OUTPUT_LOW,
+            CONFIG_STARTUP_GPIO_OUTPUT_HIGH,
+            CONFIG_STARTUP_GPIO_INPUT_FLOATING,
+            CONFIG_STARTUP_GPIO_INPUT_PULLUP,
+            CONFIG_STARTUP_GPIO_INPUT_PULLDOWN,
+            board_startup_gpio_apply)) {
+        fatal_error();
+    }
+}
+
+static bool board_gpio_configure(uint16_t encoded_pin,
+                                 rbsp_gpio_direction_t direction,
+                                 bool initial_value) {
+    if (!gpio_pin_allowed(encoded_pin)) {
+        return false;
+    }
+    const uint8_t port_index = (uint8_t)(encoded_pin / 16U);
+    const uint8_t pin_index = (uint8_t)(encoded_pin % 16U);
+    GPIO_TypeDef* port = gpio_port_from_index(port_index);
+    enable_gpio_clock(port_index);
+
+    if (direction == RBSP_GPIO_OUTPUT) {
+        HAL_GPIO_WritePin(port, (uint16_t)(1U << pin_index),
+                          initial_value ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+    GPIO_InitTypeDef init = {0};
+    init.Pin = (uint16_t)(1U << pin_index);
+    init.Mode = direction == RBSP_GPIO_OUTPUT
+                    ? GPIO_MODE_OUTPUT_PP
+                    : GPIO_MODE_INPUT;
+    init.Pull = GPIO_NOPULL;
+    /*
+     * PC13..PC15 由备份域电源开关供电，数据手册限制为最高 2MHz，
+     * 因此即使作为普通输出也只选择低速档。
+     */
+    init.Speed = (port_index == 2U && pin_index >= 13U)
+                     ? GPIO_SPEED_FREQ_LOW
+                     : GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(port, &init);
+    return true;
+}
+
+static bool board_gpio_write(uint16_t encoded_pin, bool value) {
+    if (!gpio_pin_allowed(encoded_pin)) {
+        return false;
+    }
+    GPIO_TypeDef* port =
+        gpio_port_from_index((uint8_t)(encoded_pin / 16U));
+    HAL_GPIO_WritePin(
+        port, (uint16_t)(1U << (encoded_pin % 16U)),
+        value ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    return true;
+}
+
+static bool board_gpio_read(uint16_t encoded_pin, bool* value) {
+    if (!gpio_pin_allowed(encoded_pin) || value == NULL) {
+        return false;
+    }
+    GPIO_TypeDef* port =
+        gpio_port_from_index((uint8_t)(encoded_pin / 16U));
+    *value = HAL_GPIO_ReadPin(
+                 port, (uint16_t)(1U << (encoded_pin % 16U))) ==
+             GPIO_PIN_SET;
+    return true;
+}
+
+#ifdef CONFIG_REMOTEBSP_MOTION
+static void motion_write_pin(motion_pin_t pin, bool high) {
+    GPIO_TypeDef* const gpio = gpio_port_from_index(pin.port);
+    const uint16_t mask = (uint16_t)(1U << pin.pin);
+    gpio->BSRR = high ? mask : (uint32_t)mask << 16U;
+}
+
+static void motion_configure_output(motion_pin_t pin, bool initial_high) {
+    GPIO_TypeDef* const gpio = gpio_port_from_index(pin.port);
+    const uint16_t mask = (uint16_t)(1U << pin.pin);
+    enable_gpio_clock(pin.port);
+    motion_write_pin(pin, initial_high);
+    GPIO_InitTypeDef init = {0};
+    init.Pin = mask;
+    init.Mode = GPIO_MODE_OUTPUT_PP;
+    init.Pull = GPIO_NOPULL;
+    init.Speed = (pin.port == 2U && pin.pin >= 13U)
+                     ? GPIO_SPEED_FREQ_LOW
+                     : GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(gpio, &init);
+}
+
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+static void motion_configure_limit_input(motion_pin_t pin) {
+    GPIO_TypeDef* const gpio = gpio_port_from_index(pin.port);
+    enable_gpio_clock(pin.port);
+    GPIO_InitTypeDef init = {0};
+    init.Pin = (uint16_t)(1U << pin.pin);
+    init.Mode = GPIO_MODE_INPUT;
+    init.Pull = GPIO_PULLUP;
+    init.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(gpio, &init);
+}
+#endif
+
+/*
+ * 运动引脚不依赖运行时 GPIO 对象。上电即先禁用所有驱动器，再固定为推挽输出，
+ * 避免资源创建失败或主循环阻塞时产生悬空 STEP 脉冲。
+ */
+static void motion_outputs_configure(void) {
+    for (uint8_t axis = 0U; axis < MOTION_SLOT_AXIS_COUNT; ++axis) {
+        const motion_axis_pins_t* const pins = &motion_axis_pins[axis];
+        /* 失效电平由每个槽位的 menuconfig 极性决定。 */
+        motion_configure_output(pins->enable, pins->enable_active_low);
+        motion_configure_output(pins->step, false);
+        motion_configure_output(pins->direction,
+                                pins->direction_inverted);
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+        if (motion_limit_pins[axis].present) {
+            motion_configure_limit_input(motion_limit_pins[axis].pin);
+        }
+#endif
+    }
+}
+
+static bool board_motion_set_enable(uint8_t axis, bool enabled) {
+    if (axis >= MOTION_SLOT_AXIS_COUNT) {
+        return false;
+    }
+    const motion_axis_pins_t* const pins = &motion_axis_pins[axis];
+    motion_write_pin(pins->enable, enabled != pins->enable_active_low);
+    return true;
+}
+
+static bool board_motion_set_direction(uint8_t axis, bool positive) {
+    if (axis >= MOTION_SLOT_AXIS_COUNT) {
+        return false;
+    }
+    const motion_axis_pins_t* const pins = &motion_axis_pins[axis];
+    motion_write_pin(pins->direction,
+                     positive != pins->direction_inverted);
+    return true;
+}
+
+static bool board_motion_set_step(uint8_t axis, bool high) {
+    if (axis >= MOTION_SLOT_AXIS_COUNT) {
+        return false;
+    }
+    motion_write_pin(motion_axis_pins[axis].step, high);
+    return true;
+}
+
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+static bool board_motion_limit_active(uint8_t axis, bool* active) {
+    if (axis >= MOTION_SLOT_AXIS_COUNT || active == NULL) {
+        return false;
+    }
+    const motion_limit_pin_t* const limit = &motion_limit_pins[axis];
+    if (!limit->present) {
+        *active = false;
+        return true;
+    }
+    GPIO_TypeDef* const gpio = gpio_port_from_index(limit->pin.port);
+    const uint16_t mask = (uint16_t)(1U << limit->pin.pin);
+    /* 限位开关使用上拉输入，闭合接地即为触发。 */
+    *active = (gpio->IDR & mask) == 0U;
+    return true;
+}
+#endif
+
+/* TIM2 以 1MHz 自由运行，配合溢出计数形成单调 64 位运动时钟。 */
+static void motion_timebase_configure(void) {
+    __HAL_RCC_TIM2_CLK_ENABLE();
+    TIM2->CR1 = 0U;
+    TIM2->PSC = 47U;
+    TIM2->ARR = UINT32_MAX;
+    TIM2->EGR = TIM_EGR_UG;
+    TIM2->CNT = 0U;
+    TIM2->SR = 0U;
+    TIM2->DIER = TIM_DIER_UIE;
+    motion_timebase_epochs = 0U;
+    HAL_NVIC_SetPriority(TIM2_IRQn, 1U, 0U);
+    HAL_NVIC_EnableIRQ(TIM2_IRQn);
+    TIM2->CR1 = TIM_CR1_CEN;
+}
+
+static uint64_t board_motion_nanoseconds(void) {
+    uint32_t before;
+    uint32_t after;
+    uint32_t counter;
+    do {
+        before = motion_timebase_epochs;
+        counter = TIM2->CNT;
+        after = motion_timebase_epochs;
+    } while (before != after);
+    if ((TIM2->SR & TIM_SR_UIF) != 0U && counter < UINT32_C(0x80000000)) {
+        ++after;
+    }
+    return (((uint64_t)after << 32U) | counter) * 1000ULL;
+}
+
+/* TIM3 是独立的 STEP 调度中断，TIM17 继续保留给可选软串口。 */
+static void motion_tick_timer_start(void) {
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    TIM3->CR1 = 0U;
+    TIM3->PSC = 0U;
+    TIM3->ARR =
+        (uint16_t)(CONFIG_SYSTEM_CLOCK_HZ / CONFIG_MOTION_TIMER_HZ - 1U);
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CNT = 0U;
+    TIM3->SR = 0U;
+    TIM3->DIER = TIM_DIER_UIE;
+    HAL_NVIC_SetPriority(TIM3_IRQn, 0U, 0U);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+    TIM3->CR1 = TIM_CR1_CEN;
+}
+#endif
+
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+/* TIM17 以 48MHz 自由运行，为软串口提供独立于 SysTick 的周期级时基。 */
+static void soft_uart_timer_configure(void) {
+    __HAL_RCC_TIM17_CLK_ENABLE();
+    TIM17->CR1 = 0U;
+    TIM17->PSC = 0U;
+    TIM17->ARR = UINT16_MAX;
+    TIM17->EGR = TIM_EGR_UG;
+    TIM17->CNT = 0U;
+    TIM17->CR1 = TIM_CR1_CEN;
+}
+
+static GPIO_TypeDef* soft_uart_gpio_port(uint8_t port) {
+    return port < CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT &&
+                   port < MOTION_SLOT_SOFT_UART_PORTS &&
+                   soft_uart_port_present[port]
+               ? gpio_port_from_index(soft_uart_gpio_ports[port])
+               : NULL;
+}
+
+static uint16_t soft_uart_gpio_mask(uint8_t port) {
+    return port < CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT &&
+                   port < MOTION_SLOT_SOFT_UART_PORTS &&
+                   soft_uart_port_present[port]
+               ? (uint16_t)(1U << soft_uart_gpio_pins[port])
+               : 0U;
+}
+
+static bool soft_uart_port_prepare(void* context, uint8_t port) {
+    (void)context;
+    if (soft_uart_gpio_port(port) == NULL ||
+        soft_uart_gpio_mask(port) == 0U) {
+        return false;
+    }
+    enable_gpio_clock(soft_uart_gpio_ports[port]);
+    return true;
+}
+
+static bool soft_uart_set_output(void* context, uint8_t port, bool high) {
+    (void)context;
+    GPIO_TypeDef* gpio = soft_uart_gpio_port(port);
+    const uint16_t mask = soft_uart_gpio_mask(port);
+    if (gpio == NULL || mask == 0U) {
+        return false;
+    }
+    gpio->BSRR = high ? mask : (uint32_t)mask << 16U;
+    GPIO_InitTypeDef init = {0};
+    init.Pin = mask;
+    init.Mode = GPIO_MODE_OUTPUT_PP;
+    init.Pull = GPIO_NOPULL;
+    init.Speed = (soft_uart_gpio_ports[port] == 2U &&
+                  soft_uart_gpio_pins[port] >= 13U)
+                     ? GPIO_SPEED_FREQ_LOW
+                     : GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(gpio, &init);
+    return true;
+}
+
+static bool soft_uart_set_input(void* context, uint8_t port) {
+    (void)context;
+    GPIO_TypeDef* gpio = soft_uart_gpio_port(port);
+    const uint16_t mask = soft_uart_gpio_mask(port);
+    if (gpio == NULL || mask == 0U) {
+        return false;
+    }
+    GPIO_InitTypeDef init = {0};
+    init.Pin = mask;
+    init.Mode = GPIO_MODE_INPUT;
+    init.Pull = GPIO_PULLUP;
+    init.Speed = (soft_uart_gpio_ports[port] == 2U &&
+                  soft_uart_gpio_pins[port] >= 13U)
+                     ? GPIO_SPEED_FREQ_LOW
+                     : GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(gpio, &init);
+    return true;
+}
+
+static bool soft_uart_read_input(void* context, uint8_t port, bool* high) {
+    (void)context;
+    GPIO_TypeDef* gpio = soft_uart_gpio_port(port);
+    const uint16_t mask = soft_uart_gpio_mask(port);
+    if (gpio == NULL || mask == 0U || high == NULL) {
+        return false;
+    }
+    *high = (gpio->IDR & mask) != 0U;
+    return true;
+}
+
+static void soft_uart_delay_ticks(void* context, uint32_t ticks) {
+    (void)context;
+    const uint16_t started = (uint16_t)TIM17->CNT;
+    while ((uint16_t)((uint16_t)TIM17->CNT - started) < ticks) {
+    }
+}
+
+static uint32_t soft_uart_irq_save_disable(void* context) {
+    (void)context;
+    const uint32_t state = __get_PRIMASK();
+    __disable_irq();
+    return state;
+}
+
+static void soft_uart_irq_restore(void* context, uint32_t state) {
+    (void)context;
+    if (state == 0U) {
+        __enable_irq();
+    }
+}
+
+static bool board_soft_uart_configure(uint8_t port, uint32_t baud_rate,
+                                      uint8_t data_bits, uint8_t stop_bits,
+                                      uint8_t parity) {
+    return rbsp_soft_half_duplex_uart_configure(
+        &soft_uart, port, baud_rate, data_bits, stop_bits, parity);
+}
+
+static size_t board_soft_uart_read(uint8_t port, uint8_t* data,
+                                   size_t capacity) {
+    return rbsp_soft_half_duplex_uart_read(&soft_uart, port, data, capacity);
+}
+
+static bool board_soft_uart_write(uint8_t port, const uint8_t* data,
+                                  size_t length) {
+#ifdef CONFIG_REMOTEBSP_MOTION
+    /* 定时器节拍由运动核心消费，并在各轴输出 STEP 脉冲。 */
+    if (remote_core.motion.state == RBSP_MOTION_ARMED ||
+        remote_core.motion.state == RBSP_MOTION_RUNNING) {
+        return false;
+    }
+#endif
+    return rbsp_soft_half_duplex_uart_write(&soft_uart, port, data, length);
+}
+#endif
+
+void HAL_CAN_MspInit(CAN_HandleTypeDef* handle) {
+    if (handle->Instance != CAN) {
+        return;
+    }
+    __HAL_RCC_CAN1_CLK_ENABLE();
+
+    GPIO_InitTypeDef init = {0};
+#if defined(CONFIG_CAN_PINS_PA11_PA12)
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    init.Pin = GPIO_PIN_11 | GPIO_PIN_12;
+#else
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    init.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+#endif
+    init.Mode = GPIO_MODE_AF_PP;
+    init.Pull = GPIO_NOPULL;
+    init.Speed = GPIO_SPEED_FREQ_HIGH;
+    init.Alternate = GPIO_AF4_CAN;
+#if defined(CONFIG_CAN_PINS_PA11_PA12)
+    HAL_GPIO_Init(GPIOA, &init);
+#else
+    HAL_GPIO_Init(GPIOB, &init);
+#endif
+}
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+void HAL_UART_MspInit(UART_HandleTypeDef* handle) {
+    if (handle->Instance != USART1) {
+        return;
+    }
+    __HAL_RCC_USART1_CLK_ENABLE();
+
+    GPIO_InitTypeDef init = {0};
+#if defined(CONFIG_UART0_PINS_PA9_PA10)
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    init.Pin = GPIO_PIN_9 | GPIO_PIN_10;
+    init.Alternate = GPIO_AF1_USART1;
+    init.Mode = GPIO_MODE_AF_PP;
+    init.Pull = GPIO_PULLUP;
+    init.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOA, &init);
+#else
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    init.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    init.Alternate = GPIO_AF0_USART1;
+    init.Mode = GPIO_MODE_AF_PP;
+    init.Pull = GPIO_PULLUP;
+    init.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &init);
+#endif
+}
+
+static bool board_uart_configure(uint8_t port, uint32_t baud_rate,
+                                 uint8_t data_bits, uint8_t stop_bits,
+                                 uint8_t parity) {
+    if (port != 0U || baud_rate < 300U || baud_rate > 3000000U ||
+        stop_bits < 1U || stop_bits > 2U || parity > 2U) {
+        return false;
+    }
+
+    uint32_t word_length;
+    if (parity == 0U && data_bits == 8U) {
+        word_length = UART_WORDLENGTH_8B;
+    } else if (parity != 0U && data_bits == 7U) {
+        word_length = UART_WORDLENGTH_8B;
+    } else if (parity != 0U && data_bits == 8U) {
+        word_length = UART_WORDLENGTH_9B;
+    } else {
+        return false;
+    }
+
+    HAL_NVIC_DisableIRQ(USART1_IRQn);
+    uart0_configured = false;
+    if (uart0_handle.Instance == USART1) {
+        (void)HAL_UART_DeInit(&uart0_handle);
+    }
+    rbsp_byte_ring_clear(&uart0_rx_ring);
+    rbsp_byte_ring_clear(&uart0_tx_ring);
+
+    uart0_handle.Instance = USART1;
+    uart0_handle.Init.BaudRate = baud_rate;
+    uart0_handle.Init.WordLength = word_length;
+    uart0_handle.Init.StopBits =
+        stop_bits == 1U ? UART_STOPBITS_1 : UART_STOPBITS_2;
+    uart0_handle.Init.Parity =
+        parity == 0U ? UART_PARITY_NONE
+                     : (parity == 1U ? UART_PARITY_ODD
+                                     : UART_PARITY_EVEN);
+    uart0_handle.Init.Mode = UART_MODE_TX_RX;
+    uart0_handle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    uart0_handle.Init.OverSampling = UART_OVERSAMPLING_16;
+    uart0_handle.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    uart0_handle.AdvancedInit.AdvFeatureInit =
+        UART_ADVFEATURE_NO_INIT;
+    if (HAL_UART_Init(&uart0_handle) != HAL_OK) {
+        return false;
+    }
+
+    __HAL_UART_CLEAR_OREFLAG(&uart0_handle);
+    __HAL_UART_ENABLE_IT(&uart0_handle, UART_IT_RXNE);
+    __HAL_UART_ENABLE_IT(&uart0_handle, UART_IT_ERR);
+    uart0_configured = true;
+    HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
+    return true;
+}
+
+static size_t board_uart_read(uint8_t port, uint8_t* data,
+                              size_t capacity) {
+    if (port != 0U || !uart0_configured || data == NULL) {
+        return 0U;
+    }
+    const uint32_t interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    const size_t count =
+        rbsp_byte_ring_read(&uart0_rx_ring, data, capacity);
+    if (interrupt_state == 0U) {
+        __enable_irq();
+    }
+    return count;
+}
+
+static bool board_uart_write(uint8_t port, const uint8_t* data,
+                             size_t length) {
+    if (port != 0U || !uart0_configured || data == NULL ||
+        length == 0U) {
+        return false;
+    }
+    const uint32_t interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    const bool accepted =
+        rbsp_byte_ring_write_exact(&uart0_tx_ring, data, length);
+    if (accepted) {
+        __HAL_UART_ENABLE_IT(&uart0_handle, UART_IT_TXE);
+    }
+    if (interrupt_state == 0U) {
+        __enable_irq();
+    }
+    return accepted;
+}
+#endif
+
+static void can_configure(void) {
+    can_handle.Instance = CAN;
+    can_handle.Init.Prescaler = CAN_PRESCALER;
+    can_handle.Init.Mode = CAN_MODE_NORMAL;
+    can_handle.Init.SyncJumpWidth = CAN_SJW_1TQ;
+    can_handle.Init.TimeSeg1 = CAN_BS1_13TQ;
+    can_handle.Init.TimeSeg2 = CAN_BS2_2TQ;
+    can_handle.Init.TimeTriggeredMode = DISABLE;
+    can_handle.Init.AutoBusOff = ENABLE;
+    can_handle.Init.AutoWakeUp = DISABLE;
+    can_handle.Init.AutoRetransmission = ENABLE;
+    can_handle.Init.ReceiveFifoLocked = DISABLE;
+    can_handle.Init.TransmitFifoPriority = ENABLE;
+    if (HAL_CAN_Init(&can_handle) != HAL_OK) {
+        fatal_error();
+    }
+
+    CAN_FilterTypeDef filter = {0};
+    filter.FilterBank = 0U;
+    filter.FilterMode = CAN_FILTERMODE_IDMASK;
+    filter.FilterScale = CAN_FILTERSCALE_32BIT;
+    filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+    filter.FilterActivation = ENABLE;
+    if (HAL_CAN_ConfigFilter(&can_handle, &filter) != HAL_OK ||
+        HAL_CAN_Start(&can_handle) != HAL_OK) {
+        fatal_error();
+    }
+}
+
+static bool board_can_send(const rbsp_can_frame_t* frame) {
+    if (frame == NULL || frame->length > 8U ||
+        frame->identifier > 0x7FFU) {
+        return false;
+    }
+    const uint32_t started = HAL_GetTick();
+    while (HAL_CAN_GetTxMailboxesFreeLevel(&can_handle) == 0U) {
+        if ((uint32_t)(HAL_GetTick() - started) >= 20U) {
+            ++rbsp_diag_can_tx_failures;
+            return false;
+        }
+    }
+    CAN_TxHeaderTypeDef header = {0};
+    uint32_t mailbox = 0U;
+    header.StdId = frame->identifier;
+    header.IDE = CAN_ID_STD;
+    header.RTR = CAN_RTR_DATA;
+    header.DLC = frame->length;
+    header.TransmitGlobalTime = DISABLE;
+    if (HAL_CAN_AddTxMessage(&can_handle, &header,
+                             (uint8_t*)frame->data,
+                             &mailbox) != HAL_OK) {
+        ++rbsp_diag_can_tx_failures;
+        return false;
+    }
+    ++rbsp_diag_can_tx_frames;
+    return true;
+}
+
+static void receive_can_frames(void) {
+    while (HAL_CAN_GetRxFifoFillLevel(&can_handle, CAN_RX_FIFO0) != 0U) {
+        CAN_RxHeaderTypeDef header = {0};
+        rbsp_can_frame_t frame = {0};
+        if (HAL_CAN_GetRxMessage(&can_handle, CAN_RX_FIFO0, &header,
+                                 frame.data) != HAL_OK) {
+            ++rbsp_diag_can_rx_failures;
+            return;
+        }
+        if (header.IDE != CAN_ID_STD || header.RTR != CAN_RTR_DATA ||
+            header.DLC > 8U) {
+            continue;
+        }
+        ++rbsp_diag_can_rx_frames;
+        frame.identifier = header.StdId;
+        frame.length = (uint8_t)header.DLC;
+        rbsp_core_accept_can(&remote_core, &frame);
+    }
+}
+
+static void make_node_info(rbsp_node_info_t* info) {
+    memset(info, 0, sizeof(*info));
+    put_u32(info->uuid + 0U, HAL_GetUIDw0());
+    put_u32(info->uuid + 4U, HAL_GetUIDw1());
+    put_u32(info->uuid + 8U, HAL_GetUIDw2());
+    put_u32(info->uuid + 12U, CONFIG_BOARD_TYPE);
+    info->firmware_major = CONFIG_FIRMWARE_VERSION_MAJOR;
+    info->firmware_minor = CONFIG_FIRMWARE_VERSION_MINOR;
+    info->firmware_patch = CONFIG_FIRMWARE_VERSION_PATCH;
+    info->board_type = CONFIG_BOARD_TYPE;
+}
+
+int main(void) {
+    vector_table_relocate();
+    HAL_Init();
+    system_clock_configure();
+#if defined(CONFIG_REMOTEBSP_MOTION) || \
+    defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+    if (!motion_slot_configuration_valid()) {
+        fatal_error();
+    }
+#endif
+    startup_gpio_configure();
+#ifdef CONFIG_REMOTEBSP_MOTION
+    motion_outputs_configure();
+    motion_timebase_configure();
+#endif
+    transceiver_enable();
+    can_configure();
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    soft_uart_timer_configure();
+    const rbsp_soft_half_duplex_uart_hal_t soft_uart_hal = {
+        .context = NULL,
+        .port_prepare = soft_uart_port_prepare,
+        .set_output = soft_uart_set_output,
+        .set_input = soft_uart_set_input,
+        .read_input = soft_uart_read_input,
+        .timing_hz = CONFIG_SYSTEM_CLOCK_HZ,
+        .delay_ticks = soft_uart_delay_ticks,
+        .irq_save_disable = soft_uart_irq_save_disable,
+        .irq_restore = soft_uart_irq_restore,
+    };
+    if (!rbsp_soft_half_duplex_uart_init(&soft_uart, &soft_uart_hal)) {
+        fatal_error();
+    }
+#endif
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (!rbsp_byte_ring_init(&uart0_rx_ring, uart0_rx_storage,
+                             sizeof(uart0_rx_storage)) ||
+        !rbsp_byte_ring_init(&uart0_tx_ring, uart0_tx_storage,
+                             sizeof(uart0_tx_storage))) {
+        fatal_error();
+    }
+#endif
+
+    rbsp_node_info_t info;
+    make_node_info(&info);
+    const rbsp_hal_t hal = {
+        .can_send = board_can_send,
+        .milliseconds = HAL_GetTick,
+        .gpio_configure = board_gpio_configure,
+        .gpio_write = board_gpio_write,
+        .gpio_read = board_gpio_read,
+#ifdef RBSP_HARDWARE_UART_ENABLED
+        .uart_configure = board_uart_configure,
+        .uart_read = board_uart_read,
+        .uart_write = board_uart_write,
+#elif defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+        .uart_configure = board_soft_uart_configure,
+        .uart_read = board_soft_uart_read,
+        .uart_write = board_soft_uart_write,
+#endif
+#ifdef CONFIG_REMOTEBSP_MOTION
+        .nanoseconds = board_motion_nanoseconds,
+        .motion_axis_count = MOTION_SLOT_AXIS_COUNT,
+        .motion_set_enable = board_motion_set_enable,
+        .motion_set_direction = board_motion_set_direction,
+        .motion_set_step = board_motion_set_step,
+#ifdef CONFIG_MOTION_SLOT_LIMIT_INPUTS
+        .motion_limit_active = board_motion_limit_active,
+#endif
+#endif
+#ifdef CONFIG_APP_LAYOUT_KATAPULT_8K
+        .enter_bootloader = board_enter_bootloader,
+#endif
+    };
+    if (!rbsp_core_init(&remote_core, &hal, RBSP_CAN_CLASSICAL,
+                        &info)) {
+        fatal_error();
+    }
+#ifdef CONFIG_REMOTEBSP_MOTION
+    motion_tick_timer_start();
+#endif
+
+    for (;;) {
+        receive_can_frames();
+        rbsp_core_poll(&remote_core);
+    }
+}
+
+void SysTick_Handler(void) {
+    HAL_IncTick();
+}
+
+#ifdef CONFIG_REMOTEBSP_MOTION
+void TIM2_IRQHandler(void) {
+    if ((TIM2->SR & TIM_SR_UIF) != 0U) {
+        TIM2->SR &= ~TIM_SR_UIF;
+        ++motion_timebase_epochs;
+    }
+}
+
+void TIM3_IRQHandler(void) {
+    if ((TIM3->SR & TIM_SR_UIF) != 0U) {
+        TIM3->SR &= ~TIM_SR_UIF;
+        /* 空闲时不进入通用运动内核，把 CPU 和 CAN 接收时间还给主循环。 */
+        if (remote_core.motion.state == RBSP_MOTION_ARMED ||
+            remote_core.motion.state == RBSP_MOTION_RUNNING) {
+            (void)rbsp_core_motion_tick(&remote_core);
+        }
+    }
+}
+#endif
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+void USART1_IRQHandler(void) {
+    if (!uart0_configured) {
+        return;
+    }
+
+    const uint32_t status = uart0_handle.Instance->ISR;
+    const uint32_t error_flags =
+        USART_ISR_ORE | USART_ISR_NE | USART_ISR_FE | USART_ISR_PE;
+    if ((status & USART_ISR_RXNE) != 0U) {
+        const uint8_t value = (uint8_t)uart0_handle.Instance->RDR;
+        if (rbsp_byte_ring_push(&uart0_rx_ring, value)) {
+            ++rbsp_diag_uart_rx_bytes;
+        } else {
+            ++rbsp_diag_uart_rx_overflows;
+        }
+    }
+    if ((status & error_flags) != 0U) {
+        uart0_handle.Instance->ICR =
+            USART_ICR_ORECF | USART_ICR_NCF |
+            USART_ICR_FECF | USART_ICR_PECF;
+        ++rbsp_diag_uart_errors;
+    }
+
+    if ((uart0_handle.Instance->ISR & USART_ISR_TXE) != 0U &&
+        (uart0_handle.Instance->CR1 & USART_CR1_TXEIE) != 0U) {
+        uint8_t value;
+        if (rbsp_byte_ring_pop(&uart0_tx_ring, &value)) {
+            uart0_handle.Instance->TDR = value;
+            ++rbsp_diag_uart_tx_bytes;
+        } else {
+            __HAL_UART_DISABLE_IT(&uart0_handle, UART_IT_TXE);
+        }
+    }
+}
+#endif

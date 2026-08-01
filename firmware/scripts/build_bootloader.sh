@@ -5,6 +5,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 katapult_dir="${root_dir}/vendor/katapult"
 output_dir="${root_dir}/out"
 target="${1:-all}"
+build_jobs="${RBSP_BUILD_JOBS:-32}"
 
 bash "${root_dir}/scripts/fetch_katapult.sh"
 
@@ -21,7 +22,7 @@ build_one() {
     cp "${config}" "${katapult_dir}/.config"
     make -C "${katapult_dir}" OUT="${katapult_output}" olddefconfig
     make -C "${katapult_dir}" OUT="${katapult_output}" \
-        -j"$(nproc)"
+        -j"${build_jobs}"
 
     cp "${katapult_dir}/${katapult_output}katapult.bin" \
         "${output_dir}/katapult-${profile}.bin"
@@ -34,15 +35,16 @@ build_one() {
 }
 
 case "${target}" in
-    stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb)
+    stm32f072_dual|stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb)
         build_one "${target}"
         ;;
     all)
+        build_one stm32f072_dual
         build_one stm32f103_dual
         build_one stm32g431_dual
         ;;
     *)
-        printf '用法：%s [stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb|all]\n' \
+        printf '用法：%s [stm32f072_dual|stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb|all]\n' \
             "$0" >&2
         exit 2
         ;;

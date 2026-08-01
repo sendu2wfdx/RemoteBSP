@@ -48,6 +48,56 @@ int main() {
     assert((decoded[1].flags &
             remotebsp::protocol::kResourceFlagExpanded) != 0);
 
+    const remotebsp::protocol::ResourceContract contract{
+        0x02000007,
+        remotebsp::protocol::kResourceContractVersion,
+        static_cast<std::uint16_t>(
+            remotebsp::protocol::kResourceAccessReadable |
+            remotebsp::protocol::kResourceAccessWritable |
+            remotebsp::protocol::kResourceAccessLeaseSupported),
+        1000, 500, 5000, 4096, 3000000, 3000000};
+    const auto decoded_contract =
+        remotebsp::protocol::decode_resource_contract(
+            remotebsp::protocol::encode_resource_contract(contract));
+    assert(decoded_contract.resource_id == contract.resource_id);
+    assert(decoded_contract.version ==
+           remotebsp::protocol::kResourceContractVersion);
+    assert(decoded_contract.queue_capacity == 4096);
+    assert(decoded_contract.maximum_tx_bits_per_second == 3000000);
+
+    const remotebsp::protocol::ResourceLeaseRequest lease_request{
+        0x02000007, 1000,
+        remotebsp::protocol::ResourceLeaseMode::Exclusive};
+    const auto decoded_lease_request =
+        remotebsp::protocol::decode_resource_lease_request(
+            remotebsp::protocol::encode_resource_lease_request(
+                lease_request));
+    assert(decoded_lease_request.resource_id == 0x02000007);
+    assert(decoded_lease_request.duration_ms == 1000);
+    assert(decoded_lease_request.mode ==
+           remotebsp::protocol::ResourceLeaseMode::Exclusive);
+
+    const remotebsp::protocol::ResourceLeaseTokenRequest token_request{
+        0x02000007, 0x1122334455667788ULL, 2000};
+    const auto decoded_token_request =
+        remotebsp::protocol::decode_resource_lease_token_request(
+            remotebsp::protocol::encode_resource_lease_token_request(
+                token_request));
+    assert(decoded_token_request.lease_id ==
+           0x1122334455667788ULL);
+    assert(decoded_token_request.duration_ms == 2000);
+
+    const remotebsp::protocol::ResourceLeaseInfo lease_info{
+        0x02000007, 42, 7, 2000, 1500,
+        remotebsp::protocol::ResourceLeaseMode::Exclusive, 1};
+    const auto decoded_lease_info =
+        remotebsp::protocol::decode_resource_lease_info(
+            remotebsp::protocol::encode_resource_lease_info(lease_info));
+    assert(decoded_lease_info.lease_id == 42);
+    assert(decoded_lease_info.owner_session_id == 7);
+    assert(decoded_lease_info.remaining_ms == 1500);
+    assert(decoded_lease_info.active_lease_count == 1);
+
     auto uart =
         std::make_shared<remotebsp::mock_mcu::MockUartBsp>(4, 4);
     uart->configure(7, {115200, 8, 1,
@@ -59,7 +109,16 @@ int main() {
         info,
         remotebsp::mock_mcu::capability_mask(
             remotebsp::mock_mcu::Capability::Uart),
-        nullptr, uart, resources);
+        nullptr, uart, resources, {contract});
+
+    const auto contract_response = core.handle(request(
+        Command::ResourceContract,
+        remotebsp::protocol::encode_resource_id(0x02000007)));
+    const auto remote_contract =
+        remotebsp::protocol::decode_resource_contract(
+            response_body(contract_response));
+    assert(remote_contract.resource_id == 0x02000007);
+    assert(remote_contract.worst_case_latency_us == 500);
 
     const auto list_response = core.handle(request(Command::ResourceEnum));
     assert(remotebsp::protocol::decode_resource_list(

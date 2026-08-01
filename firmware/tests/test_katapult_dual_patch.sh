@@ -31,10 +31,22 @@ build_profile() {
     grep -q '^CONFIG_USBSERIAL=y$' "${temporary_dir}/.config"
     grep -q '^CONFIG_CANSERIAL=y$' "${temporary_dir}/.config"
     grep -q '^CONFIG_STM32_CANBUS_PB8_PB9=y$' "${temporary_dir}/.config"
-    grep -q '^CONFIG_ENABLE_BUTTON=y$' "${temporary_dir}/.config"
-    grep -q '^CONFIG_BUTTON_PIN="~PA0"$' "${temporary_dir}/.config"
-    grep -q '^# CONFIG_ENABLE_DOUBLE_RESET is not set$' \
-        "${temporary_dir}/.config"
+    if [[ "${profile}" == "stm32f072_dual" ]]; then
+        grep -q '^# CONFIG_ENABLE_BUTTON is not set$' \
+            "${temporary_dir}/.config"
+        grep -q '^CONFIG_ENABLE_DOUBLE_RESET=y$' \
+            "${temporary_dir}/.config"
+    elif [[ "${profile}" == "stm32f103_dual" ]]; then
+        grep -q '^CONFIG_ENABLE_BUTTON=y$' "${temporary_dir}/.config"
+        grep -q '^CONFIG_BUTTON_PIN="~PA0"$' "${temporary_dir}/.config"
+        grep -q '^# CONFIG_ENABLE_DOUBLE_RESET is not set$' \
+            "${temporary_dir}/.config"
+    else
+        grep -q '^CONFIG_ENABLE_BUTTON=y$' "${temporary_dir}/.config"
+        grep -q '^CONFIG_BUTTON_PIN="~PC13"$' "${temporary_dir}/.config"
+        grep -q '^# CONFIG_ENABLE_DOUBLE_RESET is not set$' \
+            "${temporary_dir}/.config"
+    fi
 
     local object_dir="${temporary_dir}/${output}src"
     arm-none-eabi-nm "${object_dir}/generic/dual_interface.o" |
@@ -52,6 +64,7 @@ build_profile() {
     printf '%s：%s 字节，双模式配置有效\n' "${profile}" "${size}"
 }
 
+build_profile stm32f072_dual
 build_profile stm32f103_dual
 build_profile stm32g431_dual
 printf '临时验证目录保留在：%s\n' "${temporary_dir}"

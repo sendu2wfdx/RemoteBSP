@@ -248,7 +248,7 @@ index d45234c..455559c 100644
      prompt "Communication interface"
 +    config STM32_DUAL_CAN_USB_PA11_PA12_PB8_PB9
 +        bool "双模式：PA11/PA12 USB 恢复，PB8/PB9 CAN 总线"
-+        depends on (MACH_STM32F103 || MACH_STM32G431) && (HAVE_STM32_USBFS || HAVE_STM32_USBOTG)
++        depends on (MACH_STM32F072 || MACH_STM32F103 || MACH_STM32G431) && (HAVE_STM32_USBFS || HAVE_STM32_USBOTG)
 +        select USBSERIAL
 +        select CANSERIAL
 +        select DUAL_CAN_USB
@@ -264,6 +264,22 @@ index d45234c..455559c 100644
  config STM32_CANBUS_PI9_PH13
      bool
      default y if STM32_MMENU_CANBUS_PI9_PH13 || STM32_CMENU_CANBUS_PI9_PH13
+diff --git a/src/generic/armcm_canboot.c b/src/generic/armcm_canboot.c
+--- a/src/generic/armcm_canboot.c
++++ b/src/generic/armcm_canboot.c
+@@ -121,7 +121,12 @@ asm(".section .text.armcm_boot.stage_one\n"
+     ".global ResetHandler\n"
+     ".type ResetHandler, %function\n"
+     "ResetHandler:\n"
++#if __CORTEX_M == 0
++    "    ldr r0, =reset_handler_stage_two\n"
++    "    bx r0\n"
++#else
+     "    b reset_handler_stage_two\n"
++#endif
+     );
+ extern void ResetHandler();
+ DECL_ARMCM_IRQ(ResetHandler, -15);
 diff --git a/src/stm32/Makefile b/src/stm32/Makefile
 index eee3526..c218cb2 100644
 --- a/src/stm32/Makefile

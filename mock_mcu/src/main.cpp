@@ -1,10 +1,8 @@
+#include "remotebsp/mock_mcu/board_manifest.hpp"
 #include "remotebsp/mock_mcu/mock_node.hpp"
-#include "remotebsp/mock_mcu/gpio_bsp.hpp"
-#include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -38,68 +36,26 @@ remotebsp::transport::CanMode parse_mode(const std::string& text) {
     throw std::invalid_argument("模式必须是 classical 或 fd");
 }
 
-remotebsp::mock_mcu::RemoteCore make_core(std::uint32_t instance) {
-    remotebsp::mock_mcu::NodeInfo info;
-    info.uuid = {0x52, 0x42, 0x53, 0x50, 0x2D, 0x4D, 0x4F, 0x43,
-                 0x4B, 0x2D, 0x4E, 0x4F, 0x44, 0x45, 0x30, 0x31};
-    info.uuid[15] = static_cast<std::uint8_t>(instance);
-    info.firmware_major = 0;
-    info.firmware_minor = 1;
-    info.firmware_patch = 0;
-    info.board_type = instance;
-
-    using remotebsp::mock_mcu::Capability;
-    using remotebsp::mock_mcu::capability_mask;
-    const std::uint64_t capabilities =
-        capability_mask(Capability::Gpio) |
-        capability_mask(Capability::Uart) |
-        capability_mask(Capability::Spi) |
-        capability_mask(Capability::I2c) |
-        capability_mask(Capability::Adc) |
-        capability_mask(Capability::Pwm) |
-        capability_mask(Capability::Timer) |
-        capability_mask(Capability::Storage) |
-        capability_mask(Capability::Bootloader);
-
-    using remotebsp::protocol::ResourceDescriptor;
-    using remotebsp::protocol::ResourceType;
-    std::vector<ResourceDescriptor> resources;
-    for (std::uint16_t pin = 0; pin < 16; ++pin) {
-        resources.push_back(
-            {0x01000000U + pin, ResourceType::Gpio, pin,
-             remotebsp::protocol::kResourceFlagNative, 0, 0});
-    }
-    for (std::uint16_t port = 0; port < 8; ++port) {
-        const auto source =
-            port < 4 ? remotebsp::protocol::kResourceFlagNative
-                     : remotebsp::protocol::kResourceFlagExpanded;
-        resources.push_back(
-            {0x02000000U + port, ResourceType::Uart, port,
-             source, 4096, 4096});
-    }
-    return remotebsp::mock_mcu::RemoteCore(
-        info, capabilities,
-        std::make_shared<remotebsp::mock_mcu::MockGpioBsp>(),
-        std::make_shared<remotebsp::mock_mcu::MockUartBsp>(),
-        std::move(resources));
-}
-
 void send_reply(remotebsp::transport::CanTransport& transport,
                 std::uint32_t can_id,
                 const remotebsp::mock_mcu::NodeReply& reply) {
+    const bool bit_rate_switch =
+        transport.mode() ==
+        remotebsp::transport::CanMode::FlexibleDataRate;
     for (const auto& frame : reply.frames) {
-        transport.send({can_id, false, frame});
+        transport.send({can_id, false, frame, bit_rate_switch});
     }
 }
 
 remotebsp::mock_mcu::NodeReply make_uart_rx_event(
-    std::size_t mtu, std::uint16_t transfer_id) {
+    std::size_t mtu, std::uint16_t transfer_id,
+    std::uint32_t resource_id) {
     remotebsp::protocol::Packet event;
     event.header.message_type =
         remotebsp::protocol::MessageType::Event;
     event.header.command = static_cast<std::uint16_t>(
         remotebsp::protocol::Command::UartRxEvent);
-    event.header.object_id = 0x02000007U;
+    event.header.object_id = resource_id;
     const std::string text = "mock-uart7\n";
     event.payload.assign(text.begin(), text.end());
     remotebsp::mock_mcu::NodeReply reply;
@@ -114,7 +70,8 @@ remotebsp::mock_mcu::NodeReply make_uart_rx_event(
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "用法: mock_mcu <SocketCAN接口> <classical|fd> "
-                     "[--instance 1..127] [--uart-stream]\n";
+                     "[--instance 1..127] [--uart-stream] "
+                     "[--board JSON] [--fault-scenario JSON]\n";
         return 2;
     }
 
@@ -122,11 +79,24 @@ int main(int argc, char** argv) {
         const auto mode = parse_mode(argv[2]);
         std::uint32_t instance = 1;
         bool uart_stream = false;
+        std::string board_path = REMOTEBSP_DEFAULT_MOCK_BOARD_MANIFEST;
+        std::string fault_scenario_path;
         for (int index = 3; index < argc;) {
             const std::string option = argv[index];
             if (option == "--uart-stream") {
                 uart_stream = true;
                 ++index;
+                continue;
+            }
+            if ((option == "--board" ||
+                 option == "--fault-scenario") &&
+                index + 1 < argc) {
+                if (option == "--board") {
+                    board_path = argv[index + 1];
+                } else {
+                    fault_scenario_path = argv[index + 1];
+                }
+                index += 2;
                 continue;
             }
             if (option != "--instance" || index + 1 >= argc) {
@@ -142,48 +112,119 @@ int main(int argc, char** argv) {
             }
             index += 2;
         }
+        auto manifest =
+            remotebsp::mock_mcu::load_board_manifest(board_path);
+        remotebsp::mock_mcu::FaultScenario fault_scenario;
+        if (!fault_scenario_path.empty()) {
+            fault_scenario =
+                remotebsp::mock_mcu::load_fault_scenario(
+                    fault_scenario_path);
+        }
+        remotebsp::mock_mcu::DigitalTwin twin(
+            std::move(manifest), std::move(fault_scenario));
+        std::uint32_t uart_stream_resource_id = 0;
+        if (uart_stream) {
+            const auto& resources = twin.manifest().resources;
+            const auto found = std::find_if(
+                resources.begin(), resources.end(), [](const auto& resource) {
+                    return resource.type ==
+                               remotebsp::protocol::ResourceType::Uart &&
+                           resource.instance == 7;
+                });
+            if (found == resources.end()) {
+                throw std::invalid_argument(
+                    "--uart-stream 要求板卡描述包含 UART 7");
+            }
+            uart_stream_resource_id = found->resource_id;
+        }
         remotebsp::transport::SocketCanTransport transport(argv[1], mode);
-        remotebsp::mock_mcu::MockNode node(make_core(instance), transport.mtu(),
-                                           kNodeId);
+        remotebsp::mock_mcu::MockNode node(
+            remotebsp::mock_mcu::make_remote_core(twin, instance),
+            transport.mtu(), kNodeId);
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
 
+        const auto started_at = std::chrono::steady_clock::now();
         auto next_heartbeat =
-            std::chrono::steady_clock::now() + kHeartbeatInterval;
+            started_at + kHeartbeatInterval;
         auto next_uart_stream =
-            std::chrono::steady_clock::now() + kUartStreamInterval;
-        std::cout << "Mock MCU 已连接 " << argv[1] << "，按 Ctrl+C 退出\n";
+            started_at + kUartStreamInterval;
+        std::cout << "Mock MCU 已连接 " << argv[1]
+                  << "，板卡描述=" << twin.manifest().name
+                  << "，按 Ctrl+C 退出\n";
 
         while (stop_requested == 0) {
             const auto now = std::chrono::steady_clock::now();
+            const auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - started_at);
+            twin.advance_to(static_cast<std::uint64_t>(
+                std::max<std::int64_t>(0, elapsed_ms.count())));
             if (now >= next_heartbeat) {
-                const auto heartbeat_can_id =
-                    node.node_id() == 0
-                        ? kProvisionalResponseBaseCanId + instance
-                        : kNodeHeartbeatBaseCanId + node.node_id();
-                send_reply(transport, heartbeat_can_id,
-                           node.make_heartbeat());
+                if (twin.online()) {
+                    const auto heartbeat_can_id =
+                        node.node_id() == 0
+                            ? kProvisionalResponseBaseCanId + instance
+                            : kNodeHeartbeatBaseCanId + node.node_id();
+                    send_reply(transport, heartbeat_can_id,
+                               node.make_heartbeat());
+                }
                 next_heartbeat = now + kHeartbeatInterval;
             }
             if (uart_stream && node.node_id() != 0 &&
                 now >= next_uart_stream) {
-                send_reply(
-                    transport,
-                    kNodeHeartbeatBaseCanId + node.node_id(),
-                    make_uart_rx_event(transport.mtu(),
-                                       node.allocate_transfer_id()));
+                if (twin.online()) {
+                    const std::string stream_text = "mock-stream\n";
+                    const std::vector<std::uint8_t> stream_data(
+                        stream_text.begin(), stream_text.end());
+                    if (twin.uart()) {
+                        for (std::uint8_t port : {0U, 1U, 2U, 3U}) {
+                            try {
+                                twin.uart()->inject_rx(port, stream_data);
+                            } catch (
+                                const remotebsp::mock_mcu::UartException&) {
+                            }
+                        }
+                    }
+                    for (const auto& event :
+                         node.poll_uart_events()) {
+                        send_reply(
+                            transport,
+                            kNodeHeartbeatBaseCanId + node.node_id(),
+                            event);
+                    }
+                    send_reply(
+                        transport,
+                        kNodeHeartbeatBaseCanId + node.node_id(),
+                        make_uart_rx_event(
+                            transport.mtu(),
+                            node.allocate_transfer_id(),
+                            uart_stream_resource_id));
+                }
                 next_uart_stream = now + kUartStreamInterval;
             }
 
-            const auto next_deadline =
+            auto next_deadline =
                 uart_stream && node.node_id() != 0
                     ? std::min(next_heartbeat, next_uart_stream)
                     : next_heartbeat;
+            const auto next_fault = twin.next_event_ms();
+            if (next_fault.has_value()) {
+                next_deadline = std::min(
+                    next_deadline,
+                    started_at + std::chrono::milliseconds(*next_fault));
+            }
             const auto timeout =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    next_deadline - std::chrono::steady_clock::now());
+                std::max(std::chrono::milliseconds(0),
+                         std::chrono::duration_cast<
+                             std::chrono::milliseconds>(
+                             next_deadline -
+                             std::chrono::steady_clock::now()));
             const auto message = transport.receive(timeout);
             if (!message.has_value()) {
+                continue;
+            }
+            if (!twin.online()) {
                 continue;
             }
             const bool broadcast =

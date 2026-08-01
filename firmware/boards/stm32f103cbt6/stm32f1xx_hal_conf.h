@@ -6,6 +6,7 @@
 #define HAL_FLASH_MODULE_ENABLED
 #define HAL_GPIO_MODULE_ENABLED
 #define HAL_CAN_MODULE_ENABLED
+#define HAL_TIM_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_PCD_MODULE_ENABLED
 
@@ -26,6 +27,7 @@
 #include "stm32f1xx_hal_cortex.h"
 #include "stm32f1xx_hal_can.h"
 #include "stm32f1xx_hal_dma.h"
+#include "stm32f1xx_hal_tim.h"
 #include "stm32f1xx_hal_uart.h"
 #include "stm32f1xx_hal_pcd.h"
 

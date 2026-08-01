@@ -59,6 +59,12 @@ void test_fd_frame() {
     CHECK(output.identifier == input.identifier);
     CHECK(output.extended_identifier);
     CHECK(output.data == input.data);
+    CHECK(!output.bit_rate_switch);
+
+    input.bit_rate_switch = true;
+    const auto brs_wire = encode_fd_frame(input);
+    CHECK((brs_wire.flags & CANFD_BRS) != 0);
+    CHECK(decode_fd_frame(brs_wire).bit_rate_switch);
 
     CanMessage padded{0x123, false, std::vector<std::uint8_t>(30, 0x5A)};
     const canfd_frame padded_wire = encode_fd_frame(padded);
@@ -71,6 +77,9 @@ void test_fd_frame() {
 void test_invalid_frames() {
     check_error(CanFrameError::InvalidIdentifier, [] {
         encode_classical_frame(CanMessage{CAN_SFF_MASK + 1U, false, {}});
+    });
+    check_error(CanFrameError::InvalidFlags, [] {
+        encode_classical_frame(CanMessage{1, false, {}, true});
     });
 
     can_frame remote{};
