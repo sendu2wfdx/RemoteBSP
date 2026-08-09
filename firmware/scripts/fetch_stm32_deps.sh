@@ -38,7 +38,4 @@ clone_component cmsis-device-g4 v1.2.6 \
     https://github.com/STMicroelectronics/cmsis-device-g4.git
 clone_component stm32g4xx-hal-driver v1.2.6 \
     https://github.com/STMicroelectronics/stm32g4xx-hal-driver.git
-clone_component stm32-mw-usb-device v2.11.5 \
-    https://github.com/STMicroelectronics/stm32-mw-usb-device.git
-
 printf 'STM32 官方依赖准备完成：%s\n' "${vendor_dir}"

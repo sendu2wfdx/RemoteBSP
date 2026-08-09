@@ -4,6 +4,7 @@
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/remote_core.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
+#include "remotebsp/mock_mcu/waveform_bsp.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -89,6 +90,7 @@ public:
     const std::shared_ptr<MockGpioBsp>& gpio() const noexcept;
     const std::shared_ptr<MockUartBsp>& uart() const noexcept;
     const std::shared_ptr<MotionExecutor>& motion() const noexcept;
+    const std::shared_ptr<WaveformBsp>& waveform() const noexcept;
     bool online() const noexcept;
     std::optional<std::uint64_t> next_event_ms() const noexcept;
     std::size_t advance_to(std::uint64_t elapsed_ms);
@@ -104,6 +106,7 @@ private:
     std::shared_ptr<MockGpioBsp> gpio_;
     std::shared_ptr<MockUartBsp> uart_;
     std::shared_ptr<MotionExecutor> motion_;
+    std::shared_ptr<WaveformBsp> waveform_;
     std::vector<MotionEdge> pending_motion_edges_;
     std::size_t next_event_index_{};
     bool online_{true};

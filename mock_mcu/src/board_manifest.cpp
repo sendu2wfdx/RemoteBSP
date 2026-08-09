@@ -440,6 +440,9 @@ protocol::ResourceType parse_resource_type(const std::string& text) {
     if (text == "stepgen_axis") {
         return protocol::ResourceType::StepgenAxis;
     }
+    if (text == "timed_bitstream") {
+        return protocol::ResourceType::TimedBitstream;
+    }
     schema_error(ManifestError::InvalidValue,
                  "未知资源类型 " + text);
 }
@@ -464,6 +467,8 @@ Capability resource_capability(protocol::ResourceType type) {
             return Capability::Storage;
         case protocol::ResourceType::StepgenAxis:
             return Capability::Motion;
+        case protocol::ResourceType::TimedBitstream:
+            return Capability::TimedBitstream;
     }
     schema_error(ManifestError::InvalidValue, "资源类型没有能力位映射");
 }
@@ -950,6 +955,11 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
     }
     uart_ = std::make_shared<MockUartBsp>(
         uart_rx_capacity, uart_tx_capacity);
+    if ((manifest_.capabilities & capability_mask(Capability::Pwm)) != 0U ||
+        (manifest_.capabilities &
+         capability_mask(Capability::TimedBitstream)) != 0U) {
+        waveform_ = std::make_shared<WaveformBsp>();
+    }
     if (!manifest_.motion_axes.empty()) {
         motion_ = std::make_shared<MotionExecutor>(
             manifest_.motion_axes,
@@ -990,6 +1000,10 @@ const std::shared_ptr<MockUartBsp>& DigitalTwin::uart() const noexcept {
 
 const std::shared_ptr<MotionExecutor>& DigitalTwin::motion() const noexcept {
     return motion_;
+}
+
+const std::shared_ptr<WaveformBsp>& DigitalTwin::waveform() const noexcept {
+    return waveform_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1067,7 +1081,7 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
     return RemoteCore(instantiate_node_info(manifest, instance),
                       manifest.capabilities, twin.gpio(), twin.uart(),
                       manifest.resources, manifest.contracts,
-                      twin.motion());
+                      twin.motion(), twin.waveform());
 }
 
 }  // namespace remotebsp::mock_mcu

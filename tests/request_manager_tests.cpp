@@ -147,6 +147,20 @@ void test_session_and_response_validation() {
     CHECK(manager.accept_response(uart_response, now).status ==
           toolbusd::ResponseStatus::Matched);
 
+    for (const auto command : {protocol::Command::PwmCreate,
+                               protocol::Command::TimedBitstreamCreate}) {
+        auto waveform_create = make_request(10);
+        waveform_create.header.command =
+            static_cast<std::uint16_t>(command);
+        waveform_create.header.object_id = 0;
+        const auto waveform_submission =
+            manager.submit(waveform_create, now);
+        auto waveform_response = make_response(waveform_submission.packet);
+        waveform_response.header.object_id = 44;
+        CHECK(manager.accept_response(waveform_response, now).status ==
+              toolbusd::ResponseStatus::Matched);
+    }
+
     uart_create.header.object_id = 99;
     const auto invalid_submission = manager.submit(uart_create, now);
     auto invalid_response = make_response(invalid_submission.packet);

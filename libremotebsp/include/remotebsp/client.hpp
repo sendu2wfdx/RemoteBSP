@@ -3,6 +3,7 @@
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/resource.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 
 #include <array>
 #include <cstddef>
@@ -149,6 +150,18 @@ public:
                               bool initial_value = false) const;
     bool gpio_read(std::uint32_t object_id) const;
     void gpio_write(std::uint32_t object_id, bool value) const;
+
+    std::uint32_t pwm_create(
+        const protocol::PwmCreatePayload& config) const;
+    void pwm_write(std::uint32_t object_id, std::uint16_t duty) const;
+    void pwm_stop(std::uint32_t object_id) const;
+
+    std::uint32_t timed_bitstream_create(
+        const protocol::TimedBitstreamCreatePayload& config) const;
+    void timed_bitstream_write(
+        std::uint32_t object_id,
+        const protocol::TimedBitstreamWritePayload& data) const;
+    void timed_bitstream_abort(std::uint32_t object_id) const;
 
     std::uint32_t uart_create(const UartConfig& config) const;
     std::vector<std::uint8_t> uart_read(

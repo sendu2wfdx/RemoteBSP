@@ -256,7 +256,7 @@ MotionStatusPayload decode_motion_status(
     if (state > static_cast<std::uint8_t>(MotionStatePayload::Faulted) ||
         fault >
             static_cast<std::uint8_t>(
-                MotionFaultPayload::QueueUnderrun) ||
+                MotionFaultPayload::TimingDeadlineMissed) ||
         payload[3] != 0 ||
         payload.size() !=
             kStatusHeaderSize +

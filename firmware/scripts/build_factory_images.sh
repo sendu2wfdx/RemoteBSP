@@ -19,28 +19,28 @@ pack_one() {
 
 case "${target}" in
     fly-d5|mellow-fly-d5)
-        pack_one katapult-stm32f072_dual.bin \
+        pack_one katapult-stm32f072_mellow_fly_d5_dual.bin \
             remotebsp-stm32f072-fly-d5-katapult.bin \
             remotebsp-stm32f072-fly-d5-katapult-dual-factory.bin
         ;;
     bluepill|weact-bluepill-plus)
-        pack_one katapult-stm32f103_dual.bin \
+        pack_one katapult-stm32f103_weact_bluepill_plus_dual.bin \
             remotebsp-stm32f103-bluepill-katapult.bin \
             remotebsp-stm32f103-bluepill-katapult-dual-factory.bin
         ;;
     g431|weact-stm32g431cbu6-core)
-        pack_one katapult-stm32g431_dual.bin \
+        pack_one katapult-stm32g431_weact_core_dual.bin \
             remotebsp-stm32g431-katapult.bin \
             remotebsp-stm32g431-katapult-dual-factory.bin
         ;;
     all)
-        pack_one katapult-stm32f072_dual.bin \
+        pack_one katapult-stm32f072_mellow_fly_d5_dual.bin \
             remotebsp-stm32f072-fly-d5-katapult.bin \
             remotebsp-stm32f072-fly-d5-katapult-dual-factory.bin
-        pack_one katapult-stm32f103_dual.bin \
+        pack_one katapult-stm32f103_weact_bluepill_plus_dual.bin \
             remotebsp-stm32f103-bluepill-katapult.bin \
             remotebsp-stm32f103-bluepill-katapult-dual-factory.bin
-        pack_one katapult-stm32g431_dual.bin \
+        pack_one katapult-stm32g431_weact_core_dual.bin \
             remotebsp-stm32g431-katapult.bin \
             remotebsp-stm32g431-katapult-dual-factory.bin
         ;;

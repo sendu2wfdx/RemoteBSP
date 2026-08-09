@@ -8,6 +8,7 @@
 #define HAL_CAN_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_DMA_MODULE_ENABLED
+#define HAL_TIM_MODULE_ENABLED
 
 #define HSE_VALUE 8000000U
 #define HSE_STARTUP_TIMEOUT 100U
@@ -28,6 +29,7 @@
 #include "stm32f0xx_hal_cortex.h"
 #include "stm32f0xx_hal_can.h"
 #include "stm32f0xx_hal_dma.h"
+#include "stm32f0xx_hal_tim.h"
 #include "stm32f0xx_hal_uart.h"
 
 #define assert_param(expression) ((void)0U)

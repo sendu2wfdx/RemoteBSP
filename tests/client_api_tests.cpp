@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
     assert(client.get_capabilities() != 0);
 
     const auto resources = client.list_resources();
-    assert(resources.size() == 27);
+    assert(resources.size() == 30);
     const auto descriptor = client.describe_resource(0x02000007);
     assert(descriptor.type ==
            remotebsp::protocol::ResourceType::Uart);

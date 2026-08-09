@@ -76,6 +76,24 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+#if defined(CONFIG_REMOTEBSP_PWM)
+    bool (*pwm_configure)(uint8_t channel, uint32_t frequency_hz,
+                          uint16_t duty, bool active_low);
+    bool (*pwm_write)(uint8_t channel, uint16_t duty);
+    bool (*pwm_stop)(uint8_t channel);
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    bool (*timed_bitstream_configure)(uint8_t channel,
+                                      uint32_t bit_period_ns,
+                                      uint32_t zero_high_ns,
+                                      uint32_t one_high_ns,
+                                      uint32_t reset_time_us);
+    bool (*timed_bitstream_write)(uint8_t channel,
+                                  const uint8_t* data,
+                                  uint16_t bit_count);
+    bool (*timed_bitstream_busy)(uint8_t channel);
+    bool (*timed_bitstream_abort)(uint8_t channel);
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     uint64_t (*nanoseconds)(void);
     uint8_t motion_axis_count;
@@ -83,6 +101,10 @@ typedef struct {
     bool (*motion_set_direction)(uint8_t axis, bool positive);
     bool (*motion_set_step)(uint8_t axis, bool high);
     bool (*motion_limit_active)(uint8_t axis, bool* active);
+    bool (*motion_schedule_compare)(uint64_t deadline_ns);
+    void (*motion_cancel_compare)(void);
+    uint32_t (*motion_enter_critical)(void);
+    void (*motion_exit_critical)(uint32_t state);
 #endif
     void (*enter_bootloader)(rbsp_bootloader_mode_t mode);
 } rbsp_hal_t;
@@ -116,6 +138,22 @@ typedef struct {
     rbsp_gpio_direction_t direction;
 } rbsp_gpio_object_t;
 
+#if defined(CONFIG_REMOTEBSP_PWM)
+typedef struct {
+    bool used;
+    uint32_t object_id;
+    uint8_t channel;
+} rbsp_pwm_object_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+typedef struct {
+    bool used;
+    uint32_t object_id;
+    uint8_t channel;
+} rbsp_timed_bitstream_object_t;
+#endif
+
 #if CONFIG_UART_RESOURCE_COUNT > 0
 typedef struct {
     bool used;
@@ -147,6 +185,13 @@ typedef struct {
 #if CONFIG_UART_RESOURCE_COUNT > 0
     rbsp_uart_object_t uart_objects[CONFIG_UART_RESOURCE_COUNT];
 #endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    rbsp_pwm_object_t pwm_objects[CONFIG_PWM_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    rbsp_timed_bitstream_object_t timed_bitstream_objects[
+        CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;
 #endif
@@ -159,6 +204,7 @@ void rbsp_core_poll(rbsp_core_t* core);
 void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
 #if defined(CONFIG_REMOTEBSP_MOTION)
+bool rbsp_core_motion_service(rbsp_core_t* core);
 bool rbsp_core_motion_tick(rbsp_core_t* core);
 #endif
 

@@ -9,7 +9,6 @@
 #define HAL_DMA_MODULE_ENABLED
 #define HAL_FDCAN_MODULE_ENABLED
 #define HAL_TIM_MODULE_ENABLED
-#define HAL_PCD_MODULE_ENABLED
 
 #define HSE_VALUE 8000000U
 #define HSE_STARTUP_TIMEOUT 100U
@@ -34,6 +33,5 @@
 #include "stm32g4xx_hal_dma.h"
 #include "stm32g4xx_hal_fdcan.h"
 #include "stm32g4xx_hal_tim.h"
-#include "stm32g4xx_hal_pcd.h"
 
 #define assert_param(expression) ((void)0U)

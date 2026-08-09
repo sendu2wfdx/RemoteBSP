@@ -1,5 +1,6 @@
 #include "remotebsp/mock_mcu/board_manifest.hpp"
 #include "remotebsp/mock_mcu/mock_node.hpp"
+#include "remotebsp/mock_mcu/visual_state.hpp"
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <algorithm>
@@ -21,6 +22,7 @@ constexpr std::uint32_t kProvisionalResponseBaseCanId = 0x480;
 constexpr std::uint32_t kNodeId = 0;
 constexpr auto kHeartbeatInterval = std::chrono::milliseconds(500);
 constexpr auto kUartStreamInterval = std::chrono::milliseconds(100);
+constexpr auto kVisualStateInterval = std::chrono::milliseconds(100);
 
 volatile std::sig_atomic_t stop_requested = 0;
 
@@ -71,7 +73,8 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "用法: mock_mcu <SocketCAN接口> <classical|fd> "
                      "[--instance 1..127] [--uart-stream] "
-                     "[--board JSON] [--fault-scenario JSON]\n";
+                     "[--board JSON] [--fault-scenario JSON] "
+                     "[--visual-state JSON]\n";
         return 2;
     }
 
@@ -81,6 +84,7 @@ int main(int argc, char** argv) {
         bool uart_stream = false;
         std::string board_path = REMOTEBSP_DEFAULT_MOCK_BOARD_MANIFEST;
         std::string fault_scenario_path;
+        std::string visual_state_path;
         for (int index = 3; index < argc;) {
             const std::string option = argv[index];
             if (option == "--uart-stream") {
@@ -88,13 +92,15 @@ int main(int argc, char** argv) {
                 ++index;
                 continue;
             }
-            if ((option == "--board" ||
-                 option == "--fault-scenario") &&
+            if ((option == "--board" || option == "--fault-scenario" ||
+                 option == "--visual-state") &&
                 index + 1 < argc) {
                 if (option == "--board") {
                     board_path = argv[index + 1];
-                } else {
+                } else if (option == "--fault-scenario") {
                     fault_scenario_path = argv[index + 1];
+                } else {
+                    visual_state_path = argv[index + 1];
                 }
                 index += 2;
                 continue;
@@ -149,6 +155,7 @@ int main(int argc, char** argv) {
             started_at + kHeartbeatInterval;
         auto next_uart_stream =
             started_at + kUartStreamInterval;
+        auto next_visual_state = started_at;
         std::cout << "Mock MCU 已连接 " << argv[1]
                   << "，板卡描述=" << twin.manifest().name
                   << "，按 Ctrl+C 退出\n";
@@ -160,6 +167,13 @@ int main(int argc, char** argv) {
                     now - started_at);
             twin.advance_to(static_cast<std::uint64_t>(
                 std::max<std::int64_t>(0, elapsed_ms.count())));
+            if (!visual_state_path.empty() && now >= next_visual_state) {
+                remotebsp::mock_mcu::write_visual_state(
+                    twin,
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed_ms.count())),
+                    visual_state_path);
+                next_visual_state = now + kVisualStateInterval;
+            }
             if (now >= next_heartbeat) {
                 if (twin.online()) {
                     const auto heartbeat_can_id =
@@ -213,6 +227,9 @@ int main(int argc, char** argv) {
                 next_deadline = std::min(
                     next_deadline,
                     started_at + std::chrono::milliseconds(*next_fault));
+            }
+            if (!visual_state_path.empty()) {
+                next_deadline = std::min(next_deadline, next_visual_state);
             }
             const auto timeout =
                 std::max(std::chrono::milliseconds(0),

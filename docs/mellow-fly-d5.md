@@ -44,6 +44,10 @@ FLY-D5 的 APP 直接使用板载 CAN 收发器接入 RemoteBSP 总线，不实�
 | 可控风扇 | PC9、PC8 |
 | 探针 / 舵机 | PB5 / PA8 |
 
+通用波形基础预设还提供 PA6/TIM3_CH1 PWM 和 PA8/TIM1_CH1+DMA 定时位流。
+PA6 同时是 DRIVER2 的 EN，PA8 同时是探针/舵机接口，因此它们只是不同固件用途
+下的候选映射，不能与对应运动/板载功能同时启用；引脚校验器和 GUI 会拒绝冲突。
+
 当前已核对的 FLY-D5 板级资料未给出一个可安全作为 MCU 默认指示灯使用的独立 GPIO。
 因此固件不会为了呼吸灯占用上述加热、风扇、步进或探针资源；后续由运行时资源清单
 确认实际指示灯引脚后，再将其配置为可选呼吸灯输出。
@@ -53,24 +57,30 @@ FLY-D5 的 APP 直接使用板载 CAN 收发器接入 RemoteBSP 总线，不实�
 `IOIN=0x21000041`，并完成五电机转动验证；Linux 侧负责 TMC 数据报和 CRC，MCU
 只执行原始字节收发。
 
+通用 PWM、定时位流协议和板级后端已加入基础 APP 并交叉编译。PWM 使用
+PA6/TIM3_CH1；WS2812 等位流使用 PA8/TIM1_CH1 和 DMA1_Channel2。它们尚未在
+FLY-D5 上使用示波器或灯带验证，不属于已有五轴实测结论。
+
 FLY-D5 默认预设会启用 `CONFIG_REMOTEBSP_MOTION` 并填写已知接线：TIM2 提供
-1MHz 单调时基，TIM3 以 10kHz 调度 STEP。该预设不是功能开关；取消它后，
+1MHz 单调时基，TIM2_CH1 compare按下一条STEP边沿时间调度中断，不再占用TIM3。
+该预设不是功能开关；取消它后，
 STM32F072RBT6 仍可手工启用“智能步进运动”及各槽引脚。只有启用
-“智能步进运动”后，`menuconfig` 才会显示“本板步进槽配置（最多五槽）”。每个槽先选择驱动器：
+“智能步进运动”后，`menuconfig` 才会显示“兼容期静态步进槽映射”。每个槽先选择驱动器：
 “通用 STEP/DIR”或“TMC2209（STEP/DIR + 单线 UART）”；选择后者才显示该槽的
 TMC UART 引脚，并自动链接 TMC2209 专用单线通讯执行器。关闭运动模块时，运动队列、
 定时器后端、轴设置和因轴驱动器选择而拉入的通讯后端均不链接。该后端只执行原始字节
-事务，TMC 寄存器协议始终由 Linux 处理。启动时会拒绝重复、CAN/USB/SWD 保留或
-不存在的引脚。每个槽可独立启用；实际公开的逻辑轴按已启用槽的 D0→D4 顺序紧凑
+事务，TMC 寄存器协议始终由 Linux 处理。引脚使用按 GPIO 端口标注的下拉选择；
+固定占用和前面已经选择的引脚会被隐藏，启动时仍会二次拒绝重复、CAN/USB/SWD
+保留或不存在的引脚。每个槽可独立启用；实际公开的逻辑轴按已启用槽的 D0→D4 顺序紧凑
 编号。`MOTION_MAX_AXES` 是 RAM/队列的编译期容量上限，必须不小于已启用槽数量，
 并不表示五个物理槽都必须使用。启用运动后，所选 STEP/DIR/EN 引脚会从普通 GPIO
 资源中保留。
 
-实体板已完成五轴同段各 3200 STEP、持续 6 秒、自动关闭 EN；运行中主动
+旧固定tick执行器已在实体板完成五轴同段各 3200 STEP、持续 6 秒、自动关闭 EN；运行中主动
 `MOTION_ABORT` 与非最终段队列欠载也已实板验证会关闭全部 EN。D2 单轴已验证
-4500 step/s、9000 步完整输出并自动禁用。10kHz 对应最多 5k step/s/轴，但这不是
-50k step/s 的性能保证；20kHz 曾使轮询 CAN 接收响应不足，后续必须先改为中断接收
-队列并用示波器、CAN/UART 并发压力测试标定。
+4500 step/s、9000 步完整输出并自动禁用。当前固件已切换为compare调度，并保守
+保留单轴5k step/s、整板25k step/s的入队预算；这些数值只是延续已知安全范围，
+compare版本仍需用示波器和CAN/UART并发压力测试重新标定。
 
 当前软件 UART 事务会短时关中断，因此运动已武装或运行时固件拒绝新的软 UART
 写请求，避免破坏 STEP 时序；待实现非阻塞状态机后解除此限制。数字孪生描述
@@ -89,7 +99,7 @@ bash scripts/build_firmware.sh mellow-fly-d5
 
 # 从 0x08002000 启动，适合配合 8 KiB Katapult
 bash scripts/build_firmware.sh mellow-fly-d5-katapult
-bash scripts/build_bootloader.sh stm32f072_dual
+bash scripts/build_bootloader.sh stm32f072_mellow_fly_d5_dual
 bash scripts/build_factory_images.sh mellow-fly-d5
 ```
 
@@ -97,7 +107,7 @@ bash scripts/build_factory_images.sh mellow-fly-d5
 
 - `out/remotebsp-stm32f072-fly-d5.hex`：独立 APP；
 - `out/remotebsp-stm32f072-fly-d5-katapult.bin`：在线升级 APP；
-- `out/katapult-stm32f072_dual.bin`：CAN/USB 双模式 Bootloader；
+- `out/katapult-stm32f072_mellow_fly_d5_dual.bin`：CAN/USB 双模式 Bootloader；
 - `out/remotebsp-stm32f072-fly-d5-katapult-dual-factory.bin`：首次整片镜像。
 
 F072 Cortex-M0 没有 VTOR。链接脚本保留 SRAM 前 192 字节，APP 启动时复制

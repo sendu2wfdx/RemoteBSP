@@ -1,7 +1,7 @@
 # Remote BSP
 
 Remote BSP 是一个传输无关的远程板级支持框架。Linux 主机通过 CAN/CAN-FD
-统一管理多块 MCU 工具板，并像使用本地资源一样调用远端 GPIO、UART 等通用
+统一管理多块 MCU 工具板，并像使用本地资源一样调用远端 GPIO、UART、PWM 等通用
 硬件能力。传感器、Modbus、阀门和厂商协议全部运行在 Linux；MCU 固件只执行
 原子硬件操作，不包含设备专用驱动。
 
@@ -22,7 +22,7 @@ flowchart TD
     F --> G["CanTransport / SocketCAN"]
     G --> H["Classical CAN 或 CAN-FD"]
     H --> I["Mock MCU 或工具板 Remote Core"]
-    I --> J["GPIO / UART 等原子 BSP"]
+    I --> J["GPIO / UART / PWM / 定时位流等原子 BSP"]
 ```
 
 应用程序不得直接访问 SocketCAN。`toolbusd` 独占总线管理职责，包括节点发现、
@@ -37,25 +37,28 @@ flowchart TD
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
-| 远程资源 | GPIO、UART、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
+| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
 | 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART；默认示例公开3路运动轴，可由描述扩展 |
-| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；板载 PB2 默认启用约 4 秒周期的软件 PWM 呼吸灯；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
-| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；当前未确认可安全占用的板载默认 LED 引脚，故不自动分配呼吸灯；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3 PWM 呼吸灯、PC13 GPIO；实板已验证，USB CDC 与双模式 Katapult 待切换验证 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、2 路 PWM、1 路定时位流；默认示例公开3路运动轴，并可按 100 ms 周期导出数字孪生状态 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、可增删的多路PWM/灯带配置、独立实时控制原型、资源清单导出，以及Mock GPIO/步进/PWM/WS2812可视化和遥测总览 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；五轴与五路 TMC2209 通讯后端待实板验收 |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；既有 CAN-FD/板载 PWM/单轴运动已实板验证，新通用波形后端待实板验收 |
 
-SPI、I2C、ADC、通用 PWM/Timer 协议和 Storage 已按当前优先级后置，尚未实现。
-当前已完成 WeAct G431 PC6 的板级 TIM3 硬件 PWM 呼吸灯和 WeAct BluePill Plus PB2
-软件 PWM 呼吸灯支持。BluePill 的实现只使用主循环的 1ms 系统节拍，不新增定时器
-中断，也不占用可选运动控制使用的 TIM2/TIM3；两种呼吸灯均可在 `menuconfig` 中关闭。
-FLY-D5 不会为演示目的占用加热、风扇、步进或探针资源，待运行时资源清单确认实际指示灯
-引脚后再启用。USB
-目前只用于 Katapult 恢复升级和 G431 APP 调试输出，不是 RemoteBSP 业务传输。
+SPI、I2C、ADC、通用 Timer 协议和 Storage 已按当前优先级后置，尚未实现。
+通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
+F072/F103/G431 固件后端第一阶段。PWM 直接描述频率、万分比占空比和极性；
+定时位流只描述 0/1 高低时间与复位时间，WS2812 的 RGB/GRB 排列、亮度和动画
+仍由 Linux 处理。三块板均已交叉编译，但新 DMA 波形后端尚未使用示波器和实体
+灯带验收，不能视为硬件完成。所有 APP 都只运行 CAN/CAN-FD；USB 仅用于
+Katapult 应急恢复升级，不承载 RemoteBSP 业务或 APP 调试输出。
 
 当前主线优先级为智能步进运动、数字孪生、遥测与监控、图形配置器。Mock 已实现
 第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，
-MCU 侧模型独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 的
-首版 STEP 定时器后端已接入；TMC 事务并发、跨板时钟同步、持久配置和图形配置器仍待实现。
+MCU 侧模型独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 已从
+固定tick切换为TIM2_CH1 compare边沿调度，支持单轴/整板步频准入、独立脉宽、
+不可整除DDA余数分配和迟到安全停机；compare版本实板压力验收、跨板时钟同步、
+持久配置和图形配置器的正式部署闭环仍待实现。
 
 ## 目录
 
@@ -67,6 +70,7 @@ libremotebsp/   C++ 应用客户端
 mock_mcu/       Linux Mock MCU 与模拟 BSP
 boards/         版本化板卡描述、公开资源和内部占用关系
 firmware/       STM32 Remote Core、板级 BSP、Katapult 配置和构建脚本
+gui/            本地板卡配置器与 Mock 数字孪生可视化
 tests/          单元、端到端、vcan 和实体 CAN 测试
 docs/           架构、硬件、构建、升级和 API 文档
 ```
@@ -97,12 +101,13 @@ sudo ip link set dev vcan0 up
 ctest --test-dir build-wsl --output-on-failure
 ```
 
-当前自动测试共 27 项，覆盖协议、CRC、运动线格式、分片、CAN/CAN-FD 帧、SocketCAN、
+当前自动测试共 32 项，覆盖协议、CRC、运动与波形线格式、分片、CAN/CAN-FD 帧、SocketCAN、
 发现、心跳、多节点、请求超时与去重、GPIO、UART、资源模型和嵌入式 Remote
 Core，并单独测试资源租约冲突、续租、会话释放、到期、安全状态、统一板卡描述、
 数字孪生故障隔离、可变轴数同步边沿、MCU可裁剪运动队列、运动欠载/限位停机、
-CAN-FD BRS、业务分类和
-低带宽准入拒绝。
+PWM/定时位流/WS2812 端到端调用、CAN-FD BRS、业务分类和
+低带宽准入拒绝，并验证 menuconfig 的 UART/TMC 容量派生、非法组合拒绝、GUI API
+和引脚目录生成一致性。
 
 ## 快速运行完整模拟链路
 
@@ -151,6 +156,15 @@ cd /mnt/d/Documents/RemoteBSP
 ./build-wsl/remote-cli --node 1 uart-stream-read 3 1024 1000
 ./build-wsl/remote-cli --node 1 uart-write-all 3 long-message 3000
 
+# PWM：20 kHz、42%占空比，高电平有效；对象ID以实际返回值为准。
+./build-wsl/remote-cli --node 1 pwm-create 0 20000 4200 active-high
+./build-wsl/remote-cli --node 1 pwm-write 4 7500
+./build-wsl/remote-cli --node 1 pwm-stop 4
+
+# WS2812：Linux 将RGB像素转换为GRB位流，MCU只负责按时序输出。
+./build-wsl/remote-cli --node 1 ws2812-create 0
+./build-wsl/remote-cli --node 1 ws2812-write 5 FF000000FF000000FF
+
 # 运动轴要求独占租约。默认 Mock 示例的三路资源 ID 如下。
 ./build-wsl/remote-cli --node 1 resource-acquire 0x09000000 5000 exclusive
 ./build-wsl/remote-cli --node 1 resource-acquire 0x09000001 5000 exclusive
@@ -174,6 +188,42 @@ Mock 默认从 [统一板卡描述](boards/mock-generic-v1.json) 加载板型、
 离线/恢复。
 格式与验证规则见
 [统一板卡描述与数字孪生 Mock](docs/board-manifest-and-digital-twin.md)。
+
+## 图形配置器与数字孪生
+
+第一版 RemoteBSP Studio 不需要安装前端依赖，直接在 Ubuntu WSL 中运行：
+
+```sh
+cd /mnt/d/Documents/RemoteBSP
+python3 gui/server.py
+```
+
+浏览器访问 `http://127.0.0.1:8765`。未连接 Mock 时页面使用内置演示数据；要显示
+Mock MCU 的真实 GPIO、步进位置、运动队列和故障状态，可这样启动：
+
+```sh
+./build-wsl/mock_mcu/mock_mcu vcan0 classical \
+    --visual-state /tmp/remotebsp-mock-state.json
+python3 gui/server.py --state /tmp/remotebsp-mock-state.json
+```
+
+数字孪生的运动区域为每个轴显示独立步进电机、当前位置步数和角度指针；状态数据
+未声明每转步数时，预览按 200 step/rev 映射一圈，不改变运动内核的真实位置。
+波形区域同时显示 PWM 频率、占空比、运行状态和 WS2812 逻辑像素颜色。
+
+引脚配置页从与固件 Kconfig 同源的板卡引脚目录生成选项，按 GPIOA/GPIOB/GPIOC
+分组，并隐藏 SWD、CAN、Katapult USB、板载演示资源和已被其他字段选中的引脚。
+EN 可以保持独立，也可以显式复用前面任意轴的 EN；共享组继承同一有效极性，
+固件会合并各轴使能请求，最后一个轴释放后才关闭物理 EN。
+每个轴还可以独立设置 DIR 正常或反相，改变设备定义的机械正方向不需要重新接线。
+数字 IO 编辑器可设置逻辑名称、输入/输出、内部上下拉、有效电平、输出故障安全
+电平和输入消抖；板载按键等已知接口由板卡描述锁定原理图确定的属性。
+PWM 与 WS2812 使用两个独立配置区，可以分别增加或删除多个资源。每个资源先选择
+绑定定时器/通道/引脚/DMA的硬件端点预设，已实现与待验证端点会明确区分。PWM配置只保存
+端点、固定频率、默认占空比和极性；灯带配置保存位流端点、灯珠数量、
+色序和复位时间。GPO电平、PWM启停/实时占空比和灯带颜色集中在独立“实时控制”页，
+目前只操作本地预览。所有配置参与同一套引脚冲突检查，并可导出JSON草案，但还不能部署到EEPROM/Flash；部署事务、A/B 配置槽
+和 toolbusd IPC 写入属于下一阶段。详细用法见 [RemoteBSP Studio](gui/README.md)。
 
 `toolbusd`默认按当前实测基线估算发送方向线时间：Classical CAN为
 1 Mbit/s，CAN-FD为500 kbit/s仲裁段和1 Mbit/s数据段。CAN-FD发送已显式启用
@@ -213,9 +263,9 @@ bash scripts/build_factory_images.sh
 
 主要输出位于 `firmware/out`：
 
-- `katapult-stm32f072_dual.bin`
-- `katapult-stm32f103_dual.bin`
-- `katapult-stm32g431_dual.bin`
+- `katapult-stm32f072_mellow_fly_d5_dual.bin`
+- `katapult-stm32f103_weact_bluepill_plus_dual.bin`
+- `katapult-stm32g431_weact_core_dual.bin`
 - `remotebsp-*-katapult.bin`：供 Katapult 在线更新的 APP
 - `remotebsp-*-katapult-dual-factory.bin`：供 ST-Link 首次烧录的完整镜像
 
@@ -274,7 +324,8 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [WeAct BluePill Plus 板卡说明](docs/weact-bluepill-plus.md)
 - [WeAct STM32G431CBU6 Core 板卡说明](docs/weact-stm32g431cbu6-core.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)
-- [Katapult Bootloader 与 USB 调试](docs/bootloader-and-usb-debug.md)
+- [Katapult 双模式升级与应急恢复](docs/bootloader-upgrade.md)
+- [RemoteBSP Studio 图形配置器](gui/README.md)
 
 ## 项目边界
 

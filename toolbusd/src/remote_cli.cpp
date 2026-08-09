@@ -96,6 +96,7 @@ const char* resource_type(remotebsp::protocol::ResourceType type) {
         case ResourceType::Timer: return "timer";
         case ResourceType::Storage: return "storage";
         case ResourceType::StepgenAxis: return "stepgen-axis";
+        case ResourceType::TimedBitstream: return "timed-bitstream";
     }
     return "unknown";
 }
@@ -176,6 +177,8 @@ const char* motion_fault_name(
         case MotionFaultPayload::Aborted: return "aborted";
         case MotionFaultPayload::LimitTriggered: return "limit";
         case MotionFaultPayload::QueueUnderrun: return "queue-underrun";
+        case MotionFaultPayload::TimingDeadlineMissed:
+            return "timing-deadline-missed";
     }
     return "unknown";
 }
@@ -214,6 +217,14 @@ void print_usage() {
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
+        << "  pwm-create <通道> <频率Hz> <占空比0..10000> [active-high|active-low]\n"
+        << "  pwm-write <对象ID> <占空比0..10000>\n"
+        << "  pwm-stop <对象ID>\n"
+        << "  timed-bitstream-create <通道> <位周期ns> <0高电平ns> <1高电平ns> <复位us>\n"
+        << "  timed-bitstream-write-hex <对象ID> <位数> <十六进制字节串>\n"
+        << "  timed-bitstream-abort <对象ID>\n"
+        << "  ws2812-create <通道>\n"
+        << "  ws2812-write <对象ID> <RRGGBB...>\n"
         << "  uart-create <端口> <波特率> [数据位] [none|odd|even] [停止位] [poll|stream]\n"
         << "  uart-read <对象ID> <最大长度>\n"
         << "  uart-stream-read <对象ID> <最大长度> [超时毫秒]\n"
@@ -487,6 +498,102 @@ int run(const std::vector<std::string>& arguments,
         }
         client.gpio_write(parse_u32(arguments[1], "GPIO 对象 ID"),
                           value != 0);
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "pwm-create" &&
+        (arguments.size() == 4 || arguments.size() == 5)) {
+        const auto channel = parse_u32(arguments[1], "PWM 通道");
+        const auto duty = parse_u32(arguments[3], "PWM 占空比");
+        if (channel > std::numeric_limits<std::uint8_t>::max() ||
+            duty > remotebsp::protocol::kPwmDutyScale) {
+            throw std::invalid_argument("PWM 通道或占空比超出范围");
+        }
+        bool active_low = false;
+        if (arguments.size() == 5) {
+            if (arguments[4] == "active-low") {
+                active_low = true;
+            } else if (arguments[4] != "active-high") {
+                throw std::invalid_argument(
+                    "PWM 极性必须是 active-high 或 active-low");
+            }
+        }
+        std::cout << "object_id=" << client.pwm_create({
+            static_cast<std::uint8_t>(channel),
+            parse_u32(arguments[2], "PWM 频率"),
+            static_cast<std::uint16_t>(duty), active_low}) << '\n';
+        return 0;
+    }
+    if (name == "pwm-write" && arguments.size() == 3) {
+        const auto duty = parse_u32(arguments[2], "PWM 占空比");
+        if (duty > remotebsp::protocol::kPwmDutyScale) {
+            throw std::invalid_argument("PWM 占空比必须在 0..10000");
+        }
+        client.pwm_write(parse_u32(arguments[1], "PWM 对象 ID"),
+                         static_cast<std::uint16_t>(duty));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "pwm-stop" && arguments.size() == 2) {
+        client.pwm_stop(parse_u32(arguments[1], "PWM 对象 ID"));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if ((name == "timed-bitstream-create" && arguments.size() == 6) ||
+        (name == "ws2812-create" && arguments.size() == 2)) {
+        const auto channel = parse_u32(arguments[1], "定时位流通道");
+        if (channel > std::numeric_limits<std::uint8_t>::max()) {
+            throw std::invalid_argument("定时位流通道超过 8 位范围");
+        }
+        remotebsp::protocol::TimedBitstreamCreatePayload config{
+            static_cast<std::uint8_t>(channel), 1250, 350, 700, 80};
+        if (name == "timed-bitstream-create") {
+            config.bit_period_ns = parse_u32(arguments[2], "位周期");
+            config.zero_high_ns = parse_u32(arguments[3], "0 高电平");
+            config.one_high_ns = parse_u32(arguments[4], "1 高电平");
+            config.reset_time_us = parse_u32(arguments[5], "复位时间");
+        }
+        std::cout << "object_id="
+                  << client.timed_bitstream_create(config) << '\n';
+        return 0;
+    }
+    if (name == "timed-bitstream-write-hex" &&
+        arguments.size() == 4) {
+        const auto bit_count = parse_u32(arguments[2], "定时位流位数");
+        if (bit_count == 0 ||
+            bit_count > std::numeric_limits<std::uint16_t>::max()) {
+            throw std::invalid_argument("定时位流位数超出范围");
+        }
+        client.timed_bitstream_write(
+            parse_u32(arguments[1], "定时位流对象 ID"),
+            {static_cast<std::uint16_t>(bit_count),
+             parse_hex(arguments[3])});
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "ws2812-write" && arguments.size() == 3) {
+        const auto rgb = parse_hex(arguments[2]);
+        if (rgb.size() % 3U != 0U ||
+            rgb.size() > std::numeric_limits<std::uint16_t>::max() / 8U) {
+            throw std::invalid_argument(
+                "WS2812 颜色必须是连续的 RRGGBB，且长度不能超限");
+        }
+        std::vector<std::uint8_t> grb;
+        grb.reserve(rgb.size());
+        for (std::size_t index = 0; index < rgb.size(); index += 3U) {
+            grb.push_back(rgb[index + 1U]);
+            grb.push_back(rgb[index]);
+            grb.push_back(rgb[index + 2U]);
+        }
+        client.timed_bitstream_write(
+            parse_u32(arguments[1], "WS2812 对象 ID"),
+            {static_cast<std::uint16_t>(grb.size() * 8U), grb});
+        std::cout << "ok pixels=" << grb.size() / 3U << '\n';
+        return 0;
+    }
+    if (name == "timed-bitstream-abort" && arguments.size() == 2) {
+        client.timed_bitstream_abort(
+            parse_u32(arguments[1], "定时位流对象 ID"));
         std::cout << "ok\n";
         return 0;
     }

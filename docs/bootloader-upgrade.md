@@ -1,4 +1,4 @@
-# Katapult Bootloader 与 USB 调试
+# Katapult 双模式升级与应急恢复
 
 ## 当前实现
 
@@ -33,10 +33,9 @@ Katapult：
 
 STM32F103 的 USB 与 bxCAN 共用 512 字节专用 SRAM。双模式 Bootloader 不会
 同时初始化两者，并使用共享中断分派器处理 F103 的 USB/CAN 共用中断入口。
-F103 APP 仍然只运行 CAN，不启用 USB CDC。
-
-STM32G431 APP 可以同时运行 PB8/PB9 上的 FDCAN 和 PA11/PA12 上的 USB CDC；
-进入 Bootloader 后 APP 已停止，Katapult 同样只启动所选的一个升级接口。
+三种 MCU 的 RemoteBSP APP 都只运行 CAN/CAN-FD，不链接 USB 协议栈；USB 只在
+Katapult 应急升级模式中启用。这样可减少 APP 的 Flash、RAM、中断和故障面，
+也避免把调试旁路误认为业务传输接口。
 
 ## Flash 布局
 
@@ -71,9 +70,9 @@ bash scripts/build_factory_images.sh
 
 主要输出：
 
-- `katapult-stm32f072_dual.bin`
-- `katapult-stm32f103_dual.bin`
-- `katapult-stm32g431_dual.bin`
+- `katapult-stm32f072_mellow_fly_d5_dual.bin`
+- `katapult-stm32f103_weact_bluepill_plus_dual.bin`
+- `katapult-stm32g431_weact_core_dual.bin`
 - `remotebsp-*-katapult.bin`：APP 在线升级包
 - `remotebsp-*-katapult-dual-factory.bin`：ST-Link 首次整片烧录包
 
@@ -179,34 +178,6 @@ G431 将文件改为 `out/remotebsp-stm32g431-katapult.bin`。CAN 和 USB 模式
 同一个 APP 包；区别只在进入原因和传输接口。项目同时提供受固定确认串和请求
 去重保护的 APP 命令入口，以及不依赖 CAN 的物理恢复键入口。
 
-## APP 的 USB CDC 调试输出（仅 STM32G431）
-
-STM32G431 的 Katapult APP 配置默认启用
-`USB 调试 -> USB CDC 非阻塞调试输出`。STM32F103 的 Kconfig 会隐藏该选项，
-防止产生硬件上无法工作的 USB+CAN 组合。G431 的调试口具备以下隔离行为：
-
-- 仅用于 APP 文本调试，不承载 RemoteBSP 协议；
-- 主机未连接时，CAN/CAN-FD 继续运行；
-- TX 环形缓冲满时丢弃新调试字节并增加计数，不等待 USB；
-- USB 初始化失败不会令 APP 进入致命错误；
-- USB RX 当前被丢弃，避免调试入口意外控制硬件。
-
-Linux 上可查看：
-
-```sh
-ls -l /dev/serial/by-id/
-picocom -b 115200 /dev/serial/by-id/<RemoteBSP-USB-Debug设备>
-```
-
-CDC 显示的波特率不决定 USB 实际传输速度。APP 启动后会输出一行
-`RemoteBSP ... APP ready`。固件代码可调用
-`rbsp_usb_debug_write()` 或 `rbsp_usb_debug_write_text()`，主循环持续调用
-`rbsp_usb_debug_poll()` 完成后台发送；丢弃计数由
-`rbsp_usb_debug_dropped_bytes()` 返回。
-
-开发配置暂用 ST 的 `0483:5740`。产品化前必须在 menuconfig 中换成有权使用的
-VID/PID，并确定稳定的产品字符串和驱动策略。
-
 ## 安全边界
 
 当前目标是可靠升级通路，不是安全启动。Katapult 在线升级没有实现项目级固件
@@ -241,8 +212,8 @@ Candlelight/gs_usb 固件的 CANable2.5，Classical CAN 速率为 1 Mbit/s：
 
 后续把 WeAct BluePill Plus 原生 USB 口接入主机后，进一步确认了 USB Katapult
 可以正常枚举；F103 APP 同时初始化 USB 与 CAN 时则无法枚举。该现象与芯片的
-USB/bxCAN 共用 SRAM 限制一致，现已通过 Kconfig 和默认配置禁止该组合。ST-Link
-VCP 不能替代 MCU 原生 USB。
+USB/bxCAN 共用 SRAM 限制一致。项目现在统一不在 APP 中链接 USB，ST-Link VCP
+也不能替代 MCU 原生 USB Katapult 接口。
 
 ## 双模式构建验收
 

@@ -5,6 +5,8 @@ add_library(remotebsp_remote_core
     src/motion_executor.cpp
     src/remote_core.cpp
     src/uart_bsp.cpp
+    src/waveform_bsp.cpp
+    src/visual_state.cpp
 )
 
 target_include_directories(remotebsp_remote_core

@@ -45,6 +45,7 @@ enum class MotionFaultPayload : std::uint8_t {
     Aborted = 1,
     LimitTriggered = 2,
     QueueUnderrun = 3,
+    TimingDeadlineMissed = 4,
 };
 
 struct MotionAxisStatusPayload {

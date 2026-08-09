@@ -396,6 +396,65 @@ void Client::gpio_write(std::uint32_t object_id, bool value) const {
                  {static_cast<std::uint8_t>(value)}, object_id));
 }
 
+std::uint32_t Client::pwm_create(
+    const protocol::PwmCreatePayload& config) const {
+    const auto response = command(
+        protocol::Command::PwmCreate,
+        protocol::encode_pwm_create(config));
+    body(response);
+    if (response.header.object_id == 0) {
+        throw ClientException("PWM_CREATE 未返回对象 ID");
+    }
+    return response.header.object_id;
+}
+
+void Client::pwm_write(std::uint32_t object_id,
+                       std::uint16_t duty) const {
+    if (object_id == 0) {
+        throw ClientException("PWM 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::PwmWrite,
+                 protocol::encode_pwm_duty(duty), object_id));
+}
+
+void Client::pwm_stop(std::uint32_t object_id) const {
+    if (object_id == 0) {
+        throw ClientException("PWM 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::PwmStop, {}, object_id));
+}
+
+std::uint32_t Client::timed_bitstream_create(
+    const protocol::TimedBitstreamCreatePayload& config) const {
+    const auto response = command(
+        protocol::Command::TimedBitstreamCreate,
+        protocol::encode_timed_bitstream_create(config));
+    body(response);
+    if (response.header.object_id == 0) {
+        throw ClientException(
+            "TIMED_BITSTREAM_CREATE 未返回对象 ID");
+    }
+    return response.header.object_id;
+}
+
+void Client::timed_bitstream_write(
+    std::uint32_t object_id,
+    const protocol::TimedBitstreamWritePayload& data) const {
+    if (object_id == 0) {
+        throw ClientException("定时位流对象 ID 不能为零");
+    }
+    body(command(protocol::Command::TimedBitstreamWrite,
+                 protocol::encode_timed_bitstream_write(data),
+                 object_id));
+}
+
+void Client::timed_bitstream_abort(std::uint32_t object_id) const {
+    if (object_id == 0) {
+        throw ClientException("定时位流对象 ID 不能为零");
+    }
+    body(command(protocol::Command::TimedBitstreamAbort, {}, object_id));
+}
+
 std::uint32_t Client::uart_create(const UartConfig& config) const {
     const auto parity = static_cast<std::uint8_t>(config.parity);
     const auto receive_mode =

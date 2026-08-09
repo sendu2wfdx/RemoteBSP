@@ -35,16 +35,16 @@ build_one() {
 }
 
 case "${target}" in
-    stm32f072_dual|stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb)
+    stm32f072_mellow_fly_d5_dual|stm32f103_weact_bluepill_plus_dual|stm32g431_weact_core_dual)
         build_one "${target}"
         ;;
     all)
-        build_one stm32f072_dual
-        build_one stm32f103_dual
-        build_one stm32g431_dual
+        build_one stm32f072_mellow_fly_d5_dual
+        build_one stm32f103_weact_bluepill_plus_dual
+        build_one stm32g431_weact_core_dual
         ;;
     *)
-        printf '用法：%s [stm32f072_dual|stm32f103_dual|stm32g431_dual|stm32f103_can|stm32f103_usb|stm32g431_can|stm32g431_usb|all]\n' \
+        printf '用法：%s [stm32f072_mellow_fly_d5_dual|stm32f103_weact_bluepill_plus_dual|stm32g431_weact_core_dual|all]\n' \
             "$0" >&2
         exit 2
         ;;

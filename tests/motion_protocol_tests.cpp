@@ -54,8 +54,8 @@ void test_segment_round_trip_and_endian() {
 
 void test_status_round_trip() {
     MotionStatusPayload source;
-    source.state = MotionStatePayload::Running;
-    source.fault = MotionFaultPayload::None;
+    source.state = MotionStatePayload::Faulted;
+    source.fault = MotionFaultPayload::TimingDeadlineMissed;
     source.node_time_ns = 123456789;
     source.queue_depth = 2;
     source.queue_capacity = 32;
@@ -71,7 +71,8 @@ void test_status_round_trip() {
     };
     const auto decoded = remotebsp::protocol::decode_motion_status(
         remotebsp::protocol::encode_motion_status(source));
-    assert(decoded.state == MotionStatePayload::Running);
+    assert(decoded.state == MotionStatePayload::Faulted);
+    assert(decoded.fault == MotionFaultPayload::TimingDeadlineMissed);
     assert(decoded.queue_depth == 2);
     assert(decoded.metrics.emitted_edges == 30);
     assert(decoded.metrics.maximum_queue_depth == 3);

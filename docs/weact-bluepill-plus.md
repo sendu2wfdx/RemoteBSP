@@ -21,7 +21,9 @@
 | CAN RX / TX | PB8 / PB9 | bxCAN 重映射，使用 TJA1051/3 等 3.3 V 逻辑收发器 |
 | USART1 TX / RX | PA9 / PA10 | 中断驱动 RX/TX 环形缓冲 |
 | 用户按键 | PA0 | 高电平按下，固件启用内部下拉 |
-| 指示灯 | PB2 | 高电平点亮；默认启用约 4 秒周期的软件 PWM 呼吸灯 |
+| 指示灯 | PB2 | 高电平点亮；可选约 4 秒周期的软件 PWM 呼吸灯，生产默认关闭 |
+| 通用 PWM | PA6 / TIM3_CH1 | 远程配置频率、占空比和极性；已交叉编译，待实板验收 |
+| 通用定时位流 | PA8 / TIM1_CH1 + DMA1_Channel2 | 可驱动 WS2812 等脉宽编码设备；已交叉编译，待实板验收 |
 | USB D- / D+ | PA11 / PA12 | Katapult USB 恢复，不作为 APP 业务传输 |
 | SWDIO / SWCLK | PA13 / PA14 | DAPLink 或 ST-Link |
 
@@ -35,7 +37,12 @@ STM32F103 的 USB 与 bxCAN 共用专用 SRAM。因此 RemoteBSP APP 只运行 C
 PING 实测约 12～16 ms；2023 字节最大 PING 载荷实测通过。
 
 可选五轴 TMC2209 构建已通过交叉编译，但尚待本板实体运动与 TMC2209 并发验收。
-TMC2209 单线通讯是固定 40000 bit/s 的内部后端，不是通用软串口或 Modbus 端口。
+该预设同时保留 USART1：逻辑 UART 对象 0 是 PA9/PA10 硬件串口，对象 1～5 是
+五路固定 40000 bit/s 的 TMC2209 单线后端。TMC 端口不是通用软串口或 Modbus 端口。
+
+基础 APP 已同时链接可选通用 PWM 与定时位流后端。前者使用 PA6/TIM3_CH1，
+后者使用 PA8/TIM1_CH1 和 DMA1_Channel2；协议、Mock 和交叉编译已经通过，但
+真实频率、占空比、WS2812 时序和运动/CAN 并发仍需实板测量。
 
 ## 构建
 
@@ -53,7 +60,7 @@ bash scripts/build_firmware.sh weact-bluepill-plus-motion
 
 # 8 KiB Katapult 布局的 APP、Bootloader 和工厂镜像
 bash scripts/build_firmware.sh weact-bluepill-plus-katapult
-bash scripts/build_bootloader.sh stm32f103_dual
+bash scripts/build_bootloader.sh stm32f103_weact_bluepill_plus_dual
 bash scripts/build_factory_images.sh weact-bluepill-plus
 ```
 
@@ -62,7 +69,7 @@ bash scripts/build_factory_images.sh weact-bluepill-plus
 - `out/remotebsp-stm32f103-bluepill-pb8-pb9.hex`：独立 APP；
 - `out/remotebsp-stm32f103-bluepill-motion-5axis-tmc2209.hex`：五轴 TMC2209 APP；
 - `out/remotebsp-stm32f103-bluepill-katapult.bin`：在线升级 APP；
-- `out/katapult-stm32f103_dual.bin`：CAN/USB 双模式 Bootloader；
+- `out/katapult-stm32f103_weact_bluepill_plus_dual.bin`：CAN/USB 双模式 Bootloader；
 - `out/remotebsp-stm32f103-bluepill-katapult-dual-factory.bin`：首次整片镜像。
 
 ## 首次烧录与总线接线
@@ -94,5 +101,5 @@ can0 up` 即可恢复接口。
 ## 相关文档
 
 - [STM32 构建、烧录与总线适配器说明](stm32-build-and-flash.md)
-- [Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)
+- [Katapult 双模式升级与应急恢复](bootloader-upgrade.md)
 - [三块 STM32 实体工具板上板规划](stm32-hardware-plan.md)

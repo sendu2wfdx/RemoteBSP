@@ -55,11 +55,13 @@ ResponseResult RequestManager::accept_response(
         return {ResponseStatus::Unexpected, std::nullopt};
     }
 
+    const auto request_command = static_cast<protocol::Command>(
+        found->second.packet.header.command);
     const bool creates_object =
-        found->second.packet.header.command ==
-            static_cast<std::uint16_t>(protocol::Command::GpioCreate) ||
-        found->second.packet.header.command ==
-            static_cast<std::uint16_t>(protocol::Command::UartCreate);
+        request_command == protocol::Command::GpioCreate ||
+        request_command == protocol::Command::UartCreate ||
+        request_command == protocol::Command::PwmCreate ||
+        request_command == protocol::Command::TimedBitstreamCreate;
     const bool response_is_error =
         (response.header.flags & protocol::kErrorResponseFlag) != 0U;
     const bool object_matches =

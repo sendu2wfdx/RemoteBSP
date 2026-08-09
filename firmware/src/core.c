@@ -22,6 +22,12 @@ enum {
     RBSP_COMMAND_UART_READ = 0x0201,
     RBSP_COMMAND_UART_WRITE = 0x0202,
     RBSP_COMMAND_UART_RX_EVENT = 0x0280,
+    RBSP_COMMAND_PWM_CREATE = 0x0600,
+    RBSP_COMMAND_PWM_WRITE = 0x0601,
+    RBSP_COMMAND_PWM_STOP = 0x0602,
+    RBSP_COMMAND_TIMED_BITSTREAM_CREATE = 0x0700,
+    RBSP_COMMAND_TIMED_BITSTREAM_WRITE = 0x0701,
+    RBSP_COMMAND_TIMED_BITSTREAM_ABORT = 0x0702,
     RBSP_COMMAND_MOTION_ENQUEUE = 0x0900,
     RBSP_COMMAND_MOTION_STATUS = 0x0901,
     RBSP_COMMAND_MOTION_ABORT = 0x0902,
@@ -99,6 +105,33 @@ static uint64_t get_u64(const uint8_t* input) {
         value |= (uint64_t)input[index] << (index * 8U);
     }
     return value;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_PWM)
+static rbsp_pwm_object_t* find_pwm_object(rbsp_core_t* core,
+                                          uint32_t object_id) {
+    for (size_t index = 0; index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+        if (core->pwm_objects[index].used &&
+            core->pwm_objects[index].object_id == object_id) {
+            return &core->pwm_objects[index];
+        }
+    }
+    return NULL;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+static rbsp_timed_bitstream_object_t* find_timed_bitstream_object(
+    rbsp_core_t* core, uint32_t object_id) {
+    for (size_t index = 0;
+         index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT; ++index) {
+        if (core->timed_bitstream_objects[index].used &&
+            core->timed_bitstream_objects[index].object_id == object_id) {
+            return &core->timed_bitstream_objects[index];
+        }
+    }
+    return NULL;
 }
 #endif
 
@@ -326,7 +359,6 @@ static rbsp_uart_object_t* find_uart_object(rbsp_core_t* core,
     return NULL;
 }
 #endif
-
 static bool process_request(rbsp_core_t* core,
                             const rbsp_request_t* request) {
     rbsp_request_cache_entry_t* cached =
@@ -418,6 +450,20 @@ static bool process_request(rbsp_core_t* core,
                 capabilities |= 1ULL << 1U;
             }
 #endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+            if (core->hal.pwm_configure != NULL &&
+                core->hal.pwm_write != NULL &&
+                core->hal.pwm_stop != NULL) {
+                capabilities |= 1ULL << 5U;
+            }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+            if (core->hal.timed_bitstream_configure != NULL &&
+                core->hal.timed_bitstream_write != NULL &&
+                core->hal.timed_bitstream_abort != NULL) {
+                capabilities |= 1ULL << 10U;
+            }
+#endif
             if (core->hal.enter_bootloader != NULL) {
                 capabilities |= 1ULL << 8U;
             }
@@ -427,7 +473,11 @@ static bool process_request(rbsp_core_t* core,
                 core->hal.motion_axis_count <= CONFIG_MOTION_MAX_AXES &&
                 core->hal.motion_set_enable != NULL &&
                 core->hal.motion_set_direction != NULL &&
-                core->hal.motion_set_step != NULL) {
+                core->hal.motion_set_step != NULL &&
+                core->hal.motion_schedule_compare != NULL &&
+                core->hal.motion_cancel_compare != NULL &&
+                core->hal.motion_enter_critical != NULL &&
+                core->hal.motion_exit_critical != NULL) {
                 capabilities |= 1ULL << 9U;
             }
 #endif
@@ -745,12 +795,258 @@ static bool process_request(rbsp_core_t* core,
         }
 #endif
 
+#if defined(CONFIG_REMOTEBSP_PWM)
+        case RBSP_COMMAND_PWM_CREATE: {
+            if (core->hal.pwm_configure == NULL ||
+                core->hal.pwm_write == NULL || core->hal.pwm_stop == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            const uint8_t channel = request->payload_length == 8U
+                                        ? request->payload[0]
+                                        : UINT8_MAX;
+            const uint32_t frequency = request->payload_length == 8U
+                                           ? get_u32(request->payload + 1U)
+                                           : 0U;
+            const uint16_t duty = request->payload_length == 8U
+                                      ? get_u16(request->payload + 5U)
+                                      : UINT16_MAX;
+            if (request->object_id != 0U || request->payload_length != 8U ||
+                channel >= CONFIG_PWM_RESOURCE_COUNT || frequency == 0U ||
+                frequency > CONFIG_PWM_MAX_FREQUENCY_HZ || duty > 10000U ||
+                request->payload[7] > 1U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            rbsp_pwm_object_t* free_object = NULL;
+            bool busy = false;
+            for (size_t index = 0; index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+                if (!core->pwm_objects[index].used && free_object == NULL) {
+                    free_object = &core->pwm_objects[index];
+                } else if (core->pwm_objects[index].used &&
+                           core->pwm_objects[index].channel == channel) {
+                    busy = true;
+                }
+            }
+            if (busy) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_BUSY, 0U, NULL, 0U);
+            } else if (free_object == NULL || core->next_object_id == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_EXHAUSTED,
+                    0U, NULL, 0U);
+            } else if (!core->hal.pwm_configure(
+                           channel, frequency, duty,
+                           request->payload[7] != 0U)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    0U, NULL, 0U);
+            } else {
+                free_object->used = true;
+                free_object->object_id = core->next_object_id++;
+                free_object->channel = channel;
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    free_object->object_id, NULL, 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_PWM_WRITE: {
+            rbsp_pwm_object_t* object =
+                find_pwm_object(core, request->object_id);
+            const uint16_t duty = request->payload_length == 2U
+                                      ? get_u16(request->payload)
+                                      : UINT16_MAX;
+            if (request->object_id == 0U || request->payload_length != 2U ||
+                duty > 10000U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (!core->hal.pwm_write(object->channel, duty)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_PWM_STOP: {
+            rbsp_pwm_object_t* object =
+                find_pwm_object(core, request->object_id);
+            if (request->object_id == 0U || request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (!core->hal.pwm_stop(object->channel)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            }
+            break;
+        }
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+        case RBSP_COMMAND_TIMED_BITSTREAM_CREATE: {
+            if (core->hal.timed_bitstream_configure == NULL ||
+                core->hal.timed_bitstream_write == NULL ||
+                core->hal.timed_bitstream_abort == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            const uint8_t channel = request->payload_length == 17U
+                                        ? request->payload[0]
+                                        : UINT8_MAX;
+            const uint32_t period = request->payload_length == 17U
+                                        ? get_u32(request->payload + 1U)
+                                        : 0U;
+            const uint32_t zero_high = request->payload_length == 17U
+                                           ? get_u32(request->payload + 5U)
+                                           : 0U;
+            const uint32_t one_high = request->payload_length == 17U
+                                          ? get_u32(request->payload + 9U)
+                                          : 0U;
+            const uint32_t reset_us = request->payload_length == 17U
+                                          ? get_u32(request->payload + 13U)
+                                          : 0U;
+            if (request->object_id != 0U || request->payload_length != 17U ||
+                channel >= CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT ||
+                period == 0U || zero_high == 0U || one_high == 0U ||
+                zero_high >= period || one_high >= period || reset_us == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            rbsp_timed_bitstream_object_t* free_object = NULL;
+            bool busy = false;
+            for (size_t index = 0;
+                 index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT; ++index) {
+                if (!core->timed_bitstream_objects[index].used &&
+                    free_object == NULL) {
+                    free_object = &core->timed_bitstream_objects[index];
+                } else if (core->timed_bitstream_objects[index].used &&
+                           core->timed_bitstream_objects[index].channel ==
+                               channel) {
+                    busy = true;
+                }
+            }
+            if (busy) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_BUSY, 0U, NULL, 0U);
+            } else if (free_object == NULL || core->next_object_id == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_EXHAUSTED,
+                    0U, NULL, 0U);
+            } else if (!core->hal.timed_bitstream_configure(
+                           channel, period, zero_high, one_high, reset_us)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    0U, NULL, 0U);
+            } else {
+                free_object->used = true;
+                free_object->object_id = core->next_object_id++;
+                free_object->channel = channel;
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    free_object->object_id, NULL, 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_TIMED_BITSTREAM_WRITE: {
+            rbsp_timed_bitstream_object_t* object =
+                find_timed_bitstream_object(core, request->object_id);
+            const uint16_t bit_count = request->payload_length >= 2U
+                                           ? get_u16(request->payload)
+                                           : 0U;
+            const uint16_t data_size = (uint16_t)((bit_count + 7U) / 8U);
+            if (request->object_id == 0U || bit_count == 0U ||
+                bit_count > CONFIG_TIMED_BITSTREAM_MAX_BITS ||
+                request->payload_length != (uint16_t)(2U + data_size)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (core->hal.timed_bitstream_busy != NULL &&
+                       core->hal.timed_bitstream_busy(object->channel)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_BUSY,
+                    request->object_id, NULL, 0U);
+            } else if (!core->hal.timed_bitstream_write(
+                           object->channel, request->payload + 2U,
+                           bit_count)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_TIMED_BITSTREAM_ABORT: {
+            rbsp_timed_bitstream_object_t* object =
+                find_timed_bitstream_object(core, request->object_id);
+            if (request->object_id == 0U || request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (!core->hal.timed_bitstream_abort(object->channel)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            }
+            break;
+        }
+#endif
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_MOTION_ENQUEUE: {
             if (core->hal.nanoseconds == NULL ||
                 core->hal.motion_set_enable == NULL ||
                 core->hal.motion_set_direction == NULL ||
-                core->hal.motion_set_step == NULL) {
+                core->hal.motion_set_step == NULL ||
+                core->hal.motion_schedule_compare == NULL ||
+                core->hal.motion_cancel_compare == NULL ||
+                core->hal.motion_enter_critical == NULL ||
+                core->hal.motion_exit_critical == NULL) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
                     0U, NULL, 0U);
@@ -806,10 +1102,21 @@ static bool process_request(rbsp_core_t* core,
                 break;
             }
             rbsp_motion_segment_t accepted;
-            const rbsp_motion_enqueue_result_t result =
-                rbsp_motion_enqueue(
+            rbsp_motion_enqueue_result_t result;
+            bool start_scheduler = false;
+            if (!rbsp_motion_validate_segment(
+                    &core->motion, &segment)) {
+                ++core->motion.rejected_segments;
+                result = RBSP_MOTION_ENQUEUE_INVALID;
+            } else {
+                const uint32_t critical_state =
+                    core->hal.motion_enter_critical();
+                start_scheduler = core->motion.size == 0U;
+                result = rbsp_motion_commit_segment(
                     &core->motion, &segment,
                     core->hal.nanoseconds(), &accepted);
+                core->hal.motion_exit_critical(critical_state);
+            }
             if (result != RBSP_MOTION_ENQUEUE_OK) {
                 uint8_t status = RBSP_STATUS_INVALID_PAYLOAD;
                 if (result == RBSP_MOTION_ENQUEUE_FULL) {
@@ -820,6 +1127,13 @@ static bool process_request(rbsp_core_t* core,
                 }
                 response_size = make_status_response(
                     core, request, status, 0U, NULL, 0U);
+                break;
+            }
+            if (start_scheduler &&
+                !rbsp_core_motion_service(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    0U, NULL, 0U);
                 break;
             }
             put_u32(payload + 1U, accepted.sequence);
@@ -838,7 +1152,11 @@ static bool process_request(rbsp_core_t* core,
             if (core->hal.nanoseconds == NULL ||
                 core->hal.motion_set_enable == NULL ||
                 core->hal.motion_set_direction == NULL ||
-                core->hal.motion_set_step == NULL) {
+                core->hal.motion_set_step == NULL ||
+                core->hal.motion_schedule_compare == NULL ||
+                core->hal.motion_cancel_compare == NULL ||
+                core->hal.motion_enter_critical == NULL ||
+                core->hal.motion_exit_critical == NULL) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
                     0U, NULL, 0U);
@@ -858,56 +1176,67 @@ static bool process_request(rbsp_core_t* core,
             }
             uint8_t* data = payload + 1U;
             memset(data, 0, data_length);
-            data[0] = (uint8_t)core->motion.state;
-            data[1] = (uint8_t)core->motion.fault;
-            data[2] = core->motion.axis_count;
+            rbsp_motion_status_snapshot_t snapshot;
+            const uint32_t critical_state =
+                core->hal.motion_enter_critical();
+            const bool snapshot_ok = rbsp_motion_snapshot(
+                &core->motion, &snapshot);
+            core->hal.motion_exit_critical(critical_state);
+            if (!snapshot_ok) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    0U, NULL, 0U);
+                break;
+            }
+            data[0] = (uint8_t)snapshot.state;
+            data[1] = (uint8_t)snapshot.fault;
+            data[2] = snapshot.axis_count;
             put_u64(data + 4U, core->hal.nanoseconds());
-            put_u16(data + 12U, core->motion.size);
+            put_u16(data + 12U, snapshot.queue_depth);
             put_u16(data + 14U, CONFIG_MOTION_QUEUE_DEPTH);
             put_u32(data + 16U,
-                    core->motion.last_accepted_sequence);
+                    snapshot.last_accepted_sequence);
             put_u32(data + 20U,
-                    core->motion.last_completed_sequence);
+                    snapshot.last_completed_sequence);
             put_u64(data + 24U,
-                    core->motion.accepted_segments);
+                    snapshot.accepted_segments);
             put_u64(data + 32U,
-                    core->motion.rejected_segments);
+                    snapshot.rejected_segments);
             put_u64(data + 40U,
-                    core->motion.completed_segments);
-            put_u64(data + 48U, core->motion.emitted_edges);
+                    snapshot.completed_segments);
+            put_u64(data + 48U, snapshot.emitted_edges);
             uint64_t emitted_steps = 0U;
             for (uint8_t axis = 0U;
-                 axis < core->motion.axis_count; ++axis) {
+                 axis < snapshot.axis_count; ++axis) {
                 if (UINT64_MAX - emitted_steps <
-                    core->motion.emitted_steps[axis]) {
+                    snapshot.emitted_steps[axis]) {
                     emitted_steps = UINT64_MAX;
                 } else {
                     emitted_steps +=
-                        core->motion.emitted_steps[axis];
+                        snapshot.emitted_steps[axis];
                 }
             }
             put_u64(data + 56U, emitted_steps);
-            put_u64(data + 64U, core->motion.safety_stops);
-            put_u64(data + 72U, core->motion.limit_stops);
-            put_u64(data + 80U,
-                    core->motion.queue_underruns);
+            put_u64(data + 64U, snapshot.safety_stops);
+            put_u64(data + 72U, snapshot.limit_stops);
+            put_u64(data + 80U, snapshot.queue_underruns);
             put_u16(data + 88U,
-                    core->motion.maximum_queue_depth);
+                    snapshot.maximum_queue_depth);
             for (uint8_t axis = 0U;
-                 axis < core->motion.axis_count; ++axis) {
+                 axis < snapshot.axis_count; ++axis) {
                 uint8_t* entry =
                     data + 92U + (uint16_t)axis * 24U;
                 put_u32(entry, 0x09000000UL + axis);
                 entry[4] =
-                    (core->motion.enabled[axis] ? 0x01U : 0U) |
-                    (core->motion.direction_positive[axis]
+                    (snapshot.enabled[axis] ? 0x01U : 0U) |
+                    (snapshot.direction_positive[axis]
                          ? 0x02U
                          : 0U) |
-                    (core->motion.step_high[axis] ? 0x04U : 0U);
+                    (snapshot.step_high[axis] ? 0x04U : 0U);
                 put_u64(entry + 8U,
-                        (uint64_t)core->motion.position_steps[axis]);
+                        (uint64_t)snapshot.position_steps[axis]);
                 put_u64(entry + 16U,
-                        core->motion.emitted_steps[axis]);
+                        snapshot.emitted_steps[axis]);
             }
             response_size = make_status_response(
                 core, request, RBSP_STATUS_OK, 0U,
@@ -922,9 +1251,12 @@ static bool process_request(rbsp_core_t* core,
                     core, request, RBSP_STATUS_INVALID_PAYLOAD,
                     0U, NULL, 0U);
             } else {
+                const uint32_t critical_state =
+                    core->hal.motion_enter_critical();
                 rbsp_motion_abort(
                     &core->motion, RBSP_MOTION_FAULT_ABORTED);
-                (void)rbsp_core_motion_tick(core);
+                core->hal.motion_exit_critical(critical_state);
+                (void)rbsp_core_motion_service(core);
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
             }
@@ -936,17 +1268,23 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_INVALID_PAYLOAD,
                     0U, NULL, 0U);
-            } else if (!rbsp_motion_clear_fault(
-                           &core->motion,
-                           core->hal.nanoseconds != NULL
-                               ? core->hal.nanoseconds()
-                               : 0U)) {
-                response_size = make_status_response(
-                    core, request, RBSP_STATUS_RESOURCE_BUSY,
-                    0U, NULL, 0U);
             } else {
-                response_size = make_status_response(
-                    core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+                const uint32_t critical_state =
+                    core->hal.motion_enter_critical();
+                const bool cleared = rbsp_motion_clear_fault(
+                    &core->motion,
+                    core->hal.nanoseconds != NULL
+                        ? core->hal.nanoseconds()
+                        : 0U);
+                core->hal.motion_exit_critical(critical_state);
+                if (!cleared) {
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_RESOURCE_BUSY,
+                        0U, NULL, 0U);
+                } else {
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+                }
             }
             break;
 #endif
@@ -1010,7 +1348,15 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
     core->info = *info;
     core->next_object_id = 1U;
 #if defined(CONFIG_REMOTEBSP_MOTION)
-    if (!rbsp_motion_init(&core->motion, hal->motion_axis_count)) {
+    if (hal->nanoseconds == NULL ||
+        hal->motion_set_enable == NULL ||
+        hal->motion_set_direction == NULL ||
+        hal->motion_set_step == NULL ||
+        hal->motion_schedule_compare == NULL ||
+        hal->motion_cancel_compare == NULL ||
+        hal->motion_enter_critical == NULL ||
+        hal->motion_exit_critical == NULL ||
+        !rbsp_motion_init(&core->motion, hal->motion_axis_count)) {
         return false;
     }
 #endif
@@ -1108,11 +1454,15 @@ void rbsp_core_poll(rbsp_core_t* core) {
 }
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
-bool rbsp_core_motion_tick(rbsp_core_t* core) {
+bool rbsp_core_motion_service(rbsp_core_t* core) {
     if (core == NULL || core->hal.nanoseconds == NULL ||
         core->hal.motion_set_enable == NULL ||
         core->hal.motion_set_direction == NULL ||
-        core->hal.motion_set_step == NULL) {
+        core->hal.motion_set_step == NULL ||
+        core->hal.motion_schedule_compare == NULL ||
+        core->hal.motion_cancel_compare == NULL ||
+        core->hal.motion_enter_critical == NULL ||
+        core->hal.motion_exit_critical == NULL) {
         return false;
     }
     const rbsp_motion_io_t io = {
@@ -1120,8 +1470,27 @@ bool rbsp_core_motion_tick(rbsp_core_t* core) {
         core->hal.motion_set_direction,
         core->hal.motion_set_step,
         core->hal.motion_limit_active};
-    return rbsp_motion_tick(
-        &core->motion, &io, core->hal.nanoseconds());
+    uint64_t deadline_ns = RBSP_MOTION_NO_DEADLINE;
+    const bool result = rbsp_motion_service(
+        &core->motion, &io, core->hal.nanoseconds(),
+        &deadline_ns);
+    if (!result || deadline_ns == RBSP_MOTION_NO_DEADLINE) {
+        core->hal.motion_cancel_compare();
+        return result;
+    }
+    if (!core->hal.motion_schedule_compare(deadline_ns)) {
+        rbsp_motion_abort(
+            &core->motion, RBSP_MOTION_FAULT_TIMING);
+        (void)rbsp_motion_service(
+            &core->motion, &io, core->hal.nanoseconds(), NULL);
+        core->hal.motion_cancel_compare();
+        return false;
+    }
+    return true;
+}
+
+bool rbsp_core_motion_tick(rbsp_core_t* core) {
+    return rbsp_core_motion_service(core);
 }
 #endif
 

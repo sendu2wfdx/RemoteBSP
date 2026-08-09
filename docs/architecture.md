@@ -261,7 +261,8 @@ UART 4～7 为板级扩展接口；8 路串口都声明 4096 字节收发缓冲�
 因此一个节点不能错误地完成另一个节点的请求。
 
 `libremotebsp` 提供线程安全的同步 C++ API，包括节点列表、信息/能力查询、
-资源查询与复位、GPIO、UART和运动段/状态/停机。每次调用使用独立 UDS 连接，一个慢调用不会污染
+资源查询与复位、GPIO、UART、PWM、定时位流/WS2812和运动段/状态/停机。
+每次调用使用独立 UDS 连接，一个慢调用不会污染
 其他线程的响应流。`toolbusd` 每次启动生成新的非零会话 ID，并覆盖客户端提供
 的会话值，避免守护进程重启后请求 ID 与 MCU 旧去重缓存冲突。
 
@@ -287,7 +288,7 @@ CAN-FD 都执行该测试。
 当前事件通路已经解决持续数据不必反复发送 `UART_READ` 的问题。每资源带宽
 配额、事件优先级和溢出丢弃计数公开仍需后续增强。
 
-## 第十五步：Katapult Bootloader 与 USB 调试旁路
+## 第十五步：Katapult 双模式升级
 
 STM32 APP 支持 `BOOTLOADER_ENTER` 和 `BOOTLOADER_ENTER_USB` 两个原子命令，
 分别选择 CAN 和 USB Katapult。载荷必须是固定 8 字节确认串，节点先缓存并
@@ -301,13 +302,10 @@ F103 和 G431 使用同一套双模式补丁：APP 命令可以选择 CAN 或 US
 按住 PA0 或 APP 无效也会选择 USB 应急恢复。两个通信后端同时链接，但运行时
 只初始化一个；F103 因而不会同时启用共享专用 SRAM 的 USB 与 bxCAN。
 
-APP USB CDC 调试是协议与 CAN 传输之外的可选旁路。它只发送诊断文本，使用
-固定环形缓冲和 64 字节 USB 包；未连接、拥塞或初始化失败都不会阻塞 CAN
-接收、心跳或远程 BSP 调度。该旁路当前仅对 STM32G431 开放，并要求 FDCAN
-固定使用 PB8/PB9。STM32F103 的 USB 与 bxCAN 共用专用 SRAM，CAN APP 禁止
-启用 USB CDC；其 USB 只在未运行 CAN 的 Katapult Bootloader 阶段使用。
-详细构建、升级和安全边界见
-[Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。
+RemoteBSP APP 不链接 USB 协议栈，业务、遥测和诊断统一经过 CAN/CAN-FD，避免
+增加第二条运行期控制通路。USB 只在 Katapult 应急升级模式中启用；因此 USB
+故障不会影响 APP 的 CAN 接收、心跳或实时调度。详细构建、升级和安全边界见
+[Katapult 双模式升级与应急恢复](bootloader-upgrade.md)。
 
 ## 第十六步：资源能力合同与会话级租约
 

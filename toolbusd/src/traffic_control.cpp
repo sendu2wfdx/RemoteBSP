@@ -125,6 +125,7 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
             return TrafficClass::Safety;
         case protocol::Command::BootloaderEnter:
         case protocol::Command::BootloaderEnterUsb:
+        case protocol::Command::TimedBitstreamWrite:
             return TrafficClass::Bulk;
         default:
             return TrafficClass::Interactive;

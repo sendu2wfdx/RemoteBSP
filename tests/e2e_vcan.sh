@@ -79,7 +79,7 @@ grep -Fq 'firmware=0.2.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
 
 capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
-grep -Fq 'capabilities=0x303' <<<"$capability_output"
+grep -Fq 'capabilities=0x723' <<<"$capability_output"
 
 traffic_output="$("$remote_cli_bin" --socket "$socket_path" traffic-status)"
 grep -Fq "mode=${can_mode}" <<<"$traffic_output"
@@ -95,6 +95,25 @@ resource_output="$("$remote_cli_bin" --socket "$socket_path" resource-list)"
 [[ "$(grep -c ' type=uart ' <<<"$resource_output")" -eq 8 ]]
 grep -Fq 'resource_id=0x2000007 type=uart instance=7 source=expanded rx_capacity=4096 tx_capacity=4096' \
     <<<"$resource_output"
+grep -Fq 'resource_id=0x6000000 type=pwm instance=0' <<<"$resource_output"
+grep -Fq 'resource_id=0xa000000 type=timed-bitstream instance=0' <<<"$resource_output"
+
+pwm_create_output="$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-create 0 20000 4200 active-high)"
+pwm_object_id="${pwm_create_output#object_id=}"
+[[ "$pwm_object_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-write "$pwm_object_id" 7500)" == "ok" ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-stop "$pwm_object_id")" == "ok" ]]
+
+ws2812_create_output="$("$remote_cli_bin" --socket "$socket_path" \
+    ws2812-create 0)"
+ws2812_object_id="${ws2812_create_output#object_id=}"
+[[ "$ws2812_object_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    ws2812-write "$ws2812_object_id" FF000000FF000000FF)" == \
+    "ok pixels=3" ]]
 
 describe_output="$("$remote_cli_bin" --socket "$socket_path" \
     resource-describe 0x02000007)"

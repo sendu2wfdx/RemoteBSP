@@ -31,12 +31,12 @@ build_profile() {
     grep -q '^CONFIG_USBSERIAL=y$' "${temporary_dir}/.config"
     grep -q '^CONFIG_CANSERIAL=y$' "${temporary_dir}/.config"
     grep -q '^CONFIG_STM32_CANBUS_PB8_PB9=y$' "${temporary_dir}/.config"
-    if [[ "${profile}" == "stm32f072_dual" ]]; then
+    if [[ "${profile}" == "stm32f072_mellow_fly_d5_dual" ]]; then
         grep -q '^# CONFIG_ENABLE_BUTTON is not set$' \
             "${temporary_dir}/.config"
         grep -q '^CONFIG_ENABLE_DOUBLE_RESET=y$' \
             "${temporary_dir}/.config"
-    elif [[ "${profile}" == "stm32f103_dual" ]]; then
+    elif [[ "${profile}" == "stm32f103_weact_bluepill_plus_dual" ]]; then
         grep -q '^CONFIG_ENABLE_BUTTON=y$' "${temporary_dir}/.config"
         grep -q '^CONFIG_BUTTON_PIN="~PA0"$' "${temporary_dir}/.config"
         grep -q '^# CONFIG_ENABLE_DOUBLE_RESET is not set$' \
@@ -57,14 +57,14 @@ build_profile() {
         grep ' T usb_console_sendf$' >/dev/null
     arm-none-eabi-nm "${object_dir}/bootentry.o" |
         grep ' T bootentry_is_usb$' >/dev/null
-    if [[ "${profile}" == "stm32f103_dual" ]]; then
+    if [[ "${profile}" == "stm32f103_weact_bluepill_plus_dual" ]]; then
         arm-none-eabi-nm "${object_dir}/generic/dual_interface.o" |
             grep ' T dual_usb_can_irq$' >/dev/null
     fi
     printf '%s：%s 字节，双模式配置有效\n' "${profile}" "${size}"
 }
 
-build_profile stm32f072_dual
-build_profile stm32f103_dual
-build_profile stm32g431_dual
+build_profile stm32f072_mellow_fly_d5_dual
+build_profile stm32f103_weact_bluepill_plus_dual
+build_profile stm32g431_weact_core_dual
 printf '临时验证目录保留在：%s\n' "${temporary_dir}"

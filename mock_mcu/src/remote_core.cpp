@@ -48,12 +48,14 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                        std::shared_ptr<UartBsp> uart_bsp,
                        std::vector<protocol::ResourceDescriptor> resources,
                        std::vector<protocol::ResourceContract> contracts,
-                       std::shared_ptr<MotionExecutor> motion)
+                       std::shared_ptr<MotionExecutor> motion,
+                       std::shared_ptr<WaveformBsp> waveform)
     : node_info_(node_info),
       capabilities_(capabilities),
       gpio_bsp_(std::move(gpio_bsp)),
       uart_bsp_(std::move(uart_bsp)),
       motion_(std::move(motion)),
+      waveform_(std::move(waveform)),
       resources_(std::move(resources)),
       contracts_(std::move(contracts)) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
@@ -140,6 +142,18 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_uart_read(request);
         case protocol::Command::UartWrite:
             return handle_uart_write(request);
+        case protocol::Command::PwmCreate:
+            return handle_pwm_create(request);
+        case protocol::Command::PwmWrite:
+            return handle_pwm_write(request);
+        case protocol::Command::PwmStop:
+            return handle_pwm_stop(request);
+        case protocol::Command::TimedBitstreamCreate:
+            return handle_timed_bitstream_create(request);
+        case protocol::Command::TimedBitstreamWrite:
+            return handle_timed_bitstream_write(request);
+        case protocol::Command::TimedBitstreamAbort:
+            return handle_timed_bitstream_abort(request);
         case protocol::Command::MotionEnqueue:
             return handle_motion_enqueue(request);
         case protocol::Command::MotionStatus:
@@ -202,6 +216,17 @@ bool RemoteCore::resource_has_objects(
                }) ||
            std::any_of(
                uart_objects_.begin(), uart_objects_.end(),
+               [resource_id](const auto& entry) {
+                   return entry.second.resource_id == resource_id;
+               }) ||
+           std::any_of(
+               pwm_objects_.begin(), pwm_objects_.end(),
+               [resource_id](const auto& entry) {
+                   return entry.second.resource_id == resource_id;
+               }) ||
+           std::any_of(
+               timed_bitstream_objects_.begin(),
+               timed_bitstream_objects_.end(),
                [resource_id](const auto& entry) {
                    return entry.second.resource_id == resource_id;
                });
@@ -286,6 +311,44 @@ void RemoteCore::release_resource_objects(
             }
         }
         iterator = uart_objects_.erase(iterator);
+    }
+
+    for (auto iterator = pwm_objects_.begin();
+         iterator != pwm_objects_.end();) {
+        const auto object = iterator->second;
+        if (object.resource_id != resource_id ||
+            object.owner_session_id != owner_session_id) {
+            ++iterator;
+            continue;
+        }
+        if (waveform_) {
+            try {
+                waveform_->pwm_stop(object.channel);
+                waveform_->reset_pwm(object.channel);
+            } catch (const std::exception&) {
+                // 释放必须继续，后端故障由资源状态单独报告。
+            }
+        }
+        iterator = pwm_objects_.erase(iterator);
+    }
+
+    for (auto iterator = timed_bitstream_objects_.begin();
+         iterator != timed_bitstream_objects_.end();) {
+        const auto object = iterator->second;
+        if (object.resource_id != resource_id ||
+            object.owner_session_id != owner_session_id) {
+            ++iterator;
+            continue;
+        }
+        if (waveform_) {
+            try {
+                waveform_->bitstream_abort(object.channel);
+                waveform_->reset_bitstream(object.channel);
+            } catch (const std::exception&) {
+                // 与 PWM 相同，始终完成对象清理。
+            }
+        }
+        iterator = timed_bitstream_objects_.erase(iterator);
     }
 }
 
@@ -593,6 +656,27 @@ protocol::Packet RemoteCore::handle_resource_reset(
         } catch (const std::exception&) {
             return make_response(request, StatusCode::ResourceFailed);
         }
+        return make_response(request, StatusCode::Ok);
+    }
+    if (found->type == protocol::ResourceType::Pwm && waveform_ &&
+        found->instance <= std::numeric_limits<std::uint8_t>::max()) {
+        try {
+            waveform_->pwm_stop(static_cast<std::uint8_t>(found->instance));
+        } catch (const std::exception&) {
+            // 尚未创建对象时复位仍然是幂等成功。
+        }
+        release_resource_objects(resource_id, request.header.session_id);
+        return make_response(request, StatusCode::Ok);
+    }
+    if (found->type == protocol::ResourceType::TimedBitstream && waveform_ &&
+        found->instance <= std::numeric_limits<std::uint8_t>::max()) {
+        try {
+            waveform_->bitstream_abort(
+                static_cast<std::uint8_t>(found->instance));
+        } catch (const std::exception&) {
+            // 与 PWM 一样允许对空闲资源重复复位。
+        }
+        release_resource_objects(resource_id, request.header.session_id);
         return make_response(request, StatusCode::Ok);
     }
     if (found->type != protocol::ResourceType::Uart || !uart_bsp_ ||
@@ -1121,6 +1205,252 @@ protocol::Packet RemoteCore::handle_uart_write(
         uart_bsp_->write(found->second.port, request.payload);
     } catch (const std::exception& error) {
         return make_uart_error_response(request, error);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_pwm_create(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ & capability_mask(Capability::Pwm)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || next_object_id_ == 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::PwmCreatePayload config;
+    try {
+        config = protocol::decode_pwm_create(request.payload);
+    } catch (const protocol::WaveformPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const bool catalog_has_type = std::any_of(
+        resources_.begin(), resources_.end(), [](const auto& resource) {
+            return resource.type == protocol::ResourceType::Pwm;
+        });
+    const auto* resource = find_resource(
+        protocol::ResourceType::Pwm, config.channel);
+    if (catalog_has_type && resource == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (std::any_of(pwm_objects_.begin(), pwm_objects_.end(),
+                    [&](const auto& entry) {
+                        return entry.second.channel == config.channel;
+                    })) {
+        return make_response(request, StatusCode::ResourceBusy);
+    }
+    std::uint32_t owner_session_id = 0;
+    if (resource != nullptr) {
+        const auto* contract = find_contract(resource->resource_id);
+        const bool lease_required = contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(resource->resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+        if (session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            owner_session_id = request.header.session_id;
+        }
+    }
+    try {
+        waveform_->pwm_configure(config);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    const std::uint32_t object_id = next_object_id_++;
+    pwm_objects_.emplace(
+        object_id,
+        PwmObject{config.channel,
+                  resource == nullptr ? 0U : resource->resource_id,
+                  owner_session_id});
+    auto response = make_response(request, StatusCode::Ok);
+    response.header.object_id = object_id;
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_pwm_write(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ & capability_mask(Capability::Pwm)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    const auto found = pwm_objects_.find(request.header.object_id);
+    if (request.header.object_id == 0 || found == pwm_objects_.end()) {
+        return make_response(
+            request, request.header.object_id == 0
+                         ? StatusCode::InvalidPayload
+                         : StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    try {
+        waveform_->pwm_write(
+            found->second.channel,
+            protocol::decode_pwm_duty(request.payload));
+    } catch (const protocol::WaveformPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_pwm_stop(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ & capability_mask(Capability::Pwm)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    const auto found = pwm_objects_.find(request.header.object_id);
+    if (request.header.object_id == 0 || !request.payload.empty()) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (found == pwm_objects_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    try {
+        waveform_->pwm_stop(found->second.channel);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_timed_bitstream_create(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ &
+         capability_mask(Capability::TimedBitstream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || next_object_id_ == 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::TimedBitstreamCreatePayload config;
+    try {
+        config = protocol::decode_timed_bitstream_create(request.payload);
+    } catch (const protocol::WaveformPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const bool catalog_has_type = std::any_of(
+        resources_.begin(), resources_.end(), [](const auto& resource) {
+            return resource.type ==
+                   protocol::ResourceType::TimedBitstream;
+        });
+    const auto* resource = find_resource(
+        protocol::ResourceType::TimedBitstream, config.channel);
+    if (catalog_has_type && resource == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (std::any_of(timed_bitstream_objects_.begin(),
+                    timed_bitstream_objects_.end(),
+                    [&](const auto& entry) {
+                        return entry.second.channel == config.channel;
+                    })) {
+        return make_response(request, StatusCode::ResourceBusy);
+    }
+    std::uint32_t owner_session_id = 0;
+    if (resource != nullptr) {
+        const auto* contract = find_contract(resource->resource_id);
+        const bool lease_required = contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(resource->resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+        if (session_has_exclusive_lease(
+                resource->resource_id, request.header.session_id)) {
+            owner_session_id = request.header.session_id;
+        }
+    }
+    try {
+        waveform_->bitstream_configure(config);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    const std::uint32_t object_id = next_object_id_++;
+    timed_bitstream_objects_.emplace(
+        object_id,
+        TimedBitstreamObject{
+            config.channel,
+            resource == nullptr ? 0U : resource->resource_id,
+            owner_session_id});
+    auto response = make_response(request, StatusCode::Ok);
+    response.header.object_id = object_id;
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_timed_bitstream_write(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ &
+         capability_mask(Capability::TimedBitstream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    const auto found =
+        timed_bitstream_objects_.find(request.header.object_id);
+    if (request.header.object_id == 0 ||
+        found == timed_bitstream_objects_.end()) {
+        return make_response(
+            request, request.header.object_id == 0
+                         ? StatusCode::InvalidPayload
+                         : StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    try {
+        const auto decoded =
+            protocol::decode_timed_bitstream_write(request.payload);
+        waveform_->bitstream_write(
+            found->second.channel, decoded.bit_count, decoded.data);
+    } catch (const protocol::WaveformPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_timed_bitstream_abort(
+    const protocol::Packet& request) {
+    if (!waveform_ ||
+        (capabilities_ &
+         capability_mask(Capability::TimedBitstream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    const auto found =
+        timed_bitstream_objects_.find(request.header.object_id);
+    if (request.header.object_id == 0 || !request.payload.empty()) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (found == timed_bitstream_objects_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != 0 &&
+        found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    try {
+        waveform_->bitstream_abort(found->second.channel);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
     }
     return make_response(request, StatusCode::Ok);
 }

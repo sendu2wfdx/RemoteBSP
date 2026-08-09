@@ -16,6 +16,14 @@ target_compile_options(motion_protocol_tests PRIVATE
 )
 add_test(NAME motion_protocol_tests COMMAND motion_protocol_tests)
 
+add_executable(waveform_protocol_tests waveform_protocol_tests.cpp)
+target_link_libraries(waveform_protocol_tests PRIVATE remotebsp_protocol)
+target_compile_options(waveform_protocol_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME waveform_protocol_tests COMMAND waveform_protocol_tests)
+
 add_executable(fragmentation_tests fragmentation_tests.cpp)
 target_link_libraries(fragmentation_tests PRIVATE remotebsp_protocol)
 
@@ -161,6 +169,13 @@ target_compile_options(gpio_tests PRIVATE
 
 add_test(NAME gpio_tests COMMAND gpio_tests)
 
+add_executable(waveform_tests waveform_tests.cpp)
+target_link_libraries(waveform_tests PRIVATE remotebsp_remote_core)
+target_compile_options(waveform_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME waveform_tests COMMAND waveform_tests)
+
 add_executable(uart_tests uart_tests.cpp)
 target_link_libraries(uart_tests PRIVATE remotebsp_remote_core)
 
@@ -293,3 +308,10 @@ target_compile_options(embedded_tmc2209_uart_backend_tests PRIVATE
 )
 add_test(NAME embedded_tmc2209_uart_backend_tests
          COMMAND embedded_tmc2209_uart_backend_tests)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME firmware_config_tests
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/firmware/tests/test_genconfig.py"
+)

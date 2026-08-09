@@ -11,6 +11,11 @@ static uint32_t now_ms;
 static bool gpio_values[256];
 static unsigned gpio_write_count;
 static unsigned uart_read_count;
+static uint16_t pwm_duty[2];
+static bool pwm_stopped[2];
+static uint16_t timed_bit_count;
+static uint8_t timed_bit_data[96];
+static bool timed_bit_busy;
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
 
@@ -126,6 +131,69 @@ static bool fake_uart_write(uint8_t port, const uint8_t* data,
     return port < 2U && data != NULL && length != 0U;
 }
 
+static bool fake_pwm_configure(uint8_t channel, uint32_t frequency_hz,
+                               uint16_t duty, bool active_low) {
+    (void)active_low;
+    if (channel >= 2U || frequency_hz == 0U || duty > 10000U) {
+        return false;
+    }
+    pwm_duty[channel] = duty;
+    pwm_stopped[channel] = false;
+    return true;
+}
+
+static bool fake_pwm_write(uint8_t channel, uint16_t duty) {
+    if (channel >= 2U || duty > 10000U) {
+        return false;
+    }
+    pwm_duty[channel] = duty;
+    pwm_stopped[channel] = false;
+    return true;
+}
+
+static bool fake_pwm_stop(uint8_t channel) {
+    if (channel >= 2U) {
+        return false;
+    }
+    pwm_duty[channel] = 0U;
+    pwm_stopped[channel] = true;
+    return true;
+}
+
+static bool fake_timed_bitstream_configure(
+    uint8_t channel, uint32_t bit_period_ns, uint32_t zero_high_ns,
+    uint32_t one_high_ns, uint32_t reset_time_us) {
+    return channel == 0U && bit_period_ns != 0U && zero_high_ns != 0U &&
+           one_high_ns != 0U && zero_high_ns < bit_period_ns &&
+           one_high_ns < bit_period_ns && reset_time_us != 0U;
+}
+
+static bool fake_timed_bitstream_write(uint8_t channel,
+                                       const uint8_t* data,
+                                       uint16_t bit_count) {
+    const size_t size = (bit_count + 7U) / 8U;
+    if (channel != 0U || data == NULL || bit_count == 0U ||
+        size > sizeof(timed_bit_data)) {
+        return false;
+    }
+    memcpy(timed_bit_data, data, size);
+    timed_bit_count = bit_count;
+    timed_bit_busy = true;
+    return true;
+}
+
+static bool fake_timed_bitstream_busy(uint8_t channel) {
+    return channel == 0U && timed_bit_busy;
+}
+
+static bool fake_timed_bitstream_abort(uint8_t channel) {
+    if (channel != 0U) {
+        return false;
+    }
+    timed_bit_busy = false;
+    return true;
+}
+
 static void fake_enter_bootloader(rbsp_bootloader_mode_t mode) {
     last_bootloader_mode = mode;
     ++bootloader_enter_count;
@@ -227,10 +295,23 @@ int main(void) {
 
     rbsp_core_t core;
     const rbsp_hal_t hal = {
-        fake_can_send, fake_milliseconds,
-        fake_gpio_configure, fake_gpio_write, fake_gpio_read,
-        fake_uart_configure, fake_uart_read, fake_uart_write,
-        fake_enter_bootloader};
+        .can_send = fake_can_send,
+        .milliseconds = fake_milliseconds,
+        .gpio_configure = fake_gpio_configure,
+        .gpio_write = fake_gpio_write,
+        .gpio_read = fake_gpio_read,
+        .uart_configure = fake_uart_configure,
+        .uart_read = fake_uart_read,
+        .uart_write = fake_uart_write,
+        .pwm_configure = fake_pwm_configure,
+        .pwm_write = fake_pwm_write,
+        .pwm_stop = fake_pwm_stop,
+        .timed_bitstream_configure = fake_timed_bitstream_configure,
+        .timed_bitstream_write = fake_timed_bitstream_write,
+        .timed_bitstream_busy = fake_timed_bitstream_busy,
+        .timed_bitstream_abort = fake_timed_bitstream_abort,
+        .enter_bootloader = fake_enter_bootloader,
+    };
     rbsp_node_info_t info = {
         {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
          0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
@@ -379,6 +460,65 @@ int main(void) {
     assert(reassemble_sent(response, 0x599U) == 25U);
     assert(response[24] == 4U);
     core.uart_objects[1].streaming = false;
+
+    clear_sent();
+    uint8_t pwm_config[8] = {0U};
+    put_u32(pwm_config + 1U, 20000U);
+    put_u16(pwm_config + 5U, 2500U);
+    request_size = make_request(request, 0x0600U, 30U, 0U,
+                                pwm_config, sizeof(pwm_config));
+    feed_packet(&core, 0x619U, 30U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    const uint32_t pwm_object = get_u32(response + 12U);
+    assert(response[24] == 0U && pwm_object != 0U);
+    assert(pwm_duty[0] == 2500U);
+
+    clear_sent();
+    uint8_t pwm_write[2];
+    put_u16(pwm_write, 7500U);
+    request_size = make_request(request, 0x0601U, 31U, pwm_object,
+                                pwm_write, sizeof(pwm_write));
+    feed_packet(&core, 0x619U, 31U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U && pwm_duty[0] == 7500U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0602U, 32U, pwm_object,
+                                NULL, 0U);
+    feed_packet(&core, 0x619U, 32U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U && pwm_stopped[0]);
+
+    clear_sent();
+    uint8_t bitstream_config[17] = {0U};
+    put_u32(bitstream_config + 1U, 1250U);
+    put_u32(bitstream_config + 5U, 350U);
+    put_u32(bitstream_config + 9U, 700U);
+    put_u32(bitstream_config + 13U, 80U);
+    request_size = make_request(request, 0x0700U, 33U, 0U,
+                                bitstream_config,
+                                sizeof(bitstream_config));
+    feed_packet(&core, 0x619U, 33U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    const uint32_t bitstream_object = get_u32(response + 12U);
+    assert(response[24] == 0U && bitstream_object != 0U);
+
+    clear_sent();
+    const uint8_t bitstream_write[] = {24U, 0U, 0x12U, 0x34U, 0x56U};
+    request_size = make_request(request, 0x0701U, 34U,
+                                bitstream_object, bitstream_write,
+                                sizeof(bitstream_write));
+    feed_packet(&core, 0x619U, 34U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U && timed_bit_count == 24U);
+    assert(memcmp(timed_bit_data, bitstream_write + 2U, 3U) == 0);
+
+    clear_sent();
+    request_size = make_request(request, 0x0702U, 35U,
+                                bitstream_object, NULL, 0U);
+    feed_packet(&core, 0x619U, 35U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U && !timed_bit_busy);
 
     clear_sent();
     const uint8_t bootloader_confirmation[] = {

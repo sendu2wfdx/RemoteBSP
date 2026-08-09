@@ -186,7 +186,7 @@ Linux本地不同应用的强所有权还需要持久IPC客户端身份，不能
 固件阶段需要：
 
 - 基于 Kconfig/menuconfig 的功能配置。
-- 按板型选择 MCU、晶振、CAN、USB 和 Bootloader 等固定硬件参数。
+- 按板型选择 MCU、晶振、CAN、Katapult USB 恢复口占用和 Bootloader 布局等固定参数。
 - 按功能选择是否编译运动控制、输入采样、UART、SPI 和持久化模块。
 - 未选模块不得链接到最终固件，也不得占用静态 RAM 或中断。
 - 每类资源数量和缓冲大小只在 menuconfig 中设置编译期硬上限。
