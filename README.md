@@ -1,11 +1,12 @@
 # Remote BSP
 
-Remote BSP 是一个传输无关的远程板级支持框架。Linux 主机通过 CAN/CAN-FD
-统一管理多块 MCU 工具板，并像使用本地资源一样调用远端 GPIO、UART、PWM 等通用
+Remote BSP 是一个传输无关的远程板级支持框架。Linux 主机默认通过 CAN/CAN-FD，
+也可通过 USB Vendor Bulk 管理 MCU 工具板，并像使用本地资源一样调用远端 GPIO、UART、PWM 等通用
 硬件能力。传感器、Modbus、阀门和厂商协议全部运行在 Linux；MCU 固件只执行
 原子硬件操作，不包含设备专用驱动。
 
-当前代码已经打通 Linux 主机、Mock MCU、Classical CAN、CAN-FD 和
+当前代码已经打通 Linux 主机、Mock MCU、Classical CAN、CAN-FD 和第一版 USB
+Vendor Bulk 主机/Mock/G431 Device 链路，并完成
 STM32F103 实板链路。STM32F103 的 CAN/USB 双模式 Katapult Bootloader 已完成
 实体板下载验证；STM32G431 已完成 CAN-FD 发现、心跳、PING、信息查询和 GPIO
 实板验证。STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
@@ -19,9 +20,10 @@ flowchart TD
     C --> D["toolbusd"]
     D --> E["远程协议与请求管理"]
     E --> F["分片与重组"]
-    F --> G["CanTransport / SocketCAN"]
-    G --> H["Classical CAN 或 CAN-FD"]
-    H --> I["Mock MCU 或工具板 Remote Core"]
+    F --> G["LinkTransport"]
+    G --> H["SocketCAN / libusb / Mock USB"]
+    H --> H2["Classical CAN / CAN-FD / USB Bulk"]
+    H2 --> I["Mock MCU 或工具板 Remote Core"]
     I --> J["GPIO / UART / PWM / 定时位流等原子 BSP"]
 ```
 
@@ -34,6 +36,8 @@ flowchart TD
 |---|---|
 | 远程包协议 | 版本、消息类型、命令、会话 ID、请求 ID、对象 ID、长度、标志、CRC，小端编码 |
 | 分片层 | Classical CAN 8 字节、CAN-FD 64 字节，最大包 2048 字节，超时、重复和非法分片检查 |
+| 通用链路层 | `LinkTransport`、逻辑路由号和链路能力；SocketCAN、libusb 与 Mock USB 共用 Remote Packet |
+| USB Vendor Bulk | Linux libusb、Mock USB 全链路及 G431 USB Device Vendor Bulk 后端已实现；G431 实体枚举与压力测试待验收 |
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
@@ -41,17 +45,19 @@ flowchart TD
 | 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、2 路 PWM、1 路定时位流；默认示例公开3路运动轴，并可按 100 ms 周期导出数字孪生状态 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、可增删的多路PWM/灯带配置、独立实时控制原型、资源清单导出，以及Mock GPIO/步进/PWM/WS2812可视化和遥测总览 |
-| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；五轴与五路 TMC2209 通讯后端待实板验收 |
+| STM32F103CBT6 / WeAct BluePill Plus | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、Classical CAN、GPIO、USART1、双模式 Katapult；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；五轴与五路 TMC2209 通讯后端待实板验收 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；既有 CAN-FD/板载 PWM/单轴运动已实板验证，新通用波形后端待实板验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；既有 CAN-FD/板载 PWM/单轴运动已实板验证，新通用波形后端待实板验收 |
 
 SPI、I2C、ADC、通用 Timer 协议和 Storage 已按当前优先级后置，尚未实现。
 通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
 F072/F103/G431 固件后端第一阶段。PWM 直接描述频率、万分比占空比和极性；
 定时位流只描述 0/1 高低时间与复位时间，WS2812 的 RGB/GRB 排列、亮度和动画
 仍由 Linux 处理。三块板均已交叉编译，但新 DMA 波形后端尚未使用示波器和实体
-灯带验收，不能视为硬件完成。所有 APP 都只运行 CAN/CAN-FD；USB 仅用于
-Katapult 应急恢复升级，不承载 RemoteBSP 业务或 APP 调试输出。
+灯带验收，不能视为硬件完成。正式 APP 默认仍运行 CAN/CAN-FD；G431 另有互斥的
+USB Vendor Bulk APP 预设，主机、Mock、MCU 公共帧格式和 G431 Device 后端已完成
+交叉编译，待实体枚举与压力测试。Katapult USB 应急升级保持独立 PID，不作为
+APP 调试串口。
 
 当前主线优先级为智能步进运动、数字孪生、遥测与监控、图形配置器。Mock 已实现
 第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，
@@ -64,7 +70,7 @@ MCU 侧模型独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/
 
 ```text
 protocol/       远程包、CRC、资源描述和分片协议
-transport/      与协议无关的 CAN 传输接口和 SocketCAN 实现
+transport/      通用链路接口、SocketCAN、libusb、USB 帧格式和 Mock USB
 toolbusd/       Linux 守护进程、本地 IPC、发现、心跳和请求管理
 libremotebsp/   C++ 应用客户端
 mock_mcu/       Linux Mock MCU 与模拟 BSP
@@ -78,11 +84,12 @@ docs/           架构、硬件、构建、升级和 API 文档
 ## Linux 主机构建
 
 需要 Linux 或具备 SocketCAN/vcan 的 WSL2，以及 CMake 3.16、Ninja、C++17
-编译器和 can-utils。项目开发使用的 WSL 发行版名为 `Ubuntu`。
+编译器、can-utils、pkg-config 和 libusb。项目开发使用的 WSL 发行版名为 `Ubuntu`。
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential cmake ninja-build can-utils
+sudo apt install -y build-essential cmake ninja-build can-utils \
+    pkg-config libusb-1.0-0-dev
 
 cd /mnt/d/Documents/RemoteBSP
 cmake -S . -B build-wsl -G Ninja \
@@ -101,7 +108,8 @@ sudo ip link set dev vcan0 up
 ctest --test-dir build-wsl --output-on-failure
 ```
 
-当前自动测试共 32 项，覆盖协议、CRC、运动与波形线格式、分片、CAN/CAN-FD 帧、SocketCAN、
+当前自动测试共 35 项，覆盖协议、CRC、运动与波形线格式、分片、CAN/CAN-FD 帧、
+SocketCAN、USB 帧、固件 USB 编解码和 USB Mock 端到端链路，
 发现、心跳、多节点、请求超时与去重、GPIO、UART、资源模型和嵌入式 Remote
 Core，并单独测试资源租约冲突、续租、会话释放、到期、安全状态、统一板卡描述、
 数字孪生故障隔离、可变轴数同步边沿、MCU可裁剪运动队列、运动欠载/限位停机、
@@ -325,10 +333,12 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [WeAct STM32G431CBU6 Core 板卡说明](docs/weact-stm32g431cbu6-core.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)
 - [Katapult 双模式升级与应急恢复](docs/bootloader-upgrade.md)
+- [USB Vendor Bulk 传输](docs/usb-transport.md)
 - [RemoteBSP Studio 图形配置器](gui/README.md)
 
 ## 项目边界
 
 当前阶段不包含 Linux 内核驱动、STM32 之外的 MCU、以太网传输或设备专用
 传感器/阀门驱动。Remote BSP 协议层不依赖 SocketCAN，MCU Remote Core 不包含
-设备协议，应用程序也不能绕过 `toolbusd` 直接访问 CAN。
+设备协议，应用程序也不能绕过 `toolbusd` 直接访问 CAN 或 USB。USB 的 Linux
+主机与 Mock 链路已经实现，STM32 USB Device 业务后端仍属于后续实板工作。

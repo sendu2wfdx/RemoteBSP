@@ -15,8 +15,8 @@ bool test_mode(const std::string& interface_name, CanMode mode,
     SocketCanTransport receiver(interface_name, mode);
     SocketCanTransport sender(interface_name, mode);
 
-    CanMessage sent;
-    sent.identifier = identifier;
+    LinkFrame sent;
+    sent.route = identifier;
     sent.data.resize(payload_size);
     for (std::size_t i = 0; i < sent.data.size(); ++i) {
         sent.data[i] = static_cast<std::uint8_t>((i * 19U) & 0xFFU);
@@ -25,8 +25,7 @@ bool test_mode(const std::string& interface_name, CanMode mode,
     sender.send(sent);
     const auto received = receiver.receive(std::chrono::milliseconds(500));
     return received.has_value() &&
-           received->identifier == sent.identifier &&
-           received->extended_identifier == sent.extended_identifier &&
+           received->route == sent.route &&
            received->data == sent.data;
 }
 

@@ -17,11 +17,18 @@ extern "C" {
 #define RBSP_HEADER_SIZE 24U
 #define RBSP_FRAGMENT_HEADER_SIZE 5U
 #define RBSP_MAX_WIRE_PACKET_SIZE 2048U
-#define RBSP_CAN_ID_DISCOVERY 0x700U
-#define RBSP_CAN_ID_REQUEST_BASE 0x600U
-#define RBSP_CAN_ID_RESPONSE_BASE 0x580U
-#define RBSP_CAN_ID_EVENT_BASE 0x500U
-#define RBSP_CAN_ID_PROVISIONAL_BASE 0x480U
+#define RBSP_ROUTE_DISCOVERY 0x700U
+#define RBSP_ROUTE_REQUEST_BASE 0x600U
+#define RBSP_ROUTE_RESPONSE_BASE 0x580U
+#define RBSP_ROUTE_EVENT_BASE 0x500U
+#define RBSP_ROUTE_PROVISIONAL_BASE 0x480U
+
+/* 兼容现有 CAN 板级代码；Remote Core 只解释逻辑路由，不解释 CAN ID。 */
+#define RBSP_CAN_ID_DISCOVERY RBSP_ROUTE_DISCOVERY
+#define RBSP_CAN_ID_REQUEST_BASE RBSP_ROUTE_REQUEST_BASE
+#define RBSP_CAN_ID_RESPONSE_BASE RBSP_ROUTE_RESPONSE_BASE
+#define RBSP_CAN_ID_EVENT_BASE RBSP_ROUTE_EVENT_BASE
+#define RBSP_CAN_ID_PROVISIONAL_BASE RBSP_ROUTE_PROVISIONAL_BASE
 
 #if CONFIG_REMOTE_MAX_PACKET_SIZE > RBSP_MAX_WIRE_PACKET_SIZE
 #error "配置的远程包长度超过协议上限"
@@ -34,7 +41,10 @@ extern "C" {
 typedef enum {
     RBSP_CAN_CLASSICAL = 0,
     RBSP_CAN_FD = 1,
-} rbsp_can_mode_t;
+    RBSP_USB = 2,
+} rbsp_link_mode_t;
+
+typedef rbsp_link_mode_t rbsp_can_mode_t;
 
 typedef enum {
     RBSP_GPIO_INPUT = 0,
@@ -47,10 +57,15 @@ typedef enum {
 } rbsp_bootloader_mode_t;
 
 typedef struct {
-    uint32_t identifier;
+    union {
+        uint32_t route;
+        uint32_t identifier;
+    };
     uint8_t length;
     uint8_t data[64];
-} rbsp_can_frame_t;
+} rbsp_link_frame_t;
+
+typedef rbsp_link_frame_t rbsp_can_frame_t;
 
 typedef struct {
     uint8_t uuid[16];
@@ -65,6 +80,8 @@ typedef struct {
  * 中断服务只负责收发字节和维护驱动状态，协议解析始终在主循环中完成。
  */
 typedef struct {
+    bool (*link_send)(const rbsp_link_frame_t* frame);
+    /* 兼容旧板级实现；link_send 为空时使用 can_send。 */
     bool (*can_send)(const rbsp_can_frame_t* frame);
     uint32_t (*milliseconds)(void);
     bool (*gpio_configure)(uint16_t pin, rbsp_gpio_direction_t direction,
@@ -169,7 +186,7 @@ typedef struct {
 
 typedef struct {
     rbsp_hal_t hal;
-    rbsp_can_mode_t can_mode;
+    rbsp_link_mode_t link_mode;
     rbsp_node_info_t info;
     uint32_t node_id;
     uint32_t next_object_id;
@@ -199,10 +216,12 @@ typedef struct {
 } rbsp_core_t;
 
 bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
-                    rbsp_can_mode_t mode, const rbsp_node_info_t* info);
+                    rbsp_link_mode_t mode, const rbsp_node_info_t* info);
 void rbsp_core_poll(rbsp_core_t* core);
 void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
+void rbsp_core_accept_link(rbsp_core_t* core,
+                           const rbsp_link_frame_t* frame);
 #if defined(CONFIG_REMOTEBSP_MOTION)
 bool rbsp_core_motion_service(rbsp_core_t* core);
 bool rbsp_core_motion_tick(rbsp_core_t* core);

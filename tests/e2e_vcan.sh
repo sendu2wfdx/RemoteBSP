@@ -8,6 +8,10 @@ client_api_bin="$4"
 can_interface="$5"
 can_mode="$6"
 
+if [[ "$can_mode" == "usb-mock" ]]; then
+    can_interface="/tmp/remotebsp-usb-link-$$.sock"
+fi
+
 socket_path="/tmp/remotebsp-e2e-${can_mode}-$$.sock"
 mock_log="/tmp/remotebsp-mock-${can_mode}-$$.log"
 daemon_log="/tmp/remotebsp-daemon-${can_mode}-$$.log"
@@ -39,11 +43,15 @@ cleanup() {
         sed -n '1,300p' "$trace_log" 2>/dev/null || true
     fi
     rm -f -- "$socket_path" "$mock_log" "$daemon_log" "$trace_log"
+    if [[ "$can_mode" == "usb-mock" ]]; then
+        rm -f -- "$can_interface"
+    fi
     exit "$result"
 }
 trap cleanup EXIT INT TERM
 
-if command -v candump >/dev/null 2>&1; then
+if [[ "$can_mode" != "usb-mock" ]] &&
+   command -v candump >/dev/null 2>&1; then
     candump -L "$can_interface" >"$trace_log" 2>&1 &
     trace_pid=$!
 fi
@@ -74,6 +82,13 @@ for _ in $(seq 1 100); do
 done
 grep -Fq 'pong=端到端测试' <<<"$ping_output"
 
+# 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。
+printf -v long_ping '%*s' 2023 ''
+long_ping="${long_ping// /x}"
+long_ping_output="$("$remote_cli_bin" --socket "$socket_path" \
+    ping "$long_ping")"
+[[ "$long_ping_output" == "pong=$long_ping" ]]
+
 info_output="$("$remote_cli_bin" --socket "$socket_path" get-info)"
 grep -Fq 'firmware=0.2.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
@@ -82,7 +97,11 @@ capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
 grep -Fq 'capabilities=0x723' <<<"$capability_output"
 
 traffic_output="$("$remote_cli_bin" --socket "$socket_path" traffic-status)"
-grep -Fq "mode=${can_mode}" <<<"$traffic_output"
+expected_traffic_mode="$can_mode"
+if [[ "$can_mode" == "usb-mock" ]]; then
+    expected_traffic_mode="usb"
+fi
+grep -Fq "mode=${expected_traffic_mode}" <<<"$traffic_output"
 grep -Fq 'max_utilization_permille=700' <<<"$traffic_output"
 grep -Fq 'class=system admitted_packets=' <<<"$traffic_output"
 grep -Fq 'class=streaming admitted_packets=' <<<"$traffic_output"

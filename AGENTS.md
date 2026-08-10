@@ -12,8 +12,8 @@
 - MCU 只实现通用、原子、确定性的硬件操作与必要的本地安全机制；Modbus、传感器、阀门、GPS、厂商协议和运动规划运行在 Linux。
 - 保持 `Protocol -> Fragmentation -> Transport -> Remote Core -> BSP` 严格分层；协议层不知道 CAN 类型，传输层不知道 GPIO、UART 或运动业务。
 - 当前支持的实体目标为：STM32F072RBT6 / Mellow FLY-D5、STM32F103CBT6 / WeAct BluePill Plus、STM32G431CBU6 / WeAct STM32G431CBU6 Core。
-- RemoteBSP APP 只运行 CAN/CAN-FD，不链接 USB 协议栈；USB 仅用于 Katapult 应急恢复升级。
-- 不加入 STM32 之外的 MCU、Linux 内核驱动、USB/Ethernet/UART 业务传输或设备专用驱动，除非用户明确扩展范围。
+- RemoteBSP APP 默认运行 CAN/CAN-FD；STM32G431 另提供与 CAN 固件互斥的 USB Vendor Bulk APP，USB Katapult 仍是独立恢复升级阶段和独立 PID。
+- 不加入 STM32 之外的 MCU、Linux 内核驱动、Ethernet/UART 业务传输或设备专用驱动，除非用户明确扩展范围。
 
 ## 固件与配置原则
 

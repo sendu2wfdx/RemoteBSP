@@ -8,7 +8,7 @@
 |---|---|---|
 | STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；PA6 PWM、PA8 DMA定时位流和五轴/TMC后端已交叉编译，待实板验收 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路TMC2209已实板验证；PA6 PWM和PA8 DMA定时位流已交叉编译；双模式Katapult切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 PWM、PA8 DMA定时位流和PC13 GPIO；既有CAN-FD/板载PWM/单轴运动已实测，新通用波形后端待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | CAN-FD实测；另有互斥的USB Vendor Bulk APP已交叉编译；PC6 PWM、PA8 DMA定时位流和PC13 GPIO |
 
 STM32F103 的硬件 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲。
 FLY-D5未默认公开通用硬件UART；G431的硬件USART尚未接入。启用TMC2209预设时只报告TMC专用单线
@@ -17,9 +17,9 @@ F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别
 基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN；
 BluePill 复位时按住 PA0、WeAct G431 复位时按住 PC13 进入 USB。双模式镜像
 已交叉编译，G431 的接口切换仍待实板验证。
-所有 APP 都只链接 CAN/CAN-FD，不提供 USB CDC 调试或业务接口。USB 只由独立的
-Katapult Bootloader 在应急升级模式中初始化；G431 实体 CAN-FD APP 已完成基础
-验收，双模式 Katapult 切换仍待验证。
+正式 APP 默认只链接 CAN/CAN-FD，不提供 USB CDC 调试接口。G431 另提供主链路
+互斥的 USB Vendor Bulk APP，已交叉编译但待实体枚举与压力测试；Katapult USB
+仍由独立 Bootloader 在应急升级阶段初始化，并使用不同 PID。
 
 通用波形模块由`CONFIG_REMOTEBSP_PWM`和`CONFIG_REMOTEBSP_TIMED_BITSTREAM`
 独立裁剪。F072/F103基础预设使用PA6/TIM3_CH1和PA8/TIM1_CH1+DMA1_Channel2；
@@ -51,8 +51,8 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/fetch_stm32_deps.sh
 ```
 
-脚本下载固定版本的 CMSIS Core、对应 MCU 的 CMSIS Device 和 HAL，不下载
-APP 不需要的 USB Device 中间件或板级示例工程。Katapult 依赖由独立脚本管理。
+脚本下载固定版本的 CMSIS Core、对应 MCU 的 CMSIS Device、HAL 和 G431 USB APP
+需要的 ST USB Device 中间件，不下载板级示例工程。Katapult 依赖由独立脚本管理。
 
 ## 使用默认配置编译
 
@@ -73,6 +73,7 @@ bash scripts/build_firmware.sh f072
 bash scripts/build_firmware.sh mellow-fly-d5
 bash scripts/build_firmware.sh g431
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-usb
 bash scripts/build_firmware.sh weact-bluepill-plus-motion
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion
 ```
@@ -144,12 +145,18 @@ EN 引脚和极性选项，而是自动继承来源槽。固件不是简单重�
   分频系数6，采样点87.5%；默认使用PA11/PA12。
 - FLY-D5：板载 8MHz HSE 经 PLL 到 PCLK 48 MHz，Classical CAN 1 Mbit/s，16 TQ，
   分频系数 3，采样点 87.5%。
-- F103 通用配置：72 MHz，CAN 外设时钟 36 MHz，500 kbit/s，采样点约
-  88.9%。
+- F103 通用预设：外部 8 MHz HSE 经 PLL 到 72 MHz，CAN 外设时钟 36 MHz，
+  500 kbit/s，18 TQ，采样点约 88.9%。menuconfig 也可选择内部 HSI8，届时
+  SYSCLK 为 64 MHz、CAN 时钟为 32 MHz，并使用 16 TQ；内部 RC 只建议作为
+  没有 HSE 时的退路。
 - F103 Bluepill 实机配置：CAN 外设时钟 36 MHz，1 Mbit/s，18 TQ，
   分频系数 2，采样点约 88.9%。
 - G431：FDCAN 内核时钟 170 MHz，仲裁段 500 kbit/s，默认数据段 1 Mbit/s，
   两段采样点均约 82.4%。
+
+WeAct BluePill Plus 和 WeAct G431 Core 的 32.768 kHz LSE 是低速守时资源，不是
+系统主时钟。当前 APP 会在 menuconfig、GUI 和运行时引脚检查中保留 PC14/PC15，
+但在 RTC/掉线守时模块实现前不会启动 LSE。FLY-D5 只声明板载 8 MHz HSE。
 
 配置成其他速率时，编译期会检查是否能被当前时序精确生成；不能精确生成就会
 停止编译，而不是悄悄使用错误速率。

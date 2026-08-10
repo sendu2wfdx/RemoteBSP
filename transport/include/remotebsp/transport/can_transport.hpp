@@ -1,9 +1,8 @@
 #pragma once
 
-#include <chrono>
-#include <cstddef>
+#include "remotebsp/transport/link_transport.hpp"
+
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 namespace remotebsp::transport {
@@ -20,15 +19,23 @@ struct CanMessage {
     bool bit_rate_switch{};
 };
 
-class CanTransport {
+class CanTransport : public LinkTransport {
 public:
-    virtual ~CanTransport() = default;
-
-    virtual void send(const CanMessage& message) = 0;
-    virtual std::optional<CanMessage> receive(
-        std::chrono::milliseconds timeout) = 0;
-    virtual std::size_t mtu() const noexcept = 0;
+    ~CanTransport() override = default;
     virtual CanMode mode() const noexcept = 0;
+
+    LinkCapabilities capabilities() const noexcept override {
+        return {
+            mode() == CanMode::Classical
+                ? LinkKind::ClassicalCan
+                : LinkKind::CanFd,
+            mode() == CanMode::Classical ? 8U : 64U,
+            false,
+            true,
+            true,
+            0U,
+        };
+    }
 };
 
 }

@@ -47,7 +47,15 @@ struct CanTrafficClassCounters {
     std::uint64_t estimated_wire_time_ns{};
 };
 
+enum class LinkTrafficMode : std::uint8_t {
+    ClassicalCan = 0,
+    CanFd = 1,
+    Usb = 2,
+};
+
 struct CanTrafficStatus {
+    LinkTrafficMode mode{LinkTrafficMode::ClassicalCan};
+    /* 兼容旧客户端；新代码应读取 mode。 */
     bool can_fd{};
     std::uint32_t arbitration_bits_per_second{};
     std::uint32_t data_bits_per_second{};

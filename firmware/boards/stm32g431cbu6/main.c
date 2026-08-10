@@ -9,11 +9,15 @@
 #include "remotebsp_embedded/soft_half_duplex_uart.h"
 #endif
 #include "remotebsp_embedded/startup_gpio.h"
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+#include "remotebsp_embedded/usb_device_link.h"
+#endif
 #include <string.h>
 
 #if CONFIG_SYSTEM_CLOCK_HZ != 170000000
 #error "STM32G431CBU6 当前时钟方案固定为 170MHz"
 #endif
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 #if (170000000U % (CONFIG_CAN_NOMINAL_BITRATE * 34U)) != 0
 #error "当前 G431 FDCAN 位时序无法精确生成所选仲裁段波特率"
 #endif
@@ -30,8 +34,11 @@
 #else
 #define FDCAN_DATA_PRESCALER 10U
 #endif
+#endif /* CONFIG_REMOTEBSP_TRANSPORT_CAN */
 
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 static FDCAN_HandleTypeDef fdcan_handle;
+#endif
 static rbsp_core_t remote_core;
 static void fatal_error(void);
 
@@ -300,6 +307,10 @@ static void system_clock_configure(void) {
 #else
         RCC_OSCILLATORTYPE_HSI;
 #endif
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+    oscillator.OscillatorType |= RCC_OSCILLATORTYPE_HSI48;
+    oscillator.HSI48State = RCC_HSI48_ON;
+#endif
 #ifdef CONFIG_G431_CLOCK_HSE_8MHZ
     oscillator.HSEState = RCC_HSE_ON;
 #else
@@ -333,11 +344,28 @@ static void system_clock_configure(void) {
     }
 
     RCC_PeriphCLKInitTypeDef peripheral_clock = {0};
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
     peripheral_clock.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
     peripheral_clock.FdcanClockSelection = RCC_FDCANCLKSOURCE_PCLK1;
+#else
+    peripheral_clock.PeriphClockSelection = RCC_PERIPHCLK_USB;
+    peripheral_clock.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+#endif
     if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock) != HAL_OK) {
         fatal_error();
     }
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+    __HAL_RCC_CRS_CLK_ENABLE();
+    RCC_CRSInitTypeDef crs = {0};
+    crs.Prescaler = RCC_CRS_SYNC_DIV1;
+    crs.Source = RCC_CRS_SYNC_SOURCE_USB;
+    crs.Polarity = RCC_CRS_SYNC_POLARITY_RISING;
+    crs.ReloadValue =
+        __HAL_RCC_CRS_RELOADVALUE_CALCULATE(48000000U, 1000U);
+    crs.ErrorLimitValue = RCC_CRS_ERRORLIMIT_DEFAULT;
+    crs.HSI48CalibrationValue = RCC_CRS_HSI48CALIBRATION_DEFAULT;
+    HAL_RCCEx_CRSConfig(&crs);
+#endif
 }
 
 static GPIO_TypeDef* gpio_port_from_index(uint8_t index) {
@@ -377,7 +405,11 @@ static bool gpio_pin_present(uint16_t encoded_pin) {
     if (port == 0U && (pin == 13U || pin == 14U)) {
         return false;
     }
-#if defined(CONFIG_CAN_PINS_PA11_PA12)
+#if defined(CONFIG_REMOTEBSP_TRANSPORT_USB)
+    if (port == 0U && (pin == 11U || pin == 12U)) {
+        return false;
+    }
+#elif defined(CONFIG_CAN_PINS_PA11_PA12)
     if (port == 0U && (pin == 11U || pin == 12U)) {
         return false;
     }
@@ -490,6 +522,7 @@ static bool gpio_pin_allowed(uint16_t encoded_pin) {
     return true;
 }
 
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 static void transceiver_enable(void) {
 #ifdef CONFIG_CAN_TRANSCEIVER_STB_ENABLE
     static const char stb_port_name[] =
@@ -513,6 +546,7 @@ static void transceiver_enable(void) {
     HAL_GPIO_Init(port, &init);
 #endif
 }
+#endif /* CONFIG_REMOTEBSP_TRANSPORT_CAN */
 
 static bool board_startup_gpio_apply(
     uint16_t encoded_pin, rbsp_startup_gpio_mode_t mode) {
@@ -1002,6 +1036,7 @@ static void motion_exit_critical(uint32_t state) {
 }
 #endif
 
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* handle) {
     if (handle->Instance != FDCAN1) {
         return;
@@ -1158,6 +1193,8 @@ static void receive_can_frames(void) {
     }
 }
 
+#endif /* CONFIG_REMOTEBSP_TRANSPORT_CAN */
+
 static void make_node_info(rbsp_node_info_t* info) {
     memset(info, 0, sizeof(*info));
     put_u32(info->uuid + 0U, HAL_GetUIDw0());
@@ -1195,8 +1232,14 @@ int main(void) {
     motion_outputs_configure();
     motion_timebase_configure();
 #endif
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
     transceiver_enable();
     fdcan_configure();
+#else
+    if (!rbsp_usb_device_link_init()) {
+        fatal_error();
+    }
+#endif
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
     const rbsp_soft_half_duplex_uart_hal_t soft_uart_hal = {
         .context = NULL,
@@ -1216,7 +1259,11 @@ int main(void) {
     rbsp_node_info_t info;
     make_node_info(&info);
     const rbsp_hal_t hal = {
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+        .link_send = rbsp_usb_device_link_send,
+#else
         .can_send = board_can_send,
+#endif
         .milliseconds = HAL_GetTick,
         .gpio_configure = board_gpio_configure,
         .gpio_write = board_gpio_write,
@@ -1252,16 +1299,26 @@ int main(void) {
         .enter_bootloader = board_enter_bootloader,
 #endif
     };
-#ifdef CONFIG_CAN_FD_ENABLE
-    const rbsp_can_mode_t mode = RBSP_CAN_FD;
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+    const rbsp_link_mode_t mode = RBSP_USB;
+#elif defined(CONFIG_CAN_FD_ENABLE)
+    const rbsp_link_mode_t mode = RBSP_CAN_FD;
 #else
-    const rbsp_can_mode_t mode = RBSP_CAN_CLASSICAL;
+    const rbsp_link_mode_t mode = RBSP_CAN_CLASSICAL;
 #endif
     if (!rbsp_core_init(&remote_core, &hal, mode, &info)) {
         fatal_error();
     }
     for (;;) {
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+        rbsp_link_frame_t frame;
+        while (rbsp_usb_device_link_receive(&frame)) {
+            rbsp_core_accept_link(&remote_core, &frame);
+        }
+        rbsp_usb_device_link_poll();
+#else
         receive_can_frames();
+#endif
         rbsp_core_poll(&remote_core);
 #ifdef CONFIG_WEACT_G431_PC6_PWM_BREATHING_LED
         led_pwm_poll();
@@ -1286,3 +1343,13 @@ void TIM2_IRQHandler(void) {
     }
 }
 #endif /* CONFIG_REMOTEBSP_MOTION */
+
+#ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
+void USB_LP_IRQHandler(void) {
+    rbsp_usb_device_link_irq_handler();
+}
+
+void USB_HP_IRQHandler(void) {
+    rbsp_usb_device_link_irq_handler();
+}
+#endif

@@ -16,10 +16,9 @@ public:
     SocketCanTransport(SocketCanTransport&& other) noexcept;
     SocketCanTransport& operator=(SocketCanTransport&& other) noexcept;
 
-    void send(const CanMessage& message) override;
-    std::optional<CanMessage> receive(
+    void send(const LinkFrame& frame) override;
+    std::optional<LinkFrame> receive(
         std::chrono::milliseconds timeout) override;
-    std::size_t mtu() const noexcept override;
     CanMode mode() const noexcept override;
 
 private:

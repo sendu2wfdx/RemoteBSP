@@ -12,8 +12,8 @@ Remote BSP 的目标是让 Linux 负责设备协议和业务逻辑，让远端 M
 
 ```text
 应用程序 -> libremotebsp -> toolbusd -> 远程协议
-        -> 分片与重组 -> CAN 传输 -> SocketCAN
-        -> Mock MCU 远程核心
+        -> 分片与重组 -> LinkTransport
+        -> SocketCAN / libusb / Mock USB -> 远程核心
 ```
 
 各层必须保持清晰边界：
@@ -48,8 +48,8 @@ CRC 字段本身。
 
 ## 第二步：分片与重组
 
-分片层接收完整编码数据包和 MTU，不依赖 SocketCAN 头或任何具体 CAN
-传输实现。Classical CAN 使用 8 字节 MTU，CAN-FD 使用 64 字节 MTU。
+分片层接收完整编码数据包和 MTU，不依赖 SocketCAN、libusb 或具体链路。
+Classical CAN 使用 8 字节 MTU，CAN-FD 和 USB 第一版使用 64 字节逻辑 MTU。
 
 每个分片具有 5 字节的小端序头：
 
@@ -73,21 +73,22 @@ Linux 重组器允许乱序重组，可以检测完全重复和内容冲突的�
 不能直接复用对端请求的传输 ID。节点尚未分配地址时，发现响应和临时心跳会
 共用临时 CAN ID；统一计数器可避免两类消息在同一重组流中撞号。
 
-## 第三步：CAN 传输基础
+## 第三步：通用链路与 CAN/USB 适配器
 
-`CanTransport` 是上层唯一依赖的 CAN 传输接口，提供：
+`LinkTransport` 是 toolbusd 和 Mock MCU 唯一依赖的链路接口，提供：
 
-- `send()`：发送一条 CAN 消息。
-- `receive()`：按指定超时接收一条 CAN 消息。
+- `send()`：发送一条带逻辑路由号的链路帧。
+- `receive()`：按指定超时接收一条链路帧。
 - `mtu()`：返回当前模式的载荷上限。
-- `mode()`：返回 Classical CAN 或 CAN-FD 模式。
+- `capabilities()`：返回链路类型、可靠性、顺序性和标称速度。
 
 `SocketCanTransport` 是 Linux 实现。Classical CAN 使用 `struct can_frame`，
 CAN-FD 使用 `struct canfd_frame`。帧转换代码负责校验 11 位或 29 位标识符、
 载荷长度，并拒绝错误帧和远程请求帧。
 
-以上传输接口已经由 `toolbusd`、Mock MCU 和真实 `vcan` 端到端测试使用；
-协议层仍不依赖任何 CAN 类型。
+`LibusbTransport` 使用 Vendor Bulk 和 `RBU1` 长度帧头；`MockUsbTransport`
+使用 Unix 字节流验证拆包与粘包。三者均已由 toolbusd 和 Mock MCU 端到端测试，
+协议层仍不依赖 CAN 或 USB 类型。USB 细节见 [USB Vendor Bulk 传输](usb-transport.md)。
 
 ## 第四步：Mock MCU 远程核心
 
@@ -302,9 +303,10 @@ F103 和 G431 使用同一套双模式补丁：APP 命令可以选择 CAN 或 US
 按住 PA0 或 APP 无效也会选择 USB 应急恢复。两个通信后端同时链接，但运行时
 只初始化一个；F103 因而不会同时启用共享专用 SRAM 的 USB 与 bxCAN。
 
-RemoteBSP APP 不链接 USB 协议栈，业务、遥测和诊断统一经过 CAN/CAN-FD，避免
-增加第二条运行期控制通路。USB 只在 Katapult 应急升级模式中启用；因此 USB
-故障不会影响 APP 的 CAN 接收、心跳或实时调度。详细构建、升级和安全边界见
+正式板卡预设默认仍通过 CAN/CAN-FD 承载业务、遥测和诊断。G431 另提供互斥的
+USB Vendor Bulk APP 预设，已经具备 Linux、Mock、MCU 公共帧格式和 USB Device
+后端并通过交叉编译，实体枚举与压力测试待验收。Katapult USB 仍是独立程序和
+独立 PID。详细构建、升级和安全边界见
 [Katapult 双模式升级与应急恢复](bootloader-upgrade.md)。
 
 ## 第十六步：资源能力合同与会话级租约

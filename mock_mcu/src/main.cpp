@@ -1,6 +1,9 @@
 #include "remotebsp/mock_mcu/board_manifest.hpp"
 #include "remotebsp/mock_mcu/mock_node.hpp"
 #include "remotebsp/mock_mcu/visual_state.hpp"
+#include "remotebsp/transport/link_routes.hpp"
+#include "remotebsp/transport/link_transport.hpp"
+#include "remotebsp/transport/mock_usb_transport.hpp"
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <algorithm>
@@ -9,16 +12,22 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr std::uint32_t kBroadcastRequestCanId = 0x700;
-constexpr std::uint32_t kNodeRequestBaseCanId = 0x600;
-constexpr std::uint32_t kNodeResponseBaseCanId = 0x580;
-constexpr std::uint32_t kNodeHeartbeatBaseCanId = 0x500;
-constexpr std::uint32_t kProvisionalResponseBaseCanId = 0x480;
+constexpr auto kBroadcastRequestRoute =
+    remotebsp::transport::kDiscoveryRoute;
+constexpr auto kNodeRequestBaseRoute =
+    remotebsp::transport::kNodeRequestBaseRoute;
+constexpr auto kNodeResponseBaseRoute =
+    remotebsp::transport::kNodeResponseBaseRoute;
+constexpr auto kNodeEventBaseRoute =
+    remotebsp::transport::kNodeEventBaseRoute;
+constexpr auto kProvisionalResponseBaseRoute =
+    remotebsp::transport::kProvisionalResponseBaseRoute;
 constexpr std::uint32_t kNodeId = 0;
 constexpr auto kHeartbeatInterval = std::chrono::milliseconds(500);
 constexpr auto kUartStreamInterval = std::chrono::milliseconds(100);
@@ -38,14 +47,11 @@ remotebsp::transport::CanMode parse_mode(const std::string& text) {
     throw std::invalid_argument("模式必须是 classical 或 fd");
 }
 
-void send_reply(remotebsp::transport::CanTransport& transport,
-                std::uint32_t can_id,
+void send_reply(remotebsp::transport::LinkTransport& transport,
+                std::uint32_t route,
                 const remotebsp::mock_mcu::NodeReply& reply) {
-    const bool bit_rate_switch =
-        transport.mode() ==
-        remotebsp::transport::CanMode::FlexibleDataRate;
     for (const auto& frame : reply.frames) {
-        transport.send({can_id, false, frame, bit_rate_switch});
+        transport.send({route, frame});
     }
 }
 
@@ -71,7 +77,7 @@ remotebsp::mock_mcu::NodeReply make_uart_rx_event(
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "用法: mock_mcu <SocketCAN接口> <classical|fd> "
+        std::cerr << "用法: mock_mcu <链路端点> <classical|fd|usb-mock> "
                      "[--instance 1..127] [--uart-stream] "
                      "[--board JSON] [--fault-scenario JSON] "
                      "[--visual-state JSON]\n";
@@ -79,7 +85,11 @@ int main(int argc, char** argv) {
     }
 
     try {
-        const auto mode = parse_mode(argv[2]);
+        const std::string mode_text = argv[2];
+        const bool mock_usb = mode_text == "usb-mock";
+        const auto mode = mock_usb
+                              ? remotebsp::transport::CanMode::Classical
+                              : parse_mode(mode_text);
         std::uint32_t instance = 1;
         bool uart_stream = false;
         std::string board_path = REMOTEBSP_DEFAULT_MOCK_BOARD_MANIFEST;
@@ -143,10 +153,19 @@ int main(int argc, char** argv) {
             }
             uart_stream_resource_id = found->resource_id;
         }
-        remotebsp::transport::SocketCanTransport transport(argv[1], mode);
+        std::unique_ptr<remotebsp::transport::LinkTransport> transport;
+        if (mock_usb) {
+            transport =
+                std::make_unique<remotebsp::transport::MockUsbTransport>(
+                    argv[1], remotebsp::transport::MockUsbRole::Device);
+        } else {
+            transport =
+                std::make_unique<remotebsp::transport::SocketCanTransport>(
+                    argv[1], mode);
+        }
         remotebsp::mock_mcu::MockNode node(
             remotebsp::mock_mcu::make_remote_core(twin, instance),
-            transport.mtu(), kNodeId);
+            transport->mtu(), kNodeId);
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
 
@@ -176,11 +195,11 @@ int main(int argc, char** argv) {
             }
             if (now >= next_heartbeat) {
                 if (twin.online()) {
-                    const auto heartbeat_can_id =
+                    const auto heartbeat_route =
                         node.node_id() == 0
-                            ? kProvisionalResponseBaseCanId + instance
-                            : kNodeHeartbeatBaseCanId + node.node_id();
-                    send_reply(transport, heartbeat_can_id,
+                            ? kProvisionalResponseBaseRoute + instance
+                            : kNodeEventBaseRoute + node.node_id();
+                    send_reply(*transport, heartbeat_route,
                                node.make_heartbeat());
                 }
                 next_heartbeat = now + kHeartbeatInterval;
@@ -203,15 +222,15 @@ int main(int argc, char** argv) {
                     for (const auto& event :
                          node.poll_uart_events()) {
                         send_reply(
-                            transport,
-                            kNodeHeartbeatBaseCanId + node.node_id(),
+                            *transport,
+                            kNodeEventBaseRoute + node.node_id(),
                             event);
                     }
                     send_reply(
-                        transport,
-                        kNodeHeartbeatBaseCanId + node.node_id(),
+                        *transport,
+                        kNodeEventBaseRoute + node.node_id(),
                         make_uart_rx_event(
-                            transport.mtu(),
+                            transport->mtu(),
                             node.allocate_transfer_id(),
                             uart_stream_resource_id));
                 }
@@ -237,7 +256,7 @@ int main(int argc, char** argv) {
                              std::chrono::milliseconds>(
                              next_deadline -
                              std::chrono::steady_clock::now()));
-            const auto message = transport.receive(timeout);
+            const auto message = transport->receive(timeout);
             if (!message.has_value()) {
                 continue;
             }
@@ -245,25 +264,24 @@ int main(int argc, char** argv) {
                 continue;
             }
             const bool broadcast =
-                message->identifier == kBroadcastRequestCanId;
+                message->route == kBroadcastRequestRoute;
             const bool addressed =
                 node.node_id() != 0 &&
-                message->identifier ==
-                    kNodeRequestBaseCanId + node.node_id();
-            if ((!broadcast && !addressed) ||
-                message->extended_identifier) {
+                message->route ==
+                    kNodeRequestBaseRoute + node.node_id();
+            if (!broadcast && !addressed) {
                 continue;
             }
 
             try {
                 const auto reply = node.handle_frame(
-                    message->identifier, message->data);
+                    message->route, message->data);
                 if (reply.has_value()) {
-                    const auto response_can_id =
+                    const auto response_route =
                         node.node_id() == 0
-                            ? kProvisionalResponseBaseCanId + instance
-                            : kNodeResponseBaseCanId + node.node_id();
-                    send_reply(transport, response_can_id, *reply);
+                            ? kProvisionalResponseBaseRoute + instance
+                            : kNodeResponseBaseRoute + node.node_id();
+                    send_reply(*transport, response_route, *reply);
                 }
             } catch (const std::exception& error) {
                 std::cerr << "忽略无效请求: " << error.what() << '\n';

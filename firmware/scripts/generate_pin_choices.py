@@ -95,6 +95,8 @@ BOARDS = {
             "PA9": "USART1 TX", "PA10": "USART1 RX", "PA11": "Katapult USB DM",
             "PA12": "Katapult USB DP", "PA13": "SWDIO", "PA14": "SWCLK",
             "PB2": "板载呼吸灯", "PB8": "CAN RX", "PB9": "CAN TX",
+            "PC14": "32.768kHz LSE", "PC15": "32.768kHz LSE",
+            "PD0": "8MHz HSE OSC_IN", "PD1": "8MHz HSE OSC_OUT",
         },
         "defaults": [
             ["PA1", "PA2", "PA3", "PA4", None],
@@ -261,6 +263,10 @@ def fixed_reservation_conditions(pin: str) -> list[str]:
         conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 0 && UART0_PINS_PA9_PA10)")
     if pin in {"PB6", "PB7"}:
         conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 0 && UART0_PINS_PB6_PB7)")
+    if pin in {"PD0", "PD1"}:
+        conditions.append("!F103_CLOCK_HSE_8MHZ")
+    if pin in {"PC14", "PC15"}:
+        conditions.append("!BOARD_HAS_LSE_32768")
     if pin == "PC6":
         conditions.append("!WEACT_G431_PC6_PWM_BREATHING_LED")
     if pin == "PB2":

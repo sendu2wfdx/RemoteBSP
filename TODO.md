@@ -10,7 +10,8 @@
 6. 通用 SPI/I2C/ADC/Timer/Storage：待以上主线形成闭环后继续；PWM 与定时位流已进入实体波形验收阶段。
 
 当前里程碑：Mock 可变轴数执行器、运动线协议、Linux C++ API/CLI、资源租约、
-Classical CAN/CAN-FD 端到端调用、限位/队列欠载安全停机和第一版运动遥测已经
+Classical CAN/CAN-FD 端到端调用、USB Vendor Bulk Linux主机与Mock全链路、
+限位/队列欠载安全停机和第一版运动遥测已经
 完成。通用 PWM 与定时位流已完成协议、Linux API/CLI、Mock、GUI 草案和三种
 STM32 后端交叉编译。MCU无关的STEP/DIR/EN执行内核已从固定tick改为下一边沿TIM2 compare调度，
 单轴/整板步频准入、脉宽/DIR时序、迟到停机、限位安全停机和运行指标已实现并测试。
@@ -21,6 +22,12 @@ compare版本尚未重新实板压力验收；也尚未完成轨迹规划、跨�
 提交、限位输入实板验收、运行时 NVM 引脚映射、F103/G431 的五轴实体压力验收和
 TMC 并发事务。当前运动槽引脚和驱动器选择仍是编译期临时实现，不能作为最终
 配置方式。
+
+USB 第二传输第一阶段已完成 `LinkTransport`、逻辑路由、libusb 主机、RBU1 帧格式、
+Mock 字节流、MCU 公共编解码器和 G431 Vendor Bulk Device 后端，USB APP 已成功
+交叉编译。后续进行 G431 实体枚举、独立 APP PID、热插拔/重枚举、吞吐及断线故障
+隔离验收；F072/F103 根据引脚及 F103 USB/CAN 共享 SRAM 约束分别适配，继续采用
+编译期主链路二选一。以太网继续后置。
 
 图形侧已完成第一版 RemoteBSP Studio：三块已知板卡的分组引脚选择、固定/重复
 占用过滤、PWM/WS2812 参数草案、资源清单 JSON 导出，以及 Mock GPIO、步进位置、PWM、WS2812 演示和遥测

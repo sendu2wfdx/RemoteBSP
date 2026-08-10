@@ -100,6 +100,52 @@ def test_shared_enable_derivation() -> None:
     assert kconf.syms["MOTION_SLOT1_ENABLE_PIN_PA2"].visibility == 0
 
 
+def test_primary_transport_choice() -> None:
+    kconf = kconfiglib.Kconfig(str(KCONFIG))
+    kconf.load_config(str(FIRMWARE_ROOT / "configs" /
+                          "stm32g431_weact_core_defconfig"))
+    assert kconf.syms["REMOTEBSP_TRANSPORT_CAN"].str_value == "y"
+    assert kconf.syms["CAN_NOMINAL_BITRATE"].visibility == 2
+    kconf.syms["REMOTEBSP_TRANSPORT_USB"].set_value(2)
+    assert kconf.syms["REMOTEBSP_TRANSPORT_USB"].str_value == "y"
+    assert kconf.syms["REMOTEBSP_TRANSPORT_CAN"].str_value == "n"
+    assert kconf.syms["CAN_NOMINAL_BITRATE"].visibility == 0
+    assert kconf.syms["USB_VENDOR_ID"].visibility == 2
+
+    kconf.load_config(str(FIRMWARE_ROOT / "configs" /
+                          "stm32g431_weact_core_usb_defconfig"))
+    assert kconf.syms["REMOTEBSP_TRANSPORT_USB"].str_value == "y"
+    assert kconf.syms["USB_RX_BUFFER_SIZE"].str_value == "3072"
+    assert kconf.syms["USB_TX_BUFFER_SIZE"].str_value == "3072"
+
+    kconf.load_config(str(FIRMWARE_ROOT / "configs" /
+                          "stm32f103_weact_bluepill_plus_defconfig"))
+    assert kconf.syms["REMOTEBSP_TRANSPORT_USB"].visibility == 0
+    assert kconf.syms["REMOTEBSP_TRANSPORT_CAN"].str_value == "y"
+
+
+def test_clock_defaults_and_crystal_pin_reservations() -> None:
+    kconf = kconfiglib.Kconfig(str(KCONFIG))
+    kconf.load_config(str(FIRMWARE_ROOT / "configs" /
+                          "stm32f103_weact_bluepill_plus_defconfig"))
+    assert kconf.syms["F103_CLOCK_HSE_8MHZ"].str_value == "y"
+    assert kconf.syms["BOARD_HAS_LSE_32768"].str_value == "y"
+    assert kconf.syms["SYSTEM_CLOCK_HZ"].str_value == "72000000"
+    kconf.syms["REMOTEBSP_MOTION"].set_value(2)
+    kconf.syms["MOTION_SLOT0_ENABLED"].set_value(2)
+    for pin in ("PC14", "PC15", "PD0", "PD1"):
+        assert kconf.syms[f"MOTION_SLOT0_STEP_PIN_{pin}"].visibility == 0
+
+    kconf.load_config(str(FIRMWARE_ROOT / "configs" /
+                          "stm32f103cbt6_defconfig"))
+    kconf.syms["F103_CLOCK_HSI8"].set_value(2)
+    assert kconf.syms["SYSTEM_CLOCK_HZ"].str_value == "64000000"
+    kconf.syms["REMOTEBSP_MOTION"].set_value(2)
+    kconf.syms["MOTION_SLOT0_ENABLED"].set_value(2)
+    assert kconf.syms["MOTION_SLOT0_STEP_PIN_PD0"].visibility == 2
+    assert kconf.syms["MOTION_SLOT0_STEP_PIN_PD1"].visibility == 2
+
+
 def main() -> None:
     assert_layout(
         "stm32f072_mellow_fly_d5_katapult_defconfig", 0, 5)
@@ -113,6 +159,8 @@ def main() -> None:
     test_invalid_tmc_capacity()
     test_remote_budget_menu_visibility()
     test_shared_enable_derivation()
+    test_primary_transport_choice()
+    test_clock_defaults_and_crystal_pin_reservations()
     print("固件配置生成器测试通过")
 
 

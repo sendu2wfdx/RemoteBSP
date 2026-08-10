@@ -238,6 +238,7 @@ CanTrafficStatus Client::traffic_status() const {
     const auto snapshot =
         toolbusd::decode_ipc_traffic_status(response.body);
     CanTrafficStatus status;
+    status.mode = static_cast<LinkTrafficMode>(snapshot.mode);
     status.can_fd =
         snapshot.mode == toolbusd::TrafficBusMode::CanFd;
     status.arbitration_bits_per_second =

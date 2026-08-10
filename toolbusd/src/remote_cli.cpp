@@ -258,8 +258,14 @@ int run(const std::vector<std::string>& arguments,
                 : static_cast<std::uint64_t>(
                       status.global_available_ns * 1000U /
                       status.global_capacity_ns);
+        const char* mode_name = "classical";
+        if (status.mode == remotebsp::LinkTrafficMode::CanFd) {
+            mode_name = "fd";
+        } else if (status.mode == remotebsp::LinkTrafficMode::Usb) {
+            mode_name = "usb";
+        }
         std::cout
-            << "mode=" << (status.can_fd ? "fd" : "classical")
+            << "mode=" << mode_name
             << " arbitration_bitrate="
             << status.arbitration_bits_per_second
             << " data_bitrate=" << status.data_bits_per_second

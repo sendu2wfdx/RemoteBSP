@@ -43,6 +43,25 @@ target_compile_options(can_frame_tests PRIVATE
 
 add_test(NAME can_frame_tests COMMAND can_frame_tests)
 
+add_executable(usb_frame_tests usb_frame_tests.cpp)
+target_link_libraries(usb_frame_tests PRIVATE remotebsp_transport)
+target_compile_options(usb_frame_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME usb_frame_tests COMMAND usb_frame_tests)
+
+add_test(
+    NAME e2e_usb_mock_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e_vcan.sh
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli>
+            $<TARGET_FILE:client_api_tests>
+            unused
+            usb-mock
+)
+set_tests_properties(e2e_usb_mock_tests PROPERTIES RUN_SERIAL TRUE)
+
 add_executable(socketcan_tests socketcan_tests.cpp)
 target_link_libraries(socketcan_tests PRIVATE remotebsp_transport)
 
@@ -252,6 +271,19 @@ target_compile_options(embedded_core_tests PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME embedded_core_tests COMMAND embedded_core_tests)
+
+add_executable(embedded_usb_link_tests
+    ../firmware/tests/usb_link_tests.c
+    ../firmware/src/usb_link.c
+)
+target_include_directories(embedded_usb_link_tests PRIVATE
+    ../firmware/include
+    ../firmware/tests/config
+)
+target_compile_options(embedded_usb_link_tests PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME embedded_usb_link_tests COMMAND embedded_usb_link_tests)
 
 add_executable(embedded_motion_tests
     ../firmware/tests/motion_queue_tests.c

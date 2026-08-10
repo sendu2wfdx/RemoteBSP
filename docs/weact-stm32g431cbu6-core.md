@@ -6,7 +6,7 @@
 - 时钟：PF0/PF1 连接板载 8 MHz HSE，PC14/PC15 连接 32.768 kHz LSE；
 - RemoteBSP 总线：FDCAN，PB8=FDCAN_RX、PB9=FDCAN_TX；
 - 默认 CAN-FD：500 kbit/s 仲裁段、1 Mbit/s 数据段、BRS 开启；
-- USB：PA11=USB_DM、PA12=USB_DP，仅用于 Katapult 应急恢复；
+- USB：PA11=USB_DM、PA12=USB_DP；默认供 Katapult 恢复，也可构建互斥的 Vendor Bulk APP；
 - SWD：PA13=SWDIO、PA14=SWCLK，建议同时接 NRST；
 - 板卡类型编号：`0x0431CB`。
 
@@ -22,10 +22,14 @@ PB8/BOOT0 约束；其他 G431 板卡不继承这些约束。
 | 用户按键 | PC13 | 高电平按下，无外部上下拉；固件启用内部下拉 |
 | 指示灯 / 通用 PWM | PC6 / TIM3_CH1 | 高电平点亮；基础 APP 将其作为远程 PWM 资源 |
 | 通用定时位流 | PA8 / TIM1_CH1 + DMA1_Channel1/DMAMUX | 可驱动 WS2812 等脉宽编码设备；已交叉编译，待实板验收 |
-| USB D- / D+ | PA11 / PA12 | Katapult 应急恢复，不由 APP 初始化 |
+| USB D- / D+ | PA11 / PA12 | Katapult 应急恢复，或 USB Vendor Bulk APP 主链路 |
 | HSE | PF0 / PF1 | 8 MHz 外部晶振 |
 | LSE | PC14 / PC15 | 32.768 kHz 外部晶振 |
 | SWDIO / SWCLK | PA13 / PA14 | DAPLink 或 ST-Link |
+
+板型预设默认选择 8 MHz HSE，170 MHz SYSCLK、FDCAN 和运动定时均以它为基准。
+32.768 kHz LSE 不参与高速系统时钟；当前 APP 只声明并保留 PC14/PC15，等未来
+RTC/跨板时间同步保持模块启用后，再由该模块启动、检测并使用 LSE。
 
 PB8 有 10 kΩ 外部下拉且也是 BOOT0。连接 CAN 收发器后，RXD 的空闲高电平可能
 影响启动选择；量产烧录应把 Option Bytes 配为 `nBOOT0=1`，使 BOOT0 选择忽略
@@ -44,7 +48,8 @@ BRS 下 TEC/REC 为 0。
 
 2 Mbit/s 数据相位在当前飞线条件下曾触发 Bus-Off，因此它保留为 menuconfig
 可选高速档，必须在更短支线和更好信号完整性条件下重新验收。Katapult CAN/USB
-切换和 UART 外设后端仍待继续验收；APP 不再提供 USB CDC。
+切换和 UART 外设后端仍待继续验收。APP 不提供 USB CDC；新增 Vendor Bulk APP
+已经交叉编译，实体枚举、重连和并发压力仍待验收。
 
 PA0=STEP、PA1=DIR、PA2=EN、PA3=TMC UART 的单轴 TMC2209 接线已完成实板转动
 验证。它只作为板名明确的验收预设；核心板本身不假定固定电机插槽，正式接线
@@ -61,6 +66,9 @@ bash scripts/fetch_stm32_deps.sh
 
 # CAN-FD 独立 APP，从 0x08000000 启动
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core
+
+# USB Vendor Bulk 独立 APP，从 0x08000000 启动，不初始化 FDCAN
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-usb
 
 # Classical CAN 单轴 TMC2209 实板验收配置
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion

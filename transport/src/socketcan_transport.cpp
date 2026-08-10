@@ -114,7 +114,11 @@ SocketCanTransport& SocketCanTransport::operator=(
     return *this;
 }
 
-void SocketCanTransport::send(const CanMessage& message) {
+void SocketCanTransport::send(const LinkFrame& link_frame) {
+    CanMessage message;
+    message.identifier = link_frame.route;
+    message.data = link_frame.data;
+    message.bit_rate_switch = mode_ == CanMode::FlexibleDataRate;
     ssize_t written = 0;
     std::size_t expected = 0;
     if (mode_ == CanMode::Classical) {
@@ -134,7 +138,7 @@ void SocketCanTransport::send(const CanMessage& message) {
     }
 }
 
-std::optional<CanMessage> SocketCanTransport::receive(
+std::optional<LinkFrame> SocketCanTransport::receive(
     std::chrono::milliseconds timeout) {
     if (timeout < std::chrono::milliseconds::zero() ||
         timeout.count() > std::numeric_limits<int>::max()) {
@@ -165,7 +169,11 @@ std::optional<CanMessage> SocketCanTransport::receive(
         if (static_cast<std::size_t>(received) != sizeof(frame)) {
             throw std::runtime_error("收到长度无效的 Classical CAN 帧");
         }
-        return decode_classical_frame(frame);
+        const auto message = decode_classical_frame(frame);
+        if (message.extended_identifier) {
+            throw std::runtime_error("RemoteBSP 只接受标准 CAN 标识符");
+        }
+        return LinkFrame{message.identifier, message.data};
     }
 
     canfd_frame frame{};
@@ -176,11 +184,11 @@ std::optional<CanMessage> SocketCanTransport::receive(
     if (static_cast<std::size_t>(received) != sizeof(frame)) {
         throw std::runtime_error("收到长度无效的 CAN-FD 帧");
     }
-    return decode_fd_frame(frame);
-}
-
-std::size_t SocketCanTransport::mtu() const noexcept {
-    return mode_ == CanMode::Classical ? CAN_MAX_DLEN : CANFD_MAX_DLEN;
+    const auto message = decode_fd_frame(frame);
+    if (message.extended_identifier) {
+        throw std::runtime_error("RemoteBSP 只接受标准 CAN 标识符");
+    }
+    return LinkFrame{message.identifier, message.data};
 }
 
 CanMode SocketCanTransport::mode() const noexcept { return mode_; }

@@ -11,6 +11,7 @@
 - [板卡资源清单与数字孪生](board-manifest-and-digital-twin.md)
 - [STM32 构建、烧录与验证](stm32-build-and-flash.md)
 - [Katapult 双模式升级与应急恢复](bootloader-upgrade.md)
+- [USB Vendor Bulk 传输](usb-transport.md)
 - [Mellow FLY-D5 板卡说明](mellow-fly-d5.md)
 - [WeAct BluePill Plus 板卡说明](weact-bluepill-plus.md)
 - [WeAct STM32G431CBU6 Core 板卡说明](weact-stm32g431cbu6-core.md)
@@ -40,9 +41,10 @@ flowchart LR
     B --> C["Unix Domain Socket"]
     C --> D["toolbusd"]
     D --> E["协议、请求、分片"]
-    E --> F["SocketCAN"]
-    F --> G["CAN / CAN-FD"]
-    G --> H["Mock MCU / STM32 Remote Core"]
+    E --> F["LinkTransport"]
+    F --> G["SocketCAN / libusb"]
+    G --> G2["CAN / CAN-FD / USB Bulk"]
+    G2 --> H["Mock MCU / STM32 Remote Core"]
     H --> I["GPIO / UART / PWM / 定时位流 / 智能资源"]
 ```
 
@@ -68,7 +70,8 @@ MCU 固件禁止包含：
 |---|---|---|
 | 远程包协议 v1 | 已实现、已测试 | 24字节固定头、小端线序、CRC-32、严格长度和版本检查 |
 | 分片与重组 | 已实现、已测试 | Classical CAN 8字节、CAN-FD 64字节、最大包2048字节 |
-| SocketCAN传输 | 已实现、已测试 | `CanTransport`统一接口，支持`can_frame`和`canfd_frame` |
+| 通用链路传输 | 已实现、已测试 | `LinkTransport`统一逻辑帧；SocketCAN和Mock USB完整端到端 |
+| USB Vendor Bulk | 第一阶段已实现、已测试 | libusb、Mock全链路和G431 Device后端已完成；实体G431待验收 |
 | 节点发现 | 已实现、已测试 | UUID发现、节点分配、协议版本协商 |
 | 心跳与离线 | 已实现、已测试 | 500 ms心跳、2 s离线判断 |
 | 请求管理 | 已实现、已测试 | 请求ID、750 ms默认超时、重试、响应匹配 |
@@ -79,7 +82,7 @@ MCU 固件禁止包含：
 | `remote-cli` | 已实现、已测试 | 信息、资源、合同/租约、GPIO、UART、PWM、定时位流/WS2812和升级入口命令 |
 | Mock MCU | 已实现、已测试 | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、8路UART、2路PWM、1路定时位流、故障注入和租约安全释放 |
 | STM32F103 | 已实现、已实测 | Classical CAN、GPIO、USART1、CAN/USB Katapult |
-| STM32G431 | CAN-FD APP 已实测 | 500 kbit/s + 1 Mbit/s BRS、GPIO、既有板载 PWM 和单轴运动已通过；新通用 PWM/定时位流已交叉编译，待实板验收 |
+| STM32G431 | CAN-FD APP 已实测，USB APP 已交叉编译 | CAN-FD基础功能已通过；USB Vendor Bulk及新通用波形待实体验收 |
 | 通用PWM与定时位流 | 第一阶段已实现、已测试 | 协议、Linux API/CLI、Mock、GUI草案和F072/F103/G431后端；实体波形待验收 |
 | SPI/I2C/ADC/Timer/Storage | 尚未实现 | 仅保留资源类型和后续设计位置 |
 | 智能运动资源 | 第一阶段已实现、已测试 | Mock 多轴、STM32 TIM2 compare STEP 调度、队列、限位安全停机和状态遥测；跨板同步与运行时配置待实现 |

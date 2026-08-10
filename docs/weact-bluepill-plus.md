@@ -2,7 +2,8 @@
 
 ## 硬件基线
 
-- MCU：STM32F103CBT6，72 MHz，128 KiB Flash，20 KiB SRAM；
+- MCU：STM32F103CBT6，外部 8 MHz HSE 经 PLL 到 72 MHz，128 KiB Flash，20 KiB SRAM；
+- 低速时钟：PC14/PC15 连接 32.768 kHz LSE；当前 APP 保留该资源，待 RTC/掉线守时模块使用；
 - RemoteBSP 总线：Classical CAN，PB8=CAN_RX、PB9=CAN_TX，实测 1 Mbit/s；
 - 主机适配器：CANable2 硬件刷入 CANable2.5 Candlelight/`gs_usb` 固件；
 - USB：PA11=USB_DM、PA12=USB_DP，仅用于 Katapult 应急升级；
@@ -25,10 +26,17 @@
 | 通用 PWM | PA6 / TIM3_CH1 | 远程配置频率、占空比和极性；已交叉编译，待实板验收 |
 | 通用定时位流 | PA8 / TIM1_CH1 + DMA1_Channel2 | 可驱动 WS2812 等脉宽编码设备；已交叉编译，待实板验收 |
 | USB D- / D+ | PA11 / PA12 | Katapult USB 恢复，不作为 APP 业务传输 |
+| HSE OSC_IN / OSC_OUT | PD0 / PD1 | 8 MHz 外部晶振；启用 HSE 时不会出现在 GPIO/运动引脚选择中 |
+| LSE OSC32_IN / OSC32_OUT | PC14 / PC15 | 32.768 kHz 外部晶振；不会作为普通 GPIO 分配 |
 | SWDIO / SWCLK | PA13 / PA14 | DAPLink 或 ST-Link |
 
 STM32F103 的 USB 与 bxCAN 共用专用 SRAM。因此 RemoteBSP APP 只运行 CAN，
 不启用 USB CDC；双模式 Katapult 根据进入原因在 CAN 与 USB 中二选一初始化。
+
+板型预设默认选择 HSE，使系统、CAN 和运动定时器都以外部晶振为基准。通用
+STM32F103 配置可在 menuconfig 中退回 HSI8（64 MHz），但内部 RC 的精度和温漂
+更差，只适合没有 HSE 的板卡和较宽松的 CAN 场景。LSE 不参与 72 MHz 主时钟；
+在 RTC/时间同步保持功能落地前，固件只保留 PC14/PC15，不会无意义地启动振荡器。
 
 ## 当前能力与边界
 

@@ -203,7 +203,7 @@ static void feed_packet(rbsp_core_t* core, uint32_t can_id,
                         uint16_t transfer_id, const uint8_t* packet,
                         uint16_t packet_size) {
     const uint8_t mtu =
-        core->can_mode == RBSP_CAN_FD ? 64U : 8U;
+        core->link_mode == RBSP_CAN_FD ? 64U : 8U;
     const uint8_t capacity = (uint8_t)(mtu - 5U);
     uint16_t offset = 0U;
     uint16_t sequence = 0U;

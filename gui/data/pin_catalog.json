@@ -340,6 +340,22 @@
         {
           "pin": "PB9",
           "owner": "CAN TX"
+        },
+        {
+          "pin": "PC14",
+          "owner": "32.768kHz LSE"
+        },
+        {
+          "pin": "PC15",
+          "owner": "32.768kHz LSE"
+        },
+        {
+          "pin": "PD0",
+          "owner": "8MHz HSE OSC_IN"
+        },
+        {
+          "pin": "PD1",
+          "owner": "8MHz HSE OSC_OUT"
         }
       ],
       "gpio_interfaces": [

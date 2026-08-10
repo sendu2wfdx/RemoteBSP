@@ -51,7 +51,29 @@ config BOARD_WEACT_BLUEPILL_PLUS
     bool "WeAct BluePill Plus"
     help
       PA0 为高电平按下的用户按键，使用 MCU 内部下拉；PB2 为高电平点亮
-      的蓝色 LED；PA11/PA12 分别为 USB DM/DP。
+      的蓝色 LED；PA11/PA12 分别为 USB DM/DP。OSC_IN/OSC_OUT 接 8MHz
+      HSE，PC14/PC15 接 32.768kHz LSE。
+
+endchoice
+
+choice F103_CLOCK_SOURCE
+    prompt "STM32F103 系统时钟源"
+    depends on BOARD_STM32F103CBT6
+    default F103_CLOCK_HSE_8MHZ if BOARD_WEACT_BLUEPILL_PLUS
+    default F103_CLOCK_HSI8
+
+config F103_CLOCK_HSI8
+    bool "内部 HSI8（PLL 到 64MHz）"
+    help
+      供没有外部高速晶振的通用核心板使用。SYSCLK 为 64MHz，APB1 和 bxCAN
+      时钟为 32MHz。内部 RC 的频率精度和温漂不如外部晶振，不建议用于高速、
+      长线或节点较多的 CAN 网络。
+
+config F103_CLOCK_HSE_8MHZ
+    bool "外部 8MHz HSE（PLL 到 72MHz，推荐）"
+    help
+      SYSCLK 为 72MHz，APB1 和 bxCAN 时钟为 36MHz。WeAct BluePill Plus
+      默认选择本项；CAN 通讯和运动定时优先使用外部晶振。
 
 endchoice
 
@@ -71,6 +93,17 @@ config BOARD_WEACT_G431_CORE_V10
       LED 高电平点亮。PF0/PF1 接 8MHz HSE，PC14/PC15 接 32.768kHz LSE。
 
 endchoice
+
+config BOARD_HAS_LSE_32768
+    bool "板卡安装 32.768kHz LSE 晶振"
+    depends on BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    default y if BOARD_WEACT_BLUEPILL_PLUS || BOARD_WEACT_G431_CORE_V10
+    default n
+    help
+      声明 PC14/PC15 已连接低速外部晶振，并从 GPIO、运动和软件 UART 的
+      可选引脚中保留它们。当前 APP 尚未使用 RTC/低功耗守时，因此只记录并
+      保护这项硬件资源，不会无意义地启动 LSE；未来时间同步保持模块启用时
+      再由该模块启动并检测 LSE。
 
 choice F072_CLOCK_SOURCE
     prompt "STM32F072 系统时钟源"
@@ -138,7 +171,8 @@ endmenu
 config SYSTEM_CLOCK_HZ
     int
     default 48000000 if BOARD_STM32F072RBT6
-    default 72000000 if BOARD_STM32F103CBT6
+    default 72000000 if F103_CLOCK_HSE_8MHZ
+    default 64000000 if F103_CLOCK_HSI8
     default 170000000 if BOARD_STM32G431CBU6
 
 config FIRMWARE_VERSION_MAJOR
@@ -170,7 +204,60 @@ config NODE_PROVISIONAL_ID
 
 endmenu
 
+menu "主通信链路"
+
+choice
+    prompt "APP 主通信链路"
+    default REMOTEBSP_TRANSPORT_CAN
+
+config REMOTEBSP_TRANSPORT_CAN
+    bool "CAN / CAN-FD"
+
+config REMOTEBSP_TRANSPORT_USB
+    bool "USB Vendor Bulk（STM32G431CBU6）"
+    depends on BOARD_STM32G431CBU6
+    help
+      使用 PA11/PA12 作为 RemoteBSP 正常运行链路。已实现公共帧格式、Linux
+      libusb 主机、Mock 端到端链路及 G431 USB Device Vendor Bulk 后端；实体
+      G431 的枚举、重连和压力测试仍待实板验收。F072/F103 暂不开放本选项。
+
+endchoice
+
+config USB_VENDOR_ID
+    hex "USB VID"
+    default 0x1209
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      0x1209 仅作为开发占位值，发布产品前必须申请或使用合法分配的 VID/PID。
+
+config USB_PRODUCT_ID
+    hex "USB PID"
+    default 0x0001
+    depends on REMOTEBSP_TRANSPORT_USB
+
+config USB_RX_BUFFER_SIZE
+    int "USB 原始接收缓冲区" if EXPERT_CONFIG
+    range 3072 8192
+    default 3072
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      至少容纳一个最大 Remote Packet 拆分后的全部 RBU1 逻辑帧，避免主循环
+      暂时繁忙时 Bulk OUT 连续到达造成半包丢失。
+
+config USB_TX_BUFFER_SIZE
+    int "USB 原始发送缓冲区" if EXPERT_CONFIG
+    range 3072 8192
+    default 3072
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      Remote Core 会连续提交同一响应的所有分片，因此缓冲必须容纳 2048 字节
+      Remote Packet 加每个逻辑帧的 12 字节 RBU1 帧头。
+
+endmenu
+
 menu "CAN/CAN-FD"
+
+depends on REMOTEBSP_TRANSPORT_CAN
 
 choice
     prompt "CAN/FDCAN 引脚组"

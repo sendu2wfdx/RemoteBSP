@@ -12,20 +12,28 @@
 #include "remotebsp_embedded/startup_gpio.h"
 #include <string.h>
 
-#if CONFIG_SYSTEM_CLOCK_HZ != 72000000
-#error "STM32F103CBT6 当前时钟方案固定为 72MHz"
+#ifdef CONFIG_F103_CLOCK_HSE_8MHZ
+#if CONFIG_SYSTEM_CLOCK_HZ != 72000000 || HSE_VALUE != 8000000U
+#error "F103 外部时钟方案要求 8MHz HSE，并产生 72MHz SYSCLK"
+#endif
+#define F103_CAN_CLOCK_HZ 36000000U
+#define F103_CAN_TIME_QUANTA 18U
+#define F103_CAN_BS1 CAN_BS1_15TQ
+#else
+#if CONFIG_SYSTEM_CLOCK_HZ != 64000000 || HSI_VALUE != 8000000U
+#error "F103 内部时钟方案要求 8MHz HSI，并产生 64MHz SYSCLK"
+#endif
+#define F103_CAN_CLOCK_HZ 32000000U
+#define F103_CAN_TIME_QUANTA 16U
+#define F103_CAN_BS1 CAN_BS1_13TQ
 #endif
 
-#if HSE_VALUE != 8000000U
-#error "STM32F103CBT6 当前时钟方案要求 8MHz 外部晶振"
-#endif
-
-#if (36000000U % (CONFIG_CAN_NOMINAL_BITRATE * 18U)) != 0
+#if (F103_CAN_CLOCK_HZ % (CONFIG_CAN_NOMINAL_BITRATE * F103_CAN_TIME_QUANTA)) != 0
 #error "当前 F103 CAN 位时序无法精确生成所选仲裁段波特率"
 #endif
 
 #define CAN_PRESCALER \
-    (36000000U / (CONFIG_CAN_NOMINAL_BITRATE * 18U))
+    (F103_CAN_CLOCK_HZ / (CONFIG_CAN_NOMINAL_BITRATE * F103_CAN_TIME_QUANTA))
 
 #if CAN_PRESCALER < 1 || CAN_PRESCALER > 1024
 #error "F103 CAN 分频系数超出硬件范围"
@@ -275,17 +283,24 @@ static void system_clock_configure(void) {
     RCC_OscInitTypeDef oscillator = {0};
     RCC_ClkInitTypeDef clock = {0};
 
-    /*
-     * F103 的 HSI 经 PLL 最多只能得到 64MHz。这里必须使用核心板上的
-     * 8MHz HSE，经 9 倍频得到 72MHz；APB1 再二分频，为 bxCAN 提供
-     * 与下方位时序计算一致的 36MHz 时钟。
-     */
+    /* 外部 8MHz 优先得到 72MHz；无 HSE 的通用板可退回 HSI/2×16=64MHz。 */
+#ifdef CONFIG_F103_CLOCK_HSE_8MHZ
     oscillator.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     oscillator.HSEState = RCC_HSE_ON;
     oscillator.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+#else
+    oscillator.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    oscillator.HSIState = RCC_HSI_ON;
+    oscillator.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+#endif
     oscillator.PLL.PLLState = RCC_PLL_ON;
+#ifdef CONFIG_F103_CLOCK_HSE_8MHZ
     oscillator.PLL.PLLSource = RCC_PLLSOURCE_HSE;
     oscillator.PLL.PLLMUL = RCC_PLL_MUL9;
+#else
+    oscillator.PLL.PLLSource = RCC_PLLSOURCE_HSI_DIV2;
+    oscillator.PLL.PLLMUL = RCC_PLL_MUL16;
+#endif
     if (HAL_RCC_OscConfig(&oscillator) != HAL_OK) {
         fatal_error();
     }
@@ -306,7 +321,7 @@ static void system_clock_configure(void) {
      */
     SystemCoreClockUpdate();
     if (SystemCoreClock != CONFIG_SYSTEM_CLOCK_HZ ||
-        HAL_RCC_GetPCLK1Freq() != 36000000U) {
+        HAL_RCC_GetPCLK1Freq() != F103_CAN_CLOCK_HZ) {
         fatal_error();
     }
 }
@@ -360,9 +375,21 @@ static bool gpio_pin_present(uint16_t encoded_pin) {
     if (port == 0U && (pin == 13U || pin == 14U)) {
         return false;
     }
+#ifdef CONFIG_F103_CLOCK_HSE_8MHZ
+    /* PD0/PD1 是 OSC_IN/OSC_OUT，外部高速晶振启用时不得复用。 */
+    if (port == 3U && (pin == 0U || pin == 1U)) {
+        return false;
+    }
+#endif
 #ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
     /* 板载 USB 接口固定占用 PA11/PA12，不能作为远程 GPIO 重新配置。 */
     if (port == 0U && (pin == 11U || pin == 12U)) {
+        return false;
+    }
+#endif
+#ifdef CONFIG_BOARD_HAS_LSE_32768
+    /* PC14/PC15 已连接 32.768kHz 晶振，留给未来 RTC/守时模块。 */
+    if (port == 2U && (pin == 14U || pin == 15U)) {
         return false;
     }
 #endif
@@ -1302,7 +1329,7 @@ static void can_configure(void) {
     can_handle.Init.Prescaler = CAN_PRESCALER;
     can_handle.Init.Mode = CAN_MODE_NORMAL;
     can_handle.Init.SyncJumpWidth = CAN_SJW_1TQ;
-    can_handle.Init.TimeSeg1 = CAN_BS1_15TQ;
+    can_handle.Init.TimeSeg1 = F103_CAN_BS1;
     can_handle.Init.TimeSeg2 = CAN_BS2_2TQ;
     can_handle.Init.TimeTriggeredMode = DISABLE;
     can_handle.Init.AutoBusOff = ENABLE;

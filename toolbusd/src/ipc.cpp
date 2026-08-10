@@ -347,7 +347,7 @@ std::vector<IpcNodeInfo> decode_ipc_node_list(
 std::vector<std::uint8_t> encode_ipc_traffic_status(
     const TrafficSnapshot& snapshot) {
     if (snapshot.version != TrafficSnapshot::kVersion ||
-        snapshot.mode > TrafficBusMode::CanFd) {
+        snapshot.mode > TrafficBusMode::Usb) {
         throw IpcException("CAN 流量状态版本或模式无效");
     }
     std::vector<std::uint8_t> body;
@@ -384,7 +384,7 @@ TrafficSnapshot decode_ipc_traffic_status(
         kTrafficClassCount * kTrafficClassCounterSize;
     if (body.size() != expected ||
         get_u16(body.data()) != TrafficSnapshot::kVersion ||
-        body[2] > static_cast<std::uint8_t>(TrafficBusMode::CanFd) ||
+        body[2] > static_cast<std::uint8_t>(TrafficBusMode::Usb) ||
         body[3] != kTrafficClassCount ||
         get_u16(body.data() + 14) != 0) {
         throw IpcException("CAN 流量状态响应长度或版本无效");

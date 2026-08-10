@@ -214,11 +214,22 @@ static uint8_t canonical_fd_length(uint8_t length) {
     return 64U;
 }
 
+static uint8_t link_mtu(rbsp_link_mode_t mode) {
+    return mode == RBSP_CAN_CLASSICAL ? 8U : 64U;
+}
+
+static bool send_link_frame(rbsp_core_t* core,
+                            const rbsp_link_frame_t* frame) {
+    if (core->hal.link_send != NULL) {
+        return core->hal.link_send(frame);
+    }
+    return core->hal.can_send != NULL && core->hal.can_send(frame);
+}
+
 static bool send_packet(rbsp_core_t* core, const uint8_t* packet,
                         uint16_t packet_size, uint16_t transfer_id,
-                        uint32_t can_id) {
-    const uint8_t mtu =
-        core->can_mode == RBSP_CAN_FD ? 64U : 8U;
+                        uint32_t route) {
+    const uint8_t mtu = link_mtu(core->link_mode);
     const uint8_t capacity =
         (uint8_t)(mtu - RBSP_FRAGMENT_HEADER_SIZE);
     uint16_t sequence = 0U;
@@ -228,9 +239,9 @@ static bool send_packet(rbsp_core_t* core, const uint8_t* packet,
         const uint16_t remaining = (uint16_t)(packet_size - offset);
         const uint8_t length =
             remaining > capacity ? capacity : (uint8_t)remaining;
-        rbsp_can_frame_t frame;
+        rbsp_link_frame_t frame;
         memset(&frame, 0, sizeof(frame));
-        frame.identifier = can_id;
+        frame.route = route;
         put_u16(frame.data, transfer_id);
         put_u16(frame.data + 2U, sequence);
         frame.data[4] =
@@ -245,10 +256,10 @@ static bool send_packet(rbsp_core_t* core, const uint8_t* packet,
                packet + offset, length);
         frame.length =
             (uint8_t)(RBSP_FRAGMENT_HEADER_SIZE + length);
-        if (core->can_mode == RBSP_CAN_FD) {
+        if (core->link_mode == RBSP_CAN_FD) {
             frame.length = canonical_fd_length(frame.length);
         }
-        if (!core->hal.can_send(&frame)) {
+        if (!send_link_frame(core, &frame)) {
             return false;
         }
         offset = (uint16_t)(offset + length);
@@ -267,10 +278,10 @@ static uint16_t allocate_transfer_id(rbsp_core_t* core) {
 
 static uint32_t response_can_id(const rbsp_core_t* core) {
     if (core->node_id == 0U) {
-        return RBSP_CAN_ID_PROVISIONAL_BASE +
+        return RBSP_ROUTE_PROVISIONAL_BASE +
                CONFIG_NODE_PROVISIONAL_ID;
     }
-    return RBSP_CAN_ID_RESPONSE_BASE + core->node_id;
+    return RBSP_ROUTE_RESPONSE_BASE + core->node_id;
 }
 
 static bool same_cached_request(
@@ -1335,16 +1346,18 @@ static rbsp_reassembly_slot_t* allocate_slot(rbsp_core_t* core) {
 }
 
 bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
-                    rbsp_can_mode_t mode,
+                    rbsp_link_mode_t mode,
                     const rbsp_node_info_t* info) {
     if (core == NULL || hal == NULL || info == NULL ||
-        hal->can_send == NULL || hal->milliseconds == NULL ||
-        (mode != RBSP_CAN_CLASSICAL && mode != RBSP_CAN_FD)) {
+        (hal->link_send == NULL && hal->can_send == NULL) ||
+        hal->milliseconds == NULL ||
+        (mode != RBSP_CAN_CLASSICAL && mode != RBSP_CAN_FD &&
+         mode != RBSP_USB)) {
         return false;
     }
     memset(core, 0, sizeof(*core));
     core->hal = *hal;
-    core->can_mode = mode;
+    core->link_mode = mode;
     core->info = *info;
     core->next_object_id = 1U;
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -1428,7 +1441,7 @@ void rbsp_core_poll(rbsp_core_t* core) {
                 object->pending_length);
             if (send_packet(core, core->tx_packet, size,
                             allocate_transfer_id(core),
-                            RBSP_CAN_ID_EVENT_BASE + core->node_id)) {
+                            RBSP_ROUTE_EVENT_BASE + core->node_id)) {
                 object->event_sequence = sequence;
                 object->pending_length = 0U;
             }
@@ -1448,7 +1461,7 @@ void rbsp_core_poll(rbsp_core_t* core) {
             payload, 17U);
         (void)send_packet(core, core->tx_packet, size,
                           allocate_transfer_id(core),
-                          RBSP_CAN_ID_EVENT_BASE + core->node_id);
+                          RBSP_ROUTE_EVENT_BASE + core->node_id);
         core->last_heartbeat_ms = now;
     }
 }
@@ -1494,22 +1507,21 @@ bool rbsp_core_motion_tick(rbsp_core_t* core) {
 }
 #endif
 
-void rbsp_core_accept_can(rbsp_core_t* core,
-                          const rbsp_can_frame_t* frame) {
+void rbsp_core_accept_link(rbsp_core_t* core,
+                           const rbsp_link_frame_t* frame) {
     if (core == NULL || frame == NULL) {
         return;
     }
-    const uint8_t mtu =
-        core->can_mode == RBSP_CAN_FD ? 64U : 8U;
+    const uint8_t mtu = link_mtu(core->link_mode);
     const uint8_t capacity =
         (uint8_t)(mtu - RBSP_FRAGMENT_HEADER_SIZE);
     const uint32_t assigned_request_id =
-        RBSP_CAN_ID_REQUEST_BASE + core->node_id;
+        RBSP_ROUTE_REQUEST_BASE + core->node_id;
     if (frame->length <= RBSP_FRAGMENT_HEADER_SIZE ||
         frame->length > mtu ||
-        (frame->identifier != RBSP_CAN_ID_DISCOVERY &&
+        (frame->route != RBSP_ROUTE_DISCOVERY &&
          (core->node_id == 0U ||
-          frame->identifier != assigned_request_id))) {
+          frame->route != assigned_request_id))) {
         return;
     }
 
@@ -1539,7 +1551,7 @@ void rbsp_core_accept_can(rbsp_core_t* core,
     }
 
     rbsp_reassembly_slot_t* slot =
-        find_slot(core, frame->identifier, transfer_id);
+        find_slot(core, frame->route, transfer_id);
     if (slot == NULL) {
         if ((flags & RBSP_FRAGMENT_FIRST) == 0U) {
             return;
@@ -1548,7 +1560,7 @@ void rbsp_core_accept_can(rbsp_core_t* core,
         if (slot == NULL) {
             return;
         }
-        slot->stream_id = frame->identifier;
+        slot->stream_id = frame->route;
         slot->transfer_id = transfer_id;
     }
 
@@ -1583,4 +1595,9 @@ void rbsp_core_accept_can(rbsp_core_t* core,
         }
         slot->active = false;
     }
+}
+
+void rbsp_core_accept_can(rbsp_core_t* core,
+                          const rbsp_can_frame_t* frame) {
+    rbsp_core_accept_link(core, frame);
 }

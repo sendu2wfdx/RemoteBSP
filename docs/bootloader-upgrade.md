@@ -33,9 +33,10 @@ Katapult：
 
 STM32F103 的 USB 与 bxCAN 共用 512 字节专用 SRAM。双模式 Bootloader 不会
 同时初始化两者，并使用共享中断分派器处理 F103 的 USB/CAN 共用中断入口。
-三种 MCU 的 RemoteBSP APP 都只运行 CAN/CAN-FD，不链接 USB 协议栈；USB 只在
-Katapult 应急升级模式中启用。这样可减少 APP 的 Flash、RAM、中断和故障面，
-也避免把调试旁路误认为业务传输接口。
+三种 MCU 的正式默认 APP 都运行 CAN/CAN-FD。G431 另有互斥的 USB Vendor Bulk
+业务 APP，它与 USB Katapult 使用不同 PID；F103/F072 APP 目前仍不链接 USB。
+这种选择保持单一主链路，减少 Flash、RAM、中断和故障面，也避免把调试旁路
+误认为业务传输接口。
 
 ## Flash 布局
 
@@ -212,7 +213,7 @@ Candlelight/gs_usb 固件的 CANable2.5，Classical CAN 速率为 1 Mbit/s：
 
 后续把 WeAct BluePill Plus 原生 USB 口接入主机后，进一步确认了 USB Katapult
 可以正常枚举；F103 APP 同时初始化 USB 与 CAN 时则无法枚举。该现象与芯片的
-USB/bxCAN 共用 SRAM 限制一致。项目现在统一不在 APP 中链接 USB，ST-Link VCP
+USB/bxCAN 共用 SRAM 限制一致。F103 APP 仍不链接 USB，ST-Link VCP
 也不能替代 MCU 原生 USB Katapult 接口。
 
 ## 双模式构建验收

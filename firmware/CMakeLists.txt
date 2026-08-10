@@ -27,6 +27,11 @@ endif()
 if(RBSP_WAVEFORM_LINES)
     set(RBSP_OPTIONAL_BOARD_SOURCES src/board_waveform.c)
 endif()
+file(STRINGS "${RBSP_CONFIG}" RBSP_USB_LINK_LINES
+     REGEX "^CONFIG_REMOTEBSP_TRANSPORT_USB=y$")
+if(RBSP_USB_LINK_LINES)
+    list(APPEND RBSP_OPTIONAL_CORE_SOURCES src/usb_link.c)
+endif()
 
 add_custom_command(
     OUTPUT "${GENERATED_CONFIG}"
@@ -179,6 +184,22 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32g431cbu6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-g4")
     set(HAL_DIR "${VENDOR_DIR}/stm32g4xx-hal-driver")
+    if(RBSP_USB_LINK_LINES)
+        set(USB_DEVICE_DIR "${VENDOR_DIR}/stm32-mw-usb-device")
+        if(NOT EXISTS "${USB_DEVICE_DIR}/Core/Src/usbd_core.c")
+            message(FATAL_ERROR
+                "USB 主通信链路缺少 ST USB Device 中间件，请先获取固件依赖")
+        endif()
+        set(RBSP_USB_BOARD_SOURCES
+            src/usb_device_link.c
+            "${USB_DEVICE_DIR}/Core/Src/usbd_core.c"
+            "${USB_DEVICE_DIR}/Core/Src/usbd_ctlreq.c"
+            "${USB_DEVICE_DIR}/Core/Src/usbd_ioreq.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_pcd.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_pcd_ex.c"
+            "${HAL_DIR}/Src/stm32g4xx_ll_usb.c"
+        )
+    endif()
     add_executable(remotebsp-stm32g431cbu6
         "${BOARD_DIR}/main.c"
         ${RBSP_OPTIONAL_BOARD_SOURCES}
@@ -197,6 +218,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
         "${HAL_DIR}/Src/stm32g4xx_hal_pwr_ex.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_tim.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_fdcan.c"
+        ${RBSP_USB_BOARD_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32g431cbu6 PRIVATE
         USE_HAL_DRIVER STM32G431xx)
@@ -210,6 +232,10 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     target_include_directories(remotebsp-stm32g431cbu6 PRIVATE
         "${BOARD_DIR}" "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
         "${VENDOR_DIR}/cmsis-core/Core/Include")
+    if(RBSP_USB_LINK_LINES)
+        target_include_directories(remotebsp-stm32g431cbu6 PRIVATE
+            "${USB_DEVICE_DIR}/Core/Inc")
+    endif()
     rbsp_common_target(remotebsp-stm32g431cbu6 cortex-m4
         "${BOARD_DIR}/STM32G431CBUx_FLASH.ld")
 else()
