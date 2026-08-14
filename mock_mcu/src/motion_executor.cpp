@@ -73,12 +73,13 @@ MotionError MotionException::code() const noexcept { return code_; }
 
 MotionExecutor::MotionExecutor(std::vector<MotionAxisConfig> axes,
                                std::size_t queue_capacity,
-                               std::uint64_t minimum_lead_time_ns)
+                               std::uint64_t minimum_lead_time_ns,
+                               std::uint32_t maximum_total_step_rate_hz)
     : axis_configs_(std::move(axes)),
       queue_capacity_(queue_capacity),
-      minimum_lead_time_ns_(minimum_lead_time_ns) {
-    if (axis_configs_.empty() ||
-        axis_configs_.size() > protocol::kMaximumMotionAxes ||
+      minimum_lead_time_ns_(minimum_lead_time_ns),
+      maximum_total_step_rate_hz_(maximum_total_step_rate_hz) {
+    if (axis_configs_.size() > protocol::kMaximumMotionAxes ||
         queue_capacity_ == 0 || queue_capacity_ > 1024 ||
         minimum_lead_time_ns_ == 0) {
         throw MotionException(MotionError::InvalidConfiguration,
@@ -110,6 +111,28 @@ MotionExecutor::MotionExecutor(std::vector<MotionAxisConfig> axes,
         }
         axes_.push_back({config});
     }
+    std::uint64_t summed_axis_rate = 0;
+    for (const auto& config : axis_configs_) {
+        summed_axis_rate += config.maximum_step_rate_hz;
+    }
+    if (summed_axis_rate == 0) {
+        maximum_total_step_rate_hz_ = 0;
+        return;
+    }
+    if (summed_axis_rate > std::numeric_limits<std::uint32_t>::max()) {
+        throw MotionException(MotionError::InvalidConfiguration,
+                              "运动轴总步频预算溢出");
+    }
+    if (maximum_total_step_rate_hz_ == 0 ||
+        maximum_total_step_rate_hz_ > summed_axis_rate) {
+        maximum_total_step_rate_hz_ =
+            static_cast<std::uint32_t>(summed_axis_rate);
+    }
+}
+
+void MotionExecutor::replace_configuration(
+    MotionExecutor&& replacement) noexcept {
+    *this = std::move(replacement);
 }
 
 MotionSegment MotionExecutor::enqueue(MotionSegment segment,
@@ -169,6 +192,7 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
     SegmentRuntime runtime;
     runtime.segment = segment;
     runtime.moves.reserve(segment.axes.size());
+    std::uint64_t total_steps = 0;
     for (const auto& move : segment.axes) {
         if (!seen_axes.insert(move.resource_id).second) {
             reject(MotionError::DuplicateAxis,
@@ -176,6 +200,12 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
         }
         const auto& axis = require_axis(move.resource_id);
         const auto count = absolute_steps(move.steps);
+        if (std::numeric_limits<std::uint64_t>::max() - total_steps <
+            count) {
+            reject(MotionError::RateExceeded,
+                   "运动段总步数溢出");
+        }
+        total_steps += count;
         if (count != 0) {
             const std::uint64_t available_after_setup =
                 segment.duration_ns > axis.config.direction_setup_ns
@@ -198,6 +228,11 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
             }
         }
         runtime.moves.push_back({move, count});
+    }
+    if (!rate_allows(total_steps, segment.duration_ns,
+                     maximum_total_step_rate_hz_)) {
+        reject(MotionError::RateExceeded,
+               "运动段超过整板总STEP频率能力");
     }
 
     next_available_time_ns_ =
@@ -330,6 +365,14 @@ std::uint64_t MotionExecutor::next_available_time_ns() const noexcept {
 
 const std::vector<MotionAxisConfig>& MotionExecutor::axes() const noexcept {
     return axis_configs_;
+}
+
+std::uint64_t MotionExecutor::minimum_lead_time_ns() const noexcept {
+    return minimum_lead_time_ns_;
+}
+
+std::uint32_t MotionExecutor::maximum_total_step_rate_hz() const noexcept {
+    return maximum_total_step_rate_hz_;
 }
 
 [[noreturn]] void MotionExecutor::reject(MotionError code,

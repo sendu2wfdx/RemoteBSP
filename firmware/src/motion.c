@@ -94,6 +94,23 @@ bool rbsp_motion_init(rbsp_motion_queue_t* queue, uint8_t axis_count) {
     queue->axis_count = axis_count;
     queue->state = RBSP_MOTION_IDLE;
     queue->next_deadline_ns = RBSP_MOTION_NO_DEADLINE;
+    for (uint8_t axis = 0U; axis < axis_count; ++axis) {
+        queue->maximum_step_rate_hz[axis] =
+            CONFIG_MOTION_MAX_STEP_RATE_HZ;
+    }
+    return true;
+}
+
+bool rbsp_motion_set_axis_rate_limit(rbsp_motion_queue_t* queue,
+                                     uint8_t axis,
+                                     uint32_t maximum_step_rate_hz) {
+    if (queue == NULL || axis >= queue->axis_count ||
+        maximum_step_rate_hz == 0U ||
+        maximum_step_rate_hz > CONFIG_MOTION_MAX_STEP_RATE_HZ ||
+        queue->state != RBSP_MOTION_IDLE || queue->size != 0U) {
+        return false;
+    }
+    queue->maximum_step_rate_hz[axis] = maximum_step_rate_hz;
     return true;
 }
 
@@ -107,8 +124,6 @@ bool rbsp_motion_validate_segment(
             requested->duration_ns) {
         return false;
     }
-    const uint64_t maximum_steps = maximum_events_for_duration(
-        requested->duration_ns, CONFIG_MOTION_MAX_STEP_RATE_HZ);
     const uint64_t maximum_total_steps = maximum_events_for_duration(
         requested->duration_ns, CONFIG_MOTION_MAX_TOTAL_STEP_RATE_HZ);
     uint64_t total_steps = 0U;
@@ -116,6 +131,9 @@ bool rbsp_motion_validate_segment(
          axis < queue->axis_count; ++axis) {
         const uint64_t steps =
             absolute_steps(requested->steps[axis]);
+        const uint64_t maximum_steps = maximum_events_for_duration(
+            requested->duration_ns,
+            queue->maximum_step_rate_hz[axis]);
         if (steps > maximum_steps || !step_timing_valid(
                 requested->duration_ns, steps) ||
             (steps != 0U &&

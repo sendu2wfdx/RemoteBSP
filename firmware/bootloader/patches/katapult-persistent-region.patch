@@ -1,0 +1,32 @@
+diff --git a/src/Kconfig b/src/Kconfig
+--- a/src/Kconfig
++++ b/src/Kconfig
+@@ -20,6 +20,14 @@ source "src/lpc176x/Kconfig"
+ source "src/stm32/Kconfig"
+ source "src/rp2040/Kconfig"
+
++config FLASH_APPLICATION_END_ADDRESS
++    hex "Application writable end address" if LOW_LEVEL_OPTIONS
++    default 0xffffffff
++    help
++        Exclusive upper address writable by application update commands.
++        Boards with persistent data at the end of flash must set this to
++        the first address of that reserved region.
++
+ # Generic configuration options for serial ports
+ config SERIAL
+     bool
+diff --git a/src/flashcmd.c b/src/flashcmd.c
+--- a/src/flashcmd.c
++++ b/src/flashcmd.c
+@@ -89,6 +89,9 @@ command_write_block(uint32_t *data)
+         goto fail;
+     uint32_t block_address = le32_to_cpu(data[1]);
+-    if (block_address < CONFIG_LAUNCH_APP_ADDRESS)
++    if (block_address < CONFIG_LAUNCH_APP_ADDRESS ||
++        block_address >= CONFIG_FLASH_APPLICATION_END_ADDRESS ||
++        CONFIG_BLOCK_SIZE >
++            CONFIG_FLASH_APPLICATION_END_ADDRESS - block_address)
+         goto fail;
+     int ret = flash_write_block(block_address, &data[2]);
+     if (ret < 0)

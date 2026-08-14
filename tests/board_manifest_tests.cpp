@@ -38,8 +38,15 @@ void test_default_board_manifest() {
     assert(manifest.resources[27].type == ResourceType::Pwm);
     assert(manifest.resources[28].instance == 1);
     assert(manifest.resources[29].type == ResourceType::TimedBitstream);
+    assert(manifest.waveform_endpoints.size() == 3);
+    assert(manifest.waveform_endpoints[0].type == ResourceType::Pwm);
+    assert(manifest.waveform_endpoints[0].pin == 9);
+    assert(manifest.waveform_endpoints[2].type ==
+           ResourceType::TimedBitstream);
+    assert(manifest.waveform_endpoints[2].maximum_bits == 192);
     assert(manifest.motion_axes.size() == 3);
     assert(manifest.motion_queue_capacity == 32);
+    assert(manifest.motion_maximum_total_step_rate_hz == 200000U);
     assert(manifest.motion_axes[0].maximum_step_rate_hz == 100000);
     assert((manifest.contracts[24].access_flags &
             remotebsp::protocol::kResourceAccessLeaseRequired) != 0);
@@ -67,6 +74,7 @@ void test_fly_d5_board_manifest() {
     assert(manifest.resources[20].instance == 4);
     assert(manifest.motion_axes.size() == 5);
     assert(manifest.motion_queue_capacity == 8);
+    assert(manifest.motion_maximum_total_step_rate_hz == 30000U);
 }
 
 void test_digital_twin_fault_isolation() {

@@ -1,9 +1,11 @@
 #pragma once
 
+#include "remotebsp/mock_mcu/device_parameter_store.hpp"
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
+#include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
@@ -33,6 +35,7 @@ enum class Capability : std::uint64_t {
     Bootloader = 1ULL << 8U,
     Motion = 1ULL << 9U,
     TimedBitstream = 1ULL << 10U,
+    DeviceParameters = 1ULL << 12U,
 };
 
 constexpr std::uint64_t capability_mask(Capability capability) noexcept {
@@ -86,7 +89,9 @@ public:
                std::vector<protocol::ResourceDescriptor> resources = {},
                std::vector<protocol::ResourceContract> contracts = {},
                std::shared_ptr<MotionExecutor> motion = nullptr,
-               std::shared_ptr<WaveformBsp> waveform = nullptr);
+               std::shared_ptr<WaveformBsp> waveform = nullptr,
+               std::shared_ptr<DeviceParameterStore>
+                   device_parameters = nullptr);
 
     protocol::Packet handle(
         const protocol::Packet& request,
@@ -126,6 +131,18 @@ private:
         const protocol::Packet& request);
     protocol::Packet handle_resource_lease_status(
         const protocol::Packet& request, TimePoint now) const;
+    protocol::Packet handle_device_parameter_status(
+        const protocol::Packet& request, TimePoint now) const;
+    protocol::Packet handle_device_parameter_list(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_device_parameter_read(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_device_parameter_unlock(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_device_parameter_write(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_device_parameter_lock(
+        const protocol::Packet& request);
     protocol::Packet handle_gpio_create(const protocol::Packet& request);
     protocol::Packet handle_gpio_read(const protocol::Packet& request) const;
     protocol::Packet handle_gpio_write(const protocol::Packet& request);
@@ -149,6 +166,8 @@ private:
         const protocol::Packet& request);
     protocol::Packet handle_motion_clear_fault(
         const protocol::Packet& request);
+    protocol::Packet handle_motion_contract(
+        const protocol::Packet& request) const;
     protocol::Packet make_uart_error_response(
         const protocol::Packet& request,
         const std::exception& error) const;
@@ -205,13 +224,13 @@ private:
     protocol::ResourceLeaseInfo make_lease_info(
         std::uint32_t resource_id, std::uint32_t requester_session_id,
         TimePoint now) const;
-
     NodeInfo node_info_;
     std::uint64_t capabilities_;
     std::shared_ptr<GpioBsp> gpio_bsp_;
     std::shared_ptr<UartBsp> uart_bsp_;
     std::shared_ptr<MotionExecutor> motion_;
     std::shared_ptr<WaveformBsp> waveform_;
+    std::shared_ptr<DeviceParameterStore> device_parameters_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;
@@ -223,6 +242,10 @@ private:
     std::uint32_t next_object_id_{1};
     std::uint64_t next_lease_id_{1};
     bool bootloader_requested_{};
+    std::uint32_t parameter_unlock_session_{};
+    std::uint32_t parameter_unlock_token_{};
+    TimePoint parameter_unlock_expires_{};
+    bool parameter_restart_required_{};
 };
 
 }

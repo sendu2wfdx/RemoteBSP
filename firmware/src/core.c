@@ -15,6 +15,18 @@ enum {
     RBSP_COMMAND_PING = 0x0012,
     RBSP_COMMAND_BOOTLOADER_ENTER = 0x0013,
     RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
+    RBSP_COMMAND_RUNTIME_CONFIG_STATUS = 0x0040,
+    RBSP_COMMAND_RUNTIME_CONFIG_READ = 0x0041,
+    RBSP_COMMAND_RUNTIME_CONFIG_VALIDATE = 0x0042,
+    RBSP_COMMAND_RUNTIME_CONFIG_STAGE = 0x0043,
+    RBSP_COMMAND_RUNTIME_CONFIG_COMMIT = 0x0044,
+    RBSP_COMMAND_RUNTIME_CONFIG_ROLLBACK = 0x0045,
+    RBSP_COMMAND_DEVICE_PARAMETER_STATUS = 0x0050,
+    RBSP_COMMAND_DEVICE_PARAMETER_LIST = 0x0051,
+    RBSP_COMMAND_DEVICE_PARAMETER_READ = 0x0052,
+    RBSP_COMMAND_DEVICE_PARAMETER_UNLOCK = 0x0053,
+    RBSP_COMMAND_DEVICE_PARAMETER_WRITE = 0x0054,
+    RBSP_COMMAND_DEVICE_PARAMETER_LOCK = 0x0055,
     RBSP_COMMAND_GPIO_CREATE = 0x0100,
     RBSP_COMMAND_GPIO_READ = 0x0101,
     RBSP_COMMAND_GPIO_WRITE = 0x0102,
@@ -32,6 +44,7 @@ enum {
     RBSP_COMMAND_MOTION_STATUS = 0x0901,
     RBSP_COMMAND_MOTION_ABORT = 0x0902,
     RBSP_COMMAND_MOTION_CLEAR_FAULT = 0x0903,
+    RBSP_COMMAND_MOTION_CONTRACT = 0x0904,
     RBSP_STATUS_OK = 0,
     RBSP_STATUS_UNKNOWN_COMMAND = 1,
     RBSP_STATUS_INVALID_PAYLOAD = 2,
@@ -47,6 +60,14 @@ enum {
     RBSP_FRAGMENT_FLAG_MASK = 0x03,
     RBSP_FRAGMENT_LENGTH_SHIFT = 2,
     RBSP_BOOTLOADER_RESET_DELAY_MS = 100,
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+    RBSP_DEVICE_PARAM_PROTOCOL_VERSION = 1,
+    RBSP_DEVICE_PARAM_STATUS_SIZE = 16,
+    RBSP_DEVICE_PARAM_UNLOCK_CONFIRMATION = 0x50564252,
+    RBSP_DEVICE_PARAM_UNLOCK_TIME_MS = 60000,
+    RBSP_DEVICE_PARAM_STATUS_UNLOCKED = 1U << 0,
+    RBSP_DEVICE_PARAM_STATUS_RESTART_REQUIRED = 1U << 1,
+#endif
 };
 
 static const uint8_t bootloader_confirmation[8] = {
@@ -97,6 +118,39 @@ static uint32_t get_u32(const uint8_t* input) {
            ((uint32_t)input[2] << 16U) |
            ((uint32_t)input[3] << 24U);
 }
+
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+static bool device_param_unlock_active(const rbsp_core_t* core,
+                                       uint32_t session_id,
+                                       uint32_t now_ms) {
+    return core->device_params_ready &&
+           core->device_param_unlock_token != 0U &&
+           core->device_param_unlock_session == session_id &&
+           (int32_t)(core->device_param_unlock_expires_ms - now_ms) > 0;
+}
+
+static void encode_device_param_status(const rbsp_core_t* core,
+                                       uint32_t session_id,
+                                       uint32_t now_ms,
+                                       uint8_t output[
+                                           RBSP_DEVICE_PARAM_STATUS_SIZE]) {
+    uint16_t flags = 0U;
+    memset(output, 0, RBSP_DEVICE_PARAM_STATUS_SIZE);
+    if (device_param_unlock_active(core, session_id, now_ms)) {
+        flags |= RBSP_DEVICE_PARAM_STATUS_UNLOCKED;
+    }
+    if (core->device_param_restart_required) {
+        flags |= RBSP_DEVICE_PARAM_STATUS_RESTART_REQUIRED;
+    }
+    put_u16(output, RBSP_DEVICE_PARAM_PROTOCOL_VERSION);
+    put_u16(output + 2U, flags);
+    put_u32(output + 4U, core->device_params.generation);
+    put_u16(output + 8U, core->device_params.record_count);
+    put_u16(output + 10U,
+            (uint16_t)rbsp_device_param_definition_count());
+    output[12U] = (uint8_t)core->device_params.last_error;
+}
+#endif
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
 static uint64_t get_u64(const uint8_t* input) {
@@ -358,7 +412,56 @@ static rbsp_gpio_object_t* find_gpio_object(rbsp_core_t* core,
     return NULL;
 }
 
+static bool configure_gpio(rbsp_core_t* core, uint16_t pin,
+                           rbsp_gpio_direction_t direction,
+                           rbsp_gpio_pull_t pull,
+                           bool initial_value) {
+    if (core->hal.gpio_configure_pull != NULL) {
+        return core->hal.gpio_configure_pull(
+            pin, direction, pull, initial_value);
+    }
+    return pull == RBSP_GPIO_FLOATING &&
+           core->hal.gpio_configure != NULL &&
+           core->hal.gpio_configure(pin, direction, initial_value);
+}
+
+
+#if defined(CONFIG_REMOTEBSP_MOTION)
+static bool motion_available(const rbsp_core_t* core) {
+    return core->hal.motion_axis_count > 0U &&
+           core->motion.axis_count == core->hal.motion_axis_count &&
+           core->hal.nanoseconds != NULL &&
+           core->hal.motion_set_enable != NULL &&
+           core->hal.motion_set_direction != NULL &&
+           core->hal.motion_set_step != NULL &&
+           core->hal.motion_schedule_compare != NULL &&
+           core->hal.motion_cancel_compare != NULL &&
+           core->hal.motion_enter_critical != NULL &&
+           core->hal.motion_exit_critical != NULL;
+}
+
+static uint32_t motion_resource_id(const rbsp_core_t* core,
+                                   uint8_t axis) {
+    (void)core;
+    return 0x09000000UL + axis;
+}
+#endif
+
 #if CONFIG_UART_RESOURCE_COUNT > 0
+static bool uart_port_available(const rbsp_core_t* core, uint8_t port) {
+    (void)core;
+    return port < CONFIG_UART_RESOURCE_COUNT;
+}
+
+static bool uart_runtime_baud_allowed(const rbsp_core_t* core,
+                                      uint8_t port,
+                                      uint32_t baud_rate) {
+    (void)core;
+    (void)port;
+    (void)baud_rate;
+    return true;
+}
+
 static rbsp_uart_object_t* find_uart_object(rbsp_core_t* core,
                                              uint32_t object_id) {
     for (size_t index = 0; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
@@ -423,6 +526,228 @@ static bool process_request(rbsp_core_t* core,
                 core, request, RBSP_STATUS_OK, core->node_id, NULL, 0U);
             break;
 
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+        case RBSP_COMMAND_DEVICE_PARAMETER_STATUS: {
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[RBSP_DEVICE_PARAM_STATUS_SIZE];
+                encode_device_param_status(
+                    core, request->session_id, core->hal.milliseconds(), data);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_DEVICE_PARAMETER_LIST: {
+            const size_t count = rbsp_device_param_definition_count();
+            const size_t data_length = 4U + count * 8U;
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 0U ||
+                       data_length + 1U >
+                           CONFIG_REMOTE_MAX_PACKET_SIZE - RBSP_HEADER_SIZE) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t* data = payload + 1U;
+                bool valid = true;
+                put_u16(data, RBSP_DEVICE_PARAM_PROTOCOL_VERSION);
+                put_u16(data + 2U, (uint16_t)count);
+                for (size_t index = 0U; index < count; ++index) {
+                    rbsp_device_param_definition definition;
+                    uint8_t* item = data + 4U + index * 8U;
+                    if (!rbsp_device_param_definition_at(
+                            index, &definition)) {
+                        valid = false;
+                        break;
+                    }
+                    put_u16(item, definition.id);
+                    item[2U] = definition.type;
+                    item[3U] = definition.flags;
+                    put_u16(item + 4U, definition.minimum_length);
+                    put_u16(item + 6U, definition.maximum_length);
+                }
+                response_size = make_status_response(
+                    core, request,
+                    valid ? RBSP_STATUS_OK : RBSP_STATUS_RESOURCE_FAILED,
+                    0U, valid ? data : NULL,
+                    valid ? (uint16_t)data_length : 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_DEVICE_PARAMETER_READ: {
+            rbsp_device_param_record record;
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 2U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!rbsp_device_param_store_get(
+                           &core->device_params,
+                           get_u16(request->payload), &record)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t* data = payload + 1U;
+                put_u16(data, record.id);
+                data[2U] = record.type;
+                data[3U] = record.flags;
+                put_u32(data + 4U, core->device_params.generation);
+                put_u16(data + 8U, record.length);
+                put_u16(data + 10U, 0U);
+                memcpy(data + 12U, record.value, record.length);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, data,
+                    (uint16_t)(12U + record.length));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_DEVICE_PARAMETER_UNLOCK: {
+            const uint32_t now_ms = core->hal.milliseconds();
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 8U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (request->session_id == 0U ||
+                       get_u32(request->payload) !=
+                           core->device_params.generation ||
+                       get_u32(request->payload + 4U) !=
+                           RBSP_DEVICE_PARAM_UNLOCK_CONFIRMATION) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    0U, NULL, 0U);
+            } else {
+                core->device_param_unlock_session = request->session_id;
+                core->device_param_unlock_token =
+                    UINT32_C(0xD15EA5E5) ^ request->session_id ^
+                    core->device_params.generation;
+                if (core->device_param_unlock_token == 0U) {
+                    core->device_param_unlock_token = 1U;
+                }
+                core->device_param_unlock_expires_ms =
+                    now_ms + RBSP_DEVICE_PARAM_UNLOCK_TIME_MS;
+                put_u32(payload + 1U, core->device_params.generation);
+                put_u32(payload + 5U,
+                        core->device_param_unlock_token);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    payload + 1U, 8U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_DEVICE_PARAMETER_WRITE: {
+            const uint32_t now_ms = core->hal.milliseconds();
+            const uint16_t length = request->payload_length >= 12U
+                ? get_u16(request->payload + 10U)
+                : 0U;
+            rbsp_device_param_definition definition;
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length < 12U ||
+                       length > RBSP_DEVICE_PARAM_MAX_VALUE_SIZE ||
+                       request->payload_length != (uint16_t)(12U + length)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!device_param_unlock_active(
+                           core, request->session_id, now_ms) ||
+                       get_u32(request->payload + 4U) !=
+                           core->device_param_unlock_token) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    0U, NULL, 0U);
+            } else if (!rbsp_device_param_find_definition(
+                           get_u16(request->payload + 8U), &definition) ||
+                       !rbsp_device_param_validate_value(
+                           get_u16(request->payload + 8U),
+                           length == 0U ? NULL : request->payload + 12U,
+                           length)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!rbsp_device_param_store_set(
+                           &core->device_params,
+                           get_u32(request->payload),
+                           get_u16(request->payload + 8U),
+                           length == 0U ? NULL : request->payload + 12U,
+                           length, core->tx_packet,
+                           sizeof(core->tx_packet))) {
+                response_size = make_status_response(
+                    core, request,
+                    core->device_params.last_error ==
+                            RBSP_DEVICE_PARAM_STORE_ERROR_WRITE_ONCE
+                        ? RBSP_STATUS_ACCESS_DENIED
+                        : RBSP_STATUS_RESOURCE_FAILED,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[RBSP_DEVICE_PARAM_STATUS_SIZE];
+                if ((definition.flags &
+                     RBSP_DEVICE_PARAM_FLAG_APPLY_AFTER_RESTART) != 0U) {
+                    core->device_param_restart_required = true;
+                }
+                encode_device_param_status(
+                    core, request->session_id, now_ms, data);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_DEVICE_PARAMETER_LOCK:
+            if (!core->device_params_ready) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else {
+                if (core->device_param_unlock_session ==
+                    request->session_id) {
+                    core->device_param_unlock_session = 0U;
+                    core->device_param_unlock_token = 0U;
+                    core->device_param_unlock_expires_ms = 0U;
+                }
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+            }
+            break;
+#endif
+
+
         case RBSP_COMMAND_GET_INFO:
             if (request->payload_length != 0U) {
                 response_size = make_status_response(
@@ -449,7 +774,8 @@ static bool process_request(rbsp_core_t* core,
                 break;
             }
             uint64_t capabilities = 0U;
-            if (core->hal.gpio_configure != NULL &&
+            if ((core->hal.gpio_configure != NULL ||
+                 core->hal.gpio_configure_pull != NULL) &&
                 core->hal.gpio_read != NULL &&
                 core->hal.gpio_write != NULL) {
                 capabilities |= 1ULL << 0U;
@@ -479,17 +805,13 @@ static bool process_request(rbsp_core_t* core,
                 capabilities |= 1ULL << 8U;
             }
 #if defined(CONFIG_REMOTEBSP_MOTION)
-            if (core->hal.nanoseconds != NULL &&
-                core->hal.motion_axis_count > 0U &&
-                core->hal.motion_axis_count <= CONFIG_MOTION_MAX_AXES &&
-                core->hal.motion_set_enable != NULL &&
-                core->hal.motion_set_direction != NULL &&
-                core->hal.motion_set_step != NULL &&
-                core->hal.motion_schedule_compare != NULL &&
-                core->hal.motion_cancel_compare != NULL &&
-                core->hal.motion_enter_critical != NULL &&
-                core->hal.motion_exit_critical != NULL) {
+            if (motion_available(core)) {
                 capabilities |= 1ULL << 9U;
+            }
+#endif
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+            if (core->device_params_ready) {
+                capabilities |= 1ULL << 12U;
             }
 #endif
             put_u64(payload + 1U, capabilities);
@@ -540,7 +862,8 @@ static bool process_request(rbsp_core_t* core,
             break;
 
         case RBSP_COMMAND_GPIO_CREATE: {
-            if (core->hal.gpio_configure == NULL ||
+            if ((core->hal.gpio_configure == NULL &&
+                 core->hal.gpio_configure_pull == NULL) ||
                 core->hal.gpio_read == NULL ||
                 core->hal.gpio_write == NULL) {
                 response_size = make_status_response(
@@ -558,6 +881,14 @@ static bool process_request(rbsp_core_t* core,
                 break;
             }
             const uint16_t pin = get_u16(request->payload);
+            if (core->hal.gpio_resource_allowed != NULL &&
+                !core->hal.gpio_resource_allowed(
+                    pin, (rbsp_gpio_direction_t)request->payload[2])) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    0U, NULL, 0U);
+                break;
+            }
             rbsp_gpio_object_t* free_object = NULL;
             bool busy = false;
             for (size_t index = 0;
@@ -579,9 +910,10 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_EXHAUSTED,
                     0U, NULL, 0U);
-            } else if (!core->hal.gpio_configure(
-                           pin,
+            } else if (!configure_gpio(
+                           core, pin,
                            (rbsp_gpio_direction_t)request->payload[2],
+                           RBSP_GPIO_FLOATING,
                            request->payload[3] != 0U)) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
@@ -697,9 +1029,15 @@ static bool process_request(rbsp_core_t* core,
                     busy = true;
                 }
             }
-            if (request->payload[0] >= CONFIG_UART_RESOURCE_COUNT) {
+            if (!uart_port_available(core, request->payload[0])) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else if (!uart_runtime_baud_allowed(
+                           core, request->payload[0],
+                           get_u32(request->payload + 1U))) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
                     0U, NULL, 0U);
             } else if (busy) {
                 response_size = make_status_response(
@@ -1050,14 +1388,7 @@ static bool process_request(rbsp_core_t* core,
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_MOTION_ENQUEUE: {
-            if (core->hal.nanoseconds == NULL ||
-                core->hal.motion_set_enable == NULL ||
-                core->hal.motion_set_direction == NULL ||
-                core->hal.motion_set_step == NULL ||
-                core->hal.motion_schedule_compare == NULL ||
-                core->hal.motion_cancel_compare == NULL ||
-                core->hal.motion_enter_critical == NULL ||
-                core->hal.motion_exit_critical == NULL) {
+            if (!motion_available(core)) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
                     0U, NULL, 0U);
@@ -1093,12 +1424,16 @@ static bool process_request(rbsp_core_t* core,
                 const uint8_t* entry =
                     request->payload + 24U + (uint16_t)index * 8U;
                 const uint32_t resource_id = get_u32(entry);
-                if ((resource_id & 0xFFFFFF00UL) != 0x09000000UL) {
-                    valid = false;
-                    break;
+                uint8_t axis = UINT8_MAX;
+                for (uint8_t candidate = 0U;
+                     candidate < core->motion.axis_count; ++candidate) {
+                    if (motion_resource_id(core, candidate) ==
+                        resource_id) {
+                        axis = candidate;
+                        break;
+                    }
                 }
-                const uint8_t axis = (uint8_t)resource_id;
-                if (axis >= core->motion.axis_count || seen[axis]) {
+                if (axis == UINT8_MAX || seen[axis]) {
                     valid = false;
                     break;
                 }
@@ -1160,14 +1495,7 @@ static bool process_request(rbsp_core_t* core,
         }
 
         case RBSP_COMMAND_MOTION_STATUS: {
-            if (core->hal.nanoseconds == NULL ||
-                core->hal.motion_set_enable == NULL ||
-                core->hal.motion_set_direction == NULL ||
-                core->hal.motion_set_step == NULL ||
-                core->hal.motion_schedule_compare == NULL ||
-                core->hal.motion_cancel_compare == NULL ||
-                core->hal.motion_enter_critical == NULL ||
-                core->hal.motion_exit_critical == NULL) {
+            if (!motion_available(core)) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
                     0U, NULL, 0U);
@@ -1237,7 +1565,7 @@ static bool process_request(rbsp_core_t* core,
                  axis < snapshot.axis_count; ++axis) {
                 uint8_t* entry =
                     data + 92U + (uint16_t)axis * 24U;
-                put_u32(entry, 0x09000000UL + axis);
+                put_u32(entry, motion_resource_id(core, axis));
                 entry[4] =
                     (snapshot.enabled[axis] ? 0x01U : 0U) |
                     (snapshot.direction_positive[axis]
@@ -1255,8 +1583,57 @@ static bool process_request(rbsp_core_t* core,
             break;
         }
 
-        case RBSP_COMMAND_MOTION_ABORT:
+        case RBSP_COMMAND_MOTION_CONTRACT: {
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            const uint16_t data_length =
+                (uint16_t)(24U + core->motion.axis_count * 20U);
             if (request->object_id != 0U ||
+                request->payload_length != 0U ||
+                (uint32_t)data_length + 1U >
+                    CONFIG_REMOTE_MAX_PACKET_SIZE - RBSP_HEADER_SIZE) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            uint8_t* data = payload + 1U;
+            memset(data, 0, data_length);
+            put_u16(data, 1U);
+            put_u16(data + 4U, core->motion.axis_count);
+            put_u16(data + 6U, CONFIG_MOTION_QUEUE_DEPTH);
+            put_u64(data + 8U,
+                    (uint64_t)CONFIG_MOTION_MIN_LEAD_TIME_US * 1000U);
+            put_u32(data + 16U, CONFIG_MOTION_MAX_TOTAL_STEP_RATE_HZ);
+            for (uint8_t axis = 0U;
+                 axis < core->motion.axis_count; ++axis) {
+                uint8_t* entry =
+                    data + 24U + (uint16_t)axis * 20U;
+                put_u32(entry, motion_resource_id(core, axis));
+                put_u32(entry + 4U,
+                        core->motion.maximum_step_rate_hz[axis]);
+                put_u32(entry + 8U,
+                        CONFIG_MOTION_STEP_PULSE_WIDTH_US * 1000U);
+                put_u32(entry + 12U,
+                        CONFIG_MOTION_MIN_STEP_LOW_US * 1000U);
+                put_u32(entry + 16U,
+                        CONFIG_MOTION_DIRECTION_SETUP_US * 1000U);
+            }
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, data, data_length);
+            break;
+        }
+
+        case RBSP_COMMAND_MOTION_ABORT:
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
                 request->payload_length != 0U) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_INVALID_PAYLOAD,
@@ -1274,7 +1651,11 @@ static bool process_request(rbsp_core_t* core,
             break;
 
         case RBSP_COMMAND_MOTION_CLEAR_FAULT:
-            if (request->object_id != 0U ||
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
                 request->payload_length != 0U) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_INVALID_PAYLOAD,
@@ -1372,11 +1753,36 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
         !rbsp_motion_init(&core->motion, hal->motion_axis_count)) {
         return false;
     }
+    core->default_motion_axis_count = hal->motion_axis_count;
 #endif
     core->next_transfer_id = 1U;
     core->last_heartbeat_ms = hal->milliseconds();
     return true;
 }
+
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+bool rbsp_core_device_params_init(
+    rbsp_core_t* core, const rbsp_device_param_backend* backend) {
+    rbsp_device_param_record uuid;
+    if (core == NULL || backend == NULL ||
+        !rbsp_device_param_store_init(&core->device_params, backend) ||
+        !rbsp_device_param_store_boot(&core->device_params)) {
+        return false;
+    }
+    core->device_params_ready = true;
+    core->device_param_restart_required = false;
+    core->device_param_unlock_session = 0U;
+    core->device_param_unlock_token = 0U;
+    core->device_param_unlock_expires_ms = 0U;
+    if (rbsp_device_param_store_get(
+            &core->device_params, RBSP_DEVICE_PARAM_DEVICE_UUID, &uuid) &&
+        uuid.length == sizeof(core->info.uuid)) {
+        memcpy(core->info.uuid, uuid.value, sizeof(core->info.uuid));
+    }
+    return true;
+}
+#endif
+
 
 void rbsp_core_poll(rbsp_core_t* core) {
     if (core == NULL) {
@@ -1468,14 +1874,7 @@ void rbsp_core_poll(rbsp_core_t* core) {
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
 bool rbsp_core_motion_service(rbsp_core_t* core) {
-    if (core == NULL || core->hal.nanoseconds == NULL ||
-        core->hal.motion_set_enable == NULL ||
-        core->hal.motion_set_direction == NULL ||
-        core->hal.motion_set_step == NULL ||
-        core->hal.motion_schedule_compare == NULL ||
-        core->hal.motion_cancel_compare == NULL ||
-        core->hal.motion_enter_critical == NULL ||
-        core->hal.motion_exit_critical == NULL) {
+    if (core == NULL || !motion_available(core)) {
         return false;
     }
     const rbsp_motion_io_t io = {

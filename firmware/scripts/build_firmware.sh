@@ -10,7 +10,7 @@ build_one() {
     local config="$2"
     local artifact="$3"
     local output_artifact="${4:-${artifact}}"
-    local build_dir="${root_dir}/build-${board}"
+    local build_dir="${root_dir}/build/${board}"
 
     cmake -S "${root_dir}" -B "${build_dir}" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="${root_dir}/cmake/arm-none-eabi-toolchain.cmake" \
@@ -43,7 +43,7 @@ case "${target}" in
         ;;
     bluepill-motion|weact-bluepill-plus-motion)
         build_one f103-bluepill-motion \
-            configs/stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig \
+            tests/configs/stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig \
             remotebsp-stm32f103cbt6 \
             remotebsp-stm32f103-bluepill-motion-5axis-tmc2209
         ;;
@@ -77,7 +77,7 @@ case "${target}" in
         ;;
     weact-stm32g431cbu6-core-motion)
         build_one g431-weact-core-motion \
-            configs/stm32g431_weact_core_motion_1axis_tmc2209_defconfig \
+            tests/configs/stm32g431_weact_core_motion_1axis_tmc2209_defconfig \
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core-motion-1axis-tmc2209
         ;;

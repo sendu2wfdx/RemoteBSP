@@ -22,3 +22,10 @@ bool rbsp_startup_gpio_apply(
     const char* output_low, const char* output_high,
     const char* input_floating, const char* input_pullup,
     const char* input_pulldown, rbsp_startup_gpio_apply_fn apply);
+
+/* 查询一个引脚是否存在于五个静态列表中，并返回其声明模式。 */
+bool rbsp_startup_gpio_find(
+    const char* output_low, const char* output_high,
+    const char* input_floating, const char* input_pullup,
+    const char* input_pulldown, uint16_t encoded_pin,
+    rbsp_startup_gpio_mode_t* mode);

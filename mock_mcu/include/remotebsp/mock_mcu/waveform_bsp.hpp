@@ -37,6 +37,7 @@ public:
     void bitstream_abort(std::uint8_t channel);
     void reset_pwm(std::uint8_t channel);
     void reset_bitstream(std::uint8_t channel);
+    void reset_all();
 
     std::vector<PwmSnapshot> pwm_snapshot() const;
     std::vector<TimedBitstreamSnapshot> bitstream_snapshot() const;

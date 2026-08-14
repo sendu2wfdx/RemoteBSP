@@ -9,6 +9,9 @@ static rbsp_can_frame_t sent_frames[1024];
 static size_t sent_count;
 static uint32_t now_ms;
 static bool gpio_values[256];
+static rbsp_gpio_direction_t gpio_directions[256];
+static rbsp_gpio_pull_t gpio_pulls[256];
+static unsigned gpio_configure_count;
 static unsigned gpio_write_count;
 static unsigned uart_read_count;
 static uint16_t pwm_duty[2];
@@ -18,6 +21,12 @@ static uint8_t timed_bit_data[96];
 static bool timed_bit_busy;
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
+#if defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+static rbsp_runtime_tmc_uart_config_t applied_tmc_uart[
+    CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT];
+static uint8_t applied_tmc_uart_count;
+static unsigned tmc_uart_apply_count;
+#endif
 
 static void put_u16(uint8_t* output, uint16_t value) {
     output[0] = (uint8_t)value;
@@ -31,12 +40,14 @@ static void put_u32(uint8_t* output, uint32_t value) {
     output[3] = (uint8_t)(value >> 24U);
 }
 
+
 static uint32_t get_u32(const uint8_t* input) {
     return (uint32_t)input[0] |
            ((uint32_t)input[1] << 8U) |
            ((uint32_t)input[2] << 16U) |
            ((uint32_t)input[3] << 24U);
 }
+
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t* data,
                              size_t size) {
@@ -86,11 +97,28 @@ static uint32_t fake_milliseconds(void) {
 static bool fake_gpio_configure(uint16_t pin,
                                 rbsp_gpio_direction_t direction,
                                 bool initial_value) {
-    (void)direction;
     if (pin >= sizeof(gpio_values) / sizeof(gpio_values[0])) {
         return false;
     }
     gpio_values[pin] = initial_value;
+    gpio_directions[pin] = direction;
+    gpio_pulls[pin] = RBSP_GPIO_FLOATING;
+    ++gpio_configure_count;
+    return true;
+}
+
+static bool fake_gpio_configure_pull(uint16_t pin,
+                                     rbsp_gpio_direction_t direction,
+                                     rbsp_gpio_pull_t pull,
+                                     bool initial_value) {
+    if (pin >= sizeof(gpio_values) / sizeof(gpio_values[0]) ||
+        pull > RBSP_GPIO_PULL_DOWN) {
+        return false;
+    }
+    gpio_values[pin] = initial_value;
+    gpio_directions[pin] = direction;
+    gpio_pulls[pin] = pull;
+    ++gpio_configure_count;
     return true;
 }
 
@@ -111,6 +139,52 @@ static bool fake_gpio_read(uint16_t pin, bool* value) {
     return true;
 }
 
+#if defined(CONFIG_REMOTEBSP_MOTION)
+static uint64_t fake_nanoseconds(void) {
+    return (uint64_t)now_ms * 1000000ULL;
+}
+
+static bool fake_motion_set_enable(uint8_t axis, bool enabled) {
+    (void)enabled;
+    return axis < CONFIG_MOTION_MAX_AXES;
+}
+
+static bool fake_motion_set_direction(uint8_t axis, bool positive) {
+    (void)positive;
+    return axis < CONFIG_MOTION_MAX_AXES;
+}
+
+static bool fake_motion_set_step(uint8_t axis, bool high) {
+    (void)high;
+    return axis < CONFIG_MOTION_MAX_AXES;
+}
+
+static bool fake_motion_limit_active(uint8_t axis, bool* active) {
+    if (axis >= CONFIG_MOTION_MAX_AXES || active == NULL) {
+        return false;
+    }
+    *active = false;
+    return true;
+}
+
+static bool fake_motion_schedule_compare(uint64_t deadline_ns) {
+    return deadline_ns != RBSP_MOTION_NO_DEADLINE;
+}
+
+static void fake_motion_cancel_compare(void) {
+}
+
+static uint32_t fake_motion_enter_critical(void) {
+    return 0U;
+}
+
+static void fake_motion_exit_critical(uint32_t state) {
+    (void)state;
+}
+
+#endif
+
+
 static size_t fake_uart_read(uint8_t port, uint8_t* data,
                              size_t capacity) {
     (void)port;
@@ -130,6 +204,7 @@ static bool fake_uart_write(uint8_t port, const uint8_t* data,
                             size_t length) {
     return port < 2U && data != NULL && length != 0U;
 }
+
 
 static bool fake_pwm_configure(uint8_t channel, uint32_t frequency_hz,
                                uint16_t duty, bool active_low) {
@@ -159,6 +234,7 @@ static bool fake_pwm_stop(uint8_t channel) {
     pwm_stopped[channel] = true;
     return true;
 }
+
 
 static bool fake_timed_bitstream_configure(
     uint8_t channel, uint32_t bit_period_ns, uint32_t zero_high_ns,
@@ -193,6 +269,7 @@ static bool fake_timed_bitstream_abort(uint8_t channel) {
     timed_bit_busy = false;
     return true;
 }
+
 
 static void fake_enter_bootloader(rbsp_bootloader_mode_t mode) {
     last_bootloader_mode = mode;
@@ -234,6 +311,12 @@ static uint16_t reassemble_sent(uint8_t* packet, uint32_t expected_id) {
     uint16_t size = 0U;
     for (size_t index = 0; index < sent_count; ++index) {
         const rbsp_can_frame_t* frame = &sent_frames[index];
+        if (frame->identifier != expected_id) {
+            fprintf(stderr,
+                    "CAN 响应标识符不匹配：帧 %zu，实际 0x%03lX，期望 0x%03lX\n",
+                    index, (unsigned long)frame->identifier,
+                    (unsigned long)expected_id);
+        }
         assert(frame->identifier == expected_id);
         const uint8_t length = frame->data[4] >> 2U;
         memcpy(packet + size, frame->data + 5U, length);
@@ -298,18 +381,35 @@ int main(void) {
         .can_send = fake_can_send,
         .milliseconds = fake_milliseconds,
         .gpio_configure = fake_gpio_configure,
+        .gpio_configure_pull = fake_gpio_configure_pull,
         .gpio_write = fake_gpio_write,
         .gpio_read = fake_gpio_read,
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,
         .uart_write = fake_uart_write,
+#if defined(CONFIG_REMOTEBSP_PWM)
         .pwm_configure = fake_pwm_configure,
         .pwm_write = fake_pwm_write,
         .pwm_stop = fake_pwm_stop,
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
         .timed_bitstream_configure = fake_timed_bitstream_configure,
         .timed_bitstream_write = fake_timed_bitstream_write,
         .timed_bitstream_busy = fake_timed_bitstream_busy,
         .timed_bitstream_abort = fake_timed_bitstream_abort,
+#endif
+#if defined(CONFIG_REMOTEBSP_MOTION)
+        .nanoseconds = fake_nanoseconds,
+        .motion_axis_count = 2U,
+        .motion_set_enable = fake_motion_set_enable,
+        .motion_set_direction = fake_motion_set_direction,
+        .motion_set_step = fake_motion_set_step,
+        .motion_limit_active = fake_motion_limit_active,
+        .motion_schedule_compare = fake_motion_schedule_compare,
+        .motion_cancel_compare = fake_motion_cancel_compare,
+        .motion_enter_critical = fake_motion_enter_critical,
+        .motion_exit_critical = fake_motion_exit_critical,
+#endif
         .enter_bootloader = fake_enter_bootloader,
     };
     rbsp_node_info_t info = {
@@ -317,7 +417,6 @@ int main(void) {
          0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
         0, 1, 0, 0x0103CB};
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
-
     uint8_t request[1024];
     uint8_t response[1024];
     const uint8_t discovery[] = {1U, 1U};
@@ -348,6 +447,9 @@ int main(void) {
     reassemble_sent(response, 0x599U);
     const uint32_t gpio_object = get_u32(response + 12U);
     assert(gpio_object != 0U);
+
+    /* 后续既有测试仍需使用刚创建的 GPIO 对象。 */
+    core.gpio_objects[0].used = true;
 
     clear_sent();
     const uint8_t high[] = {1U};

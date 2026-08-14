@@ -25,6 +25,20 @@ struct ReservedResource {
     std::string owner;
 };
 
+/* 板卡公开的固定波形硬件组合。Studio只能选择这些已经验证的
+ * 引脚、定时器、通道与DMA组合，不能任意拼接硬件资源。 */
+struct WaveformEndpointCapability {
+    protocol::ResourceType type{protocol::ResourceType::Pwm};
+    std::uint16_t instance{};
+    std::uint16_t pin{};
+    std::uint8_t timer{};
+    std::uint8_t channel{};
+    std::uint8_t dma_channel{};
+    std::uint32_t maximum_frequency_hz{};
+    std::uint16_t maximum_bits{};
+    std::uint32_t maximum_bit_rate{};
+};
+
 struct BoardManifest {
     std::uint32_t schema_version{kBoardManifestSchemaVersion};
     std::string name;
@@ -34,7 +48,9 @@ struct BoardManifest {
     std::vector<protocol::ResourceContract> contracts;
     std::vector<ReservedResource> reserved_resources;
     std::vector<MotionAxisConfig> motion_axes;
+    std::vector<WaveformEndpointCapability> waveform_endpoints;
     std::size_t motion_queue_capacity{32};
+    std::uint32_t motion_maximum_total_step_rate_hz{};
 };
 
 enum class ManifestError {

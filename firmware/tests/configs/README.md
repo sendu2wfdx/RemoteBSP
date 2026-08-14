@@ -1,0 +1,18 @@
+# 固件验收配置
+
+`stm32f072rbt6_runtime_uart_defconfig`用于验证Cortex-M0上的普通USART1运行时资源
+计划、Flash A/B清单和固定端点约束；它不是具体板卡的出厂预设。
+
+`stm32f072_mellow_fly_d5_runtime_config_defconfig`用于验证Cortex-M0、2KiB Flash
+擦除页、PWM/定时位流与运行时配置存储能够共同交叉编译；它不是正式出厂预设。
+
+`stm32f072_mellow_fly_d5_runtime_motion_5axis_tmc2209_defconfig`用于验证最紧张的
+Cortex-M0组合：运行时资源清单、五轴、五路TMC2209和Katapult 8 KiB布局。当前
+加入轴—驱动绑定后交叉编译占用RAM 13520/16192字节（83.50%）、Flash
+60152/114688字节（52.45%）。
+
+本目录保存仅用于交叉编译、单元测试或实体板验收的组合配置。它们可以描述临时
+运动轴和 TMC 接线，但不属于可部署产品的正式板卡预设。
+
+构建脚本可以保留面向开发者的目标名称，但必须从本目录读取相应配置，避免
+`firmware/configs/` 随每次接线实验不断膨胀。

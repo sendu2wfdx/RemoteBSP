@@ -99,6 +99,23 @@ int main(int argc, char** argv) {
     assert(traffic.admitted_packets != 0);
     assert(traffic.admitted_frames != 0);
 
+    const auto motion_contract = client.motion_contract(true);
+    assert(motion_contract.axes.size() == 3U);
+    assert(motion_contract.queue_capacity == 32U);
+    assert(motion_contract.maximum_total_step_rate_hz == 200000U);
+    remotebsp::protocol::MotionSegmentPayload excessive_motion{
+        2U, 0U, 1000000000ULL, true,
+        {{0x09000000U, 100000},
+         {0x09000001U, 100000},
+         {0x09000002U, 1}}};
+    try {
+        static_cast<void>(client.motion_enqueue(excessive_motion));
+        assert(false);
+    } catch (const remotebsp::ClientException& error) {
+        assert(std::string(error.what()).find(
+                   "主机运动能力准入拒绝") != std::string::npos);
+    }
+
     /* 放在最后，模拟真实设备回复后进入 Bootloader 的语义。 */
     client.enter_bootloader();
     client.enter_usb_bootloader();

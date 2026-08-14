@@ -26,6 +26,13 @@ class PackFactoryImageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "超过"):
             MODULE.pack_image(b"\x00", b"\x01" * 9, 8, 16)
 
+    def test_持久化区会缩小应用容量(self) -> None:
+        with self.assertRaisesRegex(ValueError, "参数区"):
+            MODULE.pack_image(b"\x00", b"\x01" * 5, 8, 16, 4)
+
+        image = MODULE.pack_image(b"\x00", b"\x01" * 4, 8, 16, 4)
+        self.assertEqual(len(image), 12)
+
 
 if __name__ == "__main__":
     unittest.main()

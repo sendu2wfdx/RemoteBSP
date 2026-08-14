@@ -8,6 +8,33 @@ target_compile_options(protocol_tests PRIVATE
 
 add_test(NAME protocol_tests COMMAND protocol_tests)
 
+add_executable(device_parameter_protocol_tests
+    device_parameter_protocol_tests.cpp)
+target_link_libraries(device_parameter_protocol_tests PRIVATE
+    remotebsp_protocol)
+target_compile_options(device_parameter_protocol_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME device_parameter_protocol_tests
+    COMMAND device_parameter_protocol_tests)
+
+add_executable(device_parameter_store_tests
+    device_parameter_store_tests.c)
+target_link_libraries(device_parameter_store_tests PRIVATE
+    remotebsp_device_params)
+target_compile_options(device_parameter_store_tests PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME device_parameter_store_tests
+    COMMAND device_parameter_store_tests)
+
+add_executable(device_parameter_remote_tests
+    device_parameter_remote_tests.cpp)
+target_link_libraries(device_parameter_remote_tests PRIVATE
+    remotebsp_remote_core)
+target_compile_options(device_parameter_remote_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME device_parameter_remote_tests
+    COMMAND device_parameter_remote_tests)
+
 add_executable(motion_protocol_tests motion_protocol_tests.cpp)
 target_link_libraries(motion_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(motion_protocol_tests PRIVATE
@@ -252,7 +279,9 @@ target_compile_options(motion_executor_tests PRIVATE
 add_test(NAME motion_executor_tests COMMAND motion_executor_tests)
 
 add_executable(client_api_tests client_api_tests.cpp)
-target_link_libraries(client_api_tests PRIVATE remotebsp)
+target_link_libraries(client_api_tests PRIVATE
+    remotebsp
+)
 
 target_compile_options(client_api_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
@@ -261,11 +290,12 @@ target_compile_options(client_api_tests PRIVATE
 add_executable(embedded_core_tests
     ../firmware/tests/core_tests.c
     ../firmware/src/core.c
+    ../firmware/src/motion.c
     ../firmware/src/byte_ring.c
 )
 target_include_directories(embedded_core_tests PRIVATE
     ../firmware/include
-    ../firmware/tests/config
+    ../firmware/tests/config_all
 )
 target_compile_options(embedded_core_tests PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>

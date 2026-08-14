@@ -10,6 +10,7 @@ namespace remotebsp::protocol {
 // 单个节点在当前 v1 线格式中最多报告 64 个运动轴。逻辑运动组可以跨多个
 // 节点组合，因此系统总轴数不受此单节点编解码预算限制。
 constexpr std::size_t kMaximumMotionAxes = 64;
+constexpr std::uint16_t kMotionContractVersion = 1;
 
 struct MotionAxisMovePayload {
     std::uint32_t resource_id{};
@@ -31,6 +32,25 @@ struct MotionAcceptancePayload {
     std::uint64_t start_time_ns{};
     std::uint64_t duration_ns{};
     bool final_segment{};
+};
+
+struct MotionAxisContractPayload {
+    std::uint32_t resource_id{};
+    std::uint32_t maximum_step_rate_hz{};
+    std::uint32_t step_pulse_width_ns{};
+    std::uint32_t minimum_step_low_ns{};
+    std::uint32_t direction_setup_ns{};
+};
+
+// 节点级运动合同描述固件当前运行时资源清单能够保证的静态边界。每轴限制与
+// 整板总步频限制同时生效；数值来自实体标定或明确的保守配置，不能填理论峰值。
+struct MotionContractPayload {
+    std::uint16_t version{kMotionContractVersion};
+    std::uint16_t flags{};
+    std::uint16_t queue_capacity{};
+    std::uint64_t minimum_lead_time_ns{};
+    std::uint32_t maximum_total_step_rate_hz{};
+    std::vector<MotionAxisContractPayload> axes;
 };
 
 enum class MotionStatePayload : std::uint8_t {
@@ -85,6 +105,8 @@ enum class MotionPayloadError {
     InvalidLength,
     InvalidValue,
     TooManyAxes,
+    ContractMismatch,
+    RateExceeded,
 };
 
 class MotionPayloadException : public std::runtime_error {
@@ -104,6 +126,14 @@ std::vector<std::uint8_t> encode_motion_acceptance(
     const MotionAcceptancePayload& acceptance);
 MotionAcceptancePayload decode_motion_acceptance(
     const std::vector<std::uint8_t>& payload);
+
+std::vector<std::uint8_t> encode_motion_contract(
+    const MotionContractPayload& contract);
+MotionContractPayload decode_motion_contract(
+    const std::vector<std::uint8_t>& payload);
+void validate_motion_segment_against_contract(
+    const MotionSegmentPayload& segment,
+    const MotionContractPayload& contract);
 
 std::vector<std::uint8_t> encode_motion_status(
     const MotionStatusPayload& status);

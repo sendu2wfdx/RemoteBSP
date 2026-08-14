@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #include "remotebsp_config.h"
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+#include "remotebsp/device_params/store.h"
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
 #include "remotebsp_embedded/motion.h"
 #endif
@@ -38,6 +41,7 @@ extern "C" {
 #error "去重缓存必须至少能够容纳协议头和一个状态字节"
 #endif
 
+
 typedef enum {
     RBSP_CAN_CLASSICAL = 0,
     RBSP_CAN_FD = 1,
@@ -50,6 +54,12 @@ typedef enum {
     RBSP_GPIO_INPUT = 0,
     RBSP_GPIO_OUTPUT = 1,
 } rbsp_gpio_direction_t;
+
+typedef enum {
+    RBSP_GPIO_FLOATING = 0,
+    RBSP_GPIO_PULL_UP = 1,
+    RBSP_GPIO_PULL_DOWN = 2,
+} rbsp_gpio_pull_t;
 
 typedef enum {
     RBSP_BOOTLOADER_CAN = 0,
@@ -75,6 +85,58 @@ typedef struct {
     uint32_t board_type;
 } rbsp_node_info_t;
 
+#if defined(CONFIG_REMOTEBSP_MOTION)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t enable_group_id;
+    uint32_t driver_resource_id;
+    uint32_t maximum_step_rate_hz;
+    uint16_t step_pin;
+    uint16_t direction_pin;
+    uint16_t enable_pin;
+    uint16_t limit_pin;
+    bool enable_present;
+    bool direction_inverted;
+    bool enable_active_low;
+    bool limit_active_low;
+    uint8_t driver_type;
+} rbsp_runtime_motion_axis_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+typedef struct {
+    uint32_t logical_id;
+    uint16_t pin;
+    uint8_t address;
+    uint8_t flags;
+} rbsp_runtime_tmc_uart_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_PWM)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t frequency_hz;
+    uint16_t pin;
+    uint16_t default_duty_permyriad;
+    uint8_t timer;
+    uint8_t timer_channel;
+    bool active_low;
+} rbsp_runtime_pwm_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t bit_rate;
+    uint16_t pin;
+    uint16_t maximum_bits;
+    uint8_t timer;
+    uint8_t timer_channel;
+    uint8_t dma_channel;
+} rbsp_runtime_timed_bitstream_config_t;
+#endif
+
+
 /*
  * 这是远程核心与具体 MCU 驱动之间唯一的边界。
  * 中断服务只负责收发字节和维护驱动状态，协议解析始终在主循环中完成。
@@ -86,6 +148,12 @@ typedef struct {
     uint32_t (*milliseconds)(void);
     bool (*gpio_configure)(uint16_t pin, rbsp_gpio_direction_t direction,
                            bool initial_value);
+    bool (*gpio_configure_pull)(uint16_t pin,
+                                rbsp_gpio_direction_t direction,
+                                rbsp_gpio_pull_t pull,
+                                bool initial_value);
+    bool (*gpio_resource_allowed)(uint16_t pin,
+                                  rbsp_gpio_direction_t direction);
     bool (*gpio_write)(uint16_t pin, bool value);
     bool (*gpio_read)(uint16_t pin, bool* value);
     bool (*uart_configure)(uint8_t port, uint32_t baud_rate,
@@ -155,6 +223,7 @@ typedef struct {
     rbsp_gpio_direction_t direction;
 } rbsp_gpio_object_t;
 
+
 #if defined(CONFIG_REMOTEBSP_PWM)
 typedef struct {
     bool used;
@@ -211,12 +280,26 @@ typedef struct {
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;
+    uint8_t default_motion_axis_count;
+#endif
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+    rbsp_device_param_store device_params;
+    uint32_t device_param_unlock_session;
+    uint32_t device_param_unlock_token;
+    uint32_t device_param_unlock_expires_ms;
+    bool device_params_ready;
+    bool device_param_restart_required;
 #endif
     uint8_t tx_packet[CONFIG_REMOTE_MAX_PACKET_SIZE];
 } rbsp_core_t;
 
 bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
                     rbsp_link_mode_t mode, const rbsp_node_info_t* info);
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+/* 启动时加载设备参数；若已保存 UUID，同时覆盖发现与 GET_INFO 身份。 */
+bool rbsp_core_device_params_init(
+    rbsp_core_t* core, const rbsp_device_param_backend* backend);
+#endif
 void rbsp_core_poll(rbsp_core_t* core);
 void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);

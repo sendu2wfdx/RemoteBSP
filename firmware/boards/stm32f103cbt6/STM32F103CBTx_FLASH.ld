@@ -9,7 +9,12 @@ MEMORY
   RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 20K
   FLASH (rx)  : ORIGIN = 0x08000000 + RBSP_APP_FLASH_OFFSET,
                 LENGTH = 128K - RBSP_APP_FLASH_OFFSET
+                         - RBSP_DEVICE_PARAM_FLASH_SIZE
 }
+
+PROVIDE(__rbsp_device_param_flash_start__ =
+        0x08000000 + 128K - RBSP_DEVICE_PARAM_FLASH_SIZE);
+PROVIDE(__rbsp_device_param_flash_end__ = 0x08000000 + 128K);
 
 SECTIONS
 {

@@ -94,7 +94,25 @@ grep -Fq 'firmware=0.2.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
 
 capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
-grep -Fq 'capabilities=0x723' <<<"$capability_output"
+grep -Fq 'capabilities=0x1723' <<<"$capability_output"
+
+# 设备身份与校准参数使用独立持久化接口，不与资源清单混在一起。
+parameter_status_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-status)"
+grep -Fq 'version=1 generation=0 stored=0 definitions=22' \
+    <<<"$parameter_status_output"
+parameter_list_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-list)"
+grep -Fq 'id=0x1 name=serial-number type=2' \
+    <<<"$parameter_list_output"
+parameter_write_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-set serial-number MOCK-E2E-001)"
+grep -Fq 'generation=1 stored=1' <<<"$parameter_write_output"
+grep -Fq 'restart_required=yes' <<<"$parameter_write_output"
+parameter_read_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-get serial-number)"
+grep -Fq 'generation=1 type=2 value=MOCK-E2E-001' \
+    <<<"$parameter_read_output"
 
 traffic_output="$("$remote_cli_bin" --socket "$socket_path" traffic-status)"
 expected_traffic_mode="$can_mode"
@@ -205,6 +223,15 @@ for resource_id in 0x09000000 0x09000001 0x09000002; do
     [[ "$motion_lease_id" =~ ^0x[0-9a-fA-F]+$ ]]
     motion_lease_ids+=("$motion_lease_id")
 done
+
+motion_contract_output="$("$remote_cli_bin" --socket "$socket_path" \
+    motion-contract)"
+grep -Fq 'version=1 axes=3 queue_capacity=32' \
+    <<<"$motion_contract_output"
+grep -Fq 'maximum_total_step_rate_hz=200000' \
+    <<<"$motion_contract_output"
+grep -Fq 'axis=0x9000000 maximum_step_rate_hz=100000' \
+    <<<"$motion_contract_output"
 
 motion_enqueue_output="$("$remote_cli_bin" --socket "$socket_path" \
     motion-enqueue 1 auto 1000000 final \

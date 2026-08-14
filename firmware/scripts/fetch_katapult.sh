@@ -8,19 +8,31 @@ target="${root_dir}/vendor/katapult"
 repository="https://github.com/Arksine/katapult.git"
 revision="ec59b9bb9ad6c2ec8d4dc6831fbc77f0b308e29e"
 dual_patch="${root_dir}/bootloader/patches/katapult-dual-can-usb.patch"
+persistent_patch="${root_dir}/bootloader/patches/katapult-persistent-region.patch"
 
-apply_dual_patch() {
-    if git -C "${target}" apply --reverse --check "${dual_patch}" \
+apply_patch_file() {
+    local patch_file="$1"
+    local label="$2"
+    if git -C "${target}" apply --reverse --check "${patch_file}" \
         >/dev/null 2>&1; then
-        printf 'Katapult 双模式补丁已经应用。\n'
+        printf 'Katapult %s补丁已经应用。\n' "${label}"
         return
     fi
-    if ! git -C "${target}" apply --check "${dual_patch}"; then
-        printf 'Katapult 双模式补丁与当前源码不匹配，请人工检查。\n' >&2
+    if ! git -C "${target}" apply --check "${patch_file}"; then
+        printf 'Katapult %s补丁与当前源码不匹配，请人工检查。\n' \
+            "${label}" >&2
         exit 1
     fi
-    git -C "${target}" apply "${dual_patch}"
-    printf '已应用 Katapult CAN/USB 双模式补丁。\n'
+    git -C "${target}" apply "${patch_file}"
+    printf '已应用 Katapult %s补丁。\n' "${label}"
+}
+
+apply_dual_patch() {
+    apply_patch_file "${dual_patch}" "CAN/USB双模式"
+}
+
+apply_persistent_patch() {
+    apply_patch_file "${persistent_patch}" "持久化区写保护"
 }
 
 if [[ -d "${target}/.git" ]]; then
@@ -33,6 +45,7 @@ if [[ -d "${target}/.git" ]]; then
     fi
     printf 'Katapult 已存在且版本正确：%s\n' "${revision}"
     apply_dual_patch
+    apply_persistent_patch
     exit 0
 fi
 
@@ -46,3 +59,4 @@ git clone "${repository}" "${target}"
 git -C "${target}" checkout --detach "${revision}"
 printf 'Katapult 已固定到：%s\n' "${revision}"
 apply_dual_patch
+apply_persistent_patch

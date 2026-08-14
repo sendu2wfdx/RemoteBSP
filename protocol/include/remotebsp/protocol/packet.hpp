@@ -40,6 +40,12 @@ enum class Command : std::uint16_t {
     ResourceRenew = 0x0036,
     ResourceRelease = 0x0037,
     ResourceLeaseStatus = 0x0038,
+    DeviceParameterStatus = 0x0050,
+    DeviceParameterList = 0x0051,
+    DeviceParameterRead = 0x0052,
+    DeviceParameterUnlock = 0x0053,
+    DeviceParameterWrite = 0x0054,
+    DeviceParameterLock = 0x0055,
     GpioCreate = 0x0100,
     GpioRead = 0x0101,
     GpioWrite = 0x0102,
@@ -57,6 +63,7 @@ enum class Command : std::uint16_t {
     MotionStatus = 0x0901,
     MotionAbort = 0x0902,
     MotionClearFault = 0x0903,
+    MotionContract = 0x0904,
 };
 
 struct PacketHeader {

@@ -84,6 +84,72 @@ std::vector<std::uint8_t> parse_hex(const std::string& text) {
     return result;
 }
 
+std::uint16_t parse_device_parameter_id(const std::string& text) {
+    if (text == "serial-number" || text == "sn") {
+        return RBSP_DEVICE_PARAM_SERIAL_NUMBER;
+    }
+    if (text == "device-uuid" || text == "uuid") {
+        return RBSP_DEVICE_PARAM_DEVICE_UUID;
+    }
+    if (text == "hardware-revision" || text == "hw-rev") {
+        return RBSP_DEVICE_PARAM_HARDWARE_REVISION;
+    }
+    if (text == "manufacturing-batch" || text == "batch") {
+        return RBSP_DEVICE_PARAM_MANUFACTURING_BATCH;
+    }
+    if (text == "manufacturing-date" || text == "date") {
+        return RBSP_DEVICE_PARAM_MANUFACTURING_DATE;
+    }
+    if (text == "device-name" || text == "name") {
+        return RBSP_DEVICE_PARAM_DEVICE_NAME;
+    }
+    if (text.rfind("adc", 0U) == 0U && text.size() > 3U) {
+        const auto channel = parse_u32(text.substr(3U), "ADC通道");
+        if (channel >= RBSP_DEVICE_PARAM_ADC_CHANNEL_COUNT) {
+            throw std::invalid_argument("ADC校准通道超出0～15");
+        }
+        return static_cast<std::uint16_t>(
+            RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + channel);
+    }
+    const auto value = parse_u32(text, "设备参数ID");
+    if (value > std::numeric_limits<std::uint16_t>::max()) {
+        throw std::invalid_argument("设备参数ID超过16位范围");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+const char* device_parameter_name(std::uint16_t id) {
+    switch (id) {
+        case RBSP_DEVICE_PARAM_SERIAL_NUMBER: return "serial-number";
+        case RBSP_DEVICE_PARAM_DEVICE_UUID: return "device-uuid";
+        case RBSP_DEVICE_PARAM_HARDWARE_REVISION: return "hardware-revision";
+        case RBSP_DEVICE_PARAM_MANUFACTURING_BATCH:
+            return "manufacturing-batch";
+        case RBSP_DEVICE_PARAM_MANUFACTURING_DATE:
+            return "manufacturing-date";
+        case RBSP_DEVICE_PARAM_DEVICE_NAME: return "device-name";
+        default: return "adc-calibration-or-unknown";
+    }
+}
+
+void print_device_parameter_status(
+    const remotebsp::protocol::DeviceParameterStatus& status) {
+    const auto unlocked = static_cast<std::uint16_t>(
+        remotebsp::protocol::DeviceParameterStatusFlag::MaintenanceUnlocked);
+    const auto restart = static_cast<std::uint16_t>(
+        remotebsp::protocol::DeviceParameterStatusFlag::RestartRequired);
+    std::cout << "version=" << status.version
+              << " generation=" << status.generation
+              << " stored=" << status.stored_count
+              << " definitions=" << status.definition_count
+              << " maintenance_unlocked="
+              << ((status.flags & unlocked) != 0U ? "yes" : "no")
+              << " restart_required="
+              << ((status.flags & restart) != 0U ? "yes" : "no")
+              << " store_error=" << static_cast<unsigned>(status.last_error)
+              << '\n';
+}
+
 const char* resource_type(remotebsp::protocol::ResourceType type) {
     using remotebsp::protocol::ResourceType;
     switch (type) {
@@ -214,6 +280,10 @@ void print_usage() {
         << "  resource-renew <资源ID> <租约ID> <毫秒>\n"
         << "  resource-release <资源ID> <租约ID>\n"
         << "  resource-lease-status <资源ID>\n"
+        << "  param-status\n"
+        << "  param-list\n"
+        << "  param-get <名称|参数ID>\n"
+        << "  param-set <名称|参数ID> <文本|hex:十六进制>\n"
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
@@ -237,6 +307,7 @@ void print_usage() {
         << "  motion-enqueue <序号> <开始ns|auto> <持续ns> "
            "<final|more> <资源ID:步数>...\n"
         << "  motion-status\n"
+        << "  motion-contract\n"
         << "  motion-abort\n"
         << "  motion-clear-fault\n";
 }
@@ -367,6 +438,52 @@ int run(const std::vector<std::string>& arguments,
         const auto capabilities = client.get_capabilities();
         std::cout << "capabilities=0x" << std::hex << capabilities
                   << std::dec << '\n';
+        return 0;
+    }
+    if (name == "param-status" && arguments.size() == 1) {
+        print_device_parameter_status(client.device_parameter_status());
+        return 0;
+    }
+    if (name == "param-list" && arguments.size() == 1) {
+        for (const auto& parameter : client.list_device_parameters()) {
+            std::cout << "id=0x" << std::hex << parameter.id << std::dec
+                      << " name=" << device_parameter_name(parameter.id)
+                      << " type=" << static_cast<unsigned>(parameter.type)
+                      << " flags=0x" << std::hex
+                      << static_cast<unsigned>(parameter.flags) << std::dec
+                      << " length=" << parameter.minimum_length << ".."
+                      << parameter.maximum_length << '\n';
+        }
+        return 0;
+    }
+    if (name == "param-get" && arguments.size() == 2) {
+        const auto parameter = client.read_device_parameter(
+            parse_device_parameter_id(arguments[1]));
+        std::cout << "id=0x" << std::hex << parameter.id << std::dec
+                  << " name=" << device_parameter_name(parameter.id)
+                  << " generation=" << parameter.generation
+                  << " type=" << static_cast<unsigned>(parameter.type)
+                  << " value=";
+        if (parameter.type == RBSP_DEVICE_PARAM_TYPE_UTF8) {
+            std::cout.write(
+                reinterpret_cast<const char*>(parameter.value.data()),
+                static_cast<std::streamsize>(parameter.value.size()));
+        } else {
+            print_hex(parameter.value);
+        }
+        std::cout << '\n';
+        return 0;
+    }
+    if (name == "param-set" && arguments.size() == 3) {
+        const auto id = parse_device_parameter_id(arguments[1]);
+        std::vector<std::uint8_t> value;
+        if (arguments[2].rfind("hex:", 0U) == 0U) {
+            value = parse_hex(arguments[2].substr(4U));
+        } else {
+            value.assign(arguments[2].begin(), arguments[2].end());
+        }
+        const auto status = client.write_device_parameter(id, value);
+        print_device_parameter_status(status);
         return 0;
     }
     if (name == "resource-list" && arguments.size() == 1) {
@@ -811,6 +928,29 @@ int run(const std::vector<std::string>& arguments,
                       << " position_steps=" << axis.position_steps
                       << " emitted_steps=" << axis.emitted_steps
                       << '\n';
+        }
+        return 0;
+    }
+    if (name == "motion-contract" && arguments.size() == 1) {
+        const auto contract = client.motion_contract(true);
+        std::cout << "version=" << contract.version
+                  << " axes=" << contract.axes.size()
+                  << " queue_capacity=" << contract.queue_capacity
+                  << " minimum_lead_time_ns="
+                  << contract.minimum_lead_time_ns
+                  << " maximum_total_step_rate_hz="
+                  << contract.maximum_total_step_rate_hz << '\n';
+        for (const auto& axis : contract.axes) {
+            std::cout << "axis=0x" << std::hex << axis.resource_id
+                      << std::dec
+                      << " maximum_step_rate_hz="
+                      << axis.maximum_step_rate_hz
+                      << " step_pulse_width_ns="
+                      << axis.step_pulse_width_ns
+                      << " minimum_step_low_ns="
+                      << axis.minimum_step_low_ns
+                      << " direction_setup_ns="
+                      << axis.direction_setup_ns << '\n';
         }
         return 0;
     }

@@ -30,6 +30,18 @@ flowchart TD
 应用程序不得直接访问 SocketCAN。`toolbusd` 独占总线管理职责，包括节点发现、
 心跳、请求超时与重试、响应匹配、分片重组、事件分发和本地 IPC。
 
+## 配置与固件生成原则
+
+RemoteBSP Studio 是目标产品的正式配置入口。GUI 保存版本化工程，完成资源冲突
+校验并生成完整 Kconfig `.config`；Kconfig 同时表达底层硬件、功能裁剪、静态预算
+和具体资源映射。终端 `menuconfig` 只作为开发、CI 和无 GUI 环境的备用入口。
+
+GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡专用 APP，
+烧录并重启后固定生效。运行期间可以控制资源状态，但不能动态申请 IO 或改变引脚
+复用。SN、UUID、制造信息和 ADC 校准值使用独立 EEPROM/Flash 仿 EEPROM 参数区，
+不保存 IO 拓扑。详细设计见
+[固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
+
 ## 当前能力
 
 | 模块 | 当前状态 |
@@ -41,10 +53,12 @@ flowchart TD
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
+| 静态资源配置 | Studio 工程生成完整 Kconfig `.config`；固件启动时建立固定资源表，严格检查引脚方向、共享 EN、TMC 引用、端点和容量，不提供在线改线 |
+| 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
 | 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、2 路 PWM、1 路定时位流；默认示例公开3路运动轴，并可按 100 ms 周期导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、可增删的多路PWM/灯带配置、独立实时控制原型、资源清单导出，以及Mock GPIO/步进/PWM/WS2812可视化和遥测总览 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、普通硬件 UART、每轴 STEP/DIR 或 TMC2209、共享 EN、多路 PWM/灯带、实时控制原型、Mock 数字孪生和 JSON 工程；已支持一键生成 `.config`、32线程构建、产物归档和下载，烧录/回读尚未实现 |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、Classical CAN、GPIO、USART1、双模式 Katapult；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；五轴与五路 TMC2209 通讯后端待实板验收 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；既有 CAN-FD/板载 PWM/单轴运动已实板验证，新通用波形后端待实板验收 |
@@ -60,16 +74,25 @@ USB Vendor Bulk APP 预设，主机、Mock、MCU 公共帧格式和 G431 Device 
 APP 调试串口。
 
 当前主线优先级为智能步进运动、数字孪生、遥测与监控、图形配置器。Mock 已实现
-第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，
-MCU 侧模型独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 已从
-固定tick切换为TIM2_CH1 compare边沿调度，支持单轴/整板步频准入、独立脉宽、
-不可整除DDA余数分配和迟到安全停机；compare版本实板压力验收、跨板时钟同步、
-持久配置和图形配置器的正式部署闭环仍待实现。
+第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，MCU
+独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 已从固定 tick
+切换为 TIM2_CH1 compare 边沿调度，支持单轴/整板步频准入、独立脉宽、不可整除
+DDA 余数分配和迟到安全停机。compare 版本实板压力验收和跨板时钟同步仍待实现。
+
+具体 GPIO、UART、运动、TMC、PWM 和定时位流映射由 Studio 生成到 Kconfig，构建为
+静态资源表。TMC2209 单线端点固定为 40000 bit/s，帧、CRC 和寄存器语义仍由 Linux
+负责。生成器会检查引脚、共享 EN、轴—驱动绑定、PWM 定时器以及定时位流的
+定时器/DMA冲突。实体 STM32 的完整复用图仍需补齐。
+
+设备参数是独立机制：F103 在末尾保留 2 KiB，F072/G431 保留 4 KiB，采用双页
+Flash 仿 EEPROM 保存身份、制造和校准数据。Katapult 已限制 APP 写入上界，因此
+在线升级不会覆盖参数区。Studio 构建归档已经实现，烧录、回读和设备参数维护页面尚待实现。
 
 ## 目录
 
 ```text
 protocol/       远程包、CRC、资源描述和分片协议
+device_params/  MCU无关的设备参数schema与掉电安全快照存储
 transport/      通用链路接口、SocketCAN、libusb、USB 帧格式和 Mock USB
 toolbusd/       Linux 守护进程、本地 IPC、发现、心跳和请求管理
 libremotebsp/   C++ 应用客户端
@@ -80,6 +103,13 @@ gui/            本地板卡配置器与 Mock 数字孪生可视化
 tests/          单元、端到端、vcan 和实体 CAN 测试
 docs/           架构、硬件、构建、升级和 API 文档
 ```
+
+生成物不属于源码结构：主机默认构建到 `build-wsl/`，STM32 按目标构建到
+`firmware/build/<目标>/`，最终固件复制到 `firmware/out/`。下载的 STM32 HAL/CMSIS
+依赖位于 `firmware/vendor/`，硬件备份位于 `hardware-backups/`；这些目录均被 Git
+忽略。正式板卡配置与临时验收配置的边界见
+[固件正式配置](firmware/configs/README.md)和
+[固件验收配置](firmware/tests/configs/README.md)。
 
 ## Linux 主机构建
 
@@ -108,14 +138,25 @@ sudo ip link set dev vcan0 up
 ctest --test-dir build-wsl --output-on-failure
 ```
 
-当前自动测试共 35 项，覆盖协议、CRC、运动与波形线格式、分片、CAN/CAN-FD 帧、
-SocketCAN、USB 帧、固件 USB 编解码和 USB Mock 端到端链路，
-发现、心跳、多节点、请求超时与去重、GPIO、UART、资源模型和嵌入式 Remote
-Core，并单独测试资源租约冲突、续租、会话释放、到期、安全状态、统一板卡描述、
-数字孪生故障隔离、可变轴数同步边沿、MCU可裁剪运动队列、运动欠载/限位停机、
-PWM/定时位流/WS2812 端到端调用、CAN-FD BRS、业务分类和
-低带宽准入拒绝，并验证 menuconfig 的 UART/TMC 容量派生、非法组合拒绝、GUI API
-和引脚目录生成一致性。
+自动测试覆盖协议、CRC、设备参数 schema/存储/远程调用、运动与波形线格式、分片、
+CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链路，以及发现、
+心跳、多节点、超时与去重、GPIO、UART、资源合同/租约、数字孪生故障隔离、运动
+欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、流量准入、Kconfig生成和GUI API。
+配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
+[固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
+
+Mock和启用设备参数模块的STM32支持以下参数维护命令：
+
+```sh
+./build-wsl/remote-cli --node 1 param-status
+./build-wsl/remote-cli --node 1 param-list
+./build-wsl/remote-cli --node 1 param-get serial-number
+./build-wsl/remote-cli --node 1 param-set serial-number RBSP-000001
+# 12字节：gain_q16_16=1.0、offset_uv=0、reference_uv=3300000，小端编码。
+./build-wsl/remote-cli --node 1 param-set adc0 hex:0000010000000000a05a3200
+```
+
+参数区不保存IO映射。资源接线修改请在Studio中重新生成`.config`并烧录专用固件。
 
 ## 快速运行完整模拟链路
 
@@ -179,11 +220,17 @@ cd /mnt/d/Documents/RemoteBSP
 ./build-wsl/remote-cli --node 1 resource-acquire 0x09000002 5000 exclusive
 
 # 自动选择开始时间，1 ms 内让 X 走 +3 步、Y 走 -2 步、Z 不动。
+./build-wsl/remote-cli --node 1 motion-contract
 ./build-wsl/remote-cli --node 1 motion-enqueue \
     1 auto 1000000 final \
     0x09000000:3 0x09000001:-2 0x09000002:0
 ./build-wsl/remote-cli --node 1 motion-status
 ```
+
+`motion-contract`返回活动轴列表、每轴最大步频与STEP时序、整板总步频、队列容量和
+最小排程提前量。`libremotebsp`会缓存该静态合同，并在发送运动段前使用整数算法
+执行轴集合、单轴步频、脉宽/低电平以及整板总步频准入；不满足时请求不会进入
+`toolbusd`或CAN总线。资源映射只随固件更新改变，节点重新发现后客户端会重建合同缓存。
 
 CAN-FD 模式下把 Mock MCU 和 `toolbusd` 命令中的 `classical` 都改为 `fd`。
 可使用不同 `--instance 1..127` 同时启动多个 Mock 工具板。增加
@@ -226,12 +273,20 @@ EN 可以保持独立，也可以显式复用前面任意轴的 EN；共享组�
 每个轴还可以独立设置 DIR 正常或反相，改变设备定义的机械正方向不需要重新接线。
 数字 IO 编辑器可设置逻辑名称、输入/输出、内部上下拉、有效电平、输出故障安全
 电平和输入消抖；板载按键等已知接口由板卡描述锁定原理图确定的属性。
+普通 UART 编辑器从板卡目录选择整组硬件端点并设置固定波特率，RX/TX引脚只读联动，
+仍会和运动、GPIO、PWM及灯带进行统一冲突检查。BluePill Plus 当前提供 USART1 的
+PA9/PA10 默认端点及 PB6/PB7 备选端点；TMC2209 的40000 bit/s单线UART保持为独立
+资源，不会混入这里。RS-485 DE/RE方向引脚和G431普通USART后端尚未实现。
 PWM 与 WS2812 使用两个独立配置区，可以分别增加或删除多个资源。每个资源先选择
 绑定定时器/通道/引脚/DMA的硬件端点预设，已实现与待验证端点会明确区分。PWM配置只保存
 端点、固定频率、默认占空比和极性；灯带配置保存位流端点、灯珠数量、
 色序和复位时间。GPO电平、PWM启停/实时占空比和灯带颜色集中在独立“实时控制”页，
-目前只操作本地预览。所有配置参与同一套引脚冲突检查，并可导出JSON草案，但还不能部署到EEPROM/Flash；部署事务、A/B 配置槽
-和 toolbusd IPC 写入属于下一阶段。详细用法见 [RemoteBSP Studio](gui/README.md)。
+目前只操作本地预览。所有配置参与同一套引脚冲突检查，可导出JSON工程并生成完整
+Kconfig `.config`。GUI可直接使用32个并行任务构建，并下载Studio工程、配置、
+ELF/BIN/HEX/MAP、日志和带SHA-256的构建记录；该路径已在F072/FLY-D5、
+F103/BluePill Plus和G431/WeAct Core上真实交叉编译。烧录与回读尚未接入。
+设备身份、制造信息和ADC校准值走独立参数接口，不混入IO工程。详细用法见
+[RemoteBSP Studio](gui/README.md)。
 
 `toolbusd`默认按当前实测基线估算发送方向线时间：Classical CAN为
 1 Mbit/s，CAN-FD为500 kbit/s仲裁段和1 Mbit/s数据段。CAN-FD发送已显式启用

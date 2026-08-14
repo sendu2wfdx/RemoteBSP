@@ -84,6 +84,11 @@ void WaveformBsp::reset_bitstream(std::uint8_t channel) {
     bitstreams_.erase(channel);
 }
 
+void WaveformBsp::reset_all() {
+    pwm_.clear();
+    bitstreams_.clear();
+}
+
 std::vector<PwmSnapshot> WaveformBsp::pwm_snapshot() const {
     std::vector<PwmSnapshot> result;
     for (const auto& entry : pwm_) {

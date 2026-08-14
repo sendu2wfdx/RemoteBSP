@@ -4,18 +4,25 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import mimetypes
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
+
+from firmware_builder import (
+    DEFAULT_OUTPUT_ROOT,
+    FirmwareBuildError,
+    build_firmware_project,
+    resolve_artifact,
+)
+from project_config import ProjectConfigError, generate_project_config
 
 
 GUI_ROOT = Path(__file__).resolve().parent
 CATALOG_PATH = GUI_ROOT / "data" / "pin_catalog.json"
-
-
 def demo_state() -> dict:
     return {
         "schema_version": 1,
@@ -67,6 +74,14 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def state_path(self) -> Path | None:
         return getattr(self.server, "state_path", None)
 
+    @property
+    def build_jobs(self) -> int:
+        return getattr(self.server, "build_jobs", 32)
+
+    @property
+    def build_output_root(self) -> Path:
+        return getattr(self.server, "build_output_root", DEFAULT_OUTPUT_ROOT)
+
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -75,6 +90,20 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _send_artifact(self, path: Path) -> None:
+        content_type = mimetypes.guess_type(path.name)[0] or \
+            "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with path.open("rb") as stream:
+            while chunk := stream.read(65536):
+                self.wfile.write(chunk)
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -98,9 +127,86 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                     state["warning"] = f"Mock 状态暂不可读：{error}"
             self._send_json(state)
             return
+        if path == "/api/project/target":
+            self._send_json({
+                "mode": "static-firmware",
+                "enabled": True,
+                "build_enabled": True,
+                "parallel_jobs": self.build_jobs,
+            })
+            return
+        if path.startswith("/api/project/artifacts/"):
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                self._send_json({"error": "产物地址无效"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                artifact = resolve_artifact(
+                    unquote(parts[3]), unquote(parts[4]),
+                    self.build_output_root)
+                self._send_artifact(artifact)
+            except (OSError, FirmwareBuildError) as error:
+                self._send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            return
         if path == "/":
             self.path = "/index.html"
         super().do_GET()
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path not in ("/api/project/generate", "/api/project/build"):
+            self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 262144:
+                raise ProjectConfigError("请求长度无效或超过256 KiB")
+            request = json.loads(self.rfile.read(length).decode("utf-8"))
+            catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+            project = request.get("project")
+            if path == "/api/project/generate":
+                result = generate_project_config(project, catalog)
+                response = {
+                    "ok": True,
+                    "format": "KCONFIG",
+                    "board_id": result.board_id,
+                    "firmware_target": result.firmware_target,
+                    "resource_count": result.resource_count,
+                    "byte_count": len(result.config.encode("utf-8")),
+                    "filename": f"{result.board_id}.config",
+                    "config_base64": base64.b64encode(
+                        result.config.encode("utf-8")).decode("ascii"),
+                }
+            else:
+                result = build_firmware_project(
+                    project, catalog, jobs=self.build_jobs,
+                    output_root=self.build_output_root)
+                response = {
+                    "ok": True,
+                    "format": "FIRMWARE_BUILD",
+                    "build_id": result.build_id,
+                    "board_id": result.board_id,
+                    "firmware_target": result.firmware_target,
+                    "config_sha256": result.config_sha256,
+                    "memory": result.record.get("memory", {}),
+                    "artifacts": [{
+                        "filename": artifact.filename,
+                        "size": artifact.size,
+                        "sha256": artifact.sha256,
+                        "url": "/api/project/artifacts/" +
+                               quote(result.build_id) + "/" +
+                               quote(artifact.filename),
+                    } for artifact in result.artifacts],
+                }
+            self._send_json(response)
+        except FirmwareBuildError as error:
+            self._send_json({"ok": False, "error": str(error)},
+                            HTTPStatus.UNPROCESSABLE_ENTITY)
+        except (OSError, AttributeError, json.JSONDecodeError,
+                UnicodeDecodeError, TypeError, ValueError,
+                ProjectConfigError) as error:
+            self._send_json({"ok": False, "error": str(error)},
+                            HTTPStatus.BAD_REQUEST)
 
     def log_message(self, format: str, *args: object) -> None:
         # 保留错误日志，避免状态轮询刷满终端。
@@ -108,9 +214,14 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             super().log_message(format, *args)
 
 
-def make_server(host: str, port: int, state_path: Path | None) -> ThreadingHTTPServer:
+def make_server(host: str, port: int,
+                state_path: Path | None, *, build_jobs: int = 32,
+                build_output_root: Path = DEFAULT_OUTPUT_ROOT
+                ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
+    server.build_jobs = build_jobs  # type: ignore[attr-defined]
+    server.build_output_root = build_output_root  # type: ignore[attr-defined]
     return server
 
 
@@ -119,11 +230,17 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认仅本机")
     parser.add_argument("--port", type=int, default=8765, help="监听端口")
     parser.add_argument("--state", type=Path, help="mock_mcu --visual-state 输出的 JSON 文件")
+    parser.add_argument("--build-jobs", type=int, default=32,
+                        help="固件构建并行任务数，默认32")
     args = parser.parse_args()
+    if args.build_jobs < 1 or args.build_jobs > 64:
+        parser.error("--build-jobs必须位于1～64")
     mimetypes.add_type("text/javascript", ".js")
-    server = make_server(args.host, args.port, args.state)
+    server = make_server(
+        args.host, args.port, args.state, build_jobs=args.build_jobs)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
+    print(f"固件构建使用{args.build_jobs}个并行任务。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

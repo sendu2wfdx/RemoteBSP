@@ -10,7 +10,9 @@
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路TMC2209已实板验证；PA6 PWM和PA8 DMA定时位流已交叉编译；双模式Katapult切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | CAN-FD实测；另有互斥的USB Vendor Bulk APP已交叉编译；PC6 PWM、PA8 DMA定时位流和PC13 GPIO |
 
-STM32F103 的硬件 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲。
+STM32F072与STM32F103的硬件 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲；
+Studio/Kconfig可选择合法的PA9/PA10或PB6/PB7端点并固定对象波特率。RS-485方向
+引脚暂未接入实体后端。
 FLY-D5未默认公开通用硬件UART；G431的硬件USART尚未接入。启用TMC2209预设时只报告TMC专用单线
 逻辑 UART，普通 G431 固件仍不报告 UART 能力。
 F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别通过实体板
@@ -77,6 +79,9 @@ bash scripts/build_firmware.sh weact-stm32g431cbu6-core-usb
 bash scripts/build_firmware.sh weact-bluepill-plus-motion
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion
 ```
+
+带`motion`的目标使用`firmware/tests/configs`中的临时验收配置，不是正式出厂预设。
+Studio生成配置的测试会另外对三块正式板卡执行真实交叉编译。
 
 输出位于 `firmware/out`，包括 ELF、Intel HEX、裸 BIN 和链接 MAP。
 
@@ -218,8 +223,12 @@ UART 容量设为 0，五个 TMC 端口继续使用逻辑 UART 对象 0～4。�
   定时器compare写入余量和迟到安全停机预算。
 
 除功能开关、最大轴容量和 TMC 端口容量外，运动队列、步频和定时器保护预算默认
-隐藏在专家模式中。五组 `MOTION_SLOT...` 仍是实板兼容期静态映射，菜单中已明确
-标记将迁移到 EEPROM/Flash 运行时资源清单，不能作为长期配置接口继续扩展。
+隐藏在专家模式中。五组 `MOTION_SLOT...` 由Studio工程生成到Kconfig，用于构建
+板卡专用固件；改变槽位接线必须重新构建、烧录并重启。
+
+启用`CONFIG_REMOTEBSP_DEVICE_PARAMS`时，F103在Flash末尾保留2 KiB，F072/G431
+保留4 KiB，用于SN、UUID、制造信息和ADC校准。链接器和Katapult APP写入上限都会
+避开该区域，因此正常在线升级不会清除参数。参数区不保存运动或IO映射。
 
 只有启用运动模块时，`motion.c`和`rbsp_core_t`中的轴/队列存储才参与编译。
 因此普通GPIO/UART工具板不会承担运动功能的Flash和RAM成本。上述默认值只是

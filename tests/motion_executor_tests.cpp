@@ -159,6 +159,13 @@ void test_validation_and_capacity() {
             segment(1, 1000000ULL, 1000000ULL, true, 101, 0), 0);
     });
 
+    MotionExecutor total_limited(two_axes(), 8, 1000000ULL, 150000U);
+    expect_motion_error(MotionError::RateExceeded, [&] {
+        total_limited.enqueue(
+            segment(1, 1000000ULL, 1000000000ULL,
+                    true, 80000, 80000), 0);
+    });
+
     executor.enqueue(
         segment(1, 1000000ULL, 1000000ULL, false, 1, 0), 0);
     expect_motion_error(MotionError::QueueFull, [&] {
@@ -220,6 +227,21 @@ void test_digital_twin_motion_and_fault_injection() {
         )json");
     DigitalTwin twin(std::move(manifest), scenario);
     assert(twin.motion());
+    auto core = remotebsp::mock_mcu::make_remote_core(twin, 1U);
+    remotebsp::protocol::Packet contract_request;
+    contract_request.header.message_type =
+        remotebsp::protocol::MessageType::Request;
+    contract_request.header.command = static_cast<std::uint16_t>(
+        remotebsp::protocol::Command::MotionContract);
+    const auto contract_response = core.handle(contract_request);
+    assert(contract_response.payload.size() > 1U &&
+           contract_response.payload.front() == 0U);
+    const auto contract = remotebsp::protocol::decode_motion_contract(
+        {contract_response.payload.begin() + 1U,
+         contract_response.payload.end()});
+    assert(contract.axes.size() == 3U);
+    assert(contract.maximum_total_step_rate_hz == 200000U);
+    assert(contract.queue_capacity == 32U);
     twin.motion()->enqueue(
         {1,
          1000000ULL,

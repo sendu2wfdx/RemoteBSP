@@ -17,18 +17,21 @@
 
 ## 固件与配置原则
 
-- `menuconfig` 只负责 MCU/板型、晶振、CAN、Bootloader 布局、功能裁剪和静态资源上限。
-- STEP/DIR/EN、限位、TMC 接线、逻辑资源名等可变参数最终由版本化运行时资源清单保存到 EEPROM 或 Flash 仿 EEPROM。
+- RemoteBSP Studio 是普通用户的正式配置入口，保存版本化工程并生成完整 Kconfig `.config`、板卡专用固件和构建记录，最终负责 ST-Link、CAN Katapult 或 USB Katapult 烧录；终端 `menuconfig` 只作为开发、CI 和无 GUI 环境的备用入口。
+- Kconfig 负责 MCU/板型、晶振、CAN/USB、Bootloader 布局、功能裁剪、静态资源上限，以及 GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 的具体映射。
+- 资源映射编译进板卡专用固件并在重启后固定生效；运行期间不动态申请 IO 或改变引脚复用。不保留旧版二进制资源清单或在线资源覆盖路径。
+- SN、UUID、制造信息、设备名称和 ADC 校准等少量设备参数使用与资源映射独立的 EEPROM/Flash 仿 EEPROM 存储接口；当前先实现内部 Flash 双页后端，后续可替换外部 EEPROM。
+- MCU 能力、板卡固定占用、GUI 候选项、Mock 和固件最终校验应来自同一机器可读能力源；GUI 只能选择合法 AF、定时器、DMA 和完整外设端点组合。
 - `firmware/configs` 的正式预设只保留 MCU 基础配置和名称明确的板卡配置；临时接线与压力测试配置放到测试目录或构建目录，不新增长期组合预设。
 - 运动、TMC 通讯、WS2812 等可选模块未启用时不得链接，也不得占用静态 RAM、定时器、DMA 或中断资源。
 - 单节点、单资源或单串口异常不得阻塞其他节点和资源；实时路径使用有界队列、超时、去重、故障隔离和安全停机。
 
 ## 当前研发优先级
 
-1. 智能步进运动与跨板同步。
-2. 数字孪生和运行时资源清单。
-3. 遥测、健康监控和故障隔离。
-4. 图形化板卡配置器。
+1. RemoteBSP Studio 工程、专用固件生成与烧录闭环。
+2. 智能步进运动与跨板同步。
+3. 数字孪生和资源能力共模。
+4. 遥测、健康监控和故障隔离。
 5. 其余通用 SPI、I2C、ADC、PWM、Timer、Storage 资源。
 
 ## 开发与验证

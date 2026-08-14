@@ -16,6 +16,26 @@ file(STRINGS "${RBSP_CONFIG}" RBSP_MOTION_LINES
 file(STRINGS "${RBSP_CONFIG}" RBSP_TMC_UART_LINES
      REGEX "^CONFIG_(REMOTEBSP_TMC2209_UART|MOTION_SLOT[0-4]_DRIVER_TMC2209_UART)=y$")
 set(RBSP_OPTIONAL_CORE_SOURCES)
+set(RBSP_OPTIONAL_BOARD_SOURCES)
+file(STRINGS "${RBSP_CONFIG}" RBSP_DEVICE_PARAM_DISABLED_LINES
+     REGEX "^# CONFIG_REMOTEBSP_DEVICE_PARAMS is not set$")
+file(STRINGS "${RBSP_CONFIG}" RBSP_F103_BOARD_LINES
+     REGEX "^CONFIG_BOARD_STM32F103CBT6=y$")
+if(NOT RBSP_DEVICE_PARAM_DISABLED_LINES)
+    list(APPEND RBSP_OPTIONAL_CORE_SOURCES
+         "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/schema.c"
+         "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/store.c")
+    list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_flash.c)
+    if(RBSP_F103_BOARD_LINES)
+        # F103中密度器件的擦除页为1KiB。
+        set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x800)
+    else()
+        # F072和G431的擦除页均为2KiB。
+        set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x1000)
+    endif()
+else()
+    set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x0)
+endif()
 file(STRINGS "${RBSP_CONFIG}" RBSP_WAVEFORM_LINES
      REGEX "^CONFIG_REMOTEBSP_(PWM|TIMED_BITSTREAM)=y$")
 if(RBSP_MOTION_LINES)
@@ -25,7 +45,7 @@ if(RBSP_TMC_UART_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES src/soft_half_duplex_uart.c)
 endif()
 if(RBSP_WAVEFORM_LINES)
-    set(RBSP_OPTIONAL_BOARD_SOURCES src/board_waveform.c)
+    list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/board_waveform.c)
 endif()
 file(STRINGS "${RBSP_CONFIG}" RBSP_USB_LINK_LINES
      REGEX "^CONFIG_REMOTEBSP_TRANSPORT_USB=y$")
@@ -54,6 +74,8 @@ add_library(remotebsp_embedded_core STATIC
 )
 target_include_directories(remotebsp_embedded_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../protocol/include"
     "${GENERATED_DIR}"
 )
 target_compile_options(remotebsp_embedded_core PRIVATE
@@ -97,6 +119,7 @@ function(rbsp_common_target target cpu linker_script)
         -mcpu=${cpu} -mthumb
         -T${linker_script}
         -Wl,--defsym=RBSP_APP_FLASH_OFFSET=${RBSP_APP_FLASH_OFFSET}
+        -Wl,--defsym=RBSP_DEVICE_PARAM_FLASH_SIZE=${RBSP_DEVICE_PARAM_FLASH_SIZE}
         --specs=nano.specs --specs=nosys.specs
         -Wl,--gc-sections
         -Wl,-Map=${target}.map

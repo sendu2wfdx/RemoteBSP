@@ -1,5 +1,6 @@
 add_library(remotebsp_protocol
     src/crc32.cpp
+    src/device_parameters.cpp
     src/discovery.cpp
     src/fragmentation.cpp
     src/motion.cpp

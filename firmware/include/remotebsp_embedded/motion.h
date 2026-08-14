@@ -81,6 +81,7 @@ typedef struct {
     uint64_t active_interval_remainder[CONFIG_MOTION_MAX_AXES];
     uint64_t active_interval_error[CONFIG_MOTION_MAX_AXES];
     uint64_t active_interval_divisor[CONFIG_MOTION_MAX_AXES];
+    uint32_t maximum_step_rate_hz[CONFIG_MOTION_MAX_AXES];
     uint64_t next_deadline_ns;
     uint64_t emitted_steps[CONFIG_MOTION_MAX_AXES];
     int64_t position_steps[CONFIG_MOTION_MAX_AXES];
@@ -127,6 +128,9 @@ typedef struct {
 } rbsp_motion_io_t;
 
 bool rbsp_motion_init(rbsp_motion_queue_t* queue, uint8_t axis_count);
+bool rbsp_motion_set_axis_rate_limit(rbsp_motion_queue_t* queue,
+                                     uint8_t axis,
+                                     uint32_t maximum_step_rate_hz);
 bool rbsp_motion_validate_segment(
     const rbsp_motion_queue_t* queue,
     const rbsp_motion_segment_t* requested);

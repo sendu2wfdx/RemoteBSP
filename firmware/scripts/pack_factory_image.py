@@ -17,21 +17,25 @@ def pack_image(
     application: bytes,
     application_offset: int,
     flash_size: int,
+    persistent_size: int = 0,
 ) -> bytes:
     """校验布局并返回使用 0xFF 填充间隙的合并镜像。"""
     if application_offset <= 0:
         raise ValueError("APP 偏移必须大于 0")
     if flash_size <= application_offset:
         raise ValueError("Flash 容量必须大于 APP 偏移")
+    if persistent_size < 0 or persistent_size >= flash_size - application_offset:
+        raise ValueError("持久化区大小超出 APP 可用范围")
     if len(bootloader) > application_offset:
         raise ValueError(
             f"Bootloader 大小 {len(bootloader)} 字节，超过 "
             f"{application_offset} 字节的预留区"
         )
-    if len(application) > flash_size - application_offset:
+    application_capacity = flash_size - application_offset - persistent_size
+    if len(application) > application_capacity:
         raise ValueError(
             f"APP 大小 {len(application)} 字节，超过可用的 "
-            f"{flash_size - application_offset} 字节"
+            f"{application_capacity} 字节（已保留 {persistent_size} 字节参数区）"
         )
 
     return (
@@ -60,6 +64,12 @@ def main() -> int:
         default=128 * 1024,
         help="芯片 Flash 容量，默认 128 KiB",
     )
+    parser.add_argument(
+        "--persistent-size",
+        type=parse_integer,
+        default=0,
+        help="Flash 末端持久化参数区大小，默认 0",
+    )
     args = parser.parse_args()
 
     bootloader = args.bootloader.read_bytes()
@@ -69,13 +79,15 @@ def main() -> int:
         application,
         args.application_offset,
         args.flash_size,
+        args.persistent_size,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(image)
     print(
         f"已生成 {args.output}：Bootloader={len(bootloader)} 字节，"
-        f"APP={len(application)} 字节，APP 地址偏移=0x{args.application_offset:X}"
+        f"APP={len(application)} 字节，APP 地址偏移=0x{args.application_offset:X}，"
+        f"持久化区={args.persistent_size} 字节"
     )
     return 0
 

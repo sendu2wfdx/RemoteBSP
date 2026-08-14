@@ -46,10 +46,10 @@ def read_integer_defines(header: Path) -> dict[str, int]:
     return values
 
 
-def assert_layout(config_name: str, hardware: int, tmc: int) -> None:
+def assert_layout(config_path: str, hardware: int, tmc: int) -> None:
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "remotebsp_config.h"
-        result = generate(FIRMWARE_ROOT / "configs" / config_name, output)
+        result = generate(FIRMWARE_ROOT / config_path, output)
         assert result.returncode == 0, result.stderr
         values = read_integer_defines(output)
         assert values["CONFIG_HARDWARE_UART_RESOURCE_COUNT"] == hardware
@@ -59,7 +59,7 @@ def assert_layout(config_name: str, hardware: int, tmc: int) -> None:
 
 
 def test_invalid_tmc_capacity() -> None:
-    source = FIRMWARE_ROOT / "configs" / (
+    source = FIRMWARE_ROOT / "tests" / "configs" / (
         "stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig"
     )
     with tempfile.TemporaryDirectory() as directory:
@@ -148,14 +148,17 @@ def test_clock_defaults_and_crystal_pin_reservations() -> None:
 
 def main() -> None:
     assert_layout(
-        "stm32f072_mellow_fly_d5_katapult_defconfig", 0, 5)
+        "configs/stm32f072_mellow_fly_d5_katapult_defconfig", 0, 5)
     assert_layout(
-        "stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig",
+        "tests/configs/stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig",
         1,
         5,
     )
     assert_layout(
-        "stm32g431_weact_core_motion_1axis_tmc2209_defconfig", 0, 1)
+        "tests/configs/stm32g431_weact_core_motion_1axis_tmc2209_defconfig",
+        0,
+        1,
+    )
     test_invalid_tmc_capacity()
     test_remote_budget_menu_visibility()
     test_shared_enable_derivation()

@@ -103,6 +103,7 @@ bool rbsp_board_pwm_stop(uint8_t channel) {
     __HAL_TIM_SET_COMPARE(&pwm_timer, TIM_CHANNEL_1, 0U);
     return HAL_TIM_PWM_Stop(&pwm_timer, TIM_CHANNEL_1) == HAL_OK;
 }
+
 #endif
 
 #if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
@@ -273,6 +274,7 @@ bool rbsp_board_timed_bitstream_abort(uint8_t channel) {
     timed_busy = false;
     return true;
 }
+
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef* timer) {
     if (timer != NULL && timer->Instance == TIM1) {

@@ -21,6 +21,10 @@ void MockGpioBsp::configure(std::uint16_t pin, GpioDirection direction,
     ++configure_count_;
 }
 
+void MockGpioBsp::reset_all() {
+    pins_.clear();
+}
+
 bool MockGpioBsp::read(std::uint16_t pin) const {
     const auto found = pins_.find(pin);
     if (found == pins_.end()) {

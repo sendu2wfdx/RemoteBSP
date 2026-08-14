@@ -135,6 +135,7 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
             return TrafficClass::Streaming;
         case protocol::Command::MotionEnqueue:
         case protocol::Command::MotionStatus:
+        case protocol::Command::MotionContract:
             return TrafficClass::Motion;
         case protocol::Command::MotionAbort:
             return TrafficClass::Safety;

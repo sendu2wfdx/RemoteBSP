@@ -36,6 +36,8 @@ MCUS = {
 BOARDS = {
     "mellow-fly-d5-v1": {
         "label": "STM32F072RBT6 / Mellow FLY-D5",
+        "board_type": "0x00F072D5",
+        "maximum_step_rate_hz": 50000,
         "mcu": "stm32f072rbt6",
         "reserved": {
             "PA11": "Katapult USB DM", "PA12": "Katapult USB DP",
@@ -49,6 +51,7 @@ BOARDS = {
             ["PC5", "PC4", "PB0", "PA7", None],
         ],
         "gpio_interfaces": [],
+        "uart": {"endpoints": []},
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
@@ -90,6 +93,8 @@ BOARDS = {
     },
     "weact-bluepill-plus-v1": {
         "label": "STM32F103CBT6 / WeAct BluePill Plus",
+        "board_type": "0x000103CB",
+        "maximum_step_rate_hz": 50000,
         "mcu": "stm32f103cbt6",
         "reserved": {
             "PA9": "USART1 TX", "PA10": "USART1 RX", "PA11": "Katapult USB DM",
@@ -117,6 +122,36 @@ BOARDS = {
             "safe_level": None,
             "debounce_ms": 10,
         }],
+        "uart": {
+            "endpoints": [
+                {
+                    "endpoint_id": "usart1_pa9_pa10",
+                    "enabled": True,
+                    "name": "uart_0",
+                    "port": 0,
+                    "rx_pin": "PA10",
+                    "tx_pin": "PA9",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 4500000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart1_pb6_pb7",
+                    "enabled": False,
+                    "name": "uart_0",
+                    "port": 0,
+                    "rx_pin": "PB7",
+                    "tx_pin": "PB6",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 4500000,
+                    "backend_status": "implemented",
+                },
+            ],
+        },
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
@@ -158,6 +193,8 @@ BOARDS = {
     },
     "weact-g431-core-v10": {
         "label": "STM32G431CBU6 / WeAct STM32G431CBU6 Core",
+        "board_type": "0x000431CB",
+        "maximum_step_rate_hz": 10000,
         "mcu": "stm32g431cbu6",
         "reserved": {
             "PA11": "Katapult USB DM", "PA12": "Katapult USB DP",
@@ -176,6 +213,7 @@ BOARDS = {
             "safe_level": None,
             "debounce_ms": 10,
         }],
+        "uart": {"endpoints": []},
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pc6", "enabled": True,
@@ -440,6 +478,7 @@ def generate_catalog() -> str:
                 normalized_waveform[kind].append(item)
         boards.append({
             "id": board_id,
+            "board_type": board["board_type"],
             "label": board["label"],
             "mcu": mcu["label"],
             "pins": mcu["pins"],
@@ -457,12 +496,19 @@ def generate_catalog() -> str:
                 }
                 for interface in board.get("gpio_interfaces", [])
             ],
+            "uart": board.get("uart", {"endpoints": []}),
+            "uart_defaults": [
+                endpoint
+                for endpoint in board.get("uart", {}).get("endpoints", [])
+                if endpoint.get("enabled", False)
+            ],
             "waveform": normalized_waveform,
             "motion_defaults": [
                 {"step": item[0], "dir": item[1], "enable": item[2],
                  "dir_inverted": False,
                  "enable_source": None, "enable_active_low": True,
-                 "tmc_uart": item[3], "limit": item[4]}
+                 "tmc_uart": item[3], "limit": item[4],
+                 "maximum_step_rate_hz": board["maximum_step_rate_hz"]}
                 for item in board["defaults"]
             ],
         })

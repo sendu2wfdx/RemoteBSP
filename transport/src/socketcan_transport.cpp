@@ -71,6 +71,15 @@ SocketCanTransport::SocketCanTransport(std::string interface_name, CanMode mode)
     }
 
     try {
+        // vcan 会在极短时间内投递完整分片长包；真实 CAN 控制器虽然由线速自然
+        // 限流，高优先级流量叠加时也可能形成接收突发。扩大队列可容纳最大
+        // Remote Packet 的 Classical CAN 分片和一次重试，避免调度抖动造成丢帧。
+        constexpr int kReceiveBufferBytes = 1024 * 1024;
+        if (::setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+                         &kReceiveBufferBytes,
+                         sizeof(kReceiveBufferBytes)) < 0) {
+            throw_system_error("设置 SocketCAN 接收缓冲失败");
+        }
         if (mode_ == CanMode::FlexibleDataRate) {
             const int enable = 1;
             if (::setsockopt(socket_, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable,

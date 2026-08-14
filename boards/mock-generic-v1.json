@@ -143,6 +143,42 @@
       "owner": "expanded-uart-bank-0"
     }
   ],
+  "waveform_endpoints": [
+    {
+      "type": "pwm",
+      "instance": 0,
+      "pin": 9,
+      "timer": 3,
+      "channel": 1,
+      "dma_channel": 0,
+      "maximum_frequency_hz": 100000,
+      "maximum_bits": 0,
+      "maximum_bit_rate": 0
+    },
+    {
+      "type": "pwm",
+      "instance": 1,
+      "pin": 11,
+      "timer": 3,
+      "channel": 2,
+      "dma_channel": 0,
+      "maximum_frequency_hz": 100000,
+      "maximum_bits": 0,
+      "maximum_bit_rate": 0
+    },
+    {
+      "type": "timed_bitstream",
+      "instance": 0,
+      "pin": 10,
+      "timer": 1,
+      "channel": 1,
+      "dma_channel": 1,
+      "maximum_frequency_hz": 0,
+      "maximum_bits": 192,
+      "maximum_bit_rate": 800000
+    }
+  ],
+  "motion_maximum_total_step_rate_hz": 200000,
   "motion_axes": [
     {
       "resource_id": 150994944,

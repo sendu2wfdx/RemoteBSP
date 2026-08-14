@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/resource.hpp"
@@ -8,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <optional>
 #include <string>
@@ -153,6 +155,14 @@ public:
     protocol::ResourceLeaseInfo resource_lease_status(
         std::uint32_t resource_id) const;
 
+    protocol::DeviceParameterStatus device_parameter_status() const;
+    std::vector<protocol::DeviceParameterDescriptor>
+        list_device_parameters() const;
+    protocol::DeviceParameterValue read_device_parameter(
+        std::uint16_t id) const;
+    protocol::DeviceParameterStatus write_device_parameter(
+        std::uint16_t id, const std::vector<std::uint8_t>& value) const;
+
     std::uint32_t gpio_create(std::uint16_t pin,
                               GpioDirection direction,
                               bool initial_value = false) const;
@@ -186,6 +196,8 @@ public:
 
     protocol::MotionAcceptancePayload motion_enqueue(
         const protocol::MotionSegmentPayload& segment) const;
+    protocol::MotionContractPayload motion_contract(
+        bool refresh = false) const;
     protocol::MotionStatusPayload motion_status() const;
     void motion_abort() const;
     void motion_clear_fault() const;
@@ -195,12 +207,15 @@ public:
     std::uint32_t node_id() const noexcept;
 
 private:
+    struct MotionContractCache;
+
     protocol::Packet command(protocol::Command command,
                              std::vector<std::uint8_t> payload = {},
                              std::uint32_t object_id = 0) const;
 
     std::string socket_path_;
     std::uint32_t node_id_;
+    std::shared_ptr<MotionContractCache> motion_contract_cache_;
 };
 
 }

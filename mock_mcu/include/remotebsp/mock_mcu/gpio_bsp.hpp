@@ -18,6 +18,7 @@ public:
 
     virtual void configure(std::uint16_t pin, GpioDirection direction,
                            bool initial_value) = 0;
+    virtual void reset_all() = 0;
     virtual bool read(std::uint16_t pin) const = 0;
     virtual void write(std::uint16_t pin, bool value) = 0;
 };
@@ -47,6 +48,7 @@ class MockGpioBsp final : public GpioBsp {
 public:
     void configure(std::uint16_t pin, GpioDirection direction,
                    bool initial_value) override;
+    void reset_all() override;
     bool read(std::uint16_t pin) const override;
     void write(std::uint16_t pin, bool value) override;
 
