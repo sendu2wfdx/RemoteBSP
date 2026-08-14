@@ -185,20 +185,20 @@ Linux本地不同应用的强所有权还需要持久IPC客户端身份，不能
 
 固件阶段需要：
 
-- 基于 Kconfig/menuconfig 的功能配置。
-- 按板型选择 MCU、晶振、CAN、USB 和 Bootloader 等固定硬件参数。
+- 由RemoteBSP Studio保存工程并生成完整Kconfig配置；`menuconfig`只作为开发备用入口。
+- 按板型选择 MCU、晶振、CAN、Katapult USB 恢复口占用和 Bootloader 布局等固定参数。
 - 按功能选择是否编译运动控制、输入采样、UART、SPI 和持久化模块。
 - 未选模块不得链接到最终固件，也不得占用静态 RAM 或中断。
-- 每类资源数量和缓冲大小只在 menuconfig 中设置编译期硬上限。
+- 每类资源数量、缓冲大小和具体映射均由Studio生成到Kconfig。
 - 配置 CAN 或 CAN-FD 参数。
 - 生成可重复的固件构建配置。
 
-会随接线和用途变化的 STEP/DIR/EN、限位、按钮、TMC UART/SPI 和资源依赖不
-应固化在 menuconfig 中，而应由 Linux 生成运行时资源清单并保存在板载非易失
-存储中。节点必须检查保留引脚、外设复用和资源冲突。
+会随板卡用途变化的STEP/DIR/EN、限位、按钮、TMC UART/SPI和资源依赖由Studio
+工程保存并生成到Kconfig。专用固件烧录并重启后生效，不支持运行中动态申请IO；
+生成器和节点始终检查保留引脚、外设复用和资源冲突。
 
-当前已经采用 Katapult 提供 CAN/USB 双模式升级。Bootloader 与 APP 分区、
-运行时配置分区和升级保留策略必须统一设计。
+当前已经采用Katapult提供CAN/USB双模式升级。Bootloader、APP与独立设备参数区的
+边界已经统一，Katapult更新会保留SN、UUID、制造信息和ADC校准值。
 
 ## 智能运动资源
 

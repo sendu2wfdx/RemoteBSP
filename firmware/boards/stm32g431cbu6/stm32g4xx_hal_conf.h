@@ -35,5 +35,6 @@
 #include "stm32g4xx_hal_fdcan.h"
 #include "stm32g4xx_hal_tim.h"
 #include "stm32g4xx_hal_pcd.h"
+#include "stm32g4xx_hal_pcd_ex.h"
 
 #define assert_param(expression) ((void)0U)

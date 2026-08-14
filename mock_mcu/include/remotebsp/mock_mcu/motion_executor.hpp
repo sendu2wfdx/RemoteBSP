@@ -17,6 +17,8 @@ struct MotionAxisConfig {
     std::uint32_t step_pulse_width_ns{};
     std::uint32_t minimum_step_low_ns{};
     std::uint32_t direction_setup_ns{};
+    std::uint32_t driver_resource_id{};
+    std::uint8_t driver_type{};
 };
 
 struct MotionAxisMove {
@@ -58,6 +60,7 @@ enum class MotionFault : std::uint8_t {
     Aborted = 1,
     LimitTriggered = 2,
     QueueUnderrun = 3,
+    TimingDeadlineMissed = 4,
 };
 
 struct MotionAxisStatus {
@@ -120,7 +123,8 @@ class MotionExecutor {
 public:
     explicit MotionExecutor(std::vector<MotionAxisConfig> axes,
                             std::size_t queue_capacity = 32,
-                            std::uint64_t minimum_lead_time_ns = 1000000);
+                            std::uint64_t minimum_lead_time_ns = 1000000,
+                            std::uint32_t maximum_total_step_rate_hz = 0);
 
     MotionSegment enqueue(MotionSegment segment,
                           std::uint64_t now_ns);
@@ -131,10 +135,13 @@ public:
     std::vector<MotionEdge> trigger_limit(
         std::uint32_t axis_resource_id, std::uint64_t now_ns);
     void clear_fault();
+    void replace_configuration(MotionExecutor&& replacement) noexcept;
 
     MotionStatus status() const;
     std::uint64_t next_available_time_ns() const noexcept;
     const std::vector<MotionAxisConfig>& axes() const noexcept;
+    std::uint64_t minimum_lead_time_ns() const noexcept;
+    std::uint32_t maximum_total_step_rate_hz() const noexcept;
 
 private:
     struct AxisRuntime {
@@ -174,6 +181,7 @@ private:
     std::deque<SegmentRuntime> queue_;
     std::size_t queue_capacity_;
     std::uint64_t minimum_lead_time_ns_;
+    std::uint32_t maximum_total_step_rate_hz_{};
     std::uint64_t now_ns_{};
     std::uint64_t next_available_time_ns_{};
     std::uint32_t last_accepted_sequence_{};

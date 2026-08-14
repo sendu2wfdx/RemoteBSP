@@ -44,6 +44,15 @@ void test_fd_cost_and_dlc_padding() {
     CHECK(brs.wire_time_ns < no_brs.wire_time_ns);
 }
 
+void test_usb_cost() {
+    const auto cost = toolbusd::estimate_can_frame_cost(
+        toolbusd::TrafficBusMode::Usb, 64, 12000000, 12000000);
+    CHECK(cost.nominal_phase_bits == 0);
+    CHECK(cost.data_phase_bits == 76 * 8);
+    CHECK(cost.wire_payload_length == 64);
+    CHECK(cost.wire_time_ns == 50667);
+}
+
 protocol::Packet packet(protocol::Command command) {
     protocol::Packet value;
     value.header.command = static_cast<std::uint16_t>(command);
@@ -139,6 +148,11 @@ void test_ipc_round_trip() {
     CHECK(output.global_capacity_ns == 175000000);
     CHECK(output.rejected_packets == 2);
     CHECK(output.classes[4].estimated_wire_time_ns == 6);
+
+    input.mode = toolbusd::TrafficBusMode::Usb;
+    const auto usb_output = toolbusd::decode_ipc_traffic_status(
+        toolbusd::encode_ipc_traffic_status(input));
+    CHECK(usb_output.mode == toolbusd::TrafficBusMode::Usb);
 }
 
 }
@@ -146,6 +160,7 @@ void test_ipc_round_trip() {
 int main() {
     test_classical_cost();
     test_fd_cost_and_dlc_padding();
+    test_usb_cost();
     test_classification();
     test_admission_and_refill();
     test_ipc_round_trip();

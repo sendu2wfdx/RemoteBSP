@@ -1,10 +1,13 @@
 add_library(remotebsp_remote_core
     src/board_manifest.cpp
+    src/device_parameter_store.cpp
     src/gpio_bsp.cpp
     src/mock_node.cpp
     src/motion_executor.cpp
     src/remote_core.cpp
     src/uart_bsp.cpp
+    src/waveform_bsp.cpp
+    src/visual_state.cpp
 )
 
 target_include_directories(remotebsp_remote_core
@@ -15,6 +18,7 @@ target_include_directories(remotebsp_remote_core
 target_link_libraries(remotebsp_remote_core
     PUBLIC
         remotebsp_protocol
+        remotebsp_device_params
 )
 
 target_compile_options(remotebsp_remote_core PRIVATE

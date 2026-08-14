@@ -71,6 +71,15 @@ SocketCanTransport::SocketCanTransport(std::string interface_name, CanMode mode)
     }
 
     try {
+        // vcan 会在极短时间内投递完整分片长包；真实 CAN 控制器虽然由线速自然
+        // 限流，高优先级流量叠加时也可能形成接收突发。扩大队列可容纳最大
+        // Remote Packet 的 Classical CAN 分片和一次重试，避免调度抖动造成丢帧。
+        constexpr int kReceiveBufferBytes = 1024 * 1024;
+        if (::setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+                         &kReceiveBufferBytes,
+                         sizeof(kReceiveBufferBytes)) < 0) {
+            throw_system_error("设置 SocketCAN 接收缓冲失败");
+        }
         if (mode_ == CanMode::FlexibleDataRate) {
             const int enable = 1;
             if (::setsockopt(socket_, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable,
@@ -114,7 +123,11 @@ SocketCanTransport& SocketCanTransport::operator=(
     return *this;
 }
 
-void SocketCanTransport::send(const CanMessage& message) {
+void SocketCanTransport::send(const LinkFrame& link_frame) {
+    CanMessage message;
+    message.identifier = link_frame.route;
+    message.data = link_frame.data;
+    message.bit_rate_switch = mode_ == CanMode::FlexibleDataRate;
     ssize_t written = 0;
     std::size_t expected = 0;
     if (mode_ == CanMode::Classical) {
@@ -134,7 +147,7 @@ void SocketCanTransport::send(const CanMessage& message) {
     }
 }
 
-std::optional<CanMessage> SocketCanTransport::receive(
+std::optional<LinkFrame> SocketCanTransport::receive(
     std::chrono::milliseconds timeout) {
     if (timeout < std::chrono::milliseconds::zero() ||
         timeout.count() > std::numeric_limits<int>::max()) {
@@ -165,7 +178,11 @@ std::optional<CanMessage> SocketCanTransport::receive(
         if (static_cast<std::size_t>(received) != sizeof(frame)) {
             throw std::runtime_error("收到长度无效的 Classical CAN 帧");
         }
-        return decode_classical_frame(frame);
+        const auto message = decode_classical_frame(frame);
+        if (message.extended_identifier) {
+            throw std::runtime_error("RemoteBSP 只接受标准 CAN 标识符");
+        }
+        return LinkFrame{message.identifier, message.data};
     }
 
     canfd_frame frame{};
@@ -176,11 +193,11 @@ std::optional<CanMessage> SocketCanTransport::receive(
     if (static_cast<std::size_t>(received) != sizeof(frame)) {
         throw std::runtime_error("收到长度无效的 CAN-FD 帧");
     }
-    return decode_fd_frame(frame);
-}
-
-std::size_t SocketCanTransport::mtu() const noexcept {
-    return mode_ == CanMode::Classical ? CAN_MAX_DLEN : CANFD_MAX_DLEN;
+    const auto message = decode_fd_frame(frame);
+    if (message.extended_identifier) {
+        throw std::runtime_error("RemoteBSP 只接受标准 CAN 标识符");
+    }
+    return LinkFrame{message.identifier, message.data};
 }
 
 CanMode SocketCanTransport::mode() const noexcept { return mode_; }

@@ -10,7 +10,7 @@ build_one() {
     local config="$2"
     local artifact="$3"
     local output_artifact="${4:-${artifact}}"
-    local build_dir="${root_dir}/build-${board}"
+    local build_dir="${root_dir}/build/${board}"
 
     cmake -S "${root_dir}" -B "${build_dir}" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="${root_dir}/cmake/arm-none-eabi-toolchain.cmake" \
@@ -31,68 +31,65 @@ case "${target}" in
         build_one f072 configs/stm32f072rbt6_defconfig \
             remotebsp-stm32f072rbt6
         ;;
-    f072-pb)
-        build_one f072-pb configs/stm32f072rbt6_pb8_pb9_defconfig \
-            remotebsp-stm32f072rbt6 \
-            remotebsp-stm32f072rbt6-pb8-pb9
-        ;;
     f103)
         build_one f103 configs/stm32f103cbt6_defconfig \
             remotebsp-stm32f103cbt6
         ;;
-    f103-motion)
-        build_one f103-motion \
-            configs/stm32f103cbt6_motion_5axis_tmc2209_defconfig \
-            remotebsp-stm32f103cbt6 \
-            remotebsp-stm32f103-motion-5axis-tmc2209
-        ;;
     bluepill|weact-bluepill-plus)
-        build_one f103-bluepill configs/stm32f103_bluepill_defconfig \
+        build_one f103-bluepill \
+            configs/stm32f103_weact_bluepill_plus_defconfig \
             remotebsp-stm32f103cbt6 \
             remotebsp-stm32f103-bluepill-pb8-pb9
         ;;
     bluepill-motion|weact-bluepill-plus-motion)
         build_one f103-bluepill-motion \
-            configs/stm32f103_bluepill_motion_5axis_tmc2209_defconfig \
+            tests/configs/stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig \
             remotebsp-stm32f103cbt6 \
             remotebsp-stm32f103-bluepill-motion-5axis-tmc2209
         ;;
     fly-d5|mellow-fly-d5)
-        build_one f072-fly-d5 configs/stm32f072_fly_d5_defconfig \
+        build_one f072-fly-d5 \
+            configs/stm32f072_mellow_fly_d5_defconfig \
             remotebsp-stm32f072rbt6 \
             remotebsp-stm32f072-fly-d5
         ;;
     fly-d5-katapult|mellow-fly-d5-katapult)
         build_one f072-fly-d5-katapult \
-            configs/stm32f072_fly_d5_katapult_defconfig \
+            configs/stm32f072_mellow_fly_d5_katapult_defconfig \
             remotebsp-stm32f072rbt6 \
             remotebsp-stm32f072-fly-d5-katapult
         ;;
-    g431|weact-stm32g431cbu6-core)
+    g431)
         build_one g431 configs/stm32g431cbu6_defconfig \
             remotebsp-stm32g431cbu6
         ;;
-    g431-motion|weact-stm32g431cbu6-core-motion)
-        build_one g431-motion \
-            configs/stm32g431cbu6_motion_2axis_tmc2209_defconfig \
+    weact-stm32g431cbu6-core)
+        build_one g431-weact-core \
+            configs/stm32g431_weact_core_defconfig \
             remotebsp-stm32g431cbu6 \
-            remotebsp-stm32g431-motion-2axis-tmc2209
+            remotebsp-stm32g431-weact-core
         ;;
-    g431-motion-5axis|weact-stm32g431cbu6-core-motion-5axis)
-        build_one g431-motion-5axis \
-            configs/stm32g431cbu6_motion_5axis_tmc2209_defconfig \
+    weact-stm32g431cbu6-core-usb|g431-usb)
+        build_one g431-weact-core-usb \
+            configs/stm32g431_weact_core_usb_defconfig \
             remotebsp-stm32g431cbu6 \
-            remotebsp-stm32g431-motion-5axis-tmc2209
+            remotebsp-stm32g431-weact-core-usb
+        ;;
+    weact-stm32g431cbu6-core-motion)
+        build_one g431-weact-core-motion \
+            tests/configs/stm32g431_weact_core_motion_1axis_tmc2209_defconfig \
+            remotebsp-stm32g431cbu6 \
+            remotebsp-stm32g431-weact-core-motion-1axis-tmc2209
         ;;
     bluepill-katapult|weact-bluepill-plus-katapult)
         build_one f103-bluepill-katapult \
-            configs/stm32f103_bluepill_katapult_defconfig \
+            configs/stm32f103_weact_bluepill_plus_katapult_defconfig \
             remotebsp-stm32f103cbt6 \
             remotebsp-stm32f103-bluepill-katapult
         ;;
     g431-katapult|weact-stm32g431cbu6-core-katapult)
         build_one g431-katapult \
-            configs/stm32g431cbu6_katapult_defconfig \
+            configs/stm32g431_weact_core_katapult_defconfig \
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-katapult
         ;;
@@ -101,17 +98,23 @@ case "${target}" in
             remotebsp-stm32f072rbt6
         build_one f103 configs/stm32f103cbt6_defconfig \
             remotebsp-stm32f103cbt6
-        build_one f103-bluepill configs/stm32f103_bluepill_defconfig \
+        build_one f103-bluepill \
+            configs/stm32f103_weact_bluepill_plus_defconfig \
             remotebsp-stm32f103cbt6 \
             remotebsp-stm32f103-bluepill-pb8-pb9
-        build_one f072-fly-d5 configs/stm32f072_fly_d5_defconfig \
+        build_one f072-fly-d5 \
+            configs/stm32f072_mellow_fly_d5_defconfig \
             remotebsp-stm32f072rbt6 \
             remotebsp-stm32f072-fly-d5
         build_one g431 configs/stm32g431cbu6_defconfig \
             remotebsp-stm32g431cbu6
+        build_one g431-weact-core \
+            configs/stm32g431_weact_core_defconfig \
+            remotebsp-stm32g431cbu6 \
+            remotebsp-stm32g431-weact-core
         ;;
     *)
-        printf '用法：%s [f072|f072-pb|f103|f103-motion|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-motion-5axis|weact-stm32g431cbu6-core-katapult|all]\n' \
+        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all]\n' \
             "$0" >&2
         exit 2
         ;;

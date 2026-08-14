@@ -30,6 +30,17 @@ int main(void) {
     assert(applied[45] && modes[45] == RBSP_STARTUP_GPIO_OUTPUT_HIGH);
     assert(applied[1] && modes[1] == RBSP_STARTUP_GPIO_INPUT_PULLUP);
     assert(applied[19] && modes[19] == RBSP_STARTUP_GPIO_INPUT_PULLDOWN);
+    rbsp_startup_gpio_mode_t mode = RBSP_STARTUP_GPIO_INPUT_FLOATING;
+    assert(rbsp_startup_gpio_find(
+        "PA0, PB2", "PC13", "", "PA1", "PB3", 18U, &mode));
+    assert(mode == RBSP_STARTUP_GPIO_OUTPUT_LOW);
+    assert(rbsp_startup_gpio_find(
+        "PA0, PB2", "PC13", "", "PA1", "PB3", 19U, &mode));
+    assert(mode == RBSP_STARTUP_GPIO_INPUT_PULLDOWN);
+    assert(!rbsp_startup_gpio_find(
+        "PA0, PB2", "PC13", "", "PA1", "PB3", 20U, &mode));
+    assert(!rbsp_startup_gpio_find(
+        "PA0", "", "", "", "", 18U, NULL));
 
     reset_state();
     assert(!rbsp_startup_gpio_apply(

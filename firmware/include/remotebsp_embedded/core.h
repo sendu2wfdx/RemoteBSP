@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #include "remotebsp_config.h"
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+#include "remotebsp/device_params/store.h"
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
 #include "remotebsp_embedded/motion.h"
 #endif
@@ -17,11 +20,18 @@ extern "C" {
 #define RBSP_HEADER_SIZE 24U
 #define RBSP_FRAGMENT_HEADER_SIZE 5U
 #define RBSP_MAX_WIRE_PACKET_SIZE 2048U
-#define RBSP_CAN_ID_DISCOVERY 0x700U
-#define RBSP_CAN_ID_REQUEST_BASE 0x600U
-#define RBSP_CAN_ID_RESPONSE_BASE 0x580U
-#define RBSP_CAN_ID_EVENT_BASE 0x500U
-#define RBSP_CAN_ID_PROVISIONAL_BASE 0x480U
+#define RBSP_ROUTE_DISCOVERY 0x700U
+#define RBSP_ROUTE_REQUEST_BASE 0x600U
+#define RBSP_ROUTE_RESPONSE_BASE 0x580U
+#define RBSP_ROUTE_EVENT_BASE 0x500U
+#define RBSP_ROUTE_PROVISIONAL_BASE 0x480U
+
+/* 兼容现有 CAN 板级代码；Remote Core 只解释逻辑路由，不解释 CAN ID。 */
+#define RBSP_CAN_ID_DISCOVERY RBSP_ROUTE_DISCOVERY
+#define RBSP_CAN_ID_REQUEST_BASE RBSP_ROUTE_REQUEST_BASE
+#define RBSP_CAN_ID_RESPONSE_BASE RBSP_ROUTE_RESPONSE_BASE
+#define RBSP_CAN_ID_EVENT_BASE RBSP_ROUTE_EVENT_BASE
+#define RBSP_CAN_ID_PROVISIONAL_BASE RBSP_ROUTE_PROVISIONAL_BASE
 
 #if CONFIG_REMOTE_MAX_PACKET_SIZE > RBSP_MAX_WIRE_PACKET_SIZE
 #error "配置的远程包长度超过协议上限"
@@ -31,10 +41,14 @@ extern "C" {
 #error "去重缓存必须至少能够容纳协议头和一个状态字节"
 #endif
 
+
 typedef enum {
     RBSP_CAN_CLASSICAL = 0,
     RBSP_CAN_FD = 1,
-} rbsp_can_mode_t;
+    RBSP_USB = 2,
+} rbsp_link_mode_t;
+
+typedef rbsp_link_mode_t rbsp_can_mode_t;
 
 typedef enum {
     RBSP_GPIO_INPUT = 0,
@@ -42,15 +56,26 @@ typedef enum {
 } rbsp_gpio_direction_t;
 
 typedef enum {
+    RBSP_GPIO_FLOATING = 0,
+    RBSP_GPIO_PULL_UP = 1,
+    RBSP_GPIO_PULL_DOWN = 2,
+} rbsp_gpio_pull_t;
+
+typedef enum {
     RBSP_BOOTLOADER_CAN = 0,
     RBSP_BOOTLOADER_USB = 1,
 } rbsp_bootloader_mode_t;
 
 typedef struct {
-    uint32_t identifier;
+    union {
+        uint32_t route;
+        uint32_t identifier;
+    };
     uint8_t length;
     uint8_t data[64];
-} rbsp_can_frame_t;
+} rbsp_link_frame_t;
+
+typedef rbsp_link_frame_t rbsp_can_frame_t;
 
 typedef struct {
     uint8_t uuid[16];
@@ -60,15 +85,75 @@ typedef struct {
     uint32_t board_type;
 } rbsp_node_info_t;
 
+#if defined(CONFIG_REMOTEBSP_MOTION)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t enable_group_id;
+    uint32_t driver_resource_id;
+    uint32_t maximum_step_rate_hz;
+    uint16_t step_pin;
+    uint16_t direction_pin;
+    uint16_t enable_pin;
+    uint16_t limit_pin;
+    bool enable_present;
+    bool direction_inverted;
+    bool enable_active_low;
+    bool limit_active_low;
+    uint8_t driver_type;
+} rbsp_runtime_motion_axis_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
+typedef struct {
+    uint32_t logical_id;
+    uint16_t pin;
+    uint8_t address;
+    uint8_t flags;
+} rbsp_runtime_tmc_uart_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_PWM)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t frequency_hz;
+    uint16_t pin;
+    uint16_t default_duty_permyriad;
+    uint8_t timer;
+    uint8_t timer_channel;
+    bool active_low;
+} rbsp_runtime_pwm_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+typedef struct {
+    uint32_t logical_id;
+    uint32_t bit_rate;
+    uint16_t pin;
+    uint16_t maximum_bits;
+    uint8_t timer;
+    uint8_t timer_channel;
+    uint8_t dma_channel;
+} rbsp_runtime_timed_bitstream_config_t;
+#endif
+
+
 /*
  * 这是远程核心与具体 MCU 驱动之间唯一的边界。
  * 中断服务只负责收发字节和维护驱动状态，协议解析始终在主循环中完成。
  */
 typedef struct {
+    bool (*link_send)(const rbsp_link_frame_t* frame);
+    /* 兼容旧板级实现；link_send 为空时使用 can_send。 */
     bool (*can_send)(const rbsp_can_frame_t* frame);
     uint32_t (*milliseconds)(void);
     bool (*gpio_configure)(uint16_t pin, rbsp_gpio_direction_t direction,
                            bool initial_value);
+    bool (*gpio_configure_pull)(uint16_t pin,
+                                rbsp_gpio_direction_t direction,
+                                rbsp_gpio_pull_t pull,
+                                bool initial_value);
+    bool (*gpio_resource_allowed)(uint16_t pin,
+                                  rbsp_gpio_direction_t direction);
     bool (*gpio_write)(uint16_t pin, bool value);
     bool (*gpio_read)(uint16_t pin, bool* value);
     bool (*uart_configure)(uint8_t port, uint32_t baud_rate,
@@ -76,6 +161,24 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+#if defined(CONFIG_REMOTEBSP_PWM)
+    bool (*pwm_configure)(uint8_t channel, uint32_t frequency_hz,
+                          uint16_t duty, bool active_low);
+    bool (*pwm_write)(uint8_t channel, uint16_t duty);
+    bool (*pwm_stop)(uint8_t channel);
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    bool (*timed_bitstream_configure)(uint8_t channel,
+                                      uint32_t bit_period_ns,
+                                      uint32_t zero_high_ns,
+                                      uint32_t one_high_ns,
+                                      uint32_t reset_time_us);
+    bool (*timed_bitstream_write)(uint8_t channel,
+                                  const uint8_t* data,
+                                  uint16_t bit_count);
+    bool (*timed_bitstream_busy)(uint8_t channel);
+    bool (*timed_bitstream_abort)(uint8_t channel);
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     uint64_t (*nanoseconds)(void);
     uint8_t motion_axis_count;
@@ -83,6 +186,10 @@ typedef struct {
     bool (*motion_set_direction)(uint8_t axis, bool positive);
     bool (*motion_set_step)(uint8_t axis, bool high);
     bool (*motion_limit_active)(uint8_t axis, bool* active);
+    bool (*motion_schedule_compare)(uint64_t deadline_ns);
+    void (*motion_cancel_compare)(void);
+    uint32_t (*motion_enter_critical)(void);
+    void (*motion_exit_critical)(uint32_t state);
 #endif
     void (*enter_bootloader)(rbsp_bootloader_mode_t mode);
 } rbsp_hal_t;
@@ -116,6 +223,23 @@ typedef struct {
     rbsp_gpio_direction_t direction;
 } rbsp_gpio_object_t;
 
+
+#if defined(CONFIG_REMOTEBSP_PWM)
+typedef struct {
+    bool used;
+    uint32_t object_id;
+    uint8_t channel;
+} rbsp_pwm_object_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+typedef struct {
+    bool used;
+    uint32_t object_id;
+    uint8_t channel;
+} rbsp_timed_bitstream_object_t;
+#endif
+
 #if CONFIG_UART_RESOURCE_COUNT > 0
 typedef struct {
     bool used;
@@ -131,7 +255,7 @@ typedef struct {
 
 typedef struct {
     rbsp_hal_t hal;
-    rbsp_can_mode_t can_mode;
+    rbsp_link_mode_t link_mode;
     rbsp_node_info_t info;
     uint32_t node_id;
     uint32_t next_object_id;
@@ -147,18 +271,42 @@ typedef struct {
 #if CONFIG_UART_RESOURCE_COUNT > 0
     rbsp_uart_object_t uart_objects[CONFIG_UART_RESOURCE_COUNT];
 #endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    rbsp_pwm_object_t pwm_objects[CONFIG_PWM_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    rbsp_timed_bitstream_object_t timed_bitstream_objects[
+        CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;
+    uint8_t default_motion_axis_count;
+#endif
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+    rbsp_device_param_store device_params;
+    uint32_t device_param_unlock_session;
+    uint32_t device_param_unlock_token;
+    uint32_t device_param_unlock_expires_ms;
+    bool device_params_ready;
+    bool device_param_restart_required;
 #endif
     uint8_t tx_packet[CONFIG_REMOTE_MAX_PACKET_SIZE];
 } rbsp_core_t;
 
 bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
-                    rbsp_can_mode_t mode, const rbsp_node_info_t* info);
+                    rbsp_link_mode_t mode, const rbsp_node_info_t* info);
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
+/* 启动时加载设备参数；若已保存 UUID，同时覆盖发现与 GET_INFO 身份。 */
+bool rbsp_core_device_params_init(
+    rbsp_core_t* core, const rbsp_device_param_backend* backend);
+#endif
 void rbsp_core_poll(rbsp_core_t* core);
 void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
+void rbsp_core_accept_link(rbsp_core_t* core,
+                           const rbsp_link_frame_t* frame);
 #if defined(CONFIG_REMOTEBSP_MOTION)
+bool rbsp_core_motion_service(rbsp_core_t* core);
 bool rbsp_core_motion_tick(rbsp_core_t* core);
 #endif
 

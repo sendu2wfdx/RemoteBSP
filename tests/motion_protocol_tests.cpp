@@ -8,6 +8,7 @@
 namespace {
 
 using remotebsp::protocol::MotionAxisStatusPayload;
+using remotebsp::protocol::MotionContractPayload;
 using remotebsp::protocol::MotionFaultPayload;
 using remotebsp::protocol::MotionMetricsPayload;
 using remotebsp::protocol::MotionPayloadException;
@@ -54,8 +55,8 @@ void test_segment_round_trip_and_endian() {
 
 void test_status_round_trip() {
     MotionStatusPayload source;
-    source.state = MotionStatePayload::Running;
-    source.fault = MotionFaultPayload::None;
+    source.state = MotionStatePayload::Faulted;
+    source.fault = MotionFaultPayload::TimingDeadlineMissed;
     source.node_time_ns = 123456789;
     source.queue_depth = 2;
     source.queue_capacity = 32;
@@ -71,7 +72,8 @@ void test_status_round_trip() {
     };
     const auto decoded = remotebsp::protocol::decode_motion_status(
         remotebsp::protocol::encode_motion_status(source));
-    assert(decoded.state == MotionStatePayload::Running);
+    assert(decoded.state == MotionStatePayload::Faulted);
+    assert(decoded.fault == MotionFaultPayload::TimingDeadlineMissed);
     assert(decoded.queue_depth == 2);
     assert(decoded.metrics.emitted_edges == 30);
     assert(decoded.metrics.maximum_queue_depth == 3);
@@ -79,6 +81,57 @@ void test_status_round_trip() {
     assert(decoded.axes[0].position_steps == -123);
     assert(decoded.axes[0].step_level);
     assert(decoded.axes[1].direction_positive);
+}
+
+void test_contract_round_trip_and_admission() {
+    MotionContractPayload source;
+    source.queue_capacity = 32;
+    source.minimum_lead_time_ns = 1000000ULL;
+    source.maximum_total_step_rate_hz = 150000U;
+    source.axes = {
+        {0x09000000U, 100000U, 2000U, 2000U, 2000U},
+        {0x09000001U, 100000U, 2000U, 2000U, 2000U},
+    };
+    const auto encoded =
+        remotebsp::protocol::encode_motion_contract(source);
+    assert(encoded.size() == 64U);
+    assert(encoded[0] == 1U && encoded[1] == 0U);
+    assert(encoded[4] == 2U && encoded[5] == 0U);
+    const auto decoded =
+        remotebsp::protocol::decode_motion_contract(encoded);
+    assert(decoded.queue_capacity == 32U);
+    assert(decoded.minimum_lead_time_ns == 1000000ULL);
+    assert(decoded.maximum_total_step_rate_hz == 150000U);
+    assert(decoded.axes.size() == 2U);
+    assert(decoded.axes[1].resource_id == 0x09000001U);
+
+    MotionSegmentPayload accepted{
+        1U, 0U, 1000000000ULL, true,
+        {{0x09000000U, 80000}, {0x09000001U, -60000}}};
+    remotebsp::protocol::validate_motion_segment_against_contract(
+        accepted, decoded);
+
+    auto total_rate_exceeded = accepted;
+    total_rate_exceeded.axes[0].steps = 100000;
+    try {
+        remotebsp::protocol::validate_motion_segment_against_contract(
+            total_rate_exceeded, decoded);
+        assert(false);
+    } catch (const MotionPayloadException& error) {
+        assert(error.code() ==
+               remotebsp::protocol::MotionPayloadError::RateExceeded);
+    }
+
+    auto wrong_axis = accepted;
+    wrong_axis.axes[1].resource_id = 0x09000002U;
+    try {
+        remotebsp::protocol::validate_motion_segment_against_contract(
+            wrong_axis, decoded);
+        assert(false);
+    } catch (const MotionPayloadException& error) {
+        assert(error.code() ==
+               remotebsp::protocol::MotionPayloadError::ContractMismatch);
+    }
 }
 
 void test_single_node_maximum_axis_budget() {
@@ -110,6 +163,22 @@ void test_single_node_maximum_axis_budget() {
     assert(status_encoded.size() == 1628);
     assert(remotebsp::protocol::decode_motion_status(status_encoded)
                .axes.size() == 64);
+
+    MotionContractPayload contract;
+    contract.queue_capacity = 128;
+    contract.minimum_lead_time_ns = 1000000ULL;
+    contract.maximum_total_step_rate_hz = 500000U;
+    for (std::uint32_t index = 0;
+         index < remotebsp::protocol::kMaximumMotionAxes; ++index) {
+        contract.axes.push_back(
+            {0x09000000U + index, 100000U,
+             2000U, 2000U, 2000U});
+    }
+    const auto contract_encoded =
+        remotebsp::protocol::encode_motion_contract(contract);
+    assert(contract_encoded.size() == 1304U);
+    assert(remotebsp::protocol::decode_motion_contract(contract_encoded)
+               .axes.size() == 64U);
 
     segment.axes.push_back({0x09000100U, 0});
     try {
@@ -156,6 +225,7 @@ void test_rejection() {
 int main() {
     test_segment_round_trip_and_endian();
     test_status_round_trip();
+    test_contract_round_trip_and_admission();
     test_single_node_maximum_axis_budget();
     test_rejection();
 }

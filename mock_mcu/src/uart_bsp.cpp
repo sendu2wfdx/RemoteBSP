@@ -134,6 +134,10 @@ void MockUartBsp::reset(std::uint8_t port) {
     state.failed = false;
 }
 
+void MockUartBsp::reset_all() {
+    ports_.clear();
+}
+
 const UartConfig* MockUartBsp::config(std::uint8_t port) const noexcept {
     const auto found = ports_.find(port);
     return found == ports_.end() ? nullptr : &found->second.config;

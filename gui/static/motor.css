@@ -1,0 +1,135 @@
+.axis-grid {
+  grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+}
+
+.axis {
+  grid-template-columns: 104px 1fr;
+  min-height: 132px;
+  gap: 16px;
+  padding: 14px;
+}
+
+.motor {
+  --motor-angle: 0deg;
+  position: relative;
+  width: 100px;
+  height: 100px;
+  border: 2px solid #39566a;
+  border-radius: 17px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 35%),
+    linear-gradient(145deg, #243847, #101a23 72%);
+  box-shadow: inset 0 0 0 4px #0c151d, 0 10px 22px rgba(0, 0, 0, 0.32);
+}
+
+.motor-corner {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 2px solid #607c8e;
+  border-radius: 50%;
+  background: #101922;
+}
+
+.motor-corner.c1 { left: 8px; top: 8px; }
+.motor-corner.c2 { right: 8px; top: 8px; }
+.motor-corner.c3 { right: 8px; bottom: 8px; }
+.motor-corner.c4 { left: 8px; bottom: 8px; }
+
+.motor-face {
+  position: absolute;
+  inset: 17px;
+  border: 2px solid #577286;
+  border-radius: 50%;
+  background: radial-gradient(circle at 42% 35%, #415e70 0 8%, #1b2b37 34%, #0c151d 68%);
+  box-shadow: inset 0 0 12px #02070b, 0 0 0 3px #15242e;
+}
+
+.motor-pointer {
+  position: absolute;
+  inset: 0;
+  transform: rotate(var(--motor-angle));
+  transition: transform 160ms linear;
+}
+
+.motor-pointer::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - 1px);
+  top: 5px;
+  width: 2px;
+  height: 27px;
+  border-radius: 2px;
+  background: linear-gradient(var(--orange), var(--cyan));
+  box-shadow: 0 0 8px rgba(67, 217, 189, 0.8);
+}
+
+.motor-pointer::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 5px);
+  top: 2px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 8px solid var(--orange);
+}
+
+.motor-pointer i {
+  position: absolute;
+  left: calc(50% - 3px);
+  top: 28px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+}
+
+.motor-shaft {
+  position: absolute;
+  left: calc(50% - 10px);
+  top: calc(50% - 10px);
+  width: 20px;
+  height: 20px;
+  border: 2px solid #a9bdc9;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #eef7fa, #78909d 52%, #344956 55%);
+  box-shadow: 0 2px 7px #000;
+}
+
+.motor-plug {
+  position: absolute;
+  right: -6px;
+  top: 39px;
+  width: 8px;
+  height: 24px;
+  border: 1px solid #566d7a;
+  border-radius: 2px;
+  background: #0b1218;
+}
+
+.axis-info b,
+.axis-info small {
+  display: block;
+}
+
+.axis-info small {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.axis-info .axis-state {
+  display: inline-block;
+  margin-top: 11px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.axis-info .axis-state.enabled {
+  border-color: rgba(67, 217, 189, 0.36);
+  color: var(--cyan);
+  background: rgba(67, 217, 189, 0.08);
+}

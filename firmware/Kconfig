@@ -1,7 +1,16 @@
 mainmenu "Remote BSP 工具板固件配置"
 
+config EXPERT_CONFIG
+    bool "显示专家级容量与时序设置"
+    default n
+    help
+      普通构建使用各 MCU 已验证的默认预算即可。只有在完成 SRAM、总线负载和
+      实板时序验证后才应调整专家参数。
+
+menu "目标硬件"
+
 choice
-    prompt "目标核心板"
+    prompt "目标 MCU"
     default BOARD_STM32F103CBT6
 
 config BOARD_STM32F103CBT6
@@ -14,30 +23,87 @@ config BOARD_STM32G431CBU6
     bool "STM32G431CBU6（128KB Flash / 32KB SRAM / FDCAN）"
 endchoice
 
-config BOARD_MELLOW_FLY_D5
-    bool "STM32F072RBT6 / Mellow FLY-D5 板级默认映射（可选）"
+choice
+    prompt "STM32F072RBT6 板型"
     depends on BOARD_STM32F072RBT6
-    default n
+    default BOARD_STM32F072RBT6_GENERIC
+
+config BOARD_STM32F072RBT6_GENERIC
+    bool "通用 STM32F072RBT6"
+
+config BOARD_MELLOW_FLY_D5
+    bool "Mellow FLY-D5"
     help
       仅为已知的 FLY-D5 接线预填 8MHz HSE、PB8/PB9 CAN、USB 保留和五个运动槽的
-      默认引脚。取消本项后，STM32F072RBT6 仍可手工配置 CAN、运动槽、限位和 TMC2209 通讯引脚。
+      默认引脚。通用 STM32F072RBT6 仍可手工配置相同功能。
+
+endchoice
+
+choice
+    prompt "STM32F103CBT6 板型"
+    depends on BOARD_STM32F103CBT6
+    default BOARD_STM32F103CBT6_GENERIC
+
+config BOARD_STM32F103CBT6_GENERIC
+    bool "通用 STM32F103CBT6"
 
 config BOARD_WEACT_BLUEPILL_PLUS
-    bool "STM32F103CBT6 / WeAct BluePill Plus 板级外设"
-    depends on BOARD_STM32F103CBT6
-    default n
+    bool "WeAct BluePill Plus"
     help
       PA0 为高电平按下的用户按键，使用 MCU 内部下拉；PB2 为高电平点亮
-      的蓝色 LED；PA11/PA12 分别为 USB DM/DP。
+      的蓝色 LED；PA11/PA12 分别为 USB DM/DP。OSC_IN/OSC_OUT 接 8MHz
+      HSE，PC14/PC15 接 32.768kHz LSE。
+
+endchoice
+
+choice F103_CLOCK_SOURCE
+    prompt "STM32F103 系统时钟源"
+    depends on BOARD_STM32F103CBT6
+    default F103_CLOCK_HSE_8MHZ if BOARD_WEACT_BLUEPILL_PLUS
+    default F103_CLOCK_HSI8
+
+config F103_CLOCK_HSI8
+    bool "内部 HSI8（PLL 到 64MHz）"
+    help
+      供没有外部高速晶振的通用核心板使用。SYSCLK 为 64MHz，APB1 和 bxCAN
+      时钟为 32MHz。内部 RC 的频率精度和温漂不如外部晶振，不建议用于高速、
+      长线或节点较多的 CAN 网络。
+
+config F103_CLOCK_HSE_8MHZ
+    bool "外部 8MHz HSE（PLL 到 72MHz，推荐）"
+    help
+      SYSCLK 为 72MHz，APB1 和 bxCAN 时钟为 36MHz。WeAct BluePill Plus
+      默认选择本项；CAN 通讯和运动定时优先使用外部晶振。
+
+endchoice
+
+choice
+    prompt "STM32G431CBU6 板型"
+    depends on BOARD_STM32G431CBU6
+    default BOARD_STM32G431CBU6_GENERIC
+
+config BOARD_STM32G431CBU6_GENERIC
+    bool "通用 STM32G431CBU6"
 
 config BOARD_WEACT_G431_CORE_V10
-    bool "STM32G431CBU6 / WeAct STM32G431CBU6 Core 板级外设"
-    depends on BOARD_STM32G431CBU6
-    default n
+    bool "WeAct STM32G431CBU6 Core"
     help
       PB8/BOOT0 带 10k 下拉，PB8/PB9 用于 FDCAN；PA11/PA12 用于
       USB DM/DP。PC13 用户按键高电平有效且无外部上下拉，PC6 蓝色
       LED 高电平点亮。PF0/PF1 接 8MHz HSE，PC14/PC15 接 32.768kHz LSE。
+
+endchoice
+
+config BOARD_HAS_LSE_32768
+    bool "板卡安装 32.768kHz LSE 晶振"
+    depends on BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    default y if BOARD_WEACT_BLUEPILL_PLUS || BOARD_WEACT_G431_CORE_V10
+    default n
+    help
+      声明 PC14/PC15 已连接低速外部晶振，并从 GPIO、运动和软件 UART 的
+      可选引脚中保留它们。当前 APP 尚未使用 RTC/低功耗守时，因此只记录并
+      保护这项硬件资源，不会无意义地启动 LSE；未来时间同步保持模块启用时
+      再由该模块启动并检测 LSE。
 
 choice F072_CLOCK_SOURCE
     prompt "STM32F072 系统时钟源"
@@ -56,14 +122,15 @@ config F072_CLOCK_HSE_8MHZ
 
 endchoice
 
-config F072_RESERVE_USB_PINS
-    bool "保留 PA11/PA12 给 USB"
+config F072_RESERVE_KATAPULT_USB_PINS
+    bool "保留 PA11/PA12 给 Katapult USB 恢复口"
     depends on BOARD_STM32F072RBT6
     default y if BOARD_MELLOW_FLY_D5
     default n
     help
-      启用后，普通 GPIO 与运动槽配置均不能占用 PA11/PA12。仅在板上确实接有 USB
-      或需要保留其功能时选择；FLY-D5 默认映射会自动启用本项。
+      启用后，普通 GPIO 与运动槽配置均不能占用 PA11/PA12。该选项只描述
+      Katapult 应急恢复口的板级占用，不会把 USB 协议栈链接进 APP；FLY-D5
+      默认映射会自动启用本项。
 
 choice
     prompt "STM32G431 系统时钟源"
@@ -78,10 +145,12 @@ config G431_CLOCK_HSE_8MHZ
     bool "外部 8MHz HSE"
 endchoice
 
+menu "开发与板卡自检"
+
 config WEACT_G431_PC6_PWM_BREATHING_LED
     bool "WeAct G431 PC6 PWM 呼吸灯演示"
-    depends on BOARD_WEACT_G431_CORE_V10
-    default y
+    depends on BOARD_WEACT_G431_CORE_V10 && !REMOTEBSP_PWM
+    default n
     help
       使用 TIM3_CH1（PC6，AF2）输出 10kHz PWM。亮度按约 4 秒一个
       周期缓慢起伏，用于验证定时器、PWM 输出和板载 LED。启用时 PC6
@@ -90,17 +159,20 @@ config WEACT_G431_PC6_PWM_BREATHING_LED
 config WEACT_BLUEPILL_PLUS_PB2_BREATHING_LED
     bool "WeAct BluePill Plus PB2 软件呼吸灯演示"
     depends on BOARD_WEACT_BLUEPILL_PLUS
-    default y
+    default n
     help
       使用板载高电平点亮的 PB2 LED。PB2 不具备可直接使用的 PWM 输出通道，
       固件在主循环中依据 1ms 系统节拍产生约 100Hz 的软件 PWM，并按约 4 秒
       周期改变占空比。该实现不新增定时器中断，不影响 CAN 接收、UART 中断或
       可选的运动定时器。关闭后 PB2 保持熄灭，并继续保留为板载 LED。
 
+endmenu
+
 config SYSTEM_CLOCK_HZ
-    int "系统时钟频率"
+    int
     default 48000000 if BOARD_STM32F072RBT6
-    default 72000000 if BOARD_STM32F103CBT6
+    default 72000000 if F103_CLOCK_HSE_8MHZ
+    default 64000000 if F103_CLOCK_HSI8
     default 170000000 if BOARD_STM32G431CBU6
 
 config FIRMWARE_VERSION_MAJOR
@@ -119,7 +191,7 @@ config FIRMWARE_VERSION_PATCH
     default 0
 
 config BOARD_TYPE
-    hex "板卡类型编号"
+    hex
     default 0xF072D5 if BOARD_MELLOW_FLY_D5
     default 0x0072B6 if BOARD_STM32F072RBT6
     default 0x0103CB if BOARD_STM32F103CBT6
@@ -129,6 +201,63 @@ config NODE_PROVISIONAL_ID
     int "未分配节点的临时编号"
     range 1 127
     default 1
+
+endmenu
+
+menu "主通信链路"
+
+choice
+    prompt "APP 主通信链路"
+    default REMOTEBSP_TRANSPORT_CAN
+
+config REMOTEBSP_TRANSPORT_CAN
+    bool "CAN / CAN-FD"
+
+config REMOTEBSP_TRANSPORT_USB
+    bool "USB Vendor Bulk（STM32G431CBU6）"
+    depends on BOARD_STM32G431CBU6
+    help
+      使用 PA11/PA12 作为 RemoteBSP 正常运行链路。已实现公共帧格式、Linux
+      libusb 主机、Mock 端到端链路及 G431 USB Device Vendor Bulk 后端；实体
+      G431 的枚举、重连和压力测试仍待实板验收。F072/F103 暂不开放本选项。
+
+endchoice
+
+config USB_VENDOR_ID
+    hex "USB VID"
+    default 0x1209
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      0x1209 仅作为开发占位值，发布产品前必须申请或使用合法分配的 VID/PID。
+
+config USB_PRODUCT_ID
+    hex "USB PID"
+    default 0x0001
+    depends on REMOTEBSP_TRANSPORT_USB
+
+config USB_RX_BUFFER_SIZE
+    int "USB 原始接收缓冲区" if EXPERT_CONFIG
+    range 3072 8192
+    default 3072
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      至少容纳一个最大 Remote Packet 拆分后的全部 RBU1 逻辑帧，避免主循环
+      暂时繁忙时 Bulk OUT 连续到达造成半包丢失。
+
+config USB_TX_BUFFER_SIZE
+    int "USB 原始发送缓冲区" if EXPERT_CONFIG
+    range 3072 8192
+    default 3072
+    depends on REMOTEBSP_TRANSPORT_USB
+    help
+      Remote Core 会连续提交同一响应的所有分片，因此缓冲必须容纳 2048 字节
+      Remote Packet 加每个逻辑帧的 12 字节 RBU1 帧头。
+
+endmenu
+
+menu "CAN/CAN-FD"
+
+depends on REMOTEBSP_TRANSPORT_CAN
 
 choice
     prompt "CAN/FDCAN 引脚组"
@@ -157,7 +286,7 @@ config CAN_FD_ENABLE
 config CAN_FD_DATA_BITRATE
     int "CAN-FD 数据段波特率"
     range 1000000 8000000
-    default 2000000
+    default 1000000
     depends on CAN_FD_ENABLE
 
 config CAN_TRANSCEIVER_STB_ENABLE
@@ -175,22 +304,36 @@ config CAN_TRANSCEIVER_STB_PIN
     default 0
     depends on CAN_TRANSCEIVER_STB_ENABLE
 
+endmenu
+
+menu "远程协议与内存预算"
+
+config REMOTE_BUDGET_EDIT
+    bool "编辑远程协议与内存预算"
+    default n
+    help
+      默认值已经按当前三类 MCU 做过保守配置。只有需要改变最大包长、缓存数量
+      或时序参数时才开启；下方每个选项都会显示用途和主要内存代价。
+
+comment "当前使用经过验证的安全默认值；开启上面的开关后可查看和修改"
+    depends on !REMOTE_BUDGET_EDIT && !EXPERT_CONFIG
+
 config REMOTE_MAX_PACKET_SIZE
-    int "最大远程协议包长度"
+    int "最大远程协议包长度" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 256 2048
     default 2048 if BOARD_STM32F072RBT6
     default 2048 if BOARD_STM32F103CBT6
     default 2048 if BOARD_STM32G431CBU6
 
 config REMOTE_REQUEST_CACHE_ENTRIES
-    int "请求去重缓存条目数"
+    int "请求去重缓存条目数" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 2 32
     default 8 if BOARD_STM32F072RBT6
     default 8 if BOARD_STM32F103CBT6
     default 16 if BOARD_STM32G431CBU6
 
 config REMOTE_CACHE_RESPONSE_SIZE
-    int "单条去重缓存的最大响应长度"
+    int "单条去重缓存的最大响应长度" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 64 512
     default 256
     help
@@ -198,21 +341,42 @@ config REMOTE_CACHE_RESPONSE_SIZE
       必须把完整响应限制在此长度内，才能保证重试不会重复执行操作。
 
 config REMOTE_REASSEMBLY_SLOTS
-    int "并行分片重组槽数量"
+    int "并行分片重组槽数量" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 1 4
     default 2
 
 config REMOTE_REASSEMBLY_TIMEOUT_MS
-    int "分片重组超时（毫秒）"
+    int "分片重组超时（毫秒）" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 50 5000
     default 500
 
 config HEARTBEAT_INTERVAL_MS
-    int "心跳间隔（毫秒）"
+    int "心跳间隔（毫秒）" if EXPERT_CONFIG || REMOTE_BUDGET_EDIT
     range 100 2000
     default 500
 
+config REMOTEBSP_DEVICE_PARAMS
+    bool "保存设备身份、制造信息和校准参数"
+    default y
+    help
+      在芯片内部Flash末尾保留两个擦除页，使用掉电安全的快照日志保存
+      SN、UUID、硬件版本、制造批次、设备名称和ADC校准值。这里不保存
+      GPIO、UART、运动轴等资源映射；资源映射由Studio生成并编译进固件。
+      存储接口与介质无关，后续可替换为外部EEPROM而不修改远程协议。
+
+endmenu
+
+menu "通用硬件资源"
+
 menu "上电 IO 安全状态"
+
+config REMOTEBSP_STATIC_GPIO_MAP
+    bool "只允许访问已声明的 GPIO"
+    default n
+    help
+      RemoteBSP Studio生成的产品固件应启用本项。启用后，GPIO_CREATE只能访问
+      下方五个上电状态列表中的引脚，并且请求方向必须与列表声明一致。关闭时
+      保留核心板调试固件的兼容行为，由板级驱动决定引脚是否合法。
 
 config STARTUP_GPIO_OUTPUT_LOW
     string "启动后输出低的引脚列表"
@@ -246,22 +410,32 @@ config STARTUP_GPIO_INPUT_PULLDOWN
 endmenu
 
 config GPIO_RESOURCE_COUNT
-    int "暴露的 GPIO 数量"
-    range 1 32
+    int "编译期最大 GPIO 资源数"
+    range 0 32
     default 16 if BOARD_MELLOW_FLY_D5
     default 8
 
-config UART_RESOURCE_COUNT
-    int "暴露的 UART 数量" if !REMOTEBSP_SOFT_HALF_DUPLEX_UART
-    range 0 8
-    default SOFT_HALF_DUPLEX_UART_PORT_COUNT if REMOTEBSP_SOFT_HALF_DUPLEX_UART
+config HARDWARE_UART_RESOURCE_COUNT
+    int "编译期最大硬件 UART 资源数"
+    range 0 1
+    default 0 if BOARD_MELLOW_FLY_D5
     default 1 if BOARD_STM32F072RBT6
     default 1 if BOARD_STM32F103CBT6
     default 0 if BOARD_STM32G431CBU6
+    help
+      当前 F072/F103 后端实现一组 USART1，G431 尚未接入硬件 UART。TMC2209
+      单线通讯不计入这里，而是由智能运动菜单独立裁剪。
+
+config UART_RESOURCE_COUNT
+    int
+    default HARDWARE_UART_RESOURCE_COUNT
+    help
+      生成配置头时自动派生为“硬件 UART 数量 + TMC2209 单线端口容量”。
+      此兼容符号供当前 Remote Core 分配逻辑 UART 对象，不能手工设置。
 
 choice UART0_PINS
-    prompt "STM32F072/F103 UART 0 引脚" if !REMOTEBSP_SOFT_HALF_DUPLEX_UART
-    depends on (BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6) && UART_RESOURCE_COUNT > 0 && !REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    prompt "STM32F072/F103 UART 0 引脚"
+    depends on (BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6) && HARDWARE_UART_RESOURCE_COUNT > 0
     default UART0_PINS_PA9_PA10
 
 config UART0_PINS_PA9_PA10
@@ -273,14 +447,14 @@ config UART0_PINS_PB6_PB7
 endchoice
 
 config UART_RX_BUFFER_SIZE
-    int "每路 UART RX 缓冲长度" if !REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    int "每路硬件 UART RX 缓冲长度" if HARDWARE_UART_RESOURCE_COUNT > 0
     range 64 4096
     default 256 if BOARD_STM32F072RBT6
     default 256 if BOARD_STM32F103CBT6
     default 1024 if BOARD_STM32G431CBU6
 
 config UART_TX_BUFFER_SIZE
-    int "每路 UART TX 缓冲长度" if !REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    int "每路硬件 UART TX 缓冲长度" if HARDWARE_UART_RESOURCE_COUNT > 0
     range 64 4096
     default 256 if BOARD_STM32F072RBT6
     default 256 if BOARD_STM32F103CBT6
@@ -290,7 +464,7 @@ config UART_EVENT_CHUNK_SIZE
     int "UART 流式接收事件分批长度"
     range 8 256
     default 64
-    depends on UART_RESOURCE_COUNT > 0
+    depends on HARDWARE_UART_RESOURCE_COUNT > 0 || REMOTEBSP_TMC2209_UART
     help
       从硬件 RX 环形缓冲区批量取出数据并主动上报。
       数值越大，CAN 效率越高；数值越小，串口接收延迟越低。
@@ -299,12 +473,13 @@ config UART_EVENT_FLUSH_MS
     int "UART 流式接收最大合并延迟（毫秒）"
     range 1 100
     default 5
-    depends on UART_RESOURCE_COUNT > 0
+    depends on HARDWARE_UART_RESOURCE_COUNT > 0 || REMOTEBSP_TMC2209_UART
     help
       分批未满时，第一个字节最多等待此时间后上报。
 
 config REMOTEBSP_SOFT_HALF_DUPLEX_UART
     bool
+    default y if REMOTEBSP_TMC2209_UART
     default n
     depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
 
@@ -322,8 +497,90 @@ config SOFT_HALF_DUPLEX_UART_RX_BUFFER_SIZE
 config SOFT_HALF_DUPLEX_UART_PORT_COUNT
     int
     range 1 5
-    default 5
+    default TMC2209_UART_PORT_CAPACITY
     depends on REMOTEBSP_SOFT_HALF_DUPLEX_UART
+
+endmenu
+
+menu "PWM 与定时位流（可选）"
+
+config REMOTEBSP_PWM
+    bool "编译通用 PWM 输出模块"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      提供频率、占空比和有效极性可配置的远程 PWM 对象。关闭后不分配对象状态，
+      板级定时器后端也不会接入 Remote Core。
+
+config PWM_RESOURCE_COUNT
+    int "PWM 通道编译期容量"
+    range 1 4
+    default 1
+    depends on REMOTEBSP_PWM
+
+choice
+    prompt "PWM 0 输出引脚"
+    depends on REMOTEBSP_PWM
+    default PWM0_PIN_PA6 if BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6
+    default PWM0_PIN_PC6 if BOARD_STM32G431CBU6
+
+config PWM0_PIN_PA6
+    bool "PA6（TIM3_CH1）"
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6
+    depends on !REMOTEBSP_MOTION || !MOTION_PIN_PA6_USED_25
+
+config PWM0_PIN_PC6
+    bool "PC6（TIM3_CH1，WeAct G431 板载 LED）"
+    depends on BOARD_STM32G431CBU6
+    depends on !REMOTEBSP_MOTION || !MOTION_PIN_PC6_USED_25
+
+endchoice
+
+config PWM_MAX_FREQUENCY_HZ
+    int "PWM 允许的最高频率（Hz）"
+    range 1000 2000000
+    default 100000
+    depends on REMOTEBSP_PWM
+    help
+      这是协议校验上限，不代表每个引脚都能达到该频率；最终仍由所选定时器时钟和
+      计数器分辨率决定。
+
+config REMOTEBSP_TIMED_BITSTREAM
+    bool "编译定时位流输出模块（WS2812 等）"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      MCU 只执行带 0/1 高电平宽度的通用定时位流，WS2812 的 RGB/GRB 顺序仍由
+      Linux 负责。板级后端计划使用定时器 PWM 与 DMA，避免逐位中断阻塞 CAN。
+
+config TIMED_BITSTREAM_RESOURCE_COUNT
+    int "定时位流通道编译期容量"
+    range 1 2
+    default 1
+    depends on REMOTEBSP_TIMED_BITSTREAM
+
+choice
+    prompt "定时位流 0 输出引脚"
+    depends on REMOTEBSP_TIMED_BITSTREAM
+    default TIMED_BITSTREAM0_PIN_PA8
+
+config TIMED_BITSTREAM0_PIN_PA8
+    bool "PA8（TIM1_CH1，DMA）"
+    depends on !REMOTEBSP_MOTION || !MOTION_PIN_PA8_USED_25
+
+endchoice
+
+config TIMED_BITSTREAM_MAX_BITS
+    int "单次定时位流最大位数"
+    range 24 12288
+    default 1536 if BOARD_STM32G431CBU6
+    default 768
+    depends on REMOTEBSP_TIMED_BITSTREAM
+    help
+      768 位可驱动 32 颗 RGB 灯，1536 位可驱动 64 颗。DMA 比较值缓冲区按此上限
+      消耗静态 RAM；Studio 工程决定固件实际启用的灯珠数量。
+
+endmenu
 
 menu "智能步进运动（可选）"
 
@@ -338,272 +595,29 @@ config REMOTEBSP_MOTION
       STM32F072RBT6、STM32F103CBT6 与 STM32G431CBU6 都有独立的 STEP 定时器后端。默认预设
       只负责填写已知接线；不选择预设时仍可手工配置本板运动槽和引脚。
 
+config REMOTEBSP_TMC2209_UART
+    bool "编译 TMC2209 专用单线 UART 后端"
+    default n
+    depends on REMOTEBSP_MOTION
+    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    help
+      编译固定 40000 bit/s 的单线半双工字节事务执行器。它与硬件 USART
+      独立裁剪，可同时存在；TMC 寄存器语义、CRC 和初始化策略仍由 Linux 负责。
+
+config TMC2209_UART_PORT_CAPACITY
+    int "TMC2209 单线端口编译期容量"
+    range 1 5
+    default 5 if BOARD_MELLOW_FLY_D5
+    default 1
+    depends on REMOTEBSP_TMC2209_UART
+    help
+      这是静态状态和逻辑对象容量，不是必须启用的实际端口数。兼容期静态槽位中，
+      最高 TMC 槽号必须小于本值；运行时资源清单完成后由清单决定实际端口。
+
 if REMOTEBSP_MOTION
 
-menu "本板步进槽配置（当前 STM32 后端容量为五槽）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+rsource "Kconfig.motion_pins.generated"
 
-comment "GPIO 编码：PA0=0，PB0=16，PC0=32，PD0=48；-1 表示未配置"
-
-config MOTION_SLOT0_ENABLED
-    bool "启用槽 0"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-
-if MOTION_SLOT0_ENABLED
-config MOTION_SLOT0_STEP_PIN
-    int "槽 0 STEP 引脚"
-    range -1 63
-    default 47 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT0_DIR_PIN
-    int "槽 0 DIR 引脚"
-    range -1 63
-    default 46 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT0_ENABLE_PIN
-    int "槽 0 EN 引脚"
-    range -1 63
-    default 34 if BOARD_MELLOW_FLY_D5
-    default -1
-choice MOTION_SLOT0_DRIVER
-    prompt "槽 0 步进驱动器"
-    default MOTION_SLOT0_DRIVER_TMC2209_UART if BOARD_MELLOW_FLY_D5
-    default MOTION_SLOT0_DRIVER_STEP_DIR
-config MOTION_SLOT0_DRIVER_STEP_DIR
-    bool "通用 STEP/DIR 驱动器"
-config MOTION_SLOT0_DRIVER_TMC2209_UART
-    bool "TMC2209（STEP/DIR + 单线 UART）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
-    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
-endchoice
-config MOTION_SLOT0_TMC_UART_PIN
-    int "槽 0 TMC2209 单线 UART 引脚"
-    range -1 63
-    default 45 if BOARD_MELLOW_FLY_D5
-    default -1
-    depends on MOTION_SLOT0_DRIVER_TMC2209_UART
-config MOTION_SLOT0_DIR_INVERTED
-    bool "槽 0 DIR 反相"
-    default n
-config MOTION_SLOT0_ENABLE_ACTIVE_LOW
-    bool "槽 0 EN 低有效"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-config MOTION_SLOT0_LIMIT_PIN
-    int "槽 0 限位引脚"
-    range -1 63
-    default 20 if BOARD_MELLOW_FLY_D5
-    default -1
-endif
-
-config MOTION_SLOT1_ENABLED
-    bool "启用槽 1"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-
-if MOTION_SLOT1_ENABLED
-config MOTION_SLOT1_STEP_PIN
-    int "槽 1 STEP 引脚"
-    range -1 63
-    default 1 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT1_DIR_PIN
-    int "槽 1 DIR 引脚"
-    range -1 63
-    default 0 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT1_ENABLE_PIN
-    int "槽 1 EN 引脚"
-    range -1 63
-    default 2 if BOARD_MELLOW_FLY_D5
-    default -1
-choice MOTION_SLOT1_DRIVER
-    prompt "槽 1 步进驱动器"
-    default MOTION_SLOT1_DRIVER_TMC2209_UART if BOARD_MELLOW_FLY_D5
-    default MOTION_SLOT1_DRIVER_STEP_DIR
-config MOTION_SLOT1_DRIVER_STEP_DIR
-    bool "通用 STEP/DIR 驱动器"
-config MOTION_SLOT1_DRIVER_TMC2209_UART
-    bool "TMC2209（STEP/DIR + 单线 UART）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
-    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
-endchoice
-config MOTION_SLOT1_TMC_UART_PIN
-    int "槽 1 TMC2209 单线 UART 引脚"
-    range -1 63
-    default 35 if BOARD_MELLOW_FLY_D5
-    default -1
-    depends on MOTION_SLOT1_DRIVER_TMC2209_UART
-config MOTION_SLOT1_DIR_INVERTED
-    bool "槽 1 DIR 反相"
-    default n
-config MOTION_SLOT1_ENABLE_ACTIVE_LOW
-    bool "槽 1 EN 低有效"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-config MOTION_SLOT1_LIMIT_PIN
-    int "槽 1 限位引脚"
-    range -1 63
-    default 19 if BOARD_MELLOW_FLY_D5
-    default -1
-endif
-
-config MOTION_SLOT2_ENABLED
-    bool "启用槽 2"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-
-if MOTION_SLOT2_ENABLED
-config MOTION_SLOT2_STEP_PIN
-    int "槽 2 STEP 引脚"
-    range -1 63
-    default 5 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT2_DIR_PIN
-    int "槽 2 DIR 引脚"
-    range -1 63
-    default 4 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT2_ENABLE_PIN
-    int "槽 2 EN 引脚"
-    range -1 63
-    default 6 if BOARD_MELLOW_FLY_D5
-    default -1
-choice MOTION_SLOT2_DRIVER
-    prompt "槽 2 步进驱动器"
-    default MOTION_SLOT2_DRIVER_TMC2209_UART if BOARD_MELLOW_FLY_D5
-    default MOTION_SLOT2_DRIVER_STEP_DIR
-config MOTION_SLOT2_DRIVER_STEP_DIR
-    bool "通用 STEP/DIR 驱动器"
-config MOTION_SLOT2_DRIVER_TMC2209_UART
-    bool "TMC2209（STEP/DIR + 单线 UART）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
-    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
-endchoice
-config MOTION_SLOT2_TMC_UART_PIN
-    int "槽 2 TMC2209 单线 UART 引脚"
-    range -1 63
-    default 3 if BOARD_MELLOW_FLY_D5
-    default -1
-    depends on MOTION_SLOT2_DRIVER_TMC2209_UART
-config MOTION_SLOT2_DIR_INVERTED
-    bool "槽 2 DIR 反相"
-    default n
-config MOTION_SLOT2_ENABLE_ACTIVE_LOW
-    bool "槽 2 EN 低有效"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-config MOTION_SLOT2_LIMIT_PIN
-    int "槽 2 限位引脚"
-    range -1 63
-    default 50 if BOARD_MELLOW_FLY_D5
-    default -1
-endif
-
-config MOTION_SLOT3_ENABLED
-    bool "启用槽 3"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-
-if MOTION_SLOT3_ENABLED
-config MOTION_SLOT3_STEP_PIN
-    int "槽 3 STEP 引脚"
-    range -1 63
-    default 26 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT3_DIR_PIN
-    int "槽 3 DIR 引脚"
-    range -1 63
-    default 18 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT3_ENABLE_PIN
-    int "槽 3 EN 引脚"
-    range -1 63
-    default 27 if BOARD_MELLOW_FLY_D5
-    default -1
-choice MOTION_SLOT3_DRIVER
-    prompt "槽 3 步进驱动器"
-    default MOTION_SLOT3_DRIVER_TMC2209_UART if BOARD_MELLOW_FLY_D5
-    default MOTION_SLOT3_DRIVER_STEP_DIR
-config MOTION_SLOT3_DRIVER_STEP_DIR
-    bool "通用 STEP/DIR 驱动器"
-config MOTION_SLOT3_DRIVER_TMC2209_UART
-    bool "TMC2209（STEP/DIR + 单线 UART）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
-    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
-endchoice
-config MOTION_SLOT3_TMC_UART_PIN
-    int "槽 3 TMC2209 单线 UART 引脚"
-    range -1 63
-    default 17 if BOARD_MELLOW_FLY_D5
-    default -1
-    depends on MOTION_SLOT3_DRIVER_TMC2209_UART
-config MOTION_SLOT3_DIR_INVERTED
-    bool "槽 3 DIR 反相"
-    default n
-config MOTION_SLOT3_ENABLE_ACTIVE_LOW
-    bool "槽 3 EN 低有效"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-config MOTION_SLOT3_LIMIT_PIN
-    int "槽 3 限位引脚"
-    range -1 63
-    default -1
-endif
-
-config MOTION_SLOT4_ENABLED
-    bool "启用槽 4"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-
-if MOTION_SLOT4_ENABLED
-config MOTION_SLOT4_STEP_PIN
-    int "槽 4 STEP 引脚"
-    range -1 63
-    default 37 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT4_DIR_PIN
-    int "槽 4 DIR 引脚"
-    range -1 63
-    default 36 if BOARD_MELLOW_FLY_D5
-    default -1
-config MOTION_SLOT4_ENABLE_PIN
-    int "槽 4 EN 引脚"
-    range -1 63
-    default 16 if BOARD_MELLOW_FLY_D5
-    default -1
-choice MOTION_SLOT4_DRIVER
-    prompt "槽 4 步进驱动器"
-    default MOTION_SLOT4_DRIVER_TMC2209_UART if BOARD_MELLOW_FLY_D5
-    default MOTION_SLOT4_DRIVER_STEP_DIR
-config MOTION_SLOT4_DRIVER_STEP_DIR
-    bool "通用 STEP/DIR 驱动器"
-config MOTION_SLOT4_DRIVER_TMC2209_UART
-    bool "TMC2209（STEP/DIR + 单线 UART）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
-    select REMOTEBSP_SOFT_HALF_DUPLEX_UART
-endchoice
-config MOTION_SLOT4_TMC_UART_PIN
-    int "槽 4 TMC2209 单线 UART 引脚"
-    range -1 63
-    default 7 if BOARD_MELLOW_FLY_D5
-    default -1
-    depends on MOTION_SLOT4_DRIVER_TMC2209_UART
-config MOTION_SLOT4_DIR_INVERTED
-    bool "槽 4 DIR 反相"
-    default n
-config MOTION_SLOT4_ENABLE_ACTIVE_LOW
-    bool "槽 4 EN 低有效"
-    default y if BOARD_MELLOW_FLY_D5
-    default n
-config MOTION_SLOT4_LIMIT_PIN
-    int "槽 4 限位引脚"
-    range -1 63
-    default -1
-endif
-
-endmenu
 endif
 
 config MOTION_MAX_AXES
@@ -620,7 +634,7 @@ config MOTION_MAX_AXES
       此值；逻辑运动组可组合多块板卡。
 
 config MOTION_QUEUE_DEPTH
-    int "运动段队列深度"
+    int "运动段队列深度" if EXPERT_CONFIG
     range 2 128
     default 8 if BOARD_STM32F072RBT6
     default 8 if BOARD_STM32F103CBT6
@@ -628,22 +642,79 @@ config MOTION_QUEUE_DEPTH
     depends on REMOTEBSP_MOTION
 
 config MOTION_MIN_LEAD_TIME_US
-    int "最小排程提前量（微秒）"
+    int "最小排程提前量（微秒）" if EXPERT_CONFIG
     range 100 1000000
     default 2000 if BOARD_STM32F072RBT6
     default 2000 if BOARD_STM32F103CBT6
     default 1000 if BOARD_STM32G431CBU6
     depends on REMOTEBSP_MOTION
 
-config MOTION_TIMER_HZ
-    int "STEP 执行器定时中断频率"
+config MOTION_MAX_STEP_RATE_HZ
+    int "单轴最大 STEP 频率预算" if EXPERT_CONFIG
+    range 1000 250000
+    default 30000 if BOARD_STM32F072RBT6
+    default 60000 if BOARD_STM32F103CBT6
+    default 120000 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+    help
+      运动段入队时使用的单轴安全预算。它不是周期中断频率；compare 调度器只在
+      实际边沿到期时进入中断。实板性能验收后可以针对板型提高该值。
+
+config MOTION_MAX_TOTAL_STEP_RATE_HZ
+    int "整板总 STEP 频率预算" if EXPERT_CONFIG
     range 1000 500000
-    default 100000 if BOARD_STM32F072RBT6
-    default 100000 if BOARD_STM32F103CBT6
+    default 30000 if BOARD_STM32F072RBT6
+    default 80000 if BOARD_STM32F103CBT6
     default 200000 if BOARD_STM32G431CBU6
     depends on REMOTEBSP_MOTION
     help
-      STEP 脉冲高、低电平各至少保持一个定时周期，因此单轴理论最大步频为此值一半。
+      所有轴 STEP 频率之和的入队上限，用来限制最坏情况下的 compare ISR 负载。
+      同时到期的多轴边沿会在一次中断中批量处理，因此实际中断数通常更低。
+
+config MOTION_STEP_PULSE_WIDTH_US
+    int "STEP 高电平宽度（微秒）" if EXPERT_CONFIG
+    range 1 100
+    default 8 if BOARD_STM32F072RBT6
+    default 5 if BOARD_STM32F103CBT6
+    default 2 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+
+config MOTION_MIN_STEP_LOW_US
+    int "STEP 最短低电平时间（微秒）" if EXPERT_CONFIG
+    range 1 100
+    default 8 if BOARD_STM32F072RBT6
+    default 5 if BOARD_STM32F103CBT6
+    default 2 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+
+config MOTION_DIRECTION_SETUP_US
+    int "DIR 到首个 STEP 的建立时间（微秒）" if EXPERT_CONFIG
+    range 1 100
+    default 8 if BOARD_STM32F072RBT6
+    default 5 if BOARD_STM32F103CBT6
+    default 2 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+
+config MOTION_COMPARE_MIN_LEAD_US
+    int "定时器 compare 最小提前量（微秒）" if EXPERT_CONFIG
+    range 1 100
+    default 4 if BOARD_STM32F072RBT6
+    default 3 if BOARD_STM32F103CBT6
+    default 1 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+    help
+      写入 compare 后必须至少留出的硬件计数时间。过近的边沿会向后安全顺延，
+      避免比较值已经落后于计数器而等待一次完整回绕。
+
+config MOTION_MAX_COMPARE_LATENESS_US
+    int "compare 最大容许迟到（微秒）" if EXPERT_CONFIG
+    range 1 1000
+    default 50 if BOARD_STM32F072RBT6
+    default 30 if BOARD_STM32F103CBT6
+    default 10 if BOARD_STM32G431CBU6
+    depends on REMOTEBSP_MOTION
+    help
+      超出该预算时禁止突发补发 STEP，立即锁存时序故障并关闭运动输出。
 
 config MOTION_SLOT_LIMIT_INPUTS
     bool "启用槽 0～2 的固定限位输入"
@@ -651,41 +722,7 @@ config MOTION_SLOT_LIMIT_INPUTS
     depends on REMOTEBSP_MOTION && BOARD_STM32F072RBT6
 
 endmenu
-config HARDWARE_ID_ADC
-    bool "启用 ADC 硬件 ID"
-    default n
-
-menu "USB 调试"
-
-config USB_DEBUG_CDC
-    bool "启用 USB CDC 非阻塞调试输出"
-    default n
-    depends on BOARD_STM32G431CBU6 && CAN_PINS_PB8_PB9
-    help
-      使用 PA11/PA12 枚举为 USB CDC ACM 虚拟串口。发送采用环形缓冲，
-      缓冲已满时丢弃新的调试字节，不允许调试输出阻塞 CAN 主循环。
-      STM32G431 可与 FDCAN 同时运行，CAN 必须使用 PB8/PB9。
-      STM32F103 的 USB 与 bxCAN 共用 512 字节专用 SRAM，硬件不允许
-      两者同时运行，因此 F103 的 CAN APP 不提供此选项；USB Katapult
-      Bootloader 仍可单独使用。
-
-config USB_DEBUG_TX_BUFFER_SIZE
-    int "USB 调试发送环形缓冲长度"
-    range 128 2048
-    default 1024 if BOARD_STM32G431CBU6
-    depends on USB_DEBUG_CDC
-
-config USB_DEBUG_VID
-    hex "USB VID（开发默认值，产品化前必须替换）"
-    default 0x0483
-    depends on USB_DEBUG_CDC
-
-config USB_DEBUG_PID
-    hex "USB PID（开发默认值，产品化前必须替换）"
-    default 0x5740
-    depends on USB_DEBUG_CDC
-
-endmenu
+menu "启动与升级"
 
 choice
     prompt "APP Flash 布局"
@@ -706,3 +743,5 @@ config APPLICATION_FLASH_OFFSET
     hex
     default 0x2000 if APP_LAYOUT_KATAPULT_8K
     default 0x0
+
+endmenu

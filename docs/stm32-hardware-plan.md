@@ -21,12 +21,12 @@ PA11/PA12 在 F103 上是 bxCAN 默认引脚，在 G431 上可配置为 FDCAN1
 复用功能；不会占用 SWD。PB8/PB9 作为 menuconfig 备选，F103 使用该组时需要
 打开 AFIO CAN 重映射，G431 使用 AF9。
 
-PA11/PA12 同时是 USB D-/D+。不启用 USB 的通用配置可以把 CAN 放在
+PA11/PA12 同时是 USB D-/D+。不保留 Katapult USB 恢复口的通用配置可以把 CAN 放在
 PA11/PA12。STM32F103 的 USB 与 bxCAN 还共用 512 字节专用 SRAM，即使把 CAN
 改到 PB8/PB9，两者也不能同时运行；因此 F103 双模式 Katapult 根据进入原因
-只初始化 CAN 或 USB，APP 只运行 CAN。STM32G431 的 APP 可以让 USB 使用
-PA11/PA12、FDCAN 使用 PB8/PB9；其双模式 Katapult 为了统一升级工具链，也在
-Bootloader 阶段只启动一个升级接口。Kconfig 会约束这些组合。
+只初始化 CAN 或 USB。正式 APP 默认不初始化 USB；STM32G431 另有 USB Vendor
+Bulk APP 预设，使用 PA11/PA12 且不初始化 FDCAN。G431 CAN-FD APP 使用 PB8/PB9
+时仍保留 PA11/PA12 给 Katapult。双模式 Katapult 在运行时只启动一个升级接口。
 
 当前带 Katapult 的推荐引脚为：
 

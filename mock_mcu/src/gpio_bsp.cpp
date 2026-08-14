@@ -1,5 +1,7 @@
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 
+#include <algorithm>
+
 namespace remotebsp::mock_mcu {
 
 MockGpioException::MockGpioException(MockGpioError code, const char* message)
@@ -17,6 +19,10 @@ void MockGpioBsp::configure(std::uint16_t pin, GpioDirection direction,
     }
     pins_[pin] = {direction, initial_value};
     ++configure_count_;
+}
+
+void MockGpioBsp::reset_all() {
+    pins_.clear();
 }
 
 bool MockGpioBsp::read(std::uint16_t pin) const {
@@ -67,6 +73,18 @@ std::uint64_t MockGpioBsp::read_count() const noexcept {
 
 std::uint64_t MockGpioBsp::write_count() const noexcept {
     return write_count_;
+}
+
+std::vector<GpioPinSnapshot> MockGpioBsp::snapshot() const {
+    std::vector<GpioPinSnapshot> result;
+    result.reserve(pins_.size());
+    for (const auto& [pin, state] : pins_) {
+        result.push_back({pin, state.direction, state.value});
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        return left.pin < right.pin;
+    });
+    return result;
 }
 
 }

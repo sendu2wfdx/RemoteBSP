@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -121,8 +123,14 @@ RemoteException::RemoteException(std::uint8_t status,
 
 std::uint8_t RemoteException::status() const noexcept { return status_; }
 
+struct Client::MotionContractCache {
+    std::mutex mutex;
+    std::optional<protocol::MotionContractPayload> value;
+};
+
 Client::Client(std::string socket_path, std::uint32_t node_id)
-    : socket_path_(std::move(socket_path)), node_id_(node_id) {
+    : socket_path_(std::move(socket_path)), node_id_(node_id),
+      motion_contract_cache_(std::make_shared<MotionContractCache>()) {
     if (socket_path_.empty() ||
         socket_path_.size() >= sizeof(sockaddr_un{}.sun_path)) {
         throw ClientException("Unix Domain Socket 路径无效或过长");
@@ -238,6 +246,7 @@ CanTrafficStatus Client::traffic_status() const {
     const auto snapshot =
         toolbusd::decode_ipc_traffic_status(response.body);
     CanTrafficStatus status;
+    status.mode = static_cast<LinkTrafficMode>(snapshot.mode);
     status.can_fd =
         snapshot.mode == toolbusd::TrafficBusMode::CanFd;
     status.arbitration_bits_per_second =
@@ -356,6 +365,51 @@ protocol::ResourceLeaseInfo Client::resource_lease_status(
         protocol::encode_resource_id(resource_id))));
 }
 
+protocol::DeviceParameterStatus Client::device_parameter_status() const {
+    return protocol::decode_device_parameter_status(
+        body(command(protocol::Command::DeviceParameterStatus)));
+}
+
+std::vector<protocol::DeviceParameterDescriptor>
+Client::list_device_parameters() const {
+    return protocol::decode_device_parameter_descriptors(
+        body(command(protocol::Command::DeviceParameterList)));
+}
+
+protocol::DeviceParameterValue Client::read_device_parameter(
+    std::uint16_t id) const {
+    return protocol::decode_device_parameter_value(body(command(
+        protocol::Command::DeviceParameterRead,
+        protocol::encode_device_parameter_read_request(id))));
+}
+
+protocol::DeviceParameterStatus Client::write_device_parameter(
+    std::uint16_t id, const std::vector<std::uint8_t>& value) const {
+    const auto before = device_parameter_status();
+    const auto unlock = protocol::decode_device_parameter_unlock_response(
+        body(command(
+            protocol::Command::DeviceParameterUnlock,
+            protocol::encode_device_parameter_unlock_request(
+                {before.generation,
+                 protocol::kDeviceParameterUnlockConfirmation}))));
+    try {
+        const auto after = protocol::decode_device_parameter_status(
+            body(command(
+                protocol::Command::DeviceParameterWrite,
+                protocol::encode_device_parameter_write_request(
+                    {unlock.generation, unlock.token, id, value}))));
+        body(command(protocol::Command::DeviceParameterLock));
+        return after;
+    } catch (...) {
+        try {
+            body(command(protocol::Command::DeviceParameterLock));
+        } catch (...) {
+            // 保留原始写入异常；维护解锁仍会在60秒后自动失效。
+        }
+        throw;
+    }
+}
+
 std::uint32_t Client::gpio_create(std::uint16_t pin,
                                   GpioDirection direction,
                                   bool initial_value) const {
@@ -394,6 +448,65 @@ void Client::gpio_write(std::uint32_t object_id, bool value) const {
     }
     body(command(protocol::Command::GpioWrite,
                  {static_cast<std::uint8_t>(value)}, object_id));
+}
+
+std::uint32_t Client::pwm_create(
+    const protocol::PwmCreatePayload& config) const {
+    const auto response = command(
+        protocol::Command::PwmCreate,
+        protocol::encode_pwm_create(config));
+    body(response);
+    if (response.header.object_id == 0) {
+        throw ClientException("PWM_CREATE 未返回对象 ID");
+    }
+    return response.header.object_id;
+}
+
+void Client::pwm_write(std::uint32_t object_id,
+                       std::uint16_t duty) const {
+    if (object_id == 0) {
+        throw ClientException("PWM 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::PwmWrite,
+                 protocol::encode_pwm_duty(duty), object_id));
+}
+
+void Client::pwm_stop(std::uint32_t object_id) const {
+    if (object_id == 0) {
+        throw ClientException("PWM 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::PwmStop, {}, object_id));
+}
+
+std::uint32_t Client::timed_bitstream_create(
+    const protocol::TimedBitstreamCreatePayload& config) const {
+    const auto response = command(
+        protocol::Command::TimedBitstreamCreate,
+        protocol::encode_timed_bitstream_create(config));
+    body(response);
+    if (response.header.object_id == 0) {
+        throw ClientException(
+            "TIMED_BITSTREAM_CREATE 未返回对象 ID");
+    }
+    return response.header.object_id;
+}
+
+void Client::timed_bitstream_write(
+    std::uint32_t object_id,
+    const protocol::TimedBitstreamWritePayload& data) const {
+    if (object_id == 0) {
+        throw ClientException("定时位流对象 ID 不能为零");
+    }
+    body(command(protocol::Command::TimedBitstreamWrite,
+                 protocol::encode_timed_bitstream_write(data),
+                 object_id));
+}
+
+void Client::timed_bitstream_abort(std::uint32_t object_id) const {
+    if (object_id == 0) {
+        throw ClientException("定时位流对象 ID 不能为零");
+    }
+    body(command(protocol::Command::TimedBitstreamAbort, {}, object_id));
 }
 
 std::uint32_t Client::uart_create(const UartConfig& config) const {
@@ -530,12 +643,36 @@ std::optional<UartStreamChunk> Client::uart_stream_read(
 protocol::MotionAcceptancePayload Client::motion_enqueue(
     const protocol::MotionSegmentPayload& segment) const {
     try {
+        protocol::validate_motion_segment_against_contract(
+            segment, motion_contract());
         return protocol::decode_motion_acceptance(body(command(
             protocol::Command::MotionEnqueue,
             protocol::encode_motion_segment(segment))));
     } catch (const protocol::MotionPayloadException& error) {
+        if (error.code() == protocol::MotionPayloadError::ContractMismatch ||
+            error.code() == protocol::MotionPayloadError::RateExceeded) {
+            throw ClientException(
+                std::string("主机运动能力准入拒绝: ") + error.what());
+        }
         throw ClientException(
             std::string("运动段编码或响应无效: ") + error.what());
+    }
+}
+
+protocol::MotionContractPayload Client::motion_contract(
+    bool refresh) const {
+    std::lock_guard<std::mutex> lock(motion_contract_cache_->mutex);
+    if (!refresh && motion_contract_cache_->value.has_value()) {
+        return *motion_contract_cache_->value;
+    }
+    try {
+        auto contract = protocol::decode_motion_contract(
+            body(command(protocol::Command::MotionContract)));
+        motion_contract_cache_->value = contract;
+        return contract;
+    } catch (const protocol::MotionPayloadException& error) {
+        throw ClientException(
+            std::string("运动能力合同响应无效: ") + error.what());
     }
 }
 

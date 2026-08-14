@@ -5,7 +5,9 @@
 /firmware/.kconfig-cache/
 /firmware/vendor/
 /katapult/
-/firmware/build*/
+# 当前统一目录及旧版散落构建目录都忽略。
+/firmware/build/
+/firmware/build-*/
 /firmware/out/**
 /firmware/out/katapult-*.config
 /out/

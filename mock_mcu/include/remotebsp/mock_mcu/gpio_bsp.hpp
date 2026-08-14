@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace remotebsp::mock_mcu {
 
@@ -17,6 +18,7 @@ public:
 
     virtual void configure(std::uint16_t pin, GpioDirection direction,
                            bool initial_value) = 0;
+    virtual void reset_all() = 0;
     virtual bool read(std::uint16_t pin) const = 0;
     virtual void write(std::uint16_t pin, bool value) = 0;
 };
@@ -25,6 +27,12 @@ enum class MockGpioError {
     PinNotConfigured,
     WriteToInput,
     InjectToOutput,
+};
+
+struct GpioPinSnapshot {
+    std::uint16_t pin{};
+    GpioDirection direction{GpioDirection::Input};
+    bool value{};
 };
 
 class MockGpioException : public std::runtime_error {
@@ -40,6 +48,7 @@ class MockGpioBsp final : public GpioBsp {
 public:
     void configure(std::uint16_t pin, GpioDirection direction,
                    bool initial_value) override;
+    void reset_all() override;
     bool read(std::uint16_t pin) const override;
     void write(std::uint16_t pin, bool value) override;
 
@@ -47,6 +56,7 @@ public:
     std::uint64_t configure_count() const noexcept;
     std::uint64_t read_count() const noexcept;
     std::uint64_t write_count() const noexcept;
+    std::vector<GpioPinSnapshot> snapshot() const;
 
 private:
     struct PinState {

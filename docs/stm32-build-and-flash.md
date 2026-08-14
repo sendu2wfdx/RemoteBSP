@@ -6,26 +6,31 @@
 
 | 目标 | 总线模式 | 已接通的远程功能 |
 |---|---|---|
-| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；五轴与五路 TMC2209 通讯后端已交叉编译，待实板验收 |
-| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部8 MHz HSE、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3 PWM 呼吸灯、PC13 GPIO；实板已验证，USB CDC 与双模式 Katapult 待切换验证 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；PA6 PWM、PA8 DMA定时位流和五轴/TMC后端已交叉编译，待实板验收 |
+| STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路TMC2209已实板验证；PA6 PWM和PA8 DMA定时位流已交叉编译；双模式Katapult切换待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | CAN-FD实测；另有互斥的USB Vendor Bulk APP已交叉编译；PC6 PWM、PA8 DMA定时位流和PC13 GPIO |
 
-STM32F103 的 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲。G431
-的真实 UART 驱动尚未接入，因此当前 G431 固件仍不会报告 UART 能力。
+STM32F072与STM32F103的硬件 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲；
+Studio/Kconfig可选择合法的PA9/PA10或PB6/PB7端点并固定对象波特率。RS-485方向
+引脚暂未接入实体后端。
+FLY-D5未默认公开通用硬件UART；G431的硬件USART尚未接入。启用TMC2209预设时只报告TMC专用单线
+逻辑 UART，普通 G431 固件仍不报告 UART 能力。
 F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别通过实体板
 基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN；
 BluePill 复位时按住 PA0、WeAct G431 复位时按住 PC13 进入 USB。双模式镜像
 已交叉编译，G431 的接口切换仍待实板验证。
-F103 的 USB 与 bxCAN 共用专用 SRAM，因此 CAN APP 不提供 USB CDC；G431 的
-APP USB CDC 已通过交叉编译与链接检查；G431 实体 CAN-FD APP 已完成基础验收，
-USB CDC 和双模式 Katapult 切换仍待验证。
+正式 APP 默认只链接 CAN/CAN-FD，不提供 USB CDC 调试接口。G431 另提供主链路
+互斥的 USB Vendor Bulk APP，已交叉编译但待实体枚举与压力测试；Katapult USB
+仍由独立 Bootloader 在应急升级阶段初始化，并使用不同 PID。
 
-WeAct G431 配置默认启用 `CONFIG_WEACT_G431_PC6_PWM_BREATHING_LED`：PC6
-使用 TIM3_CH1（AF2）输出 10 kHz PWM，亮度以约 4 秒周期起伏。该选项用于
-验证板级 PWM，启用时 PC6 被保留，不能由远程 GPIO 创建或写入；关闭后 PC6
-恢复为普通 GPIO。通用 PWM 资源、对象模型和远程命令仍在后续阶段实现。
+通用波形模块由`CONFIG_REMOTEBSP_PWM`和`CONFIG_REMOTEBSP_TIMED_BITSTREAM`
+独立裁剪。F072/F103基础预设使用PA6/TIM3_CH1和PA8/TIM1_CH1+DMA1_Channel2；
+G431使用PC6/TIM3_CH1和PA8/TIM1_CH1+DMA1_Channel1/DMAMUX。引脚选择会过滤
+已被运动、CAN、SWD、USB或板载固定功能占用的IO。三种后端均已交叉编译，
+但新远程PWM命令、DMA位流和WS2812实体波形仍待验收。BluePill Plus的PB2软件
+呼吸灯保留为独立板级自检功能，不等同于通用PWM资源。
 
-Bluepill 专用配置 `stm32f103_bluepill_defconfig` 把 CAN 重映射到
+BluePill Plus 专用配置 `stm32f103_weact_bluepill_plus_defconfig` 把 CAN 重映射到
 PB8/PB9，避开板载 USB 对 PA11/PA12 的占用；UART 0 默认使用
 PA9(TX)/PA10(RX)。
 
@@ -48,8 +53,8 @@ cd /mnt/d/Documents/RemoteBSP/firmware
 bash scripts/fetch_stm32_deps.sh
 ```
 
-脚本下载固定版本的 CMSIS Core、对应 MCU 的 CMSIS Device、HAL 和 ST 官方
-USB Device 中间件，不下载板级示例工程。
+脚本下载固定版本的 CMSIS Core、对应 MCU 的 CMSIS Device、HAL 和 G431 USB APP
+需要的 ST USB Device 中间件，不下载板级示例工程。Katapult 依赖由独立脚本管理。
 
 ## 使用默认配置编译
 
@@ -67,18 +72,21 @@ bash scripts/build_firmware.sh all
 bash scripts/build_firmware.sh f103
 bash scripts/build_firmware.sh weact-bluepill-plus
 bash scripts/build_firmware.sh f072
-bash scripts/build_firmware.sh f072-pb
 bash scripts/build_firmware.sh mellow-fly-d5
+bash scripts/build_firmware.sh g431
 bash scripts/build_firmware.sh weact-stm32g431cbu6-core
-bash scripts/build_firmware.sh f103-motion
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-usb
 bash scripts/build_firmware.sh weact-bluepill-plus-motion
-bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion-5axis
+bash scripts/build_firmware.sh weact-stm32g431cbu6-core-motion
 ```
+
+带`motion`的目标使用`firmware/tests/configs`中的临时验收配置，不是正式出厂预设。
+Studio生成配置的测试会另外对三块正式板卡执行真实交叉编译。
 
 输出位于 `firmware/out`，包括 ELF、Intel HEX、裸 BIN 和链接 MAP。
 
-带 Katapult 的编译、首次量产镜像、CAN/USB 在线升级和 APP USB 调试方法见
-[Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。
+带 Katapult 的编译、首次量产镜像及 CAN/USB 升级方法见
+[Katapult 双模式升级与应急恢复](bootloader-upgrade.md)。
 
 ## 使用 menuconfig
 
@@ -90,9 +98,9 @@ cp configs/stm32f103cbt6_defconfig .config
 python3 scripts/menuconfig.py
 ```
 
-FLY-D5 或 G431 将第一条命令中的文件分别改为
-`configs/stm32f072_fly_d5_defconfig` 或
-`configs/stm32g431cbu6_defconfig`。保存后编译：
+FLY-D5 或 WeAct G431 Core 将第一条命令中的文件分别改为
+`configs/stm32f072_mellow_fly_d5_defconfig` 或
+`configs/stm32g431_weact_core_defconfig`。保存后编译：
 
 ```sh
 cmake -S . -B build-custom -G Ninja \
@@ -100,6 +108,27 @@ cmake -S . -B build-custom -G Ninja \
     -DRBSP_CONFIG="$PWD/.config"
 cmake --build build-custom --parallel 32
 ```
+
+菜单按职责分为“目标硬件”“CAN/CAN-FD”“远程协议与内存预算”“通用硬件资源”
+“智能步进运动”和“启动与升级”。普通用户只需选择 MCU/板型、晶振、CAN、功能
+模块和静态容量。“远程协议与内存预算”不再是空菜单：可在菜单内单独开启编辑，
+也可打开顶层“显示专家级容量与时序设置”，查看协议缓存、运动步频和 compare
+迟到保护等需要实板验证的参数。系统时钟、板卡类型和 APP Flash 偏移均由其他
+选择自动派生，不能手工填写。
+
+兼容期运动槽的 STEP/DIR/EN/TMC/限位已经由整数编码改为 `choice` 选择项。名称
+按 `GPIOC / PC13` 形式分组标注；SWD、当前 CAN/UART/Katapult USB、板载呼吸灯
+以及前面字段已经选过的引脚不会出现在后续列表中。生成文件
+`Kconfig.motion_pins.generated` 与 GUI 引脚目录来自同一脚本，修改引脚源后运行：
+
+```sh
+python3 scripts/generate_pin_choices.py
+```
+
+每个槽的“EN 来源”可选择独立引脚，或与任意前置槽共用 EN。共用时不再显示独立
+EN 引脚和极性选项，而是自动继承来源槽。固件不是简单重复写同一 GPIO，而是保存
+各逻辑轴的使能请求并做组内 OR：任一轴仍需要使能时保持物理 EN，最后一个轴释放
+后才关闭。共享 EN 无法让组内空闲电机单独断电，这是硬件共线本身的限制。
 
 ### 上电IO安全状态
 
@@ -121,12 +150,18 @@ cmake --build build-custom --parallel 32
   分频系数6，采样点87.5%；默认使用PA11/PA12。
 - FLY-D5：板载 8MHz HSE 经 PLL 到 PCLK 48 MHz，Classical CAN 1 Mbit/s，16 TQ，
   分频系数 3，采样点 87.5%。
-- F103 通用配置：72 MHz，CAN 外设时钟 36 MHz，500 kbit/s，采样点约
-  88.9%。
+- F103 通用预设：外部 8 MHz HSE 经 PLL 到 72 MHz，CAN 外设时钟 36 MHz，
+  500 kbit/s，18 TQ，采样点约 88.9%。menuconfig 也可选择内部 HSI8，届时
+  SYSCLK 为 64 MHz、CAN 时钟为 32 MHz，并使用 16 TQ；内部 RC 只建议作为
+  没有 HSE 时的退路。
 - F103 Bluepill 实机配置：CAN 外设时钟 36 MHz，1 Mbit/s，18 TQ，
   分频系数 2，采样点约 88.9%。
 - G431：FDCAN 内核时钟 170 MHz，仲裁段 500 kbit/s，默认数据段 1 Mbit/s，
   两段采样点均约 82.4%。
+
+WeAct BluePill Plus 和 WeAct G431 Core 的 32.768 kHz LSE 是低速守时资源，不是
+系统主时钟。当前 APP 会在 menuconfig、GUI 和运行时引脚检查中保留 PC14/PC15，
+但在 RTC/掉线守时模块实现前不会启动 LSE。FLY-D5 只声明板载 8 MHz HSE。
 
 配置成其他速率时，编译期会检查是否能被当前时序精确生成；不能精确生成就会
 停止编译，而不是悄悄使用错误速率。
@@ -139,38 +174,67 @@ cmake --build build-custom --parallel 32
 STM32F072RBT6 MCU 层同样提供这两组 USART1 引脚：PA9/PA10 使用 AF1，PB6/PB7 使用 AF0。
 F072还允许CAN在PA11/PA12与PB8/PB9之间选择。数据手册列出的第三组
 PD0/PD1不在RBT6的LQFP64封装上，因此不会显示为可选项。FLY-D5板型固定选择
-PB8/PB9，并把通用 UART 数量设为 0，避免把 TMC2209 专用单线通讯误报为通用串口。
+PB8/PB9。由于尚未确认 FLY-D5 对外安全公开的硬件 USART 引脚，该板预设把硬件
+UART 容量设为 0，五个 TMC 端口继续使用逻辑 UART 对象 0～4。通用 F072 和 F103
+可以分别编译硬件 USART1 与 TMC 后端；F103 五轴预设中 USART1 为对象 0，TMC 为
+对象 1～5。TMC 端口只执行固定 40000 bit/s 原始字节事务，不能作为 Modbus 或
+通用软串口使用。
 
 被 UART 选中的引脚会从通用远程 GPIO 池中保留，不能再通过 `GPIO_CREATE`
 重新配置。
 
-## 增加其他 STM32F072RBT6 板卡
+## 基础配置与板卡配置
 
-F072固件分为MCU通用层和板型覆盖层。接入另一块RBT6板卡时：
+三种 MCU 都采用“MCU 通用层 + 板型覆盖层”，没有为单个试验接线复制 `main.c`。
+当前保留的预设分为两类：
 
-1. 继续选择`CONFIG_BOARD_STM32F072RBT6=y`，不要复制Remote Core或HAL BSP。
+- MCU 基础：`stm32f072rbt6_defconfig`、`stm32f103cbt6_defconfig`、
+  `stm32g431cbu6_defconfig`；只假定芯片本身，不启用板载 LED、按键或运动接线。
+- 具体板卡：文件名包含 `mellow_fly_d5`、`weact_bluepill_plus` 或
+  `weact_core`；可再带 `_motion_...` 或 `_katapult` 后缀说明用途。
+
+接入同 MCU 的另一块板卡时：
+
+1. 选择对应的 `CONFIG_BOARD_STM32...=y`，不要复制 Remote Core 或 HAL BSP。
 2. 如果现有CAN/UART引脚组合适用，只需新增`configs/<板名>_defconfig`。
-3. 板载USB、LED、按键、收发器STB或禁止复用引脚通过新的板型布尔选项描述。
+3. 板载 LED、按键、收发器 STB、USB 恢复口占用或禁止复用引脚通过板型选项描述。
 4. 在`boards/`增加机器可读资源描述，记录公开资源和内部占用关系。
 5. 如果需要Katapult，再增加与该板恢复方式匹配的独立Bootloader配置。
 
-通用默认配置为
-`firmware/configs/stm32f072rbt6_defconfig`：PA11/PA12 CAN、500 kbit/s、
-PA9/PA10 USART1。`f072-pb`示例配置同时验证PB8/PB9 CAN和PB6/PB7
-USART1。FLY-D5只是同一通用实现的一个板型实例。
+删除的 PB8/PB9、Classical CAN、二轴/五轴等早期试验预设都可以通过复制最接近
+的基础或板卡配置，再在 `menuconfig` 中设置得到；不再为每次临时接线永久增加
+仓库文件。
 
 `智能步进运动（可选）`菜单当前提供：
 
 - `CONFIG_REMOTEBSP_MOTION`：是否把运动队列核心编译进固件，默认关闭。
+- `CONFIG_REMOTEBSP_TMC2209_UART`：是否编译固定 40000 bit/s 的 TMC2209 单线
+  事务后端，可与 F072/F103 的硬件 USART1 同时启用。
+- `CONFIG_TMC2209_UART_PORT_CAPACITY`：TMC 单线端口的编译期静态容量；配置生成器
+  会拒绝槽号超出容量的组合。
 - `CONFIG_MOTION_MAX_AXES`：本板最大轴数，F103 默认保守设为2、G431默认5；两者均可显式配置到当前板级后端的五槽上限。
 - `CONFIG_MOTION_QUEUE_DEPTH`：固定容量运动段队列，默认F103为8、G431为32。
 - `CONFIG_MOTION_MIN_LEAD_TIME_US`：最小排程提前量。
+- `CONFIG_MOTION_MAX_STEP_RATE_HZ`与`CONFIG_MOTION_MAX_TOTAL_STEP_RATE_HZ`：
+  单轴和整板总STEP频率准入预算。
+- `CONFIG_MOTION_STEP_PULSE_WIDTH_US`、`CONFIG_MOTION_MIN_STEP_LOW_US`和
+  `CONFIG_MOTION_DIRECTION_SETUP_US`：驱动器时序约束。
+- `CONFIG_MOTION_COMPARE_MIN_LEAD_US`与`CONFIG_MOTION_MAX_COMPARE_LATENESS_US`：
+  定时器compare写入余量和迟到安全停机预算。
+
+除功能开关、最大轴容量和 TMC 端口容量外，运动队列、步频和定时器保护预算默认
+隐藏在专家模式中。五组 `MOTION_SLOT...` 由Studio工程生成到Kconfig，用于构建
+板卡专用固件；改变槽位接线必须重新构建、烧录并重启。
+
+启用`CONFIG_REMOTEBSP_DEVICE_PARAMS`时，F103在Flash末尾保留2 KiB，F072/G431
+保留4 KiB，用于SN、UUID、制造信息和ADC校准。链接器和Katapult APP写入上限都会
+避开该区域，因此正常在线升级不会清除参数。参数区不保存运动或IO映射。
 
 只有启用运动模块时，`motion.c`和`rbsp_core_t`中的轴/队列存储才参与编译。
 因此普通GPIO/UART工具板不会承担运动功能的Flash和RAM成本。上述默认值只是
-初始预算，最终可选上限必须经过实体板持续步频和最坏中断延迟测试。当前C队列
-核心已实现，但STM32定时器STEP输出和远程运动命令尚未接入，不能把打开开关
-理解为实体运动功能已经完成。
+初始预算，最终可选上限必须经过实体板持续步频和最坏中断延迟测试。当前C队列、
+远程运动命令和F072/F103/G431的TIM2_CH1 compare STEP后端均已接入并交叉编译；
+F072旧固定tick版本有实板运动记录，新compare版本及F103/G431仍需实体压力验收。
 
 ## 使用 ST-Link 烧录
 

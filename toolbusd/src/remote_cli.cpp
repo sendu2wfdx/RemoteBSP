@@ -84,6 +84,72 @@ std::vector<std::uint8_t> parse_hex(const std::string& text) {
     return result;
 }
 
+std::uint16_t parse_device_parameter_id(const std::string& text) {
+    if (text == "serial-number" || text == "sn") {
+        return RBSP_DEVICE_PARAM_SERIAL_NUMBER;
+    }
+    if (text == "device-uuid" || text == "uuid") {
+        return RBSP_DEVICE_PARAM_DEVICE_UUID;
+    }
+    if (text == "hardware-revision" || text == "hw-rev") {
+        return RBSP_DEVICE_PARAM_HARDWARE_REVISION;
+    }
+    if (text == "manufacturing-batch" || text == "batch") {
+        return RBSP_DEVICE_PARAM_MANUFACTURING_BATCH;
+    }
+    if (text == "manufacturing-date" || text == "date") {
+        return RBSP_DEVICE_PARAM_MANUFACTURING_DATE;
+    }
+    if (text == "device-name" || text == "name") {
+        return RBSP_DEVICE_PARAM_DEVICE_NAME;
+    }
+    if (text.rfind("adc", 0U) == 0U && text.size() > 3U) {
+        const auto channel = parse_u32(text.substr(3U), "ADC通道");
+        if (channel >= RBSP_DEVICE_PARAM_ADC_CHANNEL_COUNT) {
+            throw std::invalid_argument("ADC校准通道超出0～15");
+        }
+        return static_cast<std::uint16_t>(
+            RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + channel);
+    }
+    const auto value = parse_u32(text, "设备参数ID");
+    if (value > std::numeric_limits<std::uint16_t>::max()) {
+        throw std::invalid_argument("设备参数ID超过16位范围");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+const char* device_parameter_name(std::uint16_t id) {
+    switch (id) {
+        case RBSP_DEVICE_PARAM_SERIAL_NUMBER: return "serial-number";
+        case RBSP_DEVICE_PARAM_DEVICE_UUID: return "device-uuid";
+        case RBSP_DEVICE_PARAM_HARDWARE_REVISION: return "hardware-revision";
+        case RBSP_DEVICE_PARAM_MANUFACTURING_BATCH:
+            return "manufacturing-batch";
+        case RBSP_DEVICE_PARAM_MANUFACTURING_DATE:
+            return "manufacturing-date";
+        case RBSP_DEVICE_PARAM_DEVICE_NAME: return "device-name";
+        default: return "adc-calibration-or-unknown";
+    }
+}
+
+void print_device_parameter_status(
+    const remotebsp::protocol::DeviceParameterStatus& status) {
+    const auto unlocked = static_cast<std::uint16_t>(
+        remotebsp::protocol::DeviceParameterStatusFlag::MaintenanceUnlocked);
+    const auto restart = static_cast<std::uint16_t>(
+        remotebsp::protocol::DeviceParameterStatusFlag::RestartRequired);
+    std::cout << "version=" << status.version
+              << " generation=" << status.generation
+              << " stored=" << status.stored_count
+              << " definitions=" << status.definition_count
+              << " maintenance_unlocked="
+              << ((status.flags & unlocked) != 0U ? "yes" : "no")
+              << " restart_required="
+              << ((status.flags & restart) != 0U ? "yes" : "no")
+              << " store_error=" << static_cast<unsigned>(status.last_error)
+              << '\n';
+}
+
 const char* resource_type(remotebsp::protocol::ResourceType type) {
     using remotebsp::protocol::ResourceType;
     switch (type) {
@@ -96,6 +162,7 @@ const char* resource_type(remotebsp::protocol::ResourceType type) {
         case ResourceType::Timer: return "timer";
         case ResourceType::Storage: return "storage";
         case ResourceType::StepgenAxis: return "stepgen-axis";
+        case ResourceType::TimedBitstream: return "timed-bitstream";
     }
     return "unknown";
 }
@@ -176,6 +243,8 @@ const char* motion_fault_name(
         case MotionFaultPayload::Aborted: return "aborted";
         case MotionFaultPayload::LimitTriggered: return "limit";
         case MotionFaultPayload::QueueUnderrun: return "queue-underrun";
+        case MotionFaultPayload::TimingDeadlineMissed:
+            return "timing-deadline-missed";
     }
     return "unknown";
 }
@@ -211,9 +280,21 @@ void print_usage() {
         << "  resource-renew <资源ID> <租约ID> <毫秒>\n"
         << "  resource-release <资源ID> <租约ID>\n"
         << "  resource-lease-status <资源ID>\n"
+        << "  param-status\n"
+        << "  param-list\n"
+        << "  param-get <名称|参数ID>\n"
+        << "  param-set <名称|参数ID> <文本|hex:十六进制>\n"
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
+        << "  pwm-create <通道> <频率Hz> <占空比0..10000> [active-high|active-low]\n"
+        << "  pwm-write <对象ID> <占空比0..10000>\n"
+        << "  pwm-stop <对象ID>\n"
+        << "  timed-bitstream-create <通道> <位周期ns> <0高电平ns> <1高电平ns> <复位us>\n"
+        << "  timed-bitstream-write-hex <对象ID> <位数> <十六进制字节串>\n"
+        << "  timed-bitstream-abort <对象ID>\n"
+        << "  ws2812-create <通道>\n"
+        << "  ws2812-write <对象ID> <RRGGBB...>\n"
         << "  uart-create <端口> <波特率> [数据位] [none|odd|even] [停止位] [poll|stream]\n"
         << "  uart-read <对象ID> <最大长度>\n"
         << "  uart-stream-read <对象ID> <最大长度> [超时毫秒]\n"
@@ -226,6 +307,7 @@ void print_usage() {
         << "  motion-enqueue <序号> <开始ns|auto> <持续ns> "
            "<final|more> <资源ID:步数>...\n"
         << "  motion-status\n"
+        << "  motion-contract\n"
         << "  motion-abort\n"
         << "  motion-clear-fault\n";
 }
@@ -247,8 +329,14 @@ int run(const std::vector<std::string>& arguments,
                 : static_cast<std::uint64_t>(
                       status.global_available_ns * 1000U /
                       status.global_capacity_ns);
+        const char* mode_name = "classical";
+        if (status.mode == remotebsp::LinkTrafficMode::CanFd) {
+            mode_name = "fd";
+        } else if (status.mode == remotebsp::LinkTrafficMode::Usb) {
+            mode_name = "usb";
+        }
         std::cout
-            << "mode=" << (status.can_fd ? "fd" : "classical")
+            << "mode=" << mode_name
             << " arbitration_bitrate="
             << status.arbitration_bits_per_second
             << " data_bitrate=" << status.data_bits_per_second
@@ -350,6 +438,52 @@ int run(const std::vector<std::string>& arguments,
         const auto capabilities = client.get_capabilities();
         std::cout << "capabilities=0x" << std::hex << capabilities
                   << std::dec << '\n';
+        return 0;
+    }
+    if (name == "param-status" && arguments.size() == 1) {
+        print_device_parameter_status(client.device_parameter_status());
+        return 0;
+    }
+    if (name == "param-list" && arguments.size() == 1) {
+        for (const auto& parameter : client.list_device_parameters()) {
+            std::cout << "id=0x" << std::hex << parameter.id << std::dec
+                      << " name=" << device_parameter_name(parameter.id)
+                      << " type=" << static_cast<unsigned>(parameter.type)
+                      << " flags=0x" << std::hex
+                      << static_cast<unsigned>(parameter.flags) << std::dec
+                      << " length=" << parameter.minimum_length << ".."
+                      << parameter.maximum_length << '\n';
+        }
+        return 0;
+    }
+    if (name == "param-get" && arguments.size() == 2) {
+        const auto parameter = client.read_device_parameter(
+            parse_device_parameter_id(arguments[1]));
+        std::cout << "id=0x" << std::hex << parameter.id << std::dec
+                  << " name=" << device_parameter_name(parameter.id)
+                  << " generation=" << parameter.generation
+                  << " type=" << static_cast<unsigned>(parameter.type)
+                  << " value=";
+        if (parameter.type == RBSP_DEVICE_PARAM_TYPE_UTF8) {
+            std::cout.write(
+                reinterpret_cast<const char*>(parameter.value.data()),
+                static_cast<std::streamsize>(parameter.value.size()));
+        } else {
+            print_hex(parameter.value);
+        }
+        std::cout << '\n';
+        return 0;
+    }
+    if (name == "param-set" && arguments.size() == 3) {
+        const auto id = parse_device_parameter_id(arguments[1]);
+        std::vector<std::uint8_t> value;
+        if (arguments[2].rfind("hex:", 0U) == 0U) {
+            value = parse_hex(arguments[2].substr(4U));
+        } else {
+            value.assign(arguments[2].begin(), arguments[2].end());
+        }
+        const auto status = client.write_device_parameter(id, value);
+        print_device_parameter_status(status);
         return 0;
     }
     if (name == "resource-list" && arguments.size() == 1) {
@@ -487,6 +621,102 @@ int run(const std::vector<std::string>& arguments,
         }
         client.gpio_write(parse_u32(arguments[1], "GPIO 对象 ID"),
                           value != 0);
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "pwm-create" &&
+        (arguments.size() == 4 || arguments.size() == 5)) {
+        const auto channel = parse_u32(arguments[1], "PWM 通道");
+        const auto duty = parse_u32(arguments[3], "PWM 占空比");
+        if (channel > std::numeric_limits<std::uint8_t>::max() ||
+            duty > remotebsp::protocol::kPwmDutyScale) {
+            throw std::invalid_argument("PWM 通道或占空比超出范围");
+        }
+        bool active_low = false;
+        if (arguments.size() == 5) {
+            if (arguments[4] == "active-low") {
+                active_low = true;
+            } else if (arguments[4] != "active-high") {
+                throw std::invalid_argument(
+                    "PWM 极性必须是 active-high 或 active-low");
+            }
+        }
+        std::cout << "object_id=" << client.pwm_create({
+            static_cast<std::uint8_t>(channel),
+            parse_u32(arguments[2], "PWM 频率"),
+            static_cast<std::uint16_t>(duty), active_low}) << '\n';
+        return 0;
+    }
+    if (name == "pwm-write" && arguments.size() == 3) {
+        const auto duty = parse_u32(arguments[2], "PWM 占空比");
+        if (duty > remotebsp::protocol::kPwmDutyScale) {
+            throw std::invalid_argument("PWM 占空比必须在 0..10000");
+        }
+        client.pwm_write(parse_u32(arguments[1], "PWM 对象 ID"),
+                         static_cast<std::uint16_t>(duty));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "pwm-stop" && arguments.size() == 2) {
+        client.pwm_stop(parse_u32(arguments[1], "PWM 对象 ID"));
+        std::cout << "ok\n";
+        return 0;
+    }
+    if ((name == "timed-bitstream-create" && arguments.size() == 6) ||
+        (name == "ws2812-create" && arguments.size() == 2)) {
+        const auto channel = parse_u32(arguments[1], "定时位流通道");
+        if (channel > std::numeric_limits<std::uint8_t>::max()) {
+            throw std::invalid_argument("定时位流通道超过 8 位范围");
+        }
+        remotebsp::protocol::TimedBitstreamCreatePayload config{
+            static_cast<std::uint8_t>(channel), 1250, 350, 700, 80};
+        if (name == "timed-bitstream-create") {
+            config.bit_period_ns = parse_u32(arguments[2], "位周期");
+            config.zero_high_ns = parse_u32(arguments[3], "0 高电平");
+            config.one_high_ns = parse_u32(arguments[4], "1 高电平");
+            config.reset_time_us = parse_u32(arguments[5], "复位时间");
+        }
+        std::cout << "object_id="
+                  << client.timed_bitstream_create(config) << '\n';
+        return 0;
+    }
+    if (name == "timed-bitstream-write-hex" &&
+        arguments.size() == 4) {
+        const auto bit_count = parse_u32(arguments[2], "定时位流位数");
+        if (bit_count == 0 ||
+            bit_count > std::numeric_limits<std::uint16_t>::max()) {
+            throw std::invalid_argument("定时位流位数超出范围");
+        }
+        client.timed_bitstream_write(
+            parse_u32(arguments[1], "定时位流对象 ID"),
+            {static_cast<std::uint16_t>(bit_count),
+             parse_hex(arguments[3])});
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "ws2812-write" && arguments.size() == 3) {
+        const auto rgb = parse_hex(arguments[2]);
+        if (rgb.size() % 3U != 0U ||
+            rgb.size() > std::numeric_limits<std::uint16_t>::max() / 8U) {
+            throw std::invalid_argument(
+                "WS2812 颜色必须是连续的 RRGGBB，且长度不能超限");
+        }
+        std::vector<std::uint8_t> grb;
+        grb.reserve(rgb.size());
+        for (std::size_t index = 0; index < rgb.size(); index += 3U) {
+            grb.push_back(rgb[index + 1U]);
+            grb.push_back(rgb[index]);
+            grb.push_back(rgb[index + 2U]);
+        }
+        client.timed_bitstream_write(
+            parse_u32(arguments[1], "WS2812 对象 ID"),
+            {static_cast<std::uint16_t>(grb.size() * 8U), grb});
+        std::cout << "ok pixels=" << grb.size() / 3U << '\n';
+        return 0;
+    }
+    if (name == "timed-bitstream-abort" && arguments.size() == 2) {
+        client.timed_bitstream_abort(
+            parse_u32(arguments[1], "定时位流对象 ID"));
         std::cout << "ok\n";
         return 0;
     }
@@ -698,6 +928,29 @@ int run(const std::vector<std::string>& arguments,
                       << " position_steps=" << axis.position_steps
                       << " emitted_steps=" << axis.emitted_steps
                       << '\n';
+        }
+        return 0;
+    }
+    if (name == "motion-contract" && arguments.size() == 1) {
+        const auto contract = client.motion_contract(true);
+        std::cout << "version=" << contract.version
+                  << " axes=" << contract.axes.size()
+                  << " queue_capacity=" << contract.queue_capacity
+                  << " minimum_lead_time_ns="
+                  << contract.minimum_lead_time_ns
+                  << " maximum_total_step_rate_hz="
+                  << contract.maximum_total_step_rate_hz << '\n';
+        for (const auto& axis : contract.axes) {
+            std::cout << "axis=0x" << std::hex << axis.resource_id
+                      << std::dec
+                      << " maximum_step_rate_hz="
+                      << axis.maximum_step_rate_hz
+                      << " step_pulse_width_ns="
+                      << axis.step_pulse_width_ns
+                      << " minimum_step_low_ns="
+                      << axis.minimum_step_low_ns
+                      << " direction_setup_ns="
+                      << axis.direction_setup_ns << '\n';
         }
         return 0;
     }

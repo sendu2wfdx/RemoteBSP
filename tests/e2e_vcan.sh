@@ -8,6 +8,10 @@ client_api_bin="$4"
 can_interface="$5"
 can_mode="$6"
 
+if [[ "$can_mode" == "usb-mock" ]]; then
+    can_interface="/tmp/remotebsp-usb-link-$$.sock"
+fi
+
 socket_path="/tmp/remotebsp-e2e-${can_mode}-$$.sock"
 mock_log="/tmp/remotebsp-mock-${can_mode}-$$.log"
 daemon_log="/tmp/remotebsp-daemon-${can_mode}-$$.log"
@@ -39,11 +43,15 @@ cleanup() {
         sed -n '1,300p' "$trace_log" 2>/dev/null || true
     fi
     rm -f -- "$socket_path" "$mock_log" "$daemon_log" "$trace_log"
+    if [[ "$can_mode" == "usb-mock" ]]; then
+        rm -f -- "$can_interface"
+    fi
     exit "$result"
 }
 trap cleanup EXIT INT TERM
 
-if command -v candump >/dev/null 2>&1; then
+if [[ "$can_mode" != "usb-mock" ]] &&
+   command -v candump >/dev/null 2>&1; then
     candump -L "$can_interface" >"$trace_log" 2>&1 &
     trace_pid=$!
 fi
@@ -74,15 +82,44 @@ for _ in $(seq 1 100); do
 done
 grep -Fq 'pong=端到端测试' <<<"$ping_output"
 
+# 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。
+printf -v long_ping '%*s' 2023 ''
+long_ping="${long_ping// /x}"
+long_ping_output="$("$remote_cli_bin" --socket "$socket_path" \
+    ping "$long_ping")"
+[[ "$long_ping_output" == "pong=$long_ping" ]]
+
 info_output="$("$remote_cli_bin" --socket "$socket_path" get-info)"
 grep -Fq 'firmware=0.2.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
 
 capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
-grep -Fq 'capabilities=0x303' <<<"$capability_output"
+grep -Fq 'capabilities=0x1723' <<<"$capability_output"
+
+# 设备身份与校准参数使用独立持久化接口，不与资源清单混在一起。
+parameter_status_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-status)"
+grep -Fq 'version=1 generation=0 stored=0 definitions=22' \
+    <<<"$parameter_status_output"
+parameter_list_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-list)"
+grep -Fq 'id=0x1 name=serial-number type=2' \
+    <<<"$parameter_list_output"
+parameter_write_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-set serial-number MOCK-E2E-001)"
+grep -Fq 'generation=1 stored=1' <<<"$parameter_write_output"
+grep -Fq 'restart_required=yes' <<<"$parameter_write_output"
+parameter_read_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-get serial-number)"
+grep -Fq 'generation=1 type=2 value=MOCK-E2E-001' \
+    <<<"$parameter_read_output"
 
 traffic_output="$("$remote_cli_bin" --socket "$socket_path" traffic-status)"
-grep -Fq "mode=${can_mode}" <<<"$traffic_output"
+expected_traffic_mode="$can_mode"
+if [[ "$can_mode" == "usb-mock" ]]; then
+    expected_traffic_mode="usb"
+fi
+grep -Fq "mode=${expected_traffic_mode}" <<<"$traffic_output"
 grep -Fq 'max_utilization_permille=700' <<<"$traffic_output"
 grep -Fq 'class=system admitted_packets=' <<<"$traffic_output"
 grep -Fq 'class=streaming admitted_packets=' <<<"$traffic_output"
@@ -95,6 +132,25 @@ resource_output="$("$remote_cli_bin" --socket "$socket_path" resource-list)"
 [[ "$(grep -c ' type=uart ' <<<"$resource_output")" -eq 8 ]]
 grep -Fq 'resource_id=0x2000007 type=uart instance=7 source=expanded rx_capacity=4096 tx_capacity=4096' \
     <<<"$resource_output"
+grep -Fq 'resource_id=0x6000000 type=pwm instance=0' <<<"$resource_output"
+grep -Fq 'resource_id=0xa000000 type=timed-bitstream instance=0' <<<"$resource_output"
+
+pwm_create_output="$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-create 0 20000 4200 active-high)"
+pwm_object_id="${pwm_create_output#object_id=}"
+[[ "$pwm_object_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-write "$pwm_object_id" 7500)" == "ok" ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    pwm-stop "$pwm_object_id")" == "ok" ]]
+
+ws2812_create_output="$("$remote_cli_bin" --socket "$socket_path" \
+    ws2812-create 0)"
+ws2812_object_id="${ws2812_create_output#object_id=}"
+[[ "$ws2812_object_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$("$remote_cli_bin" --socket "$socket_path" \
+    ws2812-write "$ws2812_object_id" FF000000FF000000FF)" == \
+    "ok pixels=3" ]]
 
 describe_output="$("$remote_cli_bin" --socket "$socket_path" \
     resource-describe 0x02000007)"
@@ -167,6 +223,15 @@ for resource_id in 0x09000000 0x09000001 0x09000002; do
     [[ "$motion_lease_id" =~ ^0x[0-9a-fA-F]+$ ]]
     motion_lease_ids+=("$motion_lease_id")
 done
+
+motion_contract_output="$("$remote_cli_bin" --socket "$socket_path" \
+    motion-contract)"
+grep -Fq 'version=1 axes=3 queue_capacity=32' \
+    <<<"$motion_contract_output"
+grep -Fq 'maximum_total_step_rate_hz=200000' \
+    <<<"$motion_contract_output"
+grep -Fq 'axis=0x9000000 maximum_step_rate_hz=100000' \
+    <<<"$motion_contract_output"
 
 motion_enqueue_output="$("$remote_cli_bin" --socket "$socket_path" \
     motion-enqueue 1 auto 1000000 final \

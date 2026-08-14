@@ -4,7 +4,7 @@
   "board_type": 1297040203,
   "uuid": "524253502d4d4f434b2d4e4f44450000",
   "firmware_version": [0, 2, 0],
-  "capabilities": ["gpio", "uart", "bootloader", "motion"],
+  "capabilities": ["gpio", "uart", "pwm", "timed_bitstream", "bootloader", "motion"],
   "resource_groups": [
     {
       "type": "gpio",
@@ -98,6 +98,42 @@
         "maximum_rx_bits_per_second": 0,
         "maximum_tx_bits_per_second": 0
       }
+    },
+    {
+      "type": "pwm",
+      "first_instance": 0,
+      "count": 2,
+      "id_base": 100663296,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 0,
+      "contract": {
+        "access": ["write", "exclusive_write", "lease_supported"],
+        "timing_resolution_ns": 100,
+        "worst_case_latency_us": 100,
+        "maximum_operations_per_second": 1000,
+        "queue_capacity": 0,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 0
+      }
+    },
+    {
+      "type": "timed_bitstream",
+      "first_instance": 0,
+      "count": 1,
+      "id_base": 167772160,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 192,
+      "contract": {
+        "access": ["write", "exclusive_write", "lease_supported"],
+        "timing_resolution_ns": 50,
+        "worst_case_latency_us": 200,
+        "maximum_operations_per_second": 400,
+        "queue_capacity": 1,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 800000
+      }
     }
   ],
   "reserved_resources": [
@@ -107,6 +143,42 @@
       "owner": "expanded-uart-bank-0"
     }
   ],
+  "waveform_endpoints": [
+    {
+      "type": "pwm",
+      "instance": 0,
+      "pin": 9,
+      "timer": 3,
+      "channel": 1,
+      "dma_channel": 0,
+      "maximum_frequency_hz": 100000,
+      "maximum_bits": 0,
+      "maximum_bit_rate": 0
+    },
+    {
+      "type": "pwm",
+      "instance": 1,
+      "pin": 11,
+      "timer": 3,
+      "channel": 2,
+      "dma_channel": 0,
+      "maximum_frequency_hz": 100000,
+      "maximum_bits": 0,
+      "maximum_bit_rate": 0
+    },
+    {
+      "type": "timed_bitstream",
+      "instance": 0,
+      "pin": 10,
+      "timer": 1,
+      "channel": 1,
+      "dma_channel": 1,
+      "maximum_frequency_hz": 0,
+      "maximum_bits": 192,
+      "maximum_bit_rate": 800000
+    }
+  ],
+  "motion_maximum_total_step_rate_hz": 200000,
   "motion_axes": [
     {
       "resource_id": 150994944,

@@ -3,6 +3,10 @@
 #include "remotebsp/toolbusd/node_registry.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
+#include "remotebsp/transport/link_routes.hpp"
+#include "remotebsp/transport/link_transport.hpp"
+#include "remotebsp/transport/libusb_transport.hpp"
+#include "remotebsp/transport/mock_usb_transport.hpp"
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <poll.h>
@@ -23,6 +27,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -34,12 +39,17 @@
 
 namespace {
 
-constexpr std::uint32_t kBroadcastRequestCanId = 0x700;
-constexpr std::uint32_t kNodeRequestBaseCanId = 0x600;
-constexpr std::uint32_t kNodeResponseBaseCanId = 0x580;
-constexpr std::uint32_t kNodeHeartbeatBaseCanId = 0x500;
-constexpr std::uint32_t kProvisionalResponseBaseCanId = 0x480;
-constexpr std::uint32_t kMaximumNodeId = 127;
+constexpr auto kBroadcastRequestRoute =
+    remotebsp::transport::kDiscoveryRoute;
+constexpr auto kNodeRequestBaseRoute =
+    remotebsp::transport::kNodeRequestBaseRoute;
+constexpr auto kNodeResponseBaseRoute =
+    remotebsp::transport::kNodeResponseBaseRoute;
+constexpr auto kNodeEventBaseRoute =
+    remotebsp::transport::kNodeEventBaseRoute;
+constexpr auto kProvisionalResponseBaseRoute =
+    remotebsp::transport::kProvisionalResponseBaseRoute;
+constexpr auto kMaximumNodeId = remotebsp::transport::kMaximumNodeId;
 constexpr std::size_t kMaximumQueuedEventsPerNode = 256;
 constexpr std::size_t kUartStreamBufferCapacity = 64U * 1024U;
 constexpr auto kDiscoveryInterval = std::chrono::milliseconds(2000);
@@ -105,13 +115,13 @@ std::uint32_t make_session_id() noexcept {
 
 class ToolbusDaemon {
 public:
-    ToolbusDaemon(const std::string& interface_name,
-                  remotebsp::transport::CanMode mode,
+    ToolbusDaemon(
+                  std::unique_ptr<remotebsp::transport::LinkTransport> transport,
                   std::string socket_path,
                   remotebsp::toolbusd::TrafficConfig traffic_config)
-        : transport_(interface_name, mode),
-          fragmenter_(transport_.mtu()),
-          reassembler_(transport_.mtu(), std::chrono::milliseconds(500)),
+        : transport_(std::move(transport)),
+          fragmenter_(transport_->mtu()),
+          reassembler_(transport_->mtu(), std::chrono::milliseconds(500)),
           traffic_(std::move(traffic_config)),
           socket_path_(std::move(socket_path)) {}
 
@@ -173,7 +183,7 @@ public:
 
 private:
     bool send_packet(
-        const remotebsp::protocol::Packet& packet, std::uint32_t can_id,
+        const remotebsp::protocol::Packet& packet, std::uint32_t route,
         remotebsp::toolbusd::AdmissionPolicy policy =
             remotebsp::toolbusd::AdmissionPolicy::Enforce) {
         /*
@@ -198,12 +208,8 @@ private:
         if (!traffic_.admit(traffic_class, frame_lengths, policy)) {
             return false;
         }
-        const bool bit_rate_switch =
-            transport_.mode() ==
-            remotebsp::transport::CanMode::FlexibleDataRate;
         for (const auto& frame : frames) {
-            transport_.send(
-                {can_id, false, frame, bit_rate_switch});
+            transport_->send({route, frame});
         }
         return true;
     }
@@ -219,23 +225,22 @@ private:
                 }
 
                 const auto message =
-                    transport_.receive(std::chrono::milliseconds(50));
+                    transport_->receive(std::chrono::milliseconds(50));
                 if (message.has_value() &&
-                    !message->extended_identifier &&
-                    ((message->identifier >
-                          kNodeResponseBaseCanId &&
-                      message->identifier <=
-                          kNodeResponseBaseCanId + kMaximumNodeId) ||
-                     (message->identifier >
-                          kNodeHeartbeatBaseCanId &&
-                      message->identifier <=
-                          kNodeHeartbeatBaseCanId + kMaximumNodeId) ||
-                     (message->identifier >
-                          kProvisionalResponseBaseCanId &&
-                      message->identifier <=
-                          kProvisionalResponseBaseCanId +
+                    ((message->route >
+                          kNodeResponseBaseRoute &&
+                      message->route <=
+                          kNodeResponseBaseRoute + kMaximumNodeId) ||
+                     (message->route >
+                          kNodeEventBaseRoute &&
+                      message->route <=
+                          kNodeEventBaseRoute + kMaximumNodeId) ||
+                     (message->route >
+                          kProvisionalResponseBaseRoute &&
+                      message->route <=
+                          kProvisionalResponseBaseRoute +
                               kMaximumNodeId))) {
-                    handle_can_message(*message);
+                    handle_link_frame(*message);
                 }
                 process_request_timers();
             } catch (const std::exception& error) {
@@ -251,13 +256,13 @@ private:
             request = nodes_.make_discovery_request(next_control_request_id_++);
         }
         static_cast<void>(
-            send_packet(request, kBroadcastRequestCanId));
+            send_packet(request, kBroadcastRequestRoute));
     }
 
-    void handle_can_message(
-        const remotebsp::transport::CanMessage& message) {
+    void handle_link_frame(
+        const remotebsp::transport::LinkFrame& message) {
         const auto result =
-            reassembler_.accept(message.identifier, message.data);
+            reassembler_.accept(message.route, message.data);
         if (result.status !=
                 remotebsp::protocol::ReassemblyStatus::Complete ||
             !result.packet.has_value()) {
@@ -279,9 +284,9 @@ private:
                  * 已复位并丢失了 RAM 中的节点 ID。保留原 ID，但撤销
                  * 心跳确认，让下方逻辑重新发送 NODE_ASSIGN。
                  */
-                if (message.identifier > kProvisionalResponseBaseCanId &&
-                    message.identifier <=
-                        kProvisionalResponseBaseCanId + kMaximumNodeId) {
+                if (message.route > kProvisionalResponseBaseRoute &&
+                    message.route <=
+                        kProvisionalResponseBaseRoute + kMaximumNodeId) {
                     nodes_.mark_assignment_unconfirmed(identity.uuid);
                 }
                 const auto* node = nodes_.find(identity.uuid);
@@ -310,13 +315,13 @@ private:
                 nodes_.accept_heartbeat(packet);
             } else if (packet.header.message_type ==
                        remotebsp::protocol::MessageType::Event) {
-                if (message.identifier <= kNodeHeartbeatBaseCanId ||
-                    message.identifier >
-                        kNodeHeartbeatBaseCanId + kMaximumNodeId) {
+                if (message.route <= kNodeEventBaseRoute ||
+                    message.route >
+                        kNodeEventBaseRoute + kMaximumNodeId) {
                     return;
                 }
                 const auto node_id =
-                    message.identifier - kNodeHeartbeatBaseCanId;
+                    message.route - kNodeEventBaseRoute;
                 if (packet.header.command ==
                         static_cast<std::uint16_t>(
                             remotebsp::protocol::Command::UartRxEvent) &&
@@ -361,19 +366,19 @@ private:
                 queue.push_back(packet);
                 state_changed_.notify_all();
             } else {
-                if (message.identifier <= kNodeResponseBaseCanId ||
-                    message.identifier >
-                        kNodeResponseBaseCanId + kMaximumNodeId) {
+                if (message.route <= kNodeResponseBaseRoute ||
+                    message.route >
+                        kNodeResponseBaseRoute + kMaximumNodeId) {
                     return;
                 }
                 const auto key = request_key(
                     packet.header.session_id, packet.header.request_id);
-                const auto target = request_can_ids_.find(key);
+                const auto target = request_routes_.find(key);
                 const auto response_node_id =
-                    message.identifier - kNodeResponseBaseCanId;
-                if (target == request_can_ids_.end() ||
+                    message.route - kNodeResponseBaseRoute;
+                if (target == request_routes_.end() ||
                     target->second !=
-                        kNodeRequestBaseCanId + response_node_id) {
+                        kNodeRequestBaseRoute + response_node_id) {
                     return;
                 }
                 const auto response =
@@ -388,7 +393,7 @@ private:
         }
         if (assignment.has_value()) {
             static_cast<void>(send_packet(
-                *assignment, kBroadcastRequestCanId,
+                *assignment, kBroadcastRequestRoute,
                 remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
         }
     }
@@ -396,7 +401,7 @@ private:
     void process_request_timers() {
         struct Retry {
             remotebsp::protocol::Packet packet;
-            std::uint32_t can_id{};
+            std::uint32_t route{};
         };
         std::vector<Retry> retries;
         {
@@ -407,15 +412,15 @@ private:
                     event.packet.has_value()) {
                     const auto key =
                         request_key(event.session_id, event.request_id);
-                    const auto target = request_can_ids_.find(key);
-                    if (target != request_can_ids_.end()) {
+                    const auto target = request_routes_.find(key);
+                    if (target != request_routes_.end()) {
                         retries.push_back({*event.packet, target->second});
                     }
                 } else if (event.type ==
                            remotebsp::toolbusd::RequestEventType::TimedOut) {
                     timed_out_.insert(
                         request_key(event.session_id, event.request_id));
-                    request_can_ids_.erase(
+                    request_routes_.erase(
                         request_key(event.session_id, event.request_id));
                     state_changed_.notify_all();
                 }
@@ -426,7 +431,7 @@ private:
         }
         for (const auto& retry : retries) {
             static_cast<void>(send_packet(
-                retry.packet, retry.can_id,
+                retry.packet, retry.route,
                 remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
         }
     }
@@ -580,10 +585,10 @@ private:
                         "目标节点尚未发现或已经离线");
                 }
                 submission = requests_.submit(std::move(request));
-                request_can_ids_[request_key(
+                request_routes_[request_key(
                     submission.packet.header.session_id,
                     submission.request_id)] =
-                    kNodeRequestBaseCanId + ipc_request.node_id;
+                    kNodeRequestBaseRoute + ipc_request.node_id;
             }
             const auto key = request_key(
                 submission.packet.header.session_id, submission.request_id);
@@ -597,14 +602,14 @@ private:
                     : remotebsp::toolbusd::AdmissionPolicy::Enforce;
             if (!send_packet(
                     submission.packet,
-                    kNodeRequestBaseCanId + ipc_request.node_id,
+                    kNodeRequestBaseRoute + ipc_request.node_id,
                     policy)) {
                 {
                     std::lock_guard<std::mutex> state_lock(state_mutex_);
                     requests_.cancel(
                         submission.packet.header.session_id,
                         submission.request_id);
-                    request_can_ids_.erase(key);
+                    request_routes_.erase(key);
                 }
                 throw std::runtime_error(
                     "CAN 带宽准入拒绝：当前业务类别预算不足");
@@ -620,7 +625,7 @@ private:
                 const auto encoded =
                     remotebsp::protocol::encode(response->second);
                 responses_.erase(response);
-                request_can_ids_.erase(key);
+                request_routes_.erase(key);
                 lock.unlock();
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok, encoded);
@@ -706,7 +711,7 @@ private:
         }
     }
 
-    remotebsp::transport::SocketCanTransport transport_;
+    std::unique_ptr<remotebsp::transport::LinkTransport> transport_;
     remotebsp::protocol::Fragmenter fragmenter_;
     remotebsp::protocol::Reassembler reassembler_;
     remotebsp::toolbusd::TrafficController traffic_;
@@ -724,7 +729,7 @@ private:
     std::condition_variable state_changed_;
     std::unordered_map<std::uint64_t, remotebsp::protocol::Packet> responses_;
     std::unordered_set<std::uint64_t> timed_out_;
-    std::unordered_map<std::uint64_t, std::uint32_t> request_can_ids_;
+    std::unordered_map<std::uint64_t, std::uint32_t> request_routes_;
     std::unordered_map<
         std::uint32_t, std::deque<remotebsp::protocol::Packet>>
         event_queues_;
@@ -740,7 +745,7 @@ private:
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "用法: toolbusd <SocketCAN接口> <classical|fd> "
+        std::cerr << "用法: toolbusd <链路端点> <classical|fd|usb|usb-mock> "
                      "[Unix套接字路径] "
                      "[--arbitration-bitrate bit/s] "
                      "[--data-bitrate bit/s] "
@@ -751,19 +756,27 @@ int main(int argc, char** argv) {
     try {
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
-        const auto mode = parse_mode(argv[2]);
+        const std::string mode_text = argv[2];
+        const bool mock_usb = mode_text == "usb-mock";
+        const bool usb = mode_text == "usb";
+        const auto mode = (mock_usb || usb)
+                              ? remotebsp::transport::CanMode::Classical
+                              : parse_mode(mode_text);
         std::string socket_path = "/tmp/toolbusd.sock";
         remotebsp::toolbusd::TrafficConfig traffic_config;
-        traffic_config.mode =
-            mode == remotebsp::transport::CanMode::Classical
-                ? remotebsp::toolbusd::TrafficBusMode::Classical
-                : remotebsp::toolbusd::TrafficBusMode::CanFd;
+        traffic_config.mode = (mock_usb || usb)
+                                  ? remotebsp::toolbusd::TrafficBusMode::Usb
+                                  : mode == remotebsp::transport::CanMode::Classical
+                                        ? remotebsp::toolbusd::TrafficBusMode::Classical
+                                        : remotebsp::toolbusd::TrafficBusMode::CanFd;
         traffic_config.arbitration_bits_per_second =
-            mode == remotebsp::transport::CanMode::Classical
+            (mock_usb || usb) ? 12000000U
+            : mode == remotebsp::transport::CanMode::Classical
                 ? 1000000U
                 : 500000U;
         traffic_config.data_bits_per_second =
-            mode == remotebsp::transport::CanMode::Classical
+            (mock_usb || usb) ? 12000000U
+            : mode == remotebsp::transport::CanMode::Classical
                 ? 1000000U
                 : 2000000U;
         int index = 3;
@@ -801,11 +814,27 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("未知 toolbusd 选项");
             }
         }
-        if (mode == remotebsp::transport::CanMode::Classical) {
+        if (!mock_usb && !usb &&
+            mode == remotebsp::transport::CanMode::Classical) {
             traffic_config.data_bits_per_second =
                 traffic_config.arbitration_bits_per_second;
         }
-        ToolbusDaemon daemon(argv[1], mode, std::move(socket_path),
+        std::unique_ptr<remotebsp::transport::LinkTransport> transport;
+        if (mock_usb) {
+            transport =
+                std::make_unique<remotebsp::transport::MockUsbTransport>(
+                    argv[1], remotebsp::transport::MockUsbRole::Host);
+        } else if (usb) {
+            transport =
+                std::make_unique<remotebsp::transport::LibusbTransport>(
+                    remotebsp::transport::parse_usb_device_selector(
+                        argv[1]));
+        } else {
+            transport =
+                std::make_unique<remotebsp::transport::SocketCanTransport>(
+                    argv[1], mode);
+        }
+        ToolbusDaemon daemon(std::move(transport), std::move(socket_path),
                              traffic_config);
         daemon.run();
     } catch (const std::exception& error) {

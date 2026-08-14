@@ -1,0 +1,870 @@
+{
+  "schema_version": 1,
+  "boards": [
+    {
+      "id": "mellow-fly-d5-v1",
+      "board_type": "0x00F072D5",
+      "label": "STM32F072RBT6 / Mellow FLY-D5",
+      "mcu": "STM32F072RBT6",
+      "pins": [
+        "PA0",
+        "PA1",
+        "PA2",
+        "PA3",
+        "PA4",
+        "PA5",
+        "PA6",
+        "PA7",
+        "PA8",
+        "PA9",
+        "PA10",
+        "PA11",
+        "PA12",
+        "PA13",
+        "PA14",
+        "PA15",
+        "PB0",
+        "PB1",
+        "PB2",
+        "PB3",
+        "PB4",
+        "PB5",
+        "PB6",
+        "PB7",
+        "PB8",
+        "PB9",
+        "PB10",
+        "PB11",
+        "PB12",
+        "PB13",
+        "PB14",
+        "PB15",
+        "PC0",
+        "PC1",
+        "PC2",
+        "PC3",
+        "PC4",
+        "PC5",
+        "PC6",
+        "PC7",
+        "PC8",
+        "PC9",
+        "PC10",
+        "PC11",
+        "PC12",
+        "PC13",
+        "PC14",
+        "PC15",
+        "PD2"
+      ],
+      "reserved": [
+        {
+          "pin": "PA11",
+          "owner": "Katapult USB DM"
+        },
+        {
+          "pin": "PA12",
+          "owner": "Katapult USB DP"
+        },
+        {
+          "pin": "PA13",
+          "owner": "SWDIO"
+        },
+        {
+          "pin": "PA14",
+          "owner": "SWCLK"
+        },
+        {
+          "pin": "PB8",
+          "owner": "CAN RX"
+        },
+        {
+          "pin": "PB9",
+          "owner": "CAN TX"
+        }
+      ],
+      "gpio_interfaces": [],
+      "gpio_defaults": [],
+      "uart": {
+        "endpoints": []
+      },
+      "uart_defaults": [],
+      "waveform": {
+        "pwm": [
+          {
+            "endpoint_id": "tim3_ch1_pa6",
+            "enabled": false,
+            "name": "pwm_0",
+            "channel": 0,
+            "pin": "PA6",
+            "capable_pins": [
+              "PA6"
+            ],
+            "timer": "TIM3_CH1",
+            "frequency_group": "TIM3",
+            "backend_status": "implemented",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch2_pa7",
+            "enabled": false,
+            "name": "pwm_1",
+            "channel": 1,
+            "pin": "PA7",
+            "capable_pins": [
+              "PA7"
+            ],
+            "timer": "TIM3_CH2",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch3_pb0",
+            "enabled": false,
+            "name": "pwm_2",
+            "channel": 2,
+            "pin": "PB0",
+            "capable_pins": [
+              "PB0"
+            ],
+            "timer": "TIM3_CH3",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch4_pb1",
+            "enabled": false,
+            "name": "pwm_3",
+            "channel": 3,
+            "pin": "PB1",
+            "capable_pins": [
+              "PB1"
+            ],
+            "timer": "TIM3_CH4",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          }
+        ],
+        "ws2812": [
+          {
+            "endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+            "enabled": false,
+            "name": "strip_0",
+            "channel": 0,
+            "pin": "PA8",
+            "capable_pins": [
+              "PA8"
+            ],
+            "timer_dma": "TIM1_CH1 + DMA1_Channel2",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel2",
+            "backend_status": "implemented",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch2_pa9_dma1_ch3",
+            "enabled": false,
+            "name": "strip_1",
+            "channel": 1,
+            "pin": "PA9",
+            "capable_pins": [
+              "PA9"
+            ],
+            "timer_dma": "TIM1_CH2 + DMA1_Channel3",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel3",
+            "backend_status": "planned",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch3_pa10_dma1_ch4",
+            "enabled": false,
+            "name": "strip_2",
+            "channel": 2,
+            "pin": "PA10",
+            "capable_pins": [
+              "PA10"
+            ],
+            "timer_dma": "TIM1_CH3 + DMA1_Channel4",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel4",
+            "backend_status": "planned",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          }
+        ]
+      },
+      "motion_defaults": [
+        {
+          "step": "PC15",
+          "dir": "PC14",
+          "enable": "PC2",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PC13",
+          "limit": "PB4",
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PA1",
+          "dir": "PA0",
+          "enable": "PA2",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PC3",
+          "limit": "PB3",
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PA5",
+          "dir": "PA4",
+          "enable": "PA6",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PA3",
+          "limit": "PD2",
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PB10",
+          "dir": "PB2",
+          "enable": "PB11",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PB1",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PC5",
+          "dir": "PC4",
+          "enable": "PB0",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PA7",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        }
+      ]
+    },
+    {
+      "id": "weact-bluepill-plus-v1",
+      "board_type": "0x000103CB",
+      "label": "STM32F103CBT6 / WeAct BluePill Plus",
+      "mcu": "STM32F103CBT6",
+      "pins": [
+        "PA0",
+        "PA1",
+        "PA2",
+        "PA3",
+        "PA4",
+        "PA5",
+        "PA6",
+        "PA7",
+        "PA8",
+        "PA9",
+        "PA10",
+        "PA11",
+        "PA12",
+        "PA13",
+        "PA14",
+        "PA15",
+        "PB0",
+        "PB1",
+        "PB2",
+        "PB3",
+        "PB4",
+        "PB5",
+        "PB6",
+        "PB7",
+        "PB8",
+        "PB9",
+        "PB10",
+        "PB11",
+        "PB12",
+        "PB13",
+        "PB14",
+        "PB15",
+        "PC13",
+        "PC14",
+        "PC15",
+        "PD0",
+        "PD1"
+      ],
+      "reserved": [
+        {
+          "pin": "PA9",
+          "owner": "USART1 TX"
+        },
+        {
+          "pin": "PA10",
+          "owner": "USART1 RX"
+        },
+        {
+          "pin": "PA11",
+          "owner": "Katapult USB DM"
+        },
+        {
+          "pin": "PA12",
+          "owner": "Katapult USB DP"
+        },
+        {
+          "pin": "PA13",
+          "owner": "SWDIO"
+        },
+        {
+          "pin": "PA14",
+          "owner": "SWCLK"
+        },
+        {
+          "pin": "PB2",
+          "owner": "板载呼吸灯"
+        },
+        {
+          "pin": "PB8",
+          "owner": "CAN RX"
+        },
+        {
+          "pin": "PB9",
+          "owner": "CAN TX"
+        },
+        {
+          "pin": "PC14",
+          "owner": "32.768kHz LSE"
+        },
+        {
+          "pin": "PC15",
+          "owner": "32.768kHz LSE"
+        },
+        {
+          "pin": "PD0",
+          "owner": "8MHz HSE OSC_IN"
+        },
+        {
+          "pin": "PD1",
+          "owner": "8MHz HSE OSC_OUT"
+        }
+      ],
+      "gpio_interfaces": [
+        {
+          "id": "user_button",
+          "label": "用户按键",
+          "pin": "PA0",
+          "allowed_directions": [
+            "input"
+          ],
+          "allowed_pulls": [
+            "down"
+          ],
+          "default_direction": "input",
+          "default_pull": "down",
+          "active_low": false,
+          "safe_level": null,
+          "debounce_ms": 10
+        }
+      ],
+      "gpio_defaults": [
+        {
+          "name": "user_button",
+          "pin": "PA0",
+          "direction": "input",
+          "pull": "down",
+          "active_low": false,
+          "safe_level": null,
+          "debounce_ms": 10
+        }
+      ],
+      "uart": {
+        "endpoints": [
+          {
+            "endpoint_id": "usart1_pa9_pa10",
+            "enabled": true,
+            "name": "uart_0",
+            "port": 0,
+            "rx_pin": "PA10",
+            "tx_pin": "PA9",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 4500000,
+            "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart1_pb6_pb7",
+            "enabled": false,
+            "name": "uart_0",
+            "port": 0,
+            "rx_pin": "PB7",
+            "tx_pin": "PB6",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 4500000,
+            "backend_status": "implemented"
+          }
+        ]
+      },
+      "uart_defaults": [
+        {
+          "endpoint_id": "usart1_pa9_pa10",
+          "enabled": true,
+          "name": "uart_0",
+          "port": 0,
+          "rx_pin": "PA10",
+          "tx_pin": "PA9",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 4500000,
+          "backend_status": "implemented"
+        }
+      ],
+      "waveform": {
+        "pwm": [
+          {
+            "endpoint_id": "tim3_ch1_pa6",
+            "enabled": false,
+            "name": "pwm_0",
+            "channel": 0,
+            "pin": "PA6",
+            "capable_pins": [
+              "PA6"
+            ],
+            "timer": "TIM3_CH1",
+            "frequency_group": "TIM3",
+            "backend_status": "implemented",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch2_pa7",
+            "enabled": false,
+            "name": "pwm_1",
+            "channel": 1,
+            "pin": "PA7",
+            "capable_pins": [
+              "PA7"
+            ],
+            "timer": "TIM3_CH2",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch3_pb0",
+            "enabled": false,
+            "name": "pwm_2",
+            "channel": 2,
+            "pin": "PB0",
+            "capable_pins": [
+              "PB0"
+            ],
+            "timer": "TIM3_CH3",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch4_pb1",
+            "enabled": false,
+            "name": "pwm_3",
+            "channel": 3,
+            "pin": "PB1",
+            "capable_pins": [
+              "PB1"
+            ],
+            "timer": "TIM3_CH4",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 20000,
+            "default_duty_percent": 50,
+            "active_low": false
+          }
+        ],
+        "ws2812": [
+          {
+            "endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+            "enabled": false,
+            "name": "strip_0",
+            "channel": 0,
+            "pin": "PA8",
+            "capable_pins": [
+              "PA8"
+            ],
+            "timer_dma": "TIM1_CH1 + DMA1_Channel2",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel2",
+            "backend_status": "implemented",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch2_pa9_dma1_ch3",
+            "enabled": false,
+            "name": "strip_1",
+            "channel": 1,
+            "pin": "PA9",
+            "capable_pins": [
+              "PA9"
+            ],
+            "timer_dma": "TIM1_CH2 + DMA1_Channel3",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel3",
+            "backend_status": "planned",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch3_pa10_dma1_ch6",
+            "enabled": false,
+            "name": "strip_2",
+            "channel": 2,
+            "pin": "PA10",
+            "capable_pins": [
+              "PA10"
+            ],
+            "timer_dma": "TIM1_CH3 + DMA1_Channel6",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel6",
+            "backend_status": "planned",
+            "pixel_count": 8,
+            "max_pixels": 32,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          }
+        ]
+      },
+      "motion_defaults": [
+        {
+          "step": "PA1",
+          "dir": "PA2",
+          "enable": "PA3",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PA4",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PA5",
+          "dir": "PA6",
+          "enable": "PA7",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PA8",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PA15",
+          "dir": "PB0",
+          "enable": "PB1",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PC13",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PB3",
+          "dir": "PB4",
+          "enable": "PB5",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PB6",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        },
+        {
+          "step": "PB7",
+          "dir": "PB10",
+          "enable": "PB11",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PB12",
+          "limit": null,
+          "maximum_step_rate_hz": 50000
+        }
+      ]
+    },
+    {
+      "id": "weact-g431-core-v10",
+      "board_type": "0x000431CB",
+      "label": "STM32G431CBU6 / WeAct STM32G431CBU6 Core",
+      "mcu": "STM32G431CBU6",
+      "pins": [
+        "PA0",
+        "PA1",
+        "PA2",
+        "PA3",
+        "PA4",
+        "PA5",
+        "PA6",
+        "PA7",
+        "PA8",
+        "PA9",
+        "PA10",
+        "PA11",
+        "PA12",
+        "PA13",
+        "PA14",
+        "PA15",
+        "PB0",
+        "PB1",
+        "PB2",
+        "PB3",
+        "PB4",
+        "PB5",
+        "PB6",
+        "PB7",
+        "PB8",
+        "PB9",
+        "PB10",
+        "PB11",
+        "PB12",
+        "PB13",
+        "PB14",
+        "PB15",
+        "PC4",
+        "PC6",
+        "PC10",
+        "PC11",
+        "PC13"
+      ],
+      "reserved": [
+        {
+          "pin": "PA11",
+          "owner": "Katapult USB DM"
+        },
+        {
+          "pin": "PA12",
+          "owner": "Katapult USB DP"
+        },
+        {
+          "pin": "PA13",
+          "owner": "SWDIO"
+        },
+        {
+          "pin": "PA14",
+          "owner": "SWCLK"
+        },
+        {
+          "pin": "PB8",
+          "owner": "CAN RX"
+        },
+        {
+          "pin": "PB9",
+          "owner": "CAN TX"
+        }
+      ],
+      "gpio_interfaces": [
+        {
+          "id": "user_button",
+          "label": "用户按键",
+          "pin": "PC13",
+          "allowed_directions": [
+            "input"
+          ],
+          "allowed_pulls": [
+            "down"
+          ],
+          "default_direction": "input",
+          "default_pull": "down",
+          "active_low": false,
+          "safe_level": null,
+          "debounce_ms": 10
+        }
+      ],
+      "gpio_defaults": [
+        {
+          "name": "user_button",
+          "pin": "PC13",
+          "direction": "input",
+          "pull": "down",
+          "active_low": false,
+          "safe_level": null,
+          "debounce_ms": 10
+        }
+      ],
+      "uart": {
+        "endpoints": []
+      },
+      "uart_defaults": [],
+      "waveform": {
+        "pwm": [
+          {
+            "endpoint_id": "tim3_ch1_pc6",
+            "enabled": true,
+            "name": "board_led",
+            "channel": 0,
+            "pin": "PC6",
+            "capable_pins": [
+              "PC6"
+            ],
+            "timer": "TIM3_CH1",
+            "frequency_group": "TIM3",
+            "backend_status": "implemented",
+            "frequency_hz": 10000,
+            "default_duty_percent": 35,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch2_pa7",
+            "enabled": false,
+            "name": "pwm_1",
+            "channel": 1,
+            "pin": "PA7",
+            "capable_pins": [
+              "PA7"
+            ],
+            "timer": "TIM3_CH2",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 10000,
+            "default_duty_percent": 35,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch3_pb0",
+            "enabled": false,
+            "name": "pwm_2",
+            "channel": 2,
+            "pin": "PB0",
+            "capable_pins": [
+              "PB0"
+            ],
+            "timer": "TIM3_CH3",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 10000,
+            "default_duty_percent": 35,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch4_pb1",
+            "enabled": false,
+            "name": "pwm_3",
+            "channel": 3,
+            "pin": "PB1",
+            "capable_pins": [
+              "PB1"
+            ],
+            "timer": "TIM3_CH4",
+            "frequency_group": "TIM3",
+            "backend_status": "planned",
+            "frequency_hz": 10000,
+            "default_duty_percent": 35,
+            "active_low": false
+          }
+        ],
+        "ws2812": [
+          {
+            "endpoint_id": "tim1_ch1_pa8_dma1_ch1",
+            "enabled": false,
+            "name": "strip_0",
+            "channel": 0,
+            "pin": "PA8",
+            "capable_pins": [
+              "PA8"
+            ],
+            "timer_dma": "TIM1_CH1 + DMA1_Channel1 / DMAMUX",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel1",
+            "backend_status": "implemented",
+            "pixel_count": 16,
+            "max_pixels": 64,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch2_pa9_dma1_ch2",
+            "enabled": false,
+            "name": "strip_1",
+            "channel": 1,
+            "pin": "PA9",
+            "capable_pins": [
+              "PA9"
+            ],
+            "timer_dma": "TIM1_CH2 + DMA1_Channel2 / DMAMUX",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel2",
+            "backend_status": "planned",
+            "pixel_count": 16,
+            "max_pixels": 64,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          },
+          {
+            "endpoint_id": "tim1_ch3_pa10_dma1_ch3",
+            "enabled": false,
+            "name": "strip_2",
+            "channel": 2,
+            "pin": "PA10",
+            "capable_pins": [
+              "PA10"
+            ],
+            "timer_dma": "TIM1_CH3 + DMA1_Channel3 / DMAMUX",
+            "timer_group": "TIM1",
+            "dma_resource": "DMA1_Channel3",
+            "backend_status": "planned",
+            "pixel_count": 16,
+            "max_pixels": 64,
+            "color_order": "GRB",
+            "reset_time_us": 80
+          }
+        ]
+      },
+      "motion_defaults": [
+        {
+          "step": "PA0",
+          "dir": "PA1",
+          "enable": "PA2",
+          "dir_inverted": false,
+          "enable_source": null,
+          "enable_active_low": true,
+          "tmc_uart": "PA3",
+          "limit": null,
+          "maximum_step_rate_hz": 10000
+        }
+      ]
+    }
+  ]
+}

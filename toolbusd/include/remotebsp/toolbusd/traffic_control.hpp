@@ -14,6 +14,7 @@ namespace remotebsp::toolbusd {
 enum class TrafficBusMode : std::uint8_t {
     Classical = 0,
     CanFd = 1,
+    Usb = 2,
 };
 
 enum class TrafficClass : std::uint8_t {

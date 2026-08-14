@@ -440,6 +440,9 @@ protocol::ResourceType parse_resource_type(const std::string& text) {
     if (text == "stepgen_axis") {
         return protocol::ResourceType::StepgenAxis;
     }
+    if (text == "timed_bitstream") {
+        return protocol::ResourceType::TimedBitstream;
+    }
     schema_error(ManifestError::InvalidValue,
                  "未知资源类型 " + text);
 }
@@ -464,6 +467,8 @@ Capability resource_capability(protocol::ResourceType type) {
             return Capability::Storage;
         case protocol::ResourceType::StepgenAxis:
             return Capability::Motion;
+        case protocol::ResourceType::TimedBitstream:
+            return Capability::TimedBitstream;
     }
     schema_error(ManifestError::InvalidValue, "资源类型没有能力位映射");
 }
@@ -577,7 +582,8 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
                    {"schema_version", "name", "board_type", "uuid",
                     "firmware_version", "capabilities",
                     "resource_groups", "reserved_resources",
-                    "motion_axes"},
+                    "motion_axes", "motion_maximum_total_step_rate_hz",
+                    "waveform_endpoints"},
                    "板卡描述根");
 
     BoardManifest manifest;
@@ -763,6 +769,87 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
         manifest.reserved_resources.push_back(std::move(entry));
     }
 
+    const auto waveform_endpoints = root.find("waveform_endpoints");
+    std::set<std::pair<protocol::ResourceType, std::uint16_t>>
+        configured_waveform_endpoints;
+    if (waveform_endpoints != root.end()) {
+        if (waveform_endpoints->second.type != JsonValue::Type::Array) {
+            schema_error(ManifestError::InvalidSchema,
+                         "waveform_endpoints 必须是数组");
+        }
+        for (const auto& endpoint_value :
+             waveform_endpoints->second.array) {
+            const auto& endpoint =
+                require_object(endpoint_value, "waveform_endpoint");
+            reject_unknown(
+                endpoint,
+                {"type", "instance", "pin", "timer", "channel",
+                 "dma_channel", "maximum_frequency_hz", "maximum_bits",
+                 "maximum_bit_rate"},
+                "waveform_endpoint");
+            WaveformEndpointCapability capability;
+            capability.type =
+                parse_resource_type(require_string(endpoint, "type"));
+            capability.instance = require_u16(endpoint, "instance");
+            capability.pin = require_u16(endpoint, "pin");
+            const auto timer = require_u16(endpoint, "timer");
+            const auto channel = require_u16(endpoint, "channel");
+            const auto dma_channel = require_u16(endpoint, "dma_channel");
+            capability.maximum_frequency_hz =
+                require_u32(endpoint, "maximum_frequency_hz");
+            capability.maximum_bits =
+                require_u16(endpoint, "maximum_bits");
+            capability.maximum_bit_rate =
+                require_u32(endpoint, "maximum_bit_rate");
+            if ((capability.type != protocol::ResourceType::Pwm &&
+                 capability.type !=
+                     protocol::ResourceType::TimedBitstream) ||
+                timer == 0U || timer > 255U || channel == 0U ||
+                channel > 4U || dma_channel > 255U ||
+                capability.pin > 255U) {
+                schema_error(ManifestError::InvalidValue,
+                             "波形端点类型或硬件字段无效");
+            }
+            capability.timer = static_cast<std::uint8_t>(timer);
+            capability.channel = static_cast<std::uint8_t>(channel);
+            capability.dma_channel =
+                static_cast<std::uint8_t>(dma_channel);
+            const auto key =
+                std::make_pair(capability.type, capability.instance);
+            if (!configured_waveform_endpoints.insert(key).second ||
+                resource_instances.count(key) == 0U) {
+                schema_error(ManifestError::Conflict,
+                             "波形端点未引用唯一公开资源实例");
+            }
+            if (capability.type == protocol::ResourceType::Pwm) {
+                if (capability.dma_channel != 0U ||
+                    capability.maximum_frequency_hz == 0U ||
+                    capability.maximum_bits != 0U ||
+                    capability.maximum_bit_rate != 0U) {
+                    schema_error(ManifestError::InvalidValue,
+                                 "PWM端点能力字段无效");
+                }
+            } else if (capability.dma_channel == 0U ||
+                       capability.maximum_frequency_hz != 0U ||
+                       capability.maximum_bits == 0U ||
+                       capability.maximum_bit_rate == 0U) {
+                schema_error(ManifestError::InvalidValue,
+                             "定时位流端点能力字段无效");
+            }
+            manifest.waveform_endpoints.push_back(capability);
+        }
+        for (const auto& resource : manifest.resources) {
+            if ((resource.type == protocol::ResourceType::Pwm ||
+                 resource.type ==
+                     protocol::ResourceType::TimedBitstream) &&
+                configured_waveform_endpoints.count(
+                    {resource.type, resource.instance}) == 0U) {
+                schema_error(ManifestError::Conflict,
+                             "公开波形资源缺少硬件端点能力");
+            }
+        }
+    }
+
     const auto motion_axes = root.find("motion_axes");
     std::set<std::uint32_t> configured_motion_axes;
     if (motion_axes != root.end()) {
@@ -845,6 +932,18 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
     }
     if (motion_queue_capacity.has_value()) {
         manifest.motion_queue_capacity = *motion_queue_capacity;
+    }
+    if (!manifest.motion_axes.empty()) {
+        manifest.motion_maximum_total_step_rate_hz =
+            require_u32(root, "motion_maximum_total_step_rate_hz");
+        if (manifest.motion_maximum_total_step_rate_hz == 0U) {
+            schema_error(ManifestError::InvalidValue,
+                         "运动整板总STEP频率预算必须非零");
+        }
+    } else if (root.find("motion_maximum_total_step_rate_hz") !=
+               root.end()) {
+        schema_error(ManifestError::Conflict,
+                     "没有运动轴时不能声明整板总STEP频率预算");
     }
     return manifest;
 }
@@ -950,10 +1049,16 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
     }
     uart_ = std::make_shared<MockUartBsp>(
         uart_rx_capacity, uart_tx_capacity);
+    if ((manifest_.capabilities & capability_mask(Capability::Pwm)) != 0U ||
+        (manifest_.capabilities &
+         capability_mask(Capability::TimedBitstream)) != 0U) {
+        waveform_ = std::make_shared<WaveformBsp>();
+    }
     if (!manifest_.motion_axes.empty()) {
         motion_ = std::make_shared<MotionExecutor>(
             manifest_.motion_axes,
-            manifest_.motion_queue_capacity);
+            manifest_.motion_queue_capacity, 1000000ULL,
+            manifest_.motion_maximum_total_step_rate_hz);
     }
     for (const auto& event : scenario_.events) {
         if (event.action == FaultAction::SetUartFailed) {
@@ -990,6 +1095,10 @@ const std::shared_ptr<MockUartBsp>& DigitalTwin::uart() const noexcept {
 
 const std::shared_ptr<MotionExecutor>& DigitalTwin::motion() const noexcept {
     return motion_;
+}
+
+const std::shared_ptr<WaveformBsp>& DigitalTwin::waveform() const noexcept {
+    return waveform_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1064,10 +1173,13 @@ void DigitalTwin::apply(const FaultEvent& event) {
 RemoteCore make_remote_core(const DigitalTwin& twin,
                             std::uint32_t instance) {
     const auto& manifest = twin.manifest();
+    auto device_parameters = std::make_shared<DeviceParameterStore>();
     return RemoteCore(instantiate_node_info(manifest, instance),
-                      manifest.capabilities, twin.gpio(), twin.uart(),
-                      manifest.resources, manifest.contracts,
-                      twin.motion());
+                      manifest.capabilities |
+                          capability_mask(Capability::DeviceParameters),
+                       twin.gpio(), twin.uart(),
+                       manifest.resources, manifest.contracts,
+                       twin.motion(), twin.waveform(), device_parameters);
 }
 
 }  // namespace remotebsp::mock_mcu

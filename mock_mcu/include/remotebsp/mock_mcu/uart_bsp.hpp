@@ -42,6 +42,7 @@ public:
                        const std::vector<std::uint8_t>& data) = 0;
     virtual UartRuntimeStatus status(std::uint8_t port) const = 0;
     virtual void reset(std::uint8_t port) = 0;
+    virtual void reset_all() = 0;
 };
 
 enum class UartError {
@@ -75,6 +76,7 @@ public:
                const std::vector<std::uint8_t>& data) override;
     UartRuntimeStatus status(std::uint8_t port) const override;
     void reset(std::uint8_t port) override;
+    void reset_all() override;
 
     void inject_rx(std::uint8_t port,
                    const std::vector<std::uint8_t>& data);

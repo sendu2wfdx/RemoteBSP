@@ -22,7 +22,9 @@
  * PA13/PA14 始终保留为 SWDIO/SWCLK，NRST 也不分配给业务资源。
  * CAN 引脚只允许选择两颗目标 MCU 都支持的组合。
  */
-#if defined(CONFIG_CAN_PINS_PA11_PA12)
+#if defined(CONFIG_REMOTEBSP_TRANSPORT_USB)
+/* USB 主链路不分配 CAN 引脚。 */
+#elif defined(CONFIG_CAN_PINS_PA11_PA12)
 #define RBSP_CAN_RX_PORT 'A'
 #define RBSP_CAN_RX_PIN 11U
 #define RBSP_CAN_TX_PORT 'A'
@@ -32,7 +34,7 @@
 #define RBSP_CAN_RX_PIN 8U
 #define RBSP_CAN_TX_PORT 'B'
 #define RBSP_CAN_TX_PIN 9U
-#else
+#elif defined(CONFIG_REMOTEBSP_TRANSPORT_CAN)
 #error "必须选择 CAN 引脚组"
 #endif
 

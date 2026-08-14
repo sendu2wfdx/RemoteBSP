@@ -53,7 +53,7 @@ std::uint64_t read_u64(const std::uint8_t* input) {
 
 bool valid_type(std::uint8_t value) {
     return value >= static_cast<std::uint8_t>(ResourceType::Gpio) &&
-           value <= static_cast<std::uint8_t>(ResourceType::StepgenAxis);
+           value <= static_cast<std::uint8_t>(ResourceType::TimedBitstream);
 }
 
 bool valid_lease_mode(std::uint8_t value, bool allow_none) {

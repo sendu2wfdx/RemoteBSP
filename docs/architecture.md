@@ -2,7 +2,7 @@
 
 详细设备拓扑、故障隔离、多 UART、板级资源适配、固件配置和硬件 ID 需求见
 [使用场景与系统需求](use-cases-and-requirements.md)。
-后续多轴步进、限位联锁、TMC 通信和运行时资源清单见
+后续多轴步进、限位联锁、TMC 通信和静态资源模型见
 [智能实时资源与多轴运动控制设计](intelligent-motion-resources.md)。
 
 Remote BSP 的目标是让 Linux 负责设备协议和业务逻辑，让远端 MCU 只执行
@@ -12,8 +12,8 @@ Remote BSP 的目标是让 Linux 负责设备协议和业务逻辑，让远端 M
 
 ```text
 应用程序 -> libremotebsp -> toolbusd -> 远程协议
-        -> 分片与重组 -> CAN 传输 -> SocketCAN
-        -> Mock MCU 远程核心
+        -> 分片与重组 -> LinkTransport
+        -> SocketCAN / libusb / Mock USB -> 远程核心
 ```
 
 各层必须保持清晰边界：
@@ -48,8 +48,8 @@ CRC 字段本身。
 
 ## 第二步：分片与重组
 
-分片层接收完整编码数据包和 MTU，不依赖 SocketCAN 头或任何具体 CAN
-传输实现。Classical CAN 使用 8 字节 MTU，CAN-FD 使用 64 字节 MTU。
+分片层接收完整编码数据包和 MTU，不依赖 SocketCAN、libusb 或具体链路。
+Classical CAN 使用 8 字节 MTU，CAN-FD 和 USB 第一版使用 64 字节逻辑 MTU。
 
 每个分片具有 5 字节的小端序头：
 
@@ -73,21 +73,22 @@ Linux 重组器允许乱序重组，可以检测完全重复和内容冲突的�
 不能直接复用对端请求的传输 ID。节点尚未分配地址时，发现响应和临时心跳会
 共用临时 CAN ID；统一计数器可避免两类消息在同一重组流中撞号。
 
-## 第三步：CAN 传输基础
+## 第三步：通用链路与 CAN/USB 适配器
 
-`CanTransport` 是上层唯一依赖的 CAN 传输接口，提供：
+`LinkTransport` 是 toolbusd 和 Mock MCU 唯一依赖的链路接口，提供：
 
-- `send()`：发送一条 CAN 消息。
-- `receive()`：按指定超时接收一条 CAN 消息。
+- `send()`：发送一条带逻辑路由号的链路帧。
+- `receive()`：按指定超时接收一条链路帧。
 - `mtu()`：返回当前模式的载荷上限。
-- `mode()`：返回 Classical CAN 或 CAN-FD 模式。
+- `capabilities()`：返回链路类型、可靠性、顺序性和标称速度。
 
 `SocketCanTransport` 是 Linux 实现。Classical CAN 使用 `struct can_frame`，
 CAN-FD 使用 `struct canfd_frame`。帧转换代码负责校验 11 位或 29 位标识符、
 载荷长度，并拒绝错误帧和远程请求帧。
 
-以上传输接口已经由 `toolbusd`、Mock MCU 和真实 `vcan` 端到端测试使用；
-协议层仍不依赖任何 CAN 类型。
+`LibusbTransport` 使用 Vendor Bulk 和 `RBU1` 长度帧头；`MockUsbTransport`
+使用 Unix 字节流验证拆包与粘包。三者均已由 toolbusd 和 Mock MCU 端到端测试，
+协议层仍不依赖 CAN 或 USB 类型。USB 细节见 [USB Vendor Bulk 传输](usb-transport.md)。
 
 ## 第四步：Mock MCU 远程核心
 
@@ -261,7 +262,8 @@ UART 4～7 为板级扩展接口；8 路串口都声明 4096 字节收发缓冲�
 因此一个节点不能错误地完成另一个节点的请求。
 
 `libremotebsp` 提供线程安全的同步 C++ API，包括节点列表、信息/能力查询、
-资源查询与复位、GPIO、UART和运动段/状态/停机。每次调用使用独立 UDS 连接，一个慢调用不会污染
+资源查询与复位、GPIO、UART、PWM、定时位流/WS2812和运动段/状态/停机。
+每次调用使用独立 UDS 连接，一个慢调用不会污染
 其他线程的响应流。`toolbusd` 每次启动生成新的非零会话 ID，并覆盖客户端提供
 的会话值，避免守护进程重启后请求 ID 与 MCU 旧去重缓存冲突。
 
@@ -287,7 +289,7 @@ CAN-FD 都执行该测试。
 当前事件通路已经解决持续数据不必反复发送 `UART_READ` 的问题。每资源带宽
 配额、事件优先级和溢出丢弃计数公开仍需后续增强。
 
-## 第十五步：Katapult Bootloader 与 USB 调试旁路
+## 第十五步：Katapult 双模式升级
 
 STM32 APP 支持 `BOOTLOADER_ENTER` 和 `BOOTLOADER_ENTER_USB` 两个原子命令，
 分别选择 CAN 和 USB Katapult。载荷必须是固定 8 字节确认串，节点先缓存并
@@ -301,13 +303,11 @@ F103 和 G431 使用同一套双模式补丁：APP 命令可以选择 CAN 或 US
 按住 PA0 或 APP 无效也会选择 USB 应急恢复。两个通信后端同时链接，但运行时
 只初始化一个；F103 因而不会同时启用共享专用 SRAM 的 USB 与 bxCAN。
 
-APP USB CDC 调试是协议与 CAN 传输之外的可选旁路。它只发送诊断文本，使用
-固定环形缓冲和 64 字节 USB 包；未连接、拥塞或初始化失败都不会阻塞 CAN
-接收、心跳或远程 BSP 调度。该旁路当前仅对 STM32G431 开放，并要求 FDCAN
-固定使用 PB8/PB9。STM32F103 的 USB 与 bxCAN 共用专用 SRAM，CAN APP 禁止
-启用 USB CDC；其 USB 只在未运行 CAN 的 Katapult Bootloader 阶段使用。
-详细构建、升级和安全边界见
-[Katapult Bootloader 与 USB 调试](bootloader-and-usb-debug.md)。
+正式板卡预设默认仍通过 CAN/CAN-FD 承载业务、遥测和诊断。G431 另提供互斥的
+USB Vendor Bulk APP 预设，已经具备 Linux、Mock、MCU 公共帧格式和 USB Device
+后端并通过交叉编译，实体枚举与压力测试待验收。Katapult USB 仍是独立程序和
+独立 PID。详细构建、升级和安全边界见
+[Katapult 双模式升级与应急恢复](bootloader-upgrade.md)。
 
 ## 第十六步：资源能力合同与会话级租约
 
@@ -321,6 +321,18 @@ Mock MCU 已实现`RESOURCE_CONTRACT`，固定32字节合同包含：
 
 数值为0表示不适用或尚未声明，不表示无限能力。Mock数值用于协议和准入流程
 验证；F103/G431的正式保证值必须来自后续实体压力测试。
+
+运动资源另外提供节点级`MOTION_CONTRACT`，因为整板总STEP频率、统一队列和最小
+提前量不能准确表达成某一根轴的独立合同。v1合同包含活动轴资源ID及其最大步频、
+STEP高/低电平和DIR建立时间，并携带整板总步频与队列容量。Linux在首次入队前
+读取并缓存合同，以与MCU相同的整数算法做静态准入；配置提交或回滚会使缓存失效。
+队列瞬时余量、租约和故障仍由节点最终裁决，主机准入不能取代板端安全校验。
+
+运动资源另外提供节点级`MOTION_CONTRACT`，因为整板总STEP频率、统一队列和最小
+提前量不能准确表达成某一根轴的独立合同。v1合同包含活动轴资源ID及其最大步频、
+STEP高/低电平和DIR建立时间，并携带整板总步频与队列容量。Linux在首次入队前
+读取并缓存合同，以与MCU相同的整数算法做静态准入；配置提交或回滚会使缓存失效。
+队列瞬时余量、租约和故障仍由节点最终裁决，主机准入不能取代板端安全校验。
 
 资源租约命令包括：
 
@@ -387,10 +399,12 @@ vcan端到端测试同时检查FDF和BRS标志。`traffic-status`通过本地IPC
 限位和急停。TMC 型号、寄存器含义和初始化仍属于 Linux；MCU 只提供通用
 UART、半双工 UART 和 SPI 原子事务。
 
-编译期配置与运行时接线配置严格分离。`menuconfig` 负责 MCU、晶振、CAN、
-USB、Bootloader 以及是否链接运动/输入/总线模块；轴引脚、限位、TMC 总线和
-资源依赖保存为带版本、CRC 和 A/B 原子提交的非易失资源清单。详细的队列模型、
-安全状态、资源占用和分阶段实现要求见
+RemoteBSP Studio 是正式入口：它保存工程并生成完整Kconfig `.config`，再驱动
+专用固件构建与烧录。Kconfig负责MCU、晶振、CAN/USB、Bootloader、功能裁剪、
+静态容量，以及轴引脚、限位、TMC总线和资源依赖。映射编译进固件，重启后建立
+固定资源表，不提供运行期动态申请IO或在线改线。
+配置架构见[固件配置与 RemoteBSP Studio 设计](configuration-and-studio.md)，详细
+的队列模型、安全状态、资源占用和分阶段实现要求见
 [智能实时资源与多轴运动控制设计](intelligent-motion-resources.md)。
 
 不同板卡上的轴使用 64 位全局运动时间。`toolbusd` 分别估计每块 MCU 的时钟

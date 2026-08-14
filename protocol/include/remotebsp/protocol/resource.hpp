@@ -16,6 +16,7 @@ enum class ResourceType : std::uint8_t {
     Timer = 7,
     Storage = 8,
     StepgenAxis = 9,
+    TimedBitstream = 10,
 };
 
 constexpr std::uint16_t kResourceFlagNative = 0x0001;

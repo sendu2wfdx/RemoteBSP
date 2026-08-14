@@ -1,12 +1,15 @@
 #pragma once
 
+#include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/resource.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <optional>
 #include <string>
@@ -46,7 +49,15 @@ struct CanTrafficClassCounters {
     std::uint64_t estimated_wire_time_ns{};
 };
 
+enum class LinkTrafficMode : std::uint8_t {
+    ClassicalCan = 0,
+    CanFd = 1,
+    Usb = 2,
+};
+
 struct CanTrafficStatus {
+    LinkTrafficMode mode{LinkTrafficMode::ClassicalCan};
+    /* 兼容旧客户端；新代码应读取 mode。 */
     bool can_fd{};
     std::uint32_t arbitration_bits_per_second{};
     std::uint32_t data_bits_per_second{};
@@ -144,11 +155,31 @@ public:
     protocol::ResourceLeaseInfo resource_lease_status(
         std::uint32_t resource_id) const;
 
+    protocol::DeviceParameterStatus device_parameter_status() const;
+    std::vector<protocol::DeviceParameterDescriptor>
+        list_device_parameters() const;
+    protocol::DeviceParameterValue read_device_parameter(
+        std::uint16_t id) const;
+    protocol::DeviceParameterStatus write_device_parameter(
+        std::uint16_t id, const std::vector<std::uint8_t>& value) const;
+
     std::uint32_t gpio_create(std::uint16_t pin,
                               GpioDirection direction,
                               bool initial_value = false) const;
     bool gpio_read(std::uint32_t object_id) const;
     void gpio_write(std::uint32_t object_id, bool value) const;
+
+    std::uint32_t pwm_create(
+        const protocol::PwmCreatePayload& config) const;
+    void pwm_write(std::uint32_t object_id, std::uint16_t duty) const;
+    void pwm_stop(std::uint32_t object_id) const;
+
+    std::uint32_t timed_bitstream_create(
+        const protocol::TimedBitstreamCreatePayload& config) const;
+    void timed_bitstream_write(
+        std::uint32_t object_id,
+        const protocol::TimedBitstreamWritePayload& data) const;
+    void timed_bitstream_abort(std::uint32_t object_id) const;
 
     std::uint32_t uart_create(const UartConfig& config) const;
     std::vector<std::uint8_t> uart_read(
@@ -165,6 +196,8 @@ public:
 
     protocol::MotionAcceptancePayload motion_enqueue(
         const protocol::MotionSegmentPayload& segment) const;
+    protocol::MotionContractPayload motion_contract(
+        bool refresh = false) const;
     protocol::MotionStatusPayload motion_status() const;
     void motion_abort() const;
     void motion_clear_fault() const;
@@ -174,12 +207,15 @@ public:
     std::uint32_t node_id() const noexcept;
 
 private:
+    struct MotionContractCache;
+
     protocol::Packet command(protocol::Command command,
                              std::vector<std::uint8_t> payload = {},
                              std::uint32_t object_id = 0) const;
 
     std::string socket_path_;
     std::uint32_t node_id_;
+    std::shared_ptr<MotionContractCache> motion_contract_cache_;
 };
 
 }

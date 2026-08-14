@@ -53,6 +53,21 @@ CanFrameCost estimate_can_frame_cost(
         throw TrafficException(TrafficError::InvalidConfiguration,
                                "CAN 位速率必须大于零");
     }
+    if (mode == TrafficBusMode::Usb) {
+        if (payload_length > 64U) {
+            throw TrafficException(TrafficError::InvalidFrameLength,
+                                   "USB 逻辑帧载荷超过 64 字节");
+        }
+        /* RBU1 帧头 12 字节；USB 物理层校验和令牌开销由控制器保留量吸收。 */
+        const std::uint64_t total_bits = (12U + payload_length) * 8U;
+        return {
+            0U,
+            static_cast<std::uint16_t>(total_bits),
+            divide_round_up(total_bits * 1000000000ULL,
+                            data_bits_per_second),
+            static_cast<std::uint8_t>(payload_length),
+        };
+    }
     if (mode == TrafficBusMode::Classical) {
         if (payload_length > 8U) {
             throw TrafficException(TrafficError::InvalidFrameLength,
@@ -120,11 +135,13 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
             return TrafficClass::Streaming;
         case protocol::Command::MotionEnqueue:
         case protocol::Command::MotionStatus:
+        case protocol::Command::MotionContract:
             return TrafficClass::Motion;
         case protocol::Command::MotionAbort:
             return TrafficClass::Safety;
         case protocol::Command::BootloaderEnter:
         case protocol::Command::BootloaderEnterUsb:
+        case protocol::Command::TimedBitstreamWrite:
             return TrafficClass::Bulk;
         default:
             return TrafficClass::Interactive;
