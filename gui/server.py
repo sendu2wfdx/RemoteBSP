@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import mimetypes
 from http import HTTPStatus
@@ -19,6 +20,7 @@ from firmware_builder import (
     resolve_artifact,
 )
 from project_config import ProjectConfigError, generate_project_config
+from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -129,10 +131,13 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/project/target":
             self._send_json({
+                "api_version": 1,
                 "mode": "static-firmware",
                 "enabled": True,
                 "build_enabled": True,
                 "parallel_jobs": self.build_jobs,
+                "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
+                "runtime_control_enabled": False,
             })
             return
         if path.startswith("/api/project/artifacts/"):
@@ -154,7 +159,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path not in ("/api/project/generate", "/api/project/build"):
+        if path not in ("/api/project/inspect", "/api/project/generate",
+                        "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
         try:
@@ -164,19 +170,33 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/generate":
+            if path in ("/api/project/inspect", "/api/project/generate"):
                 result = generate_project_config(project, catalog)
                 response = {
                     "ok": True,
-                    "format": "KCONFIG",
+                    "format": "PROJECT_INSPECTION" if
+                              path == "/api/project/inspect" else "KCONFIG",
                     "board_id": result.board_id,
                     "firmware_target": result.firmware_target,
                     "resource_count": result.resource_count,
-                    "byte_count": len(result.config.encode("utf-8")),
-                    "filename": f"{result.board_id}.config",
-                    "config_base64": base64.b64encode(
-                        result.config.encode("utf-8")).decode("ascii"),
+                    "project_schema_version":
+                        result.project_schema_version,
+                    "project_original_schema_version":
+                        result.original_schema_version,
+                    "project_migrations": list(result.migrations),
+                    "project_sha256": result.project_sha256,
+                    "summary": result.summary,
                 }
+                if path == "/api/project/generate":
+                    config_bytes = result.config.encode("utf-8")
+                    response.update({
+                        "config_sha256":
+                            hashlib.sha256(config_bytes).hexdigest(),
+                        "byte_count": len(config_bytes),
+                        "filename": f"{result.board_id}.config",
+                        "config_base64": base64.b64encode(
+                            config_bytes).decode("ascii"),
+                    })
             else:
                 result = build_firmware_project(
                     project, catalog, jobs=self.build_jobs,
@@ -188,6 +208,14 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                     "board_id": result.board_id,
                     "firmware_target": result.firmware_target,
                     "config_sha256": result.config_sha256,
+                    "project_sha256":
+                        result.record.get("project_sha256"),
+                    "project_schema_version": result.record.get(
+                        "project_schema_version",
+                        CURRENT_PROJECT_SCHEMA_VERSION),
+                    "project_migrations": result.record.get(
+                        "project_migrations", []),
+                    "summary": result.record.get("project_summary", {}),
                     "memory": result.record.get("memory", {}),
                     "artifacts": [{
                         "filename": artifact.filename,

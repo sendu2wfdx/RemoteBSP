@@ -20,6 +20,11 @@ from firmware_builder import (  # noqa: E402
     resolve_artifact,
 )
 from project_config import ProjectConfigError, generate_project_config  # noqa: E402
+from project_contract import (  # noqa: E402
+    CURRENT_PROJECT_SCHEMA_VERSION,
+    ProjectContractError,
+    prepare_project,
+)
 from server import CATALOG_PATH, make_server  # noqa: E402
 
 
@@ -70,6 +75,31 @@ class GuiTest(unittest.TestCase):
                                   result.config)
                     self.assertIn("CONFIG_UART2_PINS_PB10_PB11=y",
                                   result.config)
+
+    def test_project_contract_migrates_legacy_and_hashes_canonically(self):
+        """旧草案可显式迁移，键顺序和排版不改变工程身份。"""
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        project = self._default_project(catalog["boards"][0])
+        reordered = json.loads(json.dumps(project, sort_keys=True))
+        self.assertEqual(
+            prepare_project(project).sha256,
+            prepare_project(reordered).sha256)
+
+        legacy = copy.deepcopy(project)
+        legacy.pop("schema_version")
+        prepared = prepare_project(legacy)
+        self.assertEqual(prepared.original_schema_version, 0)
+        self.assertEqual(prepared.schema_version,
+                         CURRENT_PROJECT_SCHEMA_VERSION)
+        self.assertEqual(prepared.document["schema_version"], 1)
+        self.assertEqual(len(prepared.migrations), 1)
+        generated = generate_project_config(legacy, catalog)
+        self.assertEqual(generated.project_sha256, prepared.sha256)
+
+        future = copy.deepcopy(project)
+        future["schema_version"] = CURRENT_PROJECT_SCHEMA_VERSION + 1
+        with self.assertRaisesRegex(ProjectContractError, "请升级"):
+            prepare_project(future)
 
     def test_pin_catalog_has_unique_defaults(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -199,6 +229,16 @@ class GuiTest(unittest.TestCase):
             self.assertRegex(result.build_id,
                              r"^mellow-fly-d5-v1-[0-9a-f]{16}$")
             self.assertEqual(result.record["parallel_jobs"], 32)
+            self.assertEqual(result.record["project_schema_version"], 1)
+            self.assertEqual(result.record["project_migrations"], [])
+            self.assertEqual(result.record["project_summary"][
+                "resource_count"], result.record["resource_count"])
+            self.assertRegex(result.record["project_sha256"],
+                             r"^[0-9a-f]{64}$")
+            self.assertEqual(result.record["project_sha256"],
+                             next(item.sha256 for item in result.artifacts
+                                  if item.filename ==
+                                  "studio-project.json"))
             self.assertEqual(result.record["memory"]["ram"]["used_bytes"],
                              1024)
             self.assertEqual(
@@ -251,7 +291,23 @@ class GuiTest(unittest.TestCase):
                 self.assertEqual(target["mode"], "static-firmware")
                 self.assertTrue(target["build_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
+                self.assertEqual(target["project_schema_version"], 1)
+                self.assertFalse(target["runtime_control_enabled"])
                 board = catalog["boards"][0]
+                inspect_request = Request(
+                    base + "/api/project/inspect",
+                    data=json.dumps({
+                        "project": self._default_project(board)
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                inspected = json.loads(urlopen(inspect_request).read())
+                self.assertEqual(inspected["format"], "PROJECT_INSPECTION")
+                self.assertEqual(inspected["project_schema_version"], 1)
+                self.assertRegex(inspected["project_sha256"],
+                                 r"^[0-9a-f]{64}$")
+                self.assertEqual(inspected["summary"]["resource_count"],
+                                 inspected["resource_count"])
                 request = Request(
                     base + "/api/project/generate",
                     data=json.dumps({
@@ -264,6 +320,10 @@ class GuiTest(unittest.TestCase):
                     generated["config_base64"]).decode("utf-8")
                 self.assertTrue(generated["ok"])
                 self.assertEqual(generated["format"], "KCONFIG")
+                self.assertEqual(generated["project_sha256"],
+                                 inspected["project_sha256"])
+                self.assertRegex(generated["config_sha256"],
+                                 r"^[0-9a-f]{64}$")
                 self.assertIn("CONFIG_REMOTEBSP_DEVICE_PARAMS=y", config)
                 fake_result = FirmwareBuildResult(
                     "test-board-0123456789abcdef", board["id"],

@@ -21,6 +21,7 @@ from project_config import (
     ProjectConfigResult,
     generate_project_config,
 )
+from project_contract import canonical_project_bytes, prepare_project
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,7 +145,9 @@ def build_firmware_project(
     """校验工程、构建固件，并归档可复现产物。"""
     if jobs < 1 or jobs > 64:
         raise FirmwareBuildError("并行任务数必须位于1～64")
-    generated: ProjectConfigResult = generate_project_config(project, catalog)
+    prepared = prepare_project(project)
+    generated: ProjectConfigResult = generate_project_config(
+        prepared.document, catalog)
     artifact_base = TARGET_ARTIFACTS.get(generated.firmware_target)
     if artifact_base is None:
         raise FirmwareBuildError("生成结果没有对应的固件构建目标")
@@ -161,9 +164,7 @@ def build_firmware_project(
         build_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         config_path.write_bytes(config_bytes)
-        project_path.write_text(
-            json.dumps(project, ensure_ascii=False, sort_keys=True, indent=2) +
-            "\n", encoding="utf-8")
+        project_path.write_bytes(canonical_project_bytes(prepared.document))
 
         configure = [
             "cmake", "-S", str(FIRMWARE), "-B", str(build_dir), "-G", "Ninja",
@@ -202,7 +203,12 @@ def build_firmware_project(
             "board_id": generated.board_id,
             "firmware_target": generated.firmware_target,
             "resource_count": generated.resource_count,
-            "project_sha256": _sha256(project_path),
+            "project_schema_version": prepared.schema_version,
+            "project_original_schema_version":
+                prepared.original_schema_version,
+            "project_migrations": list(prepared.migrations),
+            "project_summary": prepared.summary,
+            "project_sha256": prepared.sha256,
             "config_sha256": config_sha256,
             "git_revision": revision,
             "git_dirty": dirty,

@@ -99,6 +99,16 @@ python3 gui/project_config.py \
 随后也可手工按普通固件流程构建。当前尚未实现烧录和回读确认，界面不会宣称
 已经把配置部署到节点。
 
+工程后端会先执行 schema 迁移与规范化。没有版本字段的早期草案按 v0 迁移到
+当前 v1；未来版本会明确拒绝，避免错误降级。`/api/project/inspect` 可在不生成
+文件的情况下返回资源摘要和稳定工程 SHA-256；生成、构建接口返回同一工程身份，
+构建记录同时保存工程哈希和最终固件配置哈希。
+
+当前 `gui/server.py` 只属于 Studio 本地原型，`/api/state` 也只是演示或 Mock 的
+只读快照，不是面向设备运行的网络服务。未来类似 Moonraker 的常驻 Runtime 与
+类似 Fluidd 的 Web UI 边界见
+[Studio 与上位机运行时边界](../docs/studio-runtime-design.md)。
+
 设备身份、制造信息和 ADC 校准值使用独立 EEPROM/Flash 仿 EEPROM 参数区，不属于
 Studio 的 IO 工程。其设计见
 [固件配置与 RemoteBSP Studio](../docs/configuration-and-studio.md)。

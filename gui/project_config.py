@@ -12,6 +12,8 @@ from pathlib import Path
 
 import kconfiglib
 
+from project_contract import prepare_project
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIRMWARE = ROOT / "firmware"
@@ -28,6 +30,11 @@ class ProjectConfigResult:
     board_id: str
     firmware_target: str
     resource_count: int
+    project_sha256: str
+    project_schema_version: int
+    original_schema_version: int
+    migrations: tuple[str, ...]
+    summary: dict
 
 
 BOARD_CONFIGS = {
@@ -192,6 +199,8 @@ def _validate_and_collect(draft: dict, catalog: dict) -> tuple[dict, dict]:
 
 def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
     """校验 Studio 工程并生成完整、可由 Kconfig 再校验的 `.config`。"""
+    prepared = prepare_project(draft)
+    draft = prepared.document
     board, resources = _validate_and_collect(draft, catalog)
     base_relative, target = BOARD_CONFIGS[board["id"]]
 
@@ -331,7 +340,10 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
             raise ProjectConfigError(
                 f"{name}被Kconfig依赖拒绝，通常表示引脚或外设资源冲突")
     count = sum(len(value) for value in resources.values())
-    return ProjectConfigResult(config, board["id"], target, count)
+    return ProjectConfigResult(
+        config, board["id"], target, count, prepared.sha256,
+        prepared.schema_version, prepared.original_schema_version,
+        prepared.migrations, prepared.summary)
 
 
 def main() -> int:
