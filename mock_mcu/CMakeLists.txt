@@ -1,5 +1,6 @@
 add_library(remotebsp_remote_core
     src/board_manifest.cpp
+    src/bus_bsp.cpp
     src/device_parameter_store.cpp
     src/gpio_bsp.cpp
     src/mock_node.cpp

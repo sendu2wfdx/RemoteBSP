@@ -132,6 +132,8 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
             return TrafficClass::System;
         case protocol::Command::UartWrite:
         case protocol::Command::UartRxEvent:
+        case protocol::Command::StreamData:
+        case protocol::Command::StreamCredit:
             return TrafficClass::Streaming;
         case protocol::Command::MotionEnqueue:
         case protocol::Command::MotionStatus:

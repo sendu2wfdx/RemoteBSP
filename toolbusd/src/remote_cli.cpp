@@ -163,6 +163,11 @@ const char* resource_type(remotebsp::protocol::ResourceType type) {
         case ResourceType::Storage: return "storage";
         case ResourceType::StepgenAxis: return "stepgen-axis";
         case ResourceType::TimedBitstream: return "timed-bitstream";
+        case ResourceType::I2cBus: return "i2c-bus";
+        case ResourceType::I2cDevice: return "i2c-device";
+        case ResourceType::SpiBus: return "spi-bus";
+        case ResourceType::SpiDevice: return "spi-device";
+        case ResourceType::Stream: return "stream";
     }
     return "unknown";
 }

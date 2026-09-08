@@ -51,7 +51,8 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                        std::shared_ptr<MotionExecutor> motion,
                        std::shared_ptr<WaveformBsp> waveform,
                        std::shared_ptr<DeviceParameterStore>
-                           device_parameters)
+                           device_parameters,
+                       std::shared_ptr<BusBsp> bus_bsp)
     : node_info_(node_info),
       capabilities_(capabilities),
       gpio_bsp_(std::move(gpio_bsp)),
@@ -59,6 +60,7 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
       motion_(std::move(motion)),
       waveform_(std::move(waveform)),
       device_parameters_(std::move(device_parameters)),
+      bus_bsp_(std::move(bus_bsp)),
       resources_(std::move(resources)),
       contracts_(std::move(contracts)) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
@@ -157,6 +159,14 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_uart_read(request);
         case protocol::Command::UartWrite:
             return handle_uart_write(request);
+        case protocol::Command::I2cContract:
+            return handle_i2c_contract(request);
+        case protocol::Command::I2cTransfer:
+            return handle_i2c_transfer(request);
+        case protocol::Command::SpiContract:
+            return handle_spi_contract(request);
+        case protocol::Command::SpiTransfer:
+            return handle_spi_transfer(request);
         case protocol::Command::PwmCreate:
             return handle_pwm_create(request);
         case protocol::Command::PwmWrite:
@@ -1440,6 +1450,134 @@ protocol::Packet RemoteCore::handle_uart_write(
         return make_uart_error_response(request, error);
     }
     return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_i2c_contract(
+    const protocol::Packet& request) const {
+    if (!bus_bsp_ ||
+        (capabilities_ & capability_mask(Capability::I2c)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || request.payload.size() != 4) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    const auto* resource = find_resource(resource_id);
+    if (resource == nullptr ||
+        resource->type != protocol::ResourceType::I2cDevice) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = bus_bsp_->contract(resource_id);
+    if (contract == nullptr ||
+        contract->kind != protocol::BusResourceKind::I2cDevice) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_bus_resource_contract(*contract);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_i2c_transfer(
+    const protocol::Packet& request) {
+    if (!bus_bsp_ ||
+        (capabilities_ & capability_mask(Capability::I2c)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::I2cTransferRequest transfer;
+    try {
+        transfer = protocol::decode_i2c_transfer_request(request.payload);
+    } catch (const protocol::BusStreamPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto* resource = find_resource(transfer.device_resource_id);
+    if (resource == nullptr ||
+        resource->type != protocol::ResourceType::I2cDevice) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (!resource_access_allowed(resource->resource_id,
+                                 request.header.session_id)) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    protocol::BusTransferResult result;
+    try {
+        result = bus_bsp_->i2c_transfer(transfer);
+    } catch (const MockBusException&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_bus_transfer_result(result);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_spi_contract(
+    const protocol::Packet& request) const {
+    if (!bus_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Spi)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0 || request.payload.size() != 4) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    const auto* resource = find_resource(resource_id);
+    if (resource == nullptr ||
+        resource->type != protocol::ResourceType::SpiDevice) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = bus_bsp_->contract(resource_id);
+    if (contract == nullptr ||
+        contract->kind != protocol::BusResourceKind::SpiDevice) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_bus_resource_contract(*contract);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_spi_transfer(
+    const protocol::Packet& request) {
+    if (!bus_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Spi)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::SpiTransferRequest transfer;
+    try {
+        transfer = protocol::decode_spi_transfer_request(request.payload);
+    } catch (const protocol::BusStreamPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto* resource = find_resource(transfer.device_resource_id);
+    if (resource == nullptr ||
+        resource->type != protocol::ResourceType::SpiDevice) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (!resource_access_allowed(resource->resource_id,
+                                 request.header.session_id)) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    protocol::BusTransferResult result;
+    try {
+        result = bus_bsp_->spi_transfer(transfer);
+    } catch (const MockBusException&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_bus_transfer_result(result);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
 }
 
 protocol::Packet RemoteCore::handle_pwm_create(

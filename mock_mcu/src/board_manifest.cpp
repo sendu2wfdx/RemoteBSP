@@ -425,6 +425,21 @@ protocol::ResourceType parse_resource_type(const std::string& text) {
     if (text == "i2c") {
         return protocol::ResourceType::I2c;
     }
+    if (text == "i2c_bus") {
+        return protocol::ResourceType::I2cBus;
+    }
+    if (text == "i2c_device") {
+        return protocol::ResourceType::I2cDevice;
+    }
+    if (text == "spi_bus") {
+        return protocol::ResourceType::SpiBus;
+    }
+    if (text == "spi_device") {
+        return protocol::ResourceType::SpiDevice;
+    }
+    if (text == "stream") {
+        return protocol::ResourceType::Stream;
+    }
     if (text == "adc") {
         return protocol::ResourceType::Adc;
     }
@@ -454,8 +469,12 @@ Capability resource_capability(protocol::ResourceType type) {
         case protocol::ResourceType::Uart:
             return Capability::Uart;
         case protocol::ResourceType::Spi:
+        case protocol::ResourceType::SpiBus:
+        case protocol::ResourceType::SpiDevice:
             return Capability::Spi;
         case protocol::ResourceType::I2c:
+        case protocol::ResourceType::I2cBus:
+        case protocol::ResourceType::I2cDevice:
             return Capability::I2c;
         case protocol::ResourceType::Adc:
             return Capability::Adc;
@@ -469,6 +488,8 @@ Capability resource_capability(protocol::ResourceType type) {
             return Capability::Motion;
         case protocol::ResourceType::TimedBitstream:
             return Capability::TimedBitstream;
+        case protocol::ResourceType::Stream:
+            return Capability::Stream;
     }
     schema_error(ManifestError::InvalidValue, "资源类型没有能力位映射");
 }

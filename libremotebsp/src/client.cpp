@@ -365,6 +365,41 @@ protocol::ResourceLeaseInfo Client::resource_lease_status(
         protocol::encode_resource_id(resource_id))));
 }
 
+protocol::BusResourceContract Client::i2c_contract(
+    std::uint32_t device_resource_id) const {
+    return protocol::decode_bus_resource_contract(body(command(
+        protocol::Command::I2cContract,
+        protocol::encode_resource_id(device_resource_id))));
+}
+
+protocol::BusTransferResult Client::i2c_transfer(
+    const protocol::I2cTransferRequest& request) const {
+    return protocol::decode_bus_transfer_result(body(command(
+        protocol::Command::I2cTransfer,
+        protocol::encode_i2c_transfer_request(request))));
+}
+
+protocol::BusResourceContract Client::spi_contract(
+    std::uint32_t device_resource_id) const {
+    return protocol::decode_bus_resource_contract(body(command(
+        protocol::Command::SpiContract,
+        protocol::encode_resource_id(device_resource_id))));
+}
+
+protocol::BusTransferResult Client::spi_transfer(
+    const protocol::SpiTransferRequest& request) const {
+    return protocol::decode_bus_transfer_result(body(command(
+        protocol::Command::SpiTransfer,
+        protocol::encode_spi_transfer_request(request))));
+}
+
+protocol::StreamContract Client::stream_contract(
+    std::uint32_t resource_id) const {
+    return protocol::decode_stream_contract(body(command(
+        protocol::Command::StreamContract,
+        protocol::encode_resource_id(resource_id))));
+}
+
 protocol::DeviceParameterStatus Client::device_parameter_status() const {
     return protocol::decode_device_parameter_status(
         body(command(protocol::Command::DeviceParameterStatus)));

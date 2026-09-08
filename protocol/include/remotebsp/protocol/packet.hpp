@@ -53,6 +53,10 @@ enum class Command : std::uint16_t {
     UartRead = 0x0201,
     UartWrite = 0x0202,
     UartRxEvent = 0x0280,
+    I2cContract = 0x0300,
+    I2cTransfer = 0x0301,
+    SpiContract = 0x0400,
+    SpiTransfer = 0x0401,
     PwmCreate = 0x0600,
     PwmWrite = 0x0601,
     PwmStop = 0x0602,
@@ -64,6 +68,12 @@ enum class Command : std::uint16_t {
     MotionAbort = 0x0902,
     MotionClearFault = 0x0903,
     MotionContract = 0x0904,
+    StreamContract = 0x0A00,
+    StreamOpen = 0x0A01,
+    StreamData = 0x0A02,
+    StreamCredit = 0x0A03,
+    StreamStatus = 0x0A04,
+    StreamStop = 0x0A05,
 };
 
 struct PacketHeader {

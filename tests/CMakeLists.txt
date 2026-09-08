@@ -8,6 +8,21 @@ target_compile_options(protocol_tests PRIVATE
 
 add_test(NAME protocol_tests COMMAND protocol_tests)
 
+add_executable(bus_stream_protocol_tests bus_stream_protocol_tests.cpp)
+target_link_libraries(bus_stream_protocol_tests PRIVATE remotebsp_protocol)
+target_compile_options(bus_stream_protocol_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME bus_stream_protocol_tests COMMAND bus_stream_protocol_tests)
+
+add_executable(bus_resource_tests bus_resource_tests.cpp)
+target_link_libraries(bus_resource_tests PRIVATE remotebsp_remote_core)
+target_compile_options(bus_resource_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME bus_resource_tests COMMAND bus_resource_tests)
+
 add_executable(device_parameter_protocol_tests
     device_parameter_protocol_tests.cpp)
 target_link_libraries(device_parameter_protocol_tests PRIVATE

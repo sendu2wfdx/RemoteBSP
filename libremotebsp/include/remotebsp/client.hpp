@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/protocol/device_parameters.hpp"
+#include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/resource.hpp"
@@ -153,6 +154,17 @@ public:
     void release_resource(std::uint32_t resource_id,
                           std::uint64_t lease_id) const;
     protocol::ResourceLeaseInfo resource_lease_status(
+        std::uint32_t resource_id) const;
+
+    protocol::BusResourceContract i2c_contract(
+        std::uint32_t device_resource_id) const;
+    protocol::BusTransferResult i2c_transfer(
+        const protocol::I2cTransferRequest& request) const;
+    protocol::BusResourceContract spi_contract(
+        std::uint32_t device_resource_id) const;
+    protocol::BusTransferResult spi_transfer(
+        const protocol::SpiTransferRequest& request) const;
+    protocol::StreamContract stream_contract(
         std::uint32_t resource_id) const;
 
     protocol::DeviceParameterStatus device_parameter_status() const;

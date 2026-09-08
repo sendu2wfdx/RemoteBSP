@@ -17,6 +17,12 @@ enum class ResourceType : std::uint8_t {
     Storage = 8,
     StepgenAxis = 9,
     TimedBitstream = 10,
+    // Spi/I2c 保留为 v1 早期的扁平端点，新的静态资源目录应明确区分总线与设备。
+    I2cBus = 11,
+    I2cDevice = 12,
+    SpiBus = 13,
+    SpiDevice = 14,
+    Stream = 15,
 };
 
 constexpr std::uint16_t kResourceFlagNative = 0x0001;

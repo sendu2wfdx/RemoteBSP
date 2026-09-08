@@ -1,11 +1,13 @@
 #pragma once
 
 #include "remotebsp/mock_mcu/device_parameter_store.hpp"
+#include "remotebsp/mock_mcu/bus_bsp.hpp"
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
+#include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
@@ -36,6 +38,7 @@ enum class Capability : std::uint64_t {
     Motion = 1ULL << 9U,
     TimedBitstream = 1ULL << 10U,
     DeviceParameters = 1ULL << 12U,
+    Stream = 1ULL << 13U,
 };
 
 constexpr std::uint64_t capability_mask(Capability capability) noexcept {
@@ -91,7 +94,8 @@ public:
                std::shared_ptr<MotionExecutor> motion = nullptr,
                std::shared_ptr<WaveformBsp> waveform = nullptr,
                std::shared_ptr<DeviceParameterStore>
-                   device_parameters = nullptr);
+                   device_parameters = nullptr,
+               std::shared_ptr<BusBsp> bus_bsp = nullptr);
 
     protocol::Packet handle(
         const protocol::Packet& request,
@@ -149,6 +153,14 @@ private:
     protocol::Packet handle_uart_create(const protocol::Packet& request);
     protocol::Packet handle_uart_read(const protocol::Packet& request);
     protocol::Packet handle_uart_write(const protocol::Packet& request);
+    protocol::Packet handle_i2c_contract(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_i2c_transfer(
+        const protocol::Packet& request);
+    protocol::Packet handle_spi_contract(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_spi_transfer(
+        const protocol::Packet& request);
     protocol::Packet handle_pwm_create(const protocol::Packet& request);
     protocol::Packet handle_pwm_write(const protocol::Packet& request);
     protocol::Packet handle_pwm_stop(const protocol::Packet& request);
@@ -231,6 +243,7 @@ private:
     std::shared_ptr<MotionExecutor> motion_;
     std::shared_ptr<WaveformBsp> waveform_;
     std::shared_ptr<DeviceParameterStore> device_parameters_;
+    std::shared_ptr<BusBsp> bus_bsp_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;
