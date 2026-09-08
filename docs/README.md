@@ -17,6 +17,9 @@
 - [客户端 API](libremotebsp-api.md)
 - [使用场景与需求](use-cases-and-requirements.md)
 - [产品定位与上位机配套架构](product-positioning-and-host-stack.md)
+- [Studio 与上位机运行时边界](studio-runtime-design.md)
+- [总线设备与高速流资源设计](bus-and-stream-resources.md)
+- [运动可靠性与跨板同步验证计划](motion-reliability-plan.md)
 
 ## 一句话说明
 
@@ -57,7 +60,9 @@ flowchart LR
 | 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；G431完成100 STEP空载调度，持续负载与跨板同步待实现 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
 | Studio | 构建阶段已实现 | GUI工程、冲突检查、Mock可视化、生成`.config`、32线程构建、产物/日志/哈希归档和下载；G431工程已手工烧录验收，GUI自动烧录回读待实现 |
-| SPI/I2C/ADC/Timer/Storage | 尚未实现 | 按当前优先级后置 |
+| I2C / SPI | 协议与 Mock 第一阶段已实现 | 总线/设备合同、原子事务、主机API和设备级故障隔离已测试；Studio端点和STM32 BSP待实现 |
+| 高速 Stream | 协议骨架已实现、已测试 | 合同、打开、数据、信用和状态编解码；运行时会话及USB数据面待实现 |
+| ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
 ## 正式板卡
 

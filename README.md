@@ -61,15 +61,19 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config`；固件启动时建立固定资源表，严格检查引脚方向、共享 EN、TMC 引用、端点和容量，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
-| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
-| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、2 路 PWM、1 路定时位流；默认示例公开3路运动轴，并可按 100 ms 周期导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、普通硬件 UART、每轴 STEP/DIR 或 TMC2209、共享 EN、多路 PWM/灯带、实时控制原型、Mock 数字孪生和 JSON 工程；已支持一键生成 `.config`、32线程构建、产物归档和下载。G431 专用工程已完成构建、手工烧录和资源命令实板验收；GUI 自动烧录/回读及真实节点实时控制尚未实现 |
+| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
+| 总线与高速流 | I2C/SPI 原子事务、设备级 NACK/超时/忙/故障结果、主机 API 和 Mock 已实现；Stream 合同、打开、数据、信用和状态编解码已实现，实体 BSP 与流会话待实现 |
+| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；已补充 512 段持续多轴与边界故障回归 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、Mock 数字孪生、稳定 schema/迁移、规范工程哈希、`.config` 生成、32线程构建、产物归档和下载。G431 专用工程已完成构建、手工烧录和资源命令实板验收；GUI 自动烧录/回读及独立 Runtime API 尚未实现 |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
 
-SPI、I2C、ADC、通用 Timer 协议和 Storage 已按当前优先级后置，尚未实现。
+I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码、Mock BSP 和
+设备级故障隔离的第一阶段；尚未接入 Studio 静态端点、实体 STM32 BSP、有界物理
+总线队列与遥测。高速 Stream 当前只完成合同和信用流控协议骨架，尚无运行时会话。
+ADC、通用 Timer 和 Storage 仍按当前优先级后置。
 通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
 F072/F103/G431 固件后端第一阶段。PWM 直接描述频率、万分比占空比和极性；
 定时位流只描述 0/1 高低时间与复位时间，WS2812 的 RGB/GRB 排列、亮度和动画
@@ -390,6 +394,10 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [项目待办](TODO.md)
 - [架构与设计说明](docs/architecture.md)
 - [使用场景与需求](docs/use-cases-and-requirements.md)
+- [产品定位与上位机配套架构](docs/product-positioning-and-host-stack.md)
+- [Studio 与上位机运行时边界](docs/studio-runtime-design.md)
+- [总线设备与高速流资源设计](docs/bus-and-stream-resources.md)
+- [运动可靠性与跨板同步验证计划](docs/motion-reliability-plan.md)
 - [智能实时资源与多轴运动控制设计](docs/intelligent-motion-resources.md)
 - [libremotebsp 客户端 API](docs/libremotebsp-api.md)
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)

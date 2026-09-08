@@ -118,16 +118,18 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 
 ## P3：I2C、SPI、协议转换与高速流
 
-- 静态定义 `I2C_BUS`/`I2C_DEVICE` 与 `SPI_BUS`/`SPI_DEVICE`，运行时只执行原子事务；
+- 已完成 `I2C_BUS`/`I2C_DEVICE`、`SPI_BUS`/`SPI_DEVICE` 线协议、主机 API、严格
+  编解码和 Mock 原子事务竖切；下一步接入 Studio、固件静态表和 STM32 BSP；
 - SPI 转 UART/GPIO/I2C 等板级适配器暴露转换后的统一资源，隐藏内部 SPI；
 - 事务必须有最大长度、超时、队列、错误状态和资源级恢复，不得导致节点全局停机；
-- 高速数据采用有界 Stream、信用流控和独立数据面，不通过 CAN 透明隧道全部数据；
+- 高速 Stream 合同、打开、数据、信用和状态编解码已完成；下一步实现有界会话、
+  背压和独立数据面，不通过 CAN 透明隧道全部数据；
 - USB Bulk 作为首个高速数据面，Ethernet `LinkTransport` 仅作为后续明确扩展；
 - 当前阶段只实现协议、Mock 和软件测试，不操作实体转换芯片或网络硬件。
 
 ## P4：其余通用硬件资源
 
-按优先级依次实现 SPI、I2C、ADC、通用 Timer 和 Storage：
+按优先级依次实现 ADC、通用 Timer 和 Storage：
 
 - 保持 Protocol、Transport、Remote Core、BSP 分层；
 - 提供资源合同、超时、有界缓冲、故障隔离和 Mock；
