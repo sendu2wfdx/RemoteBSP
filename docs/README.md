@@ -16,6 +16,7 @@
 - [WeAct STM32G431CBU6 Core](weact-stm32g431cbu6-core.md)
 - [客户端 API](libremotebsp-api.md)
 - [使用场景与需求](use-cases-and-requirements.md)
+- [产品定位与上位机配套架构](product-positioning-and-host-stack.md)
 
 ## 一句话说明
 

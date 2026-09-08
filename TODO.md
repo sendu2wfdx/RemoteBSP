@@ -104,7 +104,28 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 - 不实现可上传任意脚本或字节码的 MCU 规则引擎；
 - WS2812 的颜色、色序、亮度和动画由 Linux 生成，MCU 只输出确定性位流。
 
-## P3：其余通用硬件资源
+## P2：上位机 Runtime API 与 Web 控制台
+
+在 `toolbusd` 本地 IPC、资源合同、事件语义和错误模型稳定后，增加类似 Moonraker
+与 Fluidd 分层的配套上位机，但不复制打印机业务：
+
+- Runtime API 通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
+- 提供版本化 REST/WebSocket API、节点/资源对象、事件订阅和遥测流；
+- 明确多客户端租约、身份、权限、审计和命令冲突处理；
+- Web 控制台展示拓扑、实时状态、运动队列、告警、日志和升级流程；
+- Studio 配置构建面与运行时控制面保持分离，只共享稳定模型和视觉组件；
+- 先完成薄服务和 Mock 端到端测试，再扩展完整 Web 产品。
+
+## P3：I2C、SPI、协议转换与高速流
+
+- 静态定义 `I2C_BUS`/`I2C_DEVICE` 与 `SPI_BUS`/`SPI_DEVICE`，运行时只执行原子事务；
+- SPI 转 UART/GPIO/I2C 等板级适配器暴露转换后的统一资源，隐藏内部 SPI；
+- 事务必须有最大长度、超时、队列、错误状态和资源级恢复，不得导致节点全局停机；
+- 高速数据采用有界 Stream、信用流控和独立数据面，不通过 CAN 透明隧道全部数据；
+- USB Bulk 作为首个高速数据面，Ethernet `LinkTransport` 仅作为后续明确扩展；
+- 当前阶段只实现协议、Mock 和软件测试，不操作实体转换芯片或网络硬件。
+
+## P4：其余通用硬件资源
 
 按优先级依次实现 SPI、I2C、ADC、通用 Timer 和 Storage：
 

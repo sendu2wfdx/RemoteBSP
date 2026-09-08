@@ -1,9 +1,15 @@
 # Remote BSP
 
-Remote BSP 是一个传输无关的远程板级支持框架。Linux 主机默认通过 CAN/CAN-FD，
-也可通过 USB Vendor Bulk 管理 MCU 工具板，并像使用本地资源一样调用远端 GPIO、UART、PWM 等通用
-硬件能力。传感器、Modbus、阀门和厂商协议全部运行在 Linux；MCU 固件只执行
-原子硬件操作，不包含设备专用驱动。
+RemoteBSP 是受 Klipper 主机/MCU 分工启发、面向通用机电设备重新设计的分布式
+控制平台。Linux 主机默认通过 CAN/CAN-FD，也可通过 USB Vendor Bulk 管理 MCU
+工具板，并像使用本地资源一样调用远端 GPIO、UART、PWM 和智能运动等能力。
+传感器、Modbus、阀门、运动规划和厂商协议运行在 Linux；MCU 固件只执行原子、
+确定性的硬件操作与必要的本地安全策略。
+
+RemoteBSP 不兼容 Klipper 协议，也不提供完整打印控制栈。它把“Linux 规划、MCU
+实时执行”的架构扩展到通用资源、多节点 CAN/CAN-FD、故障隔离、静态固件生成和
+可观测性。产品定位与类似 Moonraker + Fluidd 的后续上位机配套边界见
+[产品定位与上位机配套架构](docs/product-positioning-and-host-stack.md)。
 
 当前代码已经打通 Linux 主机、Mock MCU、Classical CAN、CAN-FD 和第一版 USB
 Vendor Bulk 主机/Mock/G431 Device 链路，并完成
