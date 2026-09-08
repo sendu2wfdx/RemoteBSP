@@ -148,6 +148,8 @@ def test_clock_defaults_and_crystal_pin_reservations() -> None:
 
 def main() -> None:
     assert_layout(
+        "configs/stm32f103_weact_bluepill_plus_katapult_defconfig", 3, 0)
+    assert_layout(
         "configs/stm32f072_mellow_fly_d5_katapult_defconfig", 0, 5)
     assert_layout(
         "tests/configs/stm32f103_weact_bluepill_plus_motion_5axis_tmc2209_defconfig",
@@ -159,6 +161,7 @@ def main() -> None:
         0,
         1,
     )
+    assert_layout("configs/stm32g431_weact_core_katapult_defconfig", 3, 0)
     test_invalid_tmc_capacity()
     test_remote_budget_menu_visibility()
     test_shared_enable_derivation()

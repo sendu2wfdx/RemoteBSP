@@ -54,6 +54,22 @@ class GuiTest(unittest.TestCase):
                               result.config)
                 self.assertIn("CONFIG_REMOTEBSP_STATIC_GPIO_MAP=y",
                               result.config)
+                if board["id"] == "weact-bluepill-plus-v1":
+                    self.assertIn(
+                        "CONFIG_HARDWARE_UART_RESOURCE_COUNT=3",
+                        result.config)
+                    self.assertIn("CONFIG_UART1_PINS_PA2_PA3=y",
+                                  result.config)
+                    self.assertIn("CONFIG_UART2_PINS_PB10_PB11=y",
+                                  result.config)
+                if board["id"] == "weact-g431-core-v10":
+                    self.assertIn(
+                        "CONFIG_HARDWARE_UART_RESOURCE_COUNT=3",
+                        result.config)
+                    self.assertIn("CONFIG_UART1_PINS_PA2_PA3=y",
+                                  result.config)
+                    self.assertIn("CONFIG_UART2_PINS_PB10_PB11=y",
+                                  result.config)
 
     def test_pin_catalog_has_unique_defaults(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -143,6 +159,11 @@ class GuiTest(unittest.TestCase):
         project = copy.deepcopy(self._default_project(board))
         project["uart"]["ports"][0]["direction_pin"] = "PB5"
         with self.assertRaisesRegex(ProjectConfigError, "方向控制"):
+            generate_project_config(project, catalog)
+
+        project = copy.deepcopy(self._default_project(board))
+        project["uart"]["ports"] = project["uart"]["ports"][1:]
+        with self.assertRaisesRegex(ProjectConfigError, "连续启用"):
             generate_project_config(project, catalog)
 
         project = copy.deepcopy(self._default_project(board))

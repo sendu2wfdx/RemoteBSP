@@ -20,6 +20,11 @@ RemoteBSP Studio 是板卡专用固件的图形配置入口。它保存工程 JS
 整板步频、PWM 定时器频率以及定时位流端点。当前只允许选择已经实现的 UART、PWM
 和 WS2812 后端；更多预设组合会在后端实现并验证后开放。
 
+BluePill Plus与WeAct G431 Core当前均提供USART1、USART2、USART3三路普通硬件UART。USART1可选择
+PA9/PA10或PB6/PB7重映射，USART2固定PA2/PA3，USART3固定PB10/PB11。固件采用
+前N路静态裁剪，所以Studio按UART 0→1→2连续增加；移除中间端口时会同时移除
+后续端口，避免生成稀疏且无法由当前固件表达的配置。
+
 ## 启动
 
 ```sh
@@ -39,6 +44,25 @@ python3 gui/server.py --state /tmp/remotebsp-mock-state.json
 
 状态文件只由 Mock MCU 写入，Studio 只读。GUI 不直接访问 CAN；未来实时控制、
 设备参数维护和烧录均通过独立后端及 `toolbusd` 完成。
+
+内置动画会明确显示“演示模式 / DEMO”，不代表实体节点在线。只有使用
+`--state`连接 Mock 状态文件时才显示“Mock MCU 实时数据”。当前实时控制页中的
+GPIO、PWM 和 WS2812 操作也是本地预览，不会向实体板发送命令。
+
+## G431 实板验收记录
+
+2026-08-17 使用 WeAct STM32G431CBU6 Core、CANable2.5 和 ST-Link 验证：
+
+- Studio 默认工程成功生成配置并以32线程构建，随后手工烧录到实体板；
+- 三路硬件 UART 与一条 TMC2209 专用单线 UART 均可按静态配置创建；
+- PC13 合法 GPIO、PC6 合法 PWM 可创建和操作，非法 GPIO/PWM 编号被板端拒绝；
+- 单轴 `PA0 STEP / PA1 DIR / PB0 EN / PB1 TMC UART` 合同为单轴120 kstep/s、
+  整板200 kstep/s，100 STEP 空载段完成且无故障、欠载或安全停机；
+- 加入 `PA8 TIM1_CH1 + DMA` WS2812 后的完整组合成功构建，RAM 77.22%、
+  Flash 43.09%；因未连接灯带，本轮只验证配置、冲突检查和链接，不算波形实测。
+
+实体 STM32 当前尚未实现通用 `resource-list` 目录命令；各具体 GPIO、UART、PWM、
+运动合同和状态命令可用。该缺口与 GUI 的真实节点接入一并列入待办。
 
 ## 构建与下载
 

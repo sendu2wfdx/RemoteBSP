@@ -24,10 +24,16 @@ def parse_explicit_config(config: Path) -> dict[str, str]:
 
 def append_derived_uart_config(output: Path, values: Mapping[str, str]) -> None:
     """生成硬件 UART 与 TMC 单线端口合计后的兼容对象数量。"""
-    hardware_default = "1" if (
-        values.get("CONFIG_BOARD_STM32F072RBT6") == "y"
-        or values.get("CONFIG_BOARD_STM32F103CBT6") == "y"
-    ) else "0"
+    if values.get("CONFIG_BOARD_STM32F103CBT6") == "y" or \
+            values.get("CONFIG_BOARD_STM32G431CBU6") == "y":
+        hardware_default = "3"
+        hardware_maximum = 3
+    elif values.get("CONFIG_BOARD_STM32F072RBT6") == "y":
+        hardware_default = "1"
+        hardware_maximum = 1
+    else:
+        hardware_default = "0"
+        hardware_maximum = 1
     hardware_count = int(values.get(
         "CONFIG_HARDWARE_UART_RESOURCE_COUNT", hardware_default), 0)
     tmc_enabled = (
@@ -42,8 +48,9 @@ def append_derived_uart_config(output: Path, values: Mapping[str, str]) -> None:
         values.get("CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT", "5")), 0) \
         if tmc_enabled else 0
     total_count = hardware_count + tmc_capacity
-    if hardware_count < 0 or hardware_count > 1:
-        raise SystemExit("硬件 UART 资源数必须在 0～1 之间")
+    if hardware_count < 0 or hardware_count > hardware_maximum:
+        raise SystemExit(
+            f"当前MCU的硬件UART资源数必须在0～{hardware_maximum}之间")
     if tmc_capacity < 0 or tmc_capacity > 5 or total_count > 8:
         raise SystemExit("UART 静态资源容量超出当前 Remote Core 上限")
 

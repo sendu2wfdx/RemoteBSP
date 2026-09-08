@@ -446,6 +446,28 @@ static uint64_t earliest_deadline(
     return deadline;
 }
 
+/*
+ * STEP下降沿与段结束允许比名义时刻稍晚：前者只会把高电平脉宽拉长，
+ * 后者只会推迟关闭EN，都不会额外产生步进。上升沿和段起点仍按严格迟到
+ * 预算处理；如果非严格事件与上升沿同一时刻到期，仍按严格事件处理。
+ */
+static bool deadline_is_non_strict(
+    const rbsp_motion_queue_t* queue,
+    const rbsp_motion_segment_t* segment,
+    uint64_t deadline_ns) {
+    (void)segment;
+    if (queue->state != RBSP_MOTION_RUNNING) {
+        return false;
+    }
+    for (uint8_t axis = 0U; axis < queue->axis_count; ++axis) {
+        if (queue->active_emitted[axis] < queue->active_target[axis] &&
+            queue->active_next_rise_ns[axis] == deadline_ns) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool emit_due_edges(rbsp_motion_queue_t* queue,
                            const rbsp_motion_io_t* io,
                            uint64_t now_ns) {
@@ -560,7 +582,8 @@ bool rbsp_motion_service(rbsp_motion_queue_t* queue,
     const uint64_t due = earliest_deadline(queue, segment);
     const uint64_t maximum_lateness_ns =
         (uint64_t)CONFIG_MOTION_MAX_COMPARE_LATENESS_US * 1000ULL;
-    if (now_ns > due && now_ns - due > maximum_lateness_ns) {
+    if (now_ns > due && now_ns - due > maximum_lateness_ns &&
+        !deadline_is_non_strict(queue, segment, due)) {
         rbsp_motion_abort(queue, RBSP_MOTION_FAULT_TIMING);
         stop_outputs(queue, io);
         return false;

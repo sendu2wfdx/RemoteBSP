@@ -241,6 +241,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
         "${HAL_DIR}/Src/stm32g4xx_hal_pwr_ex.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_tim.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_fdcan.c"
+        "${HAL_DIR}/Src/stm32g4xx_hal_uart.c"
         ${RBSP_USB_BOARD_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32g431cbu6 PRIVATE

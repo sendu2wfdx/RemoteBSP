@@ -4,6 +4,7 @@
 #if defined(CONFIG_REMOTEBSP_PWM) || defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
 #include "remotebsp_embedded/board_waveform.h"
 #endif
+#include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
 #ifdef CONFIG_REMOTEBSP_DEVICE_PARAMS
 #include "remotebsp_embedded/device_parameter_flash.h"
@@ -39,11 +40,56 @@
 #endif
 #endif /* CONFIG_REMOTEBSP_TRANSPORT_CAN */
 
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 0
+#define RBSP_HARDWARE_UART_ENABLED 1
+#endif
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 3
+#error "G431 最多提供 USART1、USART2、USART3 三路硬件 UART"
+#endif
+#if !defined(CONFIG_UART0_PINS_PA9_PA10) && \
+    !defined(CONFIG_UART0_PINS_PB6_PB7)
+#error "启用 G431 UART 时必须选择 USART1 引脚组"
+#endif
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 1 && \
+    !defined(CONFIG_UART1_PINS_PA2_PA3)
+#error "启用 G431 UART 1 时必须使用 USART2 PA2/PA3"
+#endif
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2 && \
+    !defined(CONFIG_UART2_PINS_PB10_PB11)
+#error "启用 G431 UART 2 时必须使用 USART3 PB10/PB11"
+#endif
+#if CONFIG_UART_RX_BUFFER_SIZE < 2 || CONFIG_UART_TX_BUFFER_SIZE < 2
+#error "UART 环形缓冲至少需要两个字节"
+#endif
+#endif
+
 #ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 static FDCAN_HandleTypeDef fdcan_handle;
 #endif
 static rbsp_core_t remote_core;
 static void fatal_error(void);
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+static UART_HandleTypeDef
+    hardware_uart_handles[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
+static rbsp_byte_ring_t
+    hardware_uart_rx_rings[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
+static rbsp_byte_ring_t
+    hardware_uart_tx_rings[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
+static uint8_t hardware_uart_rx_storage
+    [CONFIG_HARDWARE_UART_RESOURCE_COUNT][CONFIG_UART_RX_BUFFER_SIZE];
+static uint8_t hardware_uart_tx_storage
+    [CONFIG_HARDWARE_UART_RESOURCE_COUNT][CONFIG_UART_TX_BUFFER_SIZE];
+static volatile bool
+    hardware_uart_configured[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
+
+volatile uint32_t rbsp_diag_uart_rx_bytes;
+volatile uint32_t rbsp_diag_uart_tx_bytes;
+volatile uint32_t rbsp_diag_uart_rx_overflows;
+volatile uint32_t rbsp_diag_uart_errors;
+#endif
 
 #ifdef CONFIG_REMOTEBSP_MOTION
 #ifdef CONFIG_MOTION_SLOT0_ENABLED
@@ -1179,6 +1225,283 @@ static void motion_exit_critical(uint32_t state) {
 }
 #endif
 
+#ifdef RBSP_HARDWARE_UART_ENABLED
+void HAL_UART_MspInit(UART_HandleTypeDef* handle) {
+    GPIO_InitTypeDef init = {0};
+    init.Mode = GPIO_MODE_AF_PP;
+    init.Pull = GPIO_PULLUP;
+    init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    init.Alternate = GPIO_AF7_USART1;
+
+    if (handle->Instance == USART1) {
+        __HAL_RCC_USART1_CLK_ENABLE();
+#if defined(CONFIG_UART0_PINS_PA9_PA10)
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+        init.Pin = GPIO_PIN_9 | GPIO_PIN_10;
+        HAL_GPIO_Init(GPIOA, &init);
+#else
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+        init.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+        HAL_GPIO_Init(GPIOB, &init);
+#endif
+        return;
+    }
+
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 1
+    if (handle->Instance == USART2) {
+        __HAL_RCC_USART2_CLK_ENABLE();
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+        init.Alternate = GPIO_AF7_USART2;
+        init.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+        HAL_GPIO_Init(GPIOA, &init);
+        return;
+    }
+#endif
+
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2
+    if (handle->Instance == USART3) {
+        __HAL_RCC_USART3_CLK_ENABLE();
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+        init.Alternate = GPIO_AF7_USART3;
+        init.Pin = GPIO_PIN_10 | GPIO_PIN_11;
+        HAL_GPIO_Init(GPIOB, &init);
+    }
+#endif
+}
+
+static USART_TypeDef* hardware_uart_instance(uint8_t port) {
+    switch (port) {
+        case 0U:
+            return USART1;
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 1
+        case 1U:
+            return USART2;
+#endif
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2
+        case 2U:
+            return USART3;
+#endif
+        default:
+            return NULL;
+    }
+}
+
+static IRQn_Type hardware_uart_irq(uint8_t port) {
+    switch (port) {
+        case 0U:
+            return USART1_IRQn;
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 1
+        case 1U:
+            return USART2_IRQn;
+#endif
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2
+        case 2U:
+            return USART3_IRQn;
+#endif
+        default:
+            return NonMaskableInt_IRQn;
+    }
+}
+
+static void board_hardware_uart_stop(uint8_t port) {
+    if (port >= CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        return;
+    }
+    UART_HandleTypeDef* const handle = &hardware_uart_handles[port];
+    HAL_NVIC_DisableIRQ(hardware_uart_irq(port));
+    hardware_uart_configured[port] = false;
+    if (handle->Instance == hardware_uart_instance(port)) {
+        (void)HAL_UART_DeInit(handle);
+    }
+    rbsp_byte_ring_clear(&hardware_uart_rx_rings[port]);
+    rbsp_byte_ring_clear(&hardware_uart_tx_rings[port]);
+}
+
+static bool board_hardware_uart_configure(uint8_t port, uint32_t baud_rate,
+                                          uint8_t data_bits,
+                                          uint8_t stop_bits,
+                                          uint8_t parity) {
+    if (port >= CONFIG_HARDWARE_UART_RESOURCE_COUNT ||
+        baud_rate < 300U || stop_bits < 1U || stop_bits > 2U || parity > 2U) {
+        return false;
+    }
+
+    const uint32_t peripheral_clock =
+        port == 0U ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
+    if (baud_rate > peripheral_clock / 16U) {
+        return false;
+    }
+
+    uint32_t word_length;
+    if (parity == 0U && data_bits == 8U) {
+        word_length = UART_WORDLENGTH_8B;
+    } else if (parity != 0U && data_bits == 7U) {
+        /* STM32 的字长包含校验位：7 数据位 + 1 校验位。 */
+        word_length = UART_WORDLENGTH_8B;
+    } else if (parity != 0U && data_bits == 8U) {
+        /* STM32 的字长包含校验位：8 数据位 + 1 校验位。 */
+        word_length = UART_WORDLENGTH_9B;
+    } else {
+        return false;
+    }
+
+    board_hardware_uart_stop(port);
+    UART_HandleTypeDef* const handle = &hardware_uart_handles[port];
+    memset(handle, 0, sizeof(*handle));
+    handle->Instance = hardware_uart_instance(port);
+    handle->Init.BaudRate = baud_rate;
+    handle->Init.WordLength = word_length;
+    handle->Init.StopBits =
+        stop_bits == 1U ? UART_STOPBITS_1 : UART_STOPBITS_2;
+    handle->Init.Parity =
+        parity == 0U ? UART_PARITY_NONE
+                     : (parity == 1U ? UART_PARITY_ODD : UART_PARITY_EVEN);
+    handle->Init.Mode = UART_MODE_TX_RX;
+    handle->Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    handle->Init.OverSampling = UART_OVERSAMPLING_16;
+    handle->Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    handle->Init.ClockPrescaler = UART_PRESCALER_DIV1;
+    handle->AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    if (HAL_UART_Init(handle) != HAL_OK) {
+        return false;
+    }
+
+    __HAL_UART_CLEAR_FLAG(
+        handle, UART_CLEAR_OREF | UART_CLEAR_NEF |
+                    UART_CLEAR_FEF | UART_CLEAR_PEF);
+    __HAL_UART_ENABLE_IT(handle, UART_IT_RXNE);
+    __HAL_UART_ENABLE_IT(handle, UART_IT_ERR);
+    hardware_uart_configured[port] = true;
+    const IRQn_Type irq = hardware_uart_irq(port);
+    HAL_NVIC_SetPriority(irq, 1U, 0U);
+    HAL_NVIC_EnableIRQ(irq);
+    return true;
+}
+
+static size_t board_hardware_uart_read(uint8_t port, uint8_t* data,
+                                       size_t capacity) {
+    if (port >= CONFIG_HARDWARE_UART_RESOURCE_COUNT ||
+        !hardware_uart_configured[port] || data == NULL) {
+        return 0U;
+    }
+    const uint32_t interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    const size_t count =
+        rbsp_byte_ring_read(&hardware_uart_rx_rings[port], data, capacity);
+    if (interrupt_state == 0U) {
+        __enable_irq();
+    }
+    return count;
+}
+
+static bool board_hardware_uart_write(uint8_t port, const uint8_t* data,
+                                      size_t length) {
+    if (port >= CONFIG_HARDWARE_UART_RESOURCE_COUNT ||
+        !hardware_uart_configured[port] || data == NULL || length == 0U) {
+        return false;
+    }
+    const uint32_t interrupt_state = __get_PRIMASK();
+    __disable_irq();
+    const bool accepted =
+        rbsp_byte_ring_write_exact(&hardware_uart_tx_rings[port], data, length);
+    if (accepted) {
+        __HAL_UART_ENABLE_IT(&hardware_uart_handles[port], UART_IT_TXE);
+    }
+    if (interrupt_state == 0U) {
+        __enable_irq();
+    }
+    return accepted;
+}
+
+static void hardware_uart_irq_service(uint8_t port) {
+    if (port >= CONFIG_HARDWARE_UART_RESOURCE_COUNT ||
+        !hardware_uart_configured[port]) {
+        return;
+    }
+
+    UART_HandleTypeDef* const handle = &hardware_uart_handles[port];
+    const uint32_t status = handle->Instance->ISR;
+    const uint32_t receive_flags =
+        USART_ISR_RXNE_RXFNE | USART_ISR_ORE | USART_ISR_NE |
+        USART_ISR_FE | USART_ISR_PE;
+    if ((status & receive_flags) != 0U) {
+        if ((status & USART_ISR_RXNE_RXFNE) != 0U) {
+            const uint8_t value = (uint8_t)handle->Instance->RDR;
+            if (rbsp_byte_ring_push(&hardware_uart_rx_rings[port], value)) {
+                ++rbsp_diag_uart_rx_bytes;
+            } else {
+                ++rbsp_diag_uart_rx_overflows;
+            }
+        }
+        if ((status & (USART_ISR_ORE | USART_ISR_NE |
+                       USART_ISR_FE | USART_ISR_PE)) != 0U) {
+            handle->Instance->ICR =
+                USART_ICR_ORECF | USART_ICR_NECF |
+                USART_ICR_FECF | USART_ICR_PECF;
+            ++rbsp_diag_uart_errors;
+        }
+    }
+
+    if ((handle->Instance->ISR & USART_ISR_TXE_TXFNF) != 0U &&
+        (handle->Instance->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) {
+        uint8_t value;
+        if (rbsp_byte_ring_pop(&hardware_uart_tx_rings[port], &value)) {
+            handle->Instance->TDR = value;
+            ++rbsp_diag_uart_tx_bytes;
+        } else {
+            __HAL_UART_DISABLE_IT(handle, UART_IT_TXE);
+        }
+    }
+}
+#endif
+
+#if CONFIG_UART_RESOURCE_COUNT > 0
+static bool board_uart_configure(uint8_t port, uint32_t baud_rate,
+                                 uint8_t data_bits, uint8_t stop_bits,
+                                 uint8_t parity) {
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        return board_hardware_uart_configure(
+            port, baud_rate, data_bits, stop_bits, parity);
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    return board_soft_uart_configure(
+        (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE),
+        baud_rate, data_bits, stop_bits, parity);
+#endif
+    return false;
+}
+
+static size_t board_uart_read(uint8_t port, uint8_t* data,
+                              size_t capacity) {
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        return board_hardware_uart_read(port, data, capacity);
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    return board_soft_uart_read(
+        (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE), data, capacity);
+#endif
+    return 0U;
+}
+
+static bool board_uart_write(uint8_t port, const uint8_t* data,
+                             size_t length) {
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        return board_hardware_uart_write(port, data, length);
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    return board_soft_uart_write(
+        (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE), data, length);
+#endif
+    return false;
+}
+#endif
+
 #ifdef CONFIG_REMOTEBSP_TRANSPORT_CAN
 void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* handle) {
     if (handle->Instance != FDCAN1) {
@@ -1386,6 +1709,21 @@ int main(void) {
         fatal_error();
     }
 #endif
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    for (uint8_t port = 0U;
+         port < CONFIG_HARDWARE_UART_RESOURCE_COUNT; ++port) {
+        if (!rbsp_byte_ring_init(
+                &hardware_uart_rx_rings[port],
+                hardware_uart_rx_storage[port],
+                sizeof(hardware_uart_rx_storage[port])) ||
+            !rbsp_byte_ring_init(
+                &hardware_uart_tx_rings[port],
+                hardware_uart_tx_storage[port],
+                sizeof(hardware_uart_tx_storage[port]))) {
+            fatal_error();
+        }
+    }
+#endif
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
     const rbsp_soft_half_duplex_uart_hal_t soft_uart_hal = {
         .context = NULL,
@@ -1418,10 +1756,10 @@ int main(void) {
 #ifdef CONFIG_REMOTEBSP_STATIC_GPIO_MAP
         .gpio_resource_allowed = board_gpio_resource_allowed,
 #endif
-#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
-        .uart_configure = board_soft_uart_configure,
-        .uart_read = board_soft_uart_read,
-        .uart_write = board_soft_uart_write,
+#if CONFIG_UART_RESOURCE_COUNT > 0
+        .uart_configure = board_uart_configure,
+        .uart_read = board_uart_read,
+        .uart_write = board_uart_write,
 #endif
 #ifdef CONFIG_REMOTEBSP_PWM
         .pwm_configure = rbsp_board_pwm_configure,
@@ -1503,6 +1841,24 @@ void TIM2_IRQHandler(void) {
     }
 }
 #endif /* CONFIG_REMOTEBSP_MOTION */
+
+#ifdef RBSP_HARDWARE_UART_ENABLED
+void USART1_IRQHandler(void) {
+    hardware_uart_irq_service(0U);
+}
+
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 1
+void USART2_IRQHandler(void) {
+    hardware_uart_irq_service(1U);
+}
+#endif
+
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2
+void USART3_IRQHandler(void) {
+    hardware_uart_irq_service(2U);
+}
+#endif
+#endif
 
 #ifdef CONFIG_REMOTEBSP_TRANSPORT_USB
 void USB_LP_IRQHandler(void) {

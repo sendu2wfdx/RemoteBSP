@@ -6,15 +6,16 @@
 
 | 目标 | 总线模式 | 已接通的远程功能 |
 |---|---|---|
-| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult；PA6 PWM、PA8 DMA定时位流和五轴/TMC后端已交叉编译，待实板验收 |
+| STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发实板验证通过；PA6 PWM、PA8 DMA定时位流和五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路TMC2209已实板验证；PA6 PWM和PA8 DMA定时位流已交叉编译；双模式Katapult切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | CAN-FD实测；另有互斥的USB Vendor Bulk APP已交叉编译；PC6 PWM、PA8 DMA定时位流和PC13 GPIO |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | CAN-FD及USART1/2/3三路115200全双工并发已实测；另有互斥的USB Vendor Bulk APP；PC6 PWM、PA8 DMA定时位流和PC13 GPIO |
 
-STM32F072与STM32F103的硬件 UART 0 已接到 USART1，使用中断驱动的 RX/TX 环形缓冲；
-Studio/Kconfig可选择合法的PA9/PA10或PB6/PB7端点并固定对象波特率。RS-485方向
-引脚暂未接入实体后端。
-FLY-D5未默认公开通用硬件UART；G431的硬件USART尚未接入。启用TMC2209预设时只报告TMC专用单线
-逻辑 UART，普通 G431 固件仍不报告 UART 能力。
+STM32F072的硬件UART 0接到USART1；STM32F103与STM32G431依次提供USART1/2/3三路硬件UART。
+所有端口均使用各自独立的中断驱动RX/TX环形缓冲。Studio/Kconfig可选择USART1
+的PA9/PA10或PB6/PB7端点；F103的USART2固定PA2/PA3，USART3固定PB10/PB11。
+RS-485方向引脚暂未接入实体后端。
+FLY-D5未默认公开通用硬件UART。G431普通板卡预设默认公开三路硬件UART；单轴
+TMC2209验收预设为避免复用既有PA2/PA3接线，仍只报告TMC专用单线逻辑UART。
 F103 的 Katapult 跳转、CAN 在线升级和 USB Bootloader 枚举已经分别通过实体板
 基线验证。当前 F103/G431 已统一生成双模式 Katapult：APP 命令进入 CAN；
 BluePill 复位时按住 PA0、WeAct G431 复位时按住 PC13 进入 USB。双模式镜像
@@ -30,9 +31,8 @@ G431使用PC6/TIM3_CH1和PA8/TIM1_CH1+DMA1_Channel1/DMAMUX。引脚选择会过�
 但新远程PWM命令、DMA位流和WS2812实体波形仍待验收。BluePill Plus的PB2软件
 呼吸灯保留为独立板级自检功能，不等同于通用PWM资源。
 
-BluePill Plus 专用配置 `stm32f103_weact_bluepill_plus_defconfig` 把 CAN 重映射到
-PB8/PB9，避开板载 USB 对 PA11/PA12 的占用；UART 0 默认使用
-PA9(TX)/PA10(RX)。
+BluePill Plus专用配置`stm32f103_weact_bluepill_plus_defconfig`把CAN重映射到
+PB8/PB9，避开板载USB对PA11/PA12的占用；默认启用UART 0～2三路端口。
 
 ## Ubuntu 依赖
 
@@ -166,7 +166,7 @@ WeAct BluePill Plus 和 WeAct G431 Core 的 32.768 kHz LSE 是低速守时资源
 配置成其他速率时，编译期会检查是否能被当前时序精确生成；不能精确生成就会
 停止编译，而不是悄悄使用错误速率。
 
-`STM32F072/F103 UART 0 引脚`菜单可以在以下两组 USART1 引脚间选择：
+`STM32F072/F103 UART 0（USART1）引脚`菜单可以在以下两组引脚间选择：
 
 - PA9(TX)/PA10(RX)，默认值。
 - PB6(TX)/PB7(RX)，启用 USART1 重映射。
@@ -175,8 +175,10 @@ STM32F072RBT6 MCU 层同样提供这两组 USART1 引脚：PA9/PA10 使用 AF1�
 F072还允许CAN在PA11/PA12与PB8/PB9之间选择。数据手册列出的第三组
 PD0/PD1不在RBT6的LQFP64封装上，因此不会显示为可选项。FLY-D5板型固定选择
 PB8/PB9。由于尚未确认 FLY-D5 对外安全公开的硬件 USART 引脚，该板预设把硬件
-UART 容量设为 0，五个 TMC 端口继续使用逻辑 UART 对象 0～4。通用 F072 和 F103
-可以分别编译硬件 USART1 与 TMC 后端；F103 五轴预设中 USART1 为对象 0，TMC 为
+UART容量设为0，五个TMC端口继续使用逻辑UART对象0～4。F103的UART 1固定为
+USART2 PA2/PA3，UART 2固定为USART3 PB10/PB11；LQFP48没有引出这些外设的有效
+重映射组合，因此GUI不会提供无效候选。通用F072和F103可以分别编译硬件UART与
+TMC后端；F103五轴测试预设为节省引脚只保留USART1对象0，TMC为
 对象 1～5。TMC 端口只执行固定 40000 bit/s 原始字节事务，不能作为 Modbus 或
 通用软串口使用。
 
@@ -208,8 +210,8 @@ UART 容量设为 0，五个 TMC 端口继续使用逻辑 UART 对象 0～4。�
 `智能步进运动（可选）`菜单当前提供：
 
 - `CONFIG_REMOTEBSP_MOTION`：是否把运动队列核心编译进固件，默认关闭。
-- `CONFIG_REMOTEBSP_TMC2209_UART`：是否编译固定 40000 bit/s 的 TMC2209 单线
-  事务后端，可与 F072/F103 的硬件 USART1 同时启用。
+- `CONFIG_REMOTEBSP_TMC2209_UART`：是否编译固定40000 bit/s的TMC2209单线
+  事务后端，可与F072/F103已裁剪启用的普通硬件UART同时存在。
 - `CONFIG_TMC2209_UART_PORT_CAPACITY`：TMC 单线端口的编译期静态容量；配置生成器
   会拒绝槽号超出容量的组合。
 - `CONFIG_MOTION_MAX_AXES`：本板最大轴数，F103 默认保守设为2、G431默认5；两者均可显式配置到当前板级后端的五槽上限。
@@ -272,12 +274,18 @@ openocd -f interface/cmsis-dap.cfg -f target/stm32g4x.cfg \
 | PB0 | 16 | PB15 | 31 |
 | PC13 | 45 | PD0 | 48 |
 
-## STM32F103 实体 UART
+## STM32F103实体UART
 
-当前 UART 0 使用 256 字节 RX 和 256 字节 TX 存储区。环形缓冲保留一个空槽，
-所以每次 `UART_WRITE` 最多原子接收 255 字节；空间不足时整段返回
+三路端口分别使用256字节RX和256字节TX存储区。环形缓冲保留一个空槽，
+所以每次`UART_WRITE`最多原子接收255字节；空间不足时整段返回
 `RESOURCE_FAILED`，不会发送半条报文。`UART_READ` 为保证响应可去重重放，
 单次最多取 231 字节，更长数据可以连续读取。
+
+| RemoteBSP端口 | STM32外设 | TX | RX | 最高配置波特率 |
+|---:|---|---|---|---:|
+| 0 | USART1 | PA9（可选PB6重映射） | PA10（可选PB7重映射） | 4,500,000 |
+| 1 | USART2 | PA2 | PA3 | 2,250,000 |
+| 2 | USART3 | PB10 | PB11 | 2,250,000 |
 
 ST-Link 虚拟串口接线：
 
@@ -292,7 +300,11 @@ ST-Link 虚拟串口接线：
 ```sh
 ./build-wsl/remote-cli --node 1 get-capability
 ./build-wsl/remote-cli --node 1 uart-create 0 115200 8 none 1
-./build-wsl/remote-cli --node 1 uart-write 1 hello
+./build-wsl/remote-cli --node 1 uart-create 1 115200 8 none 1
+./build-wsl/remote-cli --node 1 uart-create 2 115200 8 none 1
+./build-wsl/remote-cli --node 1 uart-write 1 hello-uart1
+./build-wsl/remote-cli --node 1 uart-write 2 hello-uart2
+./build-wsl/remote-cli --node 1 uart-write 3 hello-uart3
 ./build-wsl/remote-cli --node 1 uart-write-hex 1 010300000002c40b
 ./build-wsl/remote-cli --node 1 uart-read 1 231
 ```
@@ -302,6 +314,17 @@ ST-Link 虚拟串口接线：
 - CAN→USART1 和 USART1→CAN 文本双向一致。
 - 包含 `00` 的 `00..FE` 共 255 字节二进制序列双向逐字节一致。
 - 256 字节 TX 写入被完整拒绝，COM18 收到 0 字节，节点和 CAN 心跳保持正常。
+
+2026-08-17三路固件实测：UART对象0/1/2同时创建成功；USART1使用ST-Link VCP，
+USART2/3使用CH348的两路接口。115200 8N1下三路同时全双工，每个方向、每路
+1024字节，共6144字节逐字节一致，`dropped_bytes=0`、`lost_events=0`，CAN保持
+ERROR-ACTIVE且收发错误、丢包和Bus-Off均为0。过量并发启动独立CLI请求时，
+`toolbusd`会按预算主动拒绝部分交互请求；顺序限速后全部通过，这是流量准入保护，
+不是UART数据丢失。
+
+CH348通道刚由Windows打开并设置波特率后立即首发时，曾在A/B两路各观察到一个
+首字节缺失；端口打开后等待500 ms再进行相位对齐递增序列测试，三路双向全部
+一致。因此该等待属于测试适配器初始化要求，不计为STM32 UART持续运行丢字。
 
 固件会拒绝 CAN/FDCAN 引脚和 SWD 引脚。F103 还会按照 LQFP48 的实际键合
 管脚拒绝不存在的 GPIO；FLY-D5 还会保留 PA11/PA12 USB，并按照 LQFP64

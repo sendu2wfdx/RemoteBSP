@@ -58,10 +58,10 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、资源枚举、能力合同、健康状态、复位和会话级租约 |
 | 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、16 路 GPIO、8 路 UART、2 路 PWM、1 路定时位流；默认示例公开3路运动轴，并可按 100 ms 周期导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、普通硬件 UART、每轴 STEP/DIR 或 TMC2209、共享 EN、多路 PWM/灯带、实时控制原型、Mock 数字孪生和 JSON 工程；已支持一键生成 `.config`、32线程构建、产物归档和下载，烧录/回读尚未实现 |
-| STM32F103CBT6 / WeAct BluePill Plus | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、Classical CAN、GPIO、USART1、双模式 Katapult；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；五轴与五路 TMC2209 通讯后端待实板验收 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡引脚配置、冲突过滤、普通硬件 UART、每轴 STEP/DIR 或 TMC2209、共享 EN、多路 PWM/灯带、实时控制原型、Mock 数字孪生和 JSON 工程；已支持一键生成 `.config`、32线程构建、产物归档和下载。G431 专用工程已完成构建、手工烧录和资源命令实板验收；GUI 自动烧录/回读及真实节点实时控制尚未实现 |
+| STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；既有 CAN-FD/板载 PWM/单轴运动已实板验证，新通用波形后端待实板验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
 
 SPI、I2C、ADC、通用 Timer 协议和 Storage 已按当前优先级后置，尚未实现。
 通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
@@ -77,7 +77,10 @@ APP 调试串口。
 第一版多轴运动段协议和确定性执行器；Linux 通过 `libremotebsp`/CLI 入队，MCU
 独立生成 STEP/DIR/EN 时间线，不逐脉冲占用 CAN。F072/F103/G431 已从固定 tick
 切换为 TIM2_CH1 compare 边沿调度，支持单轴/整板步频准入、独立脉宽、不可整除
-DDA 余数分配和迟到安全停机。compare 版本实板压力验收和跨板时钟同步仍待实现。
+DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 100 STEP 空载调度
+实测；STEP 上升沿仍严格执行迟到停机，下降沿和纯段结束允许安全延后，避免因
+拉长脉宽或推迟关闭 EN 被误判为多发脉冲。持续高步频、示波器抖动验收和跨板
+时钟同步仍待实现。
 
 具体 GPIO、UART、运动、TMC、PWM 和定时位流映射由 Studio 生成到 Kconfig，构建为
 静态资源表。TMC2209 单线端点固定为 40000 bit/s，帧、CRC 和寄存器语义仍由 Linux
@@ -274,9 +277,10 @@ EN 可以保持独立，也可以显式复用前面任意轴的 EN；共享组�
 数字 IO 编辑器可设置逻辑名称、输入/输出、内部上下拉、有效电平、输出故障安全
 电平和输入消抖；板载按键等已知接口由板卡描述锁定原理图确定的属性。
 普通 UART 编辑器从板卡目录选择整组硬件端点并设置固定波特率，RX/TX引脚只读联动，
-仍会和运动、GPIO、PWM及灯带进行统一冲突检查。BluePill Plus 当前提供 USART1 的
-PA9/PA10 默认端点及 PB6/PB7 备选端点；TMC2209 的40000 bit/s单线UART保持为独立
-资源，不会混入这里。RS-485 DE/RE方向引脚和G431普通USART后端尚未实现。
+仍会和运动、GPIO、PWM及灯带进行统一冲突检查。BluePill Plus与WeAct G431均提供USART1的
+PA9/PA10默认端点及PB6/PB7备选端点、USART2的PA2/PA3、USART3的PB10/PB11；
+三路按UART 0→1→2连续裁剪。TMC2209的40000 bit/s单线UART保持为独立
+资源，不会混入这里。RS-485 DE/RE方向引脚尚未实现。
 PWM 与 WS2812 使用两个独立配置区，可以分别增加或删除多个资源。每个资源先选择
 绑定定时器/通道/引脚/DMA的硬件端点预设，已实现与待验证端点会明确区分。PWM配置只保存
 端点、固定频率、默认占空比和极性；灯带配置保存位流端点、灯珠数量、

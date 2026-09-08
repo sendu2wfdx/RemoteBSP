@@ -417,14 +417,17 @@ config GPIO_RESOURCE_COUNT
 
 config HARDWARE_UART_RESOURCE_COUNT
     int "编译期最大硬件 UART 资源数"
-    range 0 1
+    range 0 3 if BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    range 0 1 if BOARD_STM32F072RBT6
     default 0 if BOARD_MELLOW_FLY_D5
     default 1 if BOARD_STM32F072RBT6
-    default 1 if BOARD_STM32F103CBT6
-    default 0 if BOARD_STM32G431CBU6
+    default 3 if BOARD_STM32F103CBT6
+    default 3 if BOARD_STM32G431CBU6
     help
-      当前 F072/F103 后端实现一组 USART1，G431 尚未接入硬件 UART。TMC2209
-      单线通讯不计入这里，而是由智能运动菜单独立裁剪。
+      F072 后端实现一组 USART1；F103 后端依次提供 USART1、USART2、USART3，
+      G431后端同样依次提供USART1、USART2、USART3。数量设为1/2/3时只链接并
+      占用对应的前N组资源。
+      TMC2209单线通讯不计入这里，而是由智能运动菜单独立裁剪。
 
 config UART_RESOURCE_COUNT
     int
@@ -434,8 +437,8 @@ config UART_RESOURCE_COUNT
       此兼容符号供当前 Remote Core 分配逻辑 UART 对象，不能手工设置。
 
 choice UART0_PINS
-    prompt "STM32F072/F103 UART 0 引脚"
-    depends on (BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6) && HARDWARE_UART_RESOURCE_COUNT > 0
+    prompt "UART 0（USART1）引脚"
+    depends on (BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6) && HARDWARE_UART_RESOURCE_COUNT > 0
     default UART0_PINS_PA9_PA10
 
 config UART0_PINS_PA9_PA10
@@ -445,6 +448,22 @@ config UART0_PINS_PB6_PB7
     bool "USART1 重映射：PB6(TX) / PB7(RX)"
 
 endchoice
+
+config UART1_PINS_PA2_PA3
+    bool
+    default y
+    depends on (BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6) && HARDWARE_UART_RESOURCE_COUNT > 1
+    help
+      UART 1固定使用USART2：PA2(TX) / PA3(RX)。当前支持的F103/G431封装均
+      不提供另一组完整且不占用SWD的有效端点，因此不显示无效候选项。
+
+config UART2_PINS_PB10_PB11
+    bool
+    default y
+    depends on (BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6) && HARDWARE_UART_RESOURCE_COUNT > 2
+    help
+      UART 2固定使用USART3：PB10(TX) / PB11(RX)。G431虽然还可使用
+      PC10/PC11，但当前板卡端点统一固定为PB10/PB11。
 
 config UART_RX_BUFFER_SIZE
     int "每路硬件 UART RX 缓冲长度" if HARDWARE_UART_RESOURCE_COUNT > 0

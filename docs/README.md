@@ -51,11 +51,11 @@ flowchart LR
 | 发现、心跳、请求 | 已实现、已测试 | UUID发现、节点分配、500 ms心跳、2 s离线、重试和副作用去重 |
 | 本地 IPC / C++ API / CLI | 已实现、已测试 | 应用不直接访问CAN；覆盖节点、资源、GPIO、UART、运动、波形和升级 |
 | 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护 |
-| GPIO / UART | 已实现、已测试 | Mock完整；F103 USART1已实现，G431普通UART待补 |
-| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译，实体波形待验收 |
-| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板同步待实现 |
+| GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致 |
+| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM对象命令已实测，实体WS2812波形待验收 |
+| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；G431完成100 STEP空载调度，持续负载与跨板同步待实现 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
-| Studio | 构建阶段已实现 | GUI工程、冲突检查、Mock可视化、生成`.config`、32线程构建、产物/日志/哈希归档和下载；烧录回读待实现 |
+| Studio | 构建阶段已实现 | GUI工程、冲突检查、Mock可视化、生成`.config`、32线程构建、产物/日志/哈希归档和下载；G431工程已手工烧录验收，GUI自动烧录回读待实现 |
 | SPI/I2C/ADC/Timer/Storage | 尚未实现 | 按当前优先级后置 |
 
 ## 正式板卡
@@ -63,8 +63,8 @@ flowchart LR
 | 板卡 | 当前能力 |
 |---|---|
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴和五路TMC2209已实测；双模式Katapult切换待验收 |
-| STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源、Classical CAN、GPIO、USART1、双模式Katapult；五轴/TMC待实板验收 |
-| STM32G431CBU6 / WeAct Core | 外部8 MHz HSE、32.768 kHz LSE资源、CAN-FD、PC6 PWM、PC13 GPIO；五轴/USB/双模式Katapult待继续验收 |
+| STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发实板验证通过；五轴/TMC待实板验收 |
+| STM32G431CBU6 / WeAct Core | 外部8 MHz HSE、32.768 kHz LSE资源、CAN-FD、USART1/2/3、PC6 PWM、PC13 GPIO；三路UART、Studio专用固件及单轴空载调度已实测，五轴持续负载/USB/双模式Katapult待继续验收 |
 
 ## 严格分层
 

@@ -78,8 +78,16 @@ def _validate_and_collect(draft: dict, catalog: dict) -> tuple[dict, dict]:
     axes = _items(draft, "motion", "axes")
     pwm = _items(draft, "pwm", "channels")
     strips = _items(draft, "timed_bitstream", "ws2812")
-    if len(uart) > 1 or len(pwm) > 1 or len(strips) > 1:
-        raise ProjectConfigError("当前实体后端每板最多支持1路硬件UART、1路PWM和1路WS2812")
+    implemented_uart_ports = {
+        int(item["port"])
+        for item in board.get("uart", {}).get("endpoints", [])
+        if item.get("backend_status") == "implemented"
+    }
+    if len(uart) > len(implemented_uart_ports) or \
+            len(pwm) > 1 or len(strips) > 1:
+        raise ProjectConfigError(
+            f"当前板卡最多支持{len(implemented_uart_ports)}路硬件UART、"
+            "1路PWM和1路WS2812")
     if len(axes) > 5:
         raise ProjectConfigError("当前单板静态固件最多支持5个运动轴")
 
@@ -229,14 +237,23 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
                 set_value(f"STARTUP_GPIO_{suffix}", ",".join(pins))
             set_value("GPIO_RESOURCE_COUNT", max(1, len(resources["gpio"])))
 
-            uart = resources["uart"]
+            uart = sorted(resources["uart"], key=lambda item: item["port"])
+            ports = [int(item["port"]) for item in uart]
+            if ports != list(range(len(ports))):
+                raise ProjectConfigError(
+                    "硬件UART必须从端口0开始连续启用，不能跳过中间端口")
             set_value("HARDWARE_UART_RESOURCE_COUNT", len(uart))
-            if uart:
-                endpoint = uart[0]["endpoint_id"].upper()
-                if endpoint == "USART1_PA9_PA10":
+            for item in uart:
+                endpoint = item["endpoint_id"].upper()
+                port = int(item["port"])
+                if port == 0 and endpoint == "USART1_PA9_PA10":
                     set_value("UART0_PINS_PA9_PA10", True)
-                elif endpoint == "USART1_PB6_PB7":
+                elif port == 0 and endpoint == "USART1_PB6_PB7":
                     set_value("UART0_PINS_PB6_PB7", True)
+                elif port == 1 and endpoint == "USART2_PA2_PA3":
+                    pass
+                elif port == 2 and endpoint == "USART3_PB10_PB11":
+                    pass
                 else:
                     raise ProjectConfigError("UART端点尚未映射到固件Kconfig")
 
@@ -289,7 +306,6 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
                     tmc_slots.append(index)
                 else:
                     set_value(prefix + "DRIVER_STEP_DIR", True)
-                    set_value(prefix + "TMC_UART_PIN_NONE", True)
             if axes:
                 set_value("MOTION_MAX_AXES", len(axes))
                 rates = [int(axis.get("maximum_step_rate_hz", 10000))

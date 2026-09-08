@@ -59,17 +59,17 @@ function renderGpioTable(){
 }
 function capablePinOptions(pins,current){const used=occupied();if(current)used.delete(current);const available=(pins||[]).filter(pin=>!used.has(pin)||pin===current);return '<option value="">未映射</option>'+available.map(pin=>`<option value="${pin}" ${pin===current?'selected':''}>${pin}</option>`).join('')}
 function uartTemplates(){return board.uart?.endpoints||[]}
-function uartEndpointOptions(current){
-  return uartTemplates().map(endpoint=>`<option value="${endpoint.endpoint_id}" ${endpoint.endpoint_id===current?'selected':''}>USART1 · RX ${endpoint.rx_pin} / TX ${endpoint.tx_pin}</option>`).join('');
+function uartEndpointOptions(current,port){
+  return uartTemplates().filter(endpoint=>endpoint.port===port).map(endpoint=>`<option value="${endpoint.endpoint_id}" ${endpoint.endpoint_id===current?'selected':''}>USART${endpoint.port+1} · RX ${endpoint.rx_pin} / TX ${endpoint.tx_pin}</option>`).join('');
 }
 function applyUartEndpoint(item,endpointId){
   const endpoint=uartTemplates().find(x=>x.endpoint_id===endpointId);if(!endpoint)return;
   const preserved={name:item.name,baud_rate:item.baud_rate};Object.assign(item,structuredClone(endpoint),preserved,{enabled:true,direction_pin:null});
 }
 function renderUartConfig(){
-  $('#uartTable').innerHTML=uarts.map((uart,index)=>`<div class="resource-row"><div class="axis-row-head"><b>${escapeHtml(uart.name||`uart_${index}`)}</b><span class="endpoint-status implemented">固件已实现</span><button data-remove-uart="${index}">移除</button></div><div class="resource-fields"><label>逻辑名称<input data-uart="${index}" data-uart-role="name" value="${escapeHtml(uart.name||'')}"></label><label class="endpoint-field">硬件端点<select data-uart="${index}" data-uart-role="endpoint_id">${uartEndpointOptions(uart.endpoint_id)}</select></label><label>RX 引脚<input value="${uart.rx_pin}" disabled></label><label>TX 引脚<input value="${uart.tx_pin}" disabled></label><label>固定波特率<input type="number" min="${uart.minimum_baud_rate}" max="${uart.maximum_baud_rate}" data-uart="${index}" data-uart-role="baud_rate" value="${uart.baud_rate}"><span>bit/s</span></label><div class="constraint-note">普通USART与TMC单线UART相互独立；当前实体后端暂不支持RS-485 DE/RE方向引脚。所选端点必须与固件menuconfig保留的USART1引脚组一致。</div></div></div>`).join('')||'<p class="muted">此板卡尚未启用普通硬件 UART 资源。</p>';
+  $('#uartTable').innerHTML=uarts.map((uart,index)=>`<div class="resource-row"><div class="axis-row-head"><b>${escapeHtml(uart.name||`uart_${index}`)}</b><span class="endpoint-status implemented">USART${uart.port+1} · 固件已实现</span><button data-remove-uart="${index}">移除</button></div><div class="resource-fields"><label>逻辑名称<input data-uart="${index}" data-uart-role="name" value="${escapeHtml(uart.name||'')}"></label><label class="endpoint-field">硬件端点<select data-uart="${index}" data-uart-role="endpoint_id">${uartEndpointOptions(uart.endpoint_id,uart.port)}</select></label><label>RX 引脚<input value="${uart.rx_pin}" disabled></label><label>TX 引脚<input value="${uart.tx_pin}" disabled></label><label>固定波特率<input type="number" min="${uart.minimum_baud_rate}" max="${uart.maximum_baud_rate}" data-uart="${index}" data-uart-role="baud_rate" value="${uart.baud_rate}"><span>bit/s</span></label><div class="constraint-note">普通USART与TMC单线UART相互独立；当前实体后端暂不支持RS-485 DE/RE方向引脚。F103/G431按UART 0→1→2连续裁剪，不能跳过中间端口。</div></div></div>`).join('')||'<p class="muted">此板卡尚未启用普通硬件 UART 资源。</p>';
   $$('[data-uart]').forEach(control=>control.onchange=()=>{const item=uarts[+control.dataset.uart],role=control.dataset.uartRole;if(role==='endpoint_id')applyUartEndpoint(item,control.value);else if(role==='baud_rate')item.baud_rate=Math.max(item.minimum_baud_rate,Math.min(item.maximum_baud_rate,+control.value||item.minimum_baud_rate));else item[role]=control.value||null;renderResources()});
-  $$('[data-remove-uart]').forEach(button=>button.onclick=()=>{uarts.splice(+button.dataset.removeUart,1);renderResources()});
+  $$('[data-remove-uart]').forEach(button=>button.onclick=()=>{const port=uarts[+button.dataset.removeUart].port;uarts=uarts.filter(item=>item.port<port);renderResources()});
 }
 function waveformTemplates(kind){return board.waveform?.[kind]||[]}
 function endpointOptions(kind,current,items){
@@ -91,7 +91,7 @@ function renderStripConfig(){
   $$('[data-strip]').forEach(control=>control.onchange=()=>{const item=pixelStrips[+control.dataset.strip],role=control.dataset.waveRole;if(role==='endpoint_id')applyEndpoint(item,'ws2812',control.value);else if(role==='pixel_count')item.pixel_count=Math.max(1,Math.min(item.max_pixels,+control.value||1));else if(role==='reset_time_us')item.reset_time_us=Math.max(50,Math.min(1000,+control.value||80));else item[role]=control.value||null;renderResources()});
   $$('[data-remove-strip]').forEach(button=>button.onclick=()=>{pixelStrips.splice(+button.dataset.removeStrip,1);renderResources()});
 }
-function renderResources(){renderUartConfig();renderPwmConfig();renderStripConfig();renderAxisTable();renderGpioTable();validate();$('#addUart').disabled=uarts.length>=Math.min(1,uartTemplates().length);$('#addPwm').disabled=pwms.length>=waveformTemplates('pwm').length;$('#addStrip').disabled=pixelStrips.length>=waveformTemplates('ws2812').length}
+function renderResources(){renderUartConfig();renderPwmConfig();renderStripConfig();renderAxisTable();renderGpioTable();validate();const availablePorts=new Set(uartTemplates().map(x=>x.port));$('#addUart').disabled=uarts.length>=availablePorts.size;$('#addPwm').disabled=pwms.length>=waveformTemplates('pwm').length;$('#addStrip').disabled=pixelStrips.length>=waveformTemplates('ws2812').length}
 function enableSourceOptions(index,source){return `<option value="own" ${source===null?'selected':''}>独立 EN</option>`+axes.slice(0,index).map((axis,i)=>`<option value="${i}" ${source===i?'selected':''}>与轴 ${i+1} 共用 · ${axis.enable||'未配置'}</option>`).join('')}
 function normalizeAxisDriver(axis){
   if(!axis.driver_type)axis.driver_type=axis.tmc_uart?'tmc2209_uart':'none';
@@ -173,11 +173,12 @@ function renderLiveControls(value){
   $$('[data-live-strip-color]').forEach(control=>control.oninput=()=>{controlOverrides.strips.set(+control.dataset.liveStripColor,{color:control.value});applyControlOverrides(state);renderState(state)});
 }
 function renderState(value){
-  state=value;applyControlOverrides(value);$('#boardName').textContent=value.board_name;$('#nodeState').textContent=value.online?'在线':'离线';
-  $('#sideDot').classList.toggle('online',value.online);$('#sideStatus').textContent=value.online?'节点在线':'节点离线';$('#sideSource').textContent=value.source==='mock_mcu'?'Mock MCU 实时数据':'内置演示数据';
+  const demo=value.source==='demo';
+  state=value;applyControlOverrides(value);$('#boardName').textContent=value.board_name;$('#nodeState').textContent=demo?'演示':(value.online?'在线':'离线');
+  $('#sideDot').classList.toggle('online',!demo&&value.online);$('#sideStatus').textContent=demo?'演示模式':(value.online?'节点在线':'节点离线');$('#sideSource').textContent=value.source==='mock_mcu'?'Mock MCU 实时数据':'内置演示数据';
   $('#elapsed').textContent=formatTime(value.elapsed_ms);$('#motionState').textContent=value.motion.state.toUpperCase();$('#motionFault').textContent=value.motion.fault.toUpperCase();$('#queueDepth').textContent=`${value.motion.queue_depth} / ${value.motion.queue_capacity}`;
   renderGpio(value.gpio);renderAxes(value.motion.axes);renderPwm(value.pwm);renderPixels(value.ws2812);renderLiveControls(value);
-  $('#monOnline').textContent=value.online?'ONLINE':'OFFLINE';$('#monElapsed').textContent=`${value.elapsed_ms.toLocaleString()} ms`;$('#monGpio').textContent=value.gpio.length;$('#monSteps').textContent=value.motion.axes.reduce((n,x)=>n+x.emitted_steps,0).toLocaleString();
+  $('#monOnline').textContent=demo?'DEMO':(value.online?'ONLINE':'OFFLINE');$('#monElapsed').textContent=`${value.elapsed_ms.toLocaleString()} ms`;$('#monGpio').textContent=value.gpio.length;$('#monSteps').textContent=value.motion.axes.reduce((n,x)=>n+x.emitted_steps,0).toLocaleString();
   $('#timeline').innerHTML=[['状态快照已更新',`${formatTime(value.elapsed_ms)} · ${value.source}`],[`运动内核 ${value.motion.state.toUpperCase()}`,`queue ${value.motion.queue_depth}/${value.motion.queue_capacity}`],[value.ws2812?.supported?'WS2812 预览可用':'WS2812 后端未启用','resource capability']].map(x=>`<div class="event"><b>${x[0]}</b><small>${x[1]}</small></div>`).join('');
 }
 async function refresh(){try{const response=await fetch('/api/state',{cache:'no-store'});renderState(await response.json())}catch(error){$('#sideStatus').textContent='GUI 服务断开';$('#sideDot').classList.remove('online')}}
@@ -199,7 +200,7 @@ async function init(){
   catalog=await (await fetch('/api/catalog')).json();$('#boardSelect').innerHTML=catalog.boards.map(x=>`<option value="${x.id}">${x.label}</option>`).join('');loadBoard(catalog.boards[0].id);
   $('#boardSelect').onchange=e=>loadBoard(e.target.value);$('#addAxis').onclick=()=>{if(axes.length>=5)return;axes.push({step:null,dir:null,dir_inverted:false,enable:null,enable_source:null,enable_active_low:true,driver_type:'none',tmc_uart:null,tmc_address:0,limit:null});renderResources()};
   $('#addGpio').onclick=()=>{if(gpios.length>=16)return;gpios.push({name:`gpio_${gpios.length+1}`,pin:null,direction:'input',pull:'none',active_low:false,safe_level:false,debounce_ms:0});renderResources()};
-  $('#addUart').onclick=()=>{const endpoint=uartTemplates()[0];if(!endpoint||uarts.length>=1)return;uarts.push(structuredClone(endpoint));renderResources()};
+  $('#addUart').onclick=()=>{const used=new Set(uarts.map(x=>x.port));const endpoint=uartTemplates().find(x=>!used.has(x.port));if(!endpoint)return;uarts.push(structuredClone(endpoint));uarts.sort((a,b)=>a.port-b.port);renderResources()};
   $('#addPwm').onclick=addPwmResource;$('#addStrip').onclick=addStripResource;
   $('#exportConfig').onclick=exportManifest;$('#compileConfig').onclick=compileManifest;$('#buildFirmware').onclick=buildFirmware;$('#refresh').onclick=refresh;$('#demoMotion').onclick=()=>{demoRunning=!demoRunning;$('#demoMotion').textContent=demoRunning?'停止演示':'演示运动'};
   await refresh();setInterval(()=>{if(demoRunning&&state?.source==='demo')animateDemo();else refresh()},250);

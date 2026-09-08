@@ -317,14 +317,6 @@
       ],
       "reserved": [
         {
-          "pin": "PA9",
-          "owner": "USART1 TX"
-        },
-        {
-          "pin": "PA10",
-          "owner": "USART1 RX"
-        },
-        {
           "pin": "PA11",
           "owner": "Katapult USB DM"
         },
@@ -425,6 +417,32 @@
             "minimum_baud_rate": 300,
             "maximum_baud_rate": 4500000,
             "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart2_pa2_pa3",
+            "enabled": true,
+            "name": "uart_1",
+            "port": 1,
+            "rx_pin": "PA3",
+            "tx_pin": "PA2",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 2250000,
+            "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart3_pb10_pb11",
+            "enabled": true,
+            "name": "uart_2",
+            "port": 2,
+            "rx_pin": "PB11",
+            "tx_pin": "PB10",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 2250000,
+            "backend_status": "implemented"
           }
         ]
       },
@@ -440,6 +458,32 @@
           "baud_rate": 115200,
           "minimum_baud_rate": 300,
           "maximum_baud_rate": 4500000,
+          "backend_status": "implemented"
+        },
+        {
+          "endpoint_id": "usart2_pa2_pa3",
+          "enabled": true,
+          "name": "uart_1",
+          "port": 1,
+          "rx_pin": "PA3",
+          "tx_pin": "PA2",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 2250000,
+          "backend_status": "implemented"
+        },
+        {
+          "endpoint_id": "usart3_pb10_pb11",
+          "enabled": true,
+          "name": "uart_2",
+          "port": 2,
+          "rx_pin": "PB11",
+          "tx_pin": "PB10",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 2250000,
           "backend_status": "implemented"
         }
       ],
@@ -570,56 +614,56 @@
       "motion_defaults": [
         {
           "step": "PA1",
-          "dir": "PA2",
-          "enable": "PA3",
+          "dir": "PA4",
+          "enable": "PA5",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PA4",
+          "tmc_uart": "PA6",
           "limit": null,
           "maximum_step_rate_hz": 50000
         },
         {
-          "step": "PA5",
-          "dir": "PA6",
-          "enable": "PA7",
+          "step": "PA7",
+          "dir": "PA8",
+          "enable": "PA15",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PA8",
+          "tmc_uart": "PB0",
           "limit": null,
           "maximum_step_rate_hz": 50000
         },
         {
-          "step": "PA15",
-          "dir": "PB0",
-          "enable": "PB1",
+          "step": "PB1",
+          "dir": "PB3",
+          "enable": "PB4",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PC13",
+          "tmc_uart": "PB5",
           "limit": null,
           "maximum_step_rate_hz": 50000
         },
         {
-          "step": "PB3",
-          "dir": "PB4",
-          "enable": "PB5",
+          "step": "PB6",
+          "dir": "PB7",
+          "enable": "PB12",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PB6",
+          "tmc_uart": "PB13",
           "limit": null,
           "maximum_step_rate_hz": 50000
         },
         {
-          "step": "PB7",
-          "dir": "PB10",
-          "enable": "PB11",
+          "step": "PB14",
+          "dir": "PB15",
+          "enable": "PC13",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PB12",
+          "tmc_uart": null,
           "limit": null,
           "maximum_step_rate_hz": 50000
         }
@@ -725,9 +769,102 @@
         }
       ],
       "uart": {
-        "endpoints": []
+        "endpoints": [
+          {
+            "endpoint_id": "usart1_pa9_pa10",
+            "enabled": true,
+            "name": "uart_0",
+            "port": 0,
+            "rx_pin": "PA10",
+            "tx_pin": "PA9",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 10000000,
+            "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart1_pb6_pb7",
+            "enabled": false,
+            "name": "uart_0",
+            "port": 0,
+            "rx_pin": "PB7",
+            "tx_pin": "PB6",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 10000000,
+            "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart2_pa2_pa3",
+            "enabled": true,
+            "name": "uart_1",
+            "port": 1,
+            "rx_pin": "PA3",
+            "tx_pin": "PA2",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 10000000,
+            "backend_status": "implemented"
+          },
+          {
+            "endpoint_id": "usart3_pb10_pb11",
+            "enabled": true,
+            "name": "uart_2",
+            "port": 2,
+            "rx_pin": "PB11",
+            "tx_pin": "PB10",
+            "direction_pin": null,
+            "baud_rate": 115200,
+            "minimum_baud_rate": 300,
+            "maximum_baud_rate": 10000000,
+            "backend_status": "implemented"
+          }
+        ]
       },
-      "uart_defaults": [],
+      "uart_defaults": [
+        {
+          "endpoint_id": "usart1_pa9_pa10",
+          "enabled": true,
+          "name": "uart_0",
+          "port": 0,
+          "rx_pin": "PA10",
+          "tx_pin": "PA9",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 10000000,
+          "backend_status": "implemented"
+        },
+        {
+          "endpoint_id": "usart2_pa2_pa3",
+          "enabled": true,
+          "name": "uart_1",
+          "port": 1,
+          "rx_pin": "PA3",
+          "tx_pin": "PA2",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 10000000,
+          "backend_status": "implemented"
+        },
+        {
+          "endpoint_id": "usart3_pb10_pb11",
+          "enabled": true,
+          "name": "uart_2",
+          "port": 2,
+          "rx_pin": "PB11",
+          "tx_pin": "PB10",
+          "direction_pin": null,
+          "baud_rate": 115200,
+          "minimum_baud_rate": 300,
+          "maximum_baud_rate": 10000000,
+          "backend_status": "implemented"
+        }
+      ],
       "waveform": {
         "pwm": [
           {
@@ -856,11 +993,11 @@
         {
           "step": "PA0",
           "dir": "PA1",
-          "enable": "PA2",
+          "enable": "PB0",
           "dir_inverted": false,
           "enable_source": null,
           "enable_active_low": true,
-          "tmc_uart": "PA3",
+          "tmc_uart": "PB1",
           "limit": null,
           "maximum_step_rate_hz": 10000
         }

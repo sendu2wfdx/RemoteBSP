@@ -353,6 +353,73 @@ static void test_compare_lateness_stops_instead_of_bursting(void) {
     assert(!io_step[0]);
 }
 
+static void test_late_fall_extends_pulse_without_fault(void) {
+    memset(io_enabled, 0, sizeof(io_enabled));
+    memset(io_direction, 0, sizeof(io_direction));
+    memset(io_step, 0, sizeof(io_step));
+    memset(io_limit, 0, sizeof(io_limit));
+    recorded_step_edge_count = 0U;
+    const rbsp_motion_io_t io = {
+        set_enable, set_direction, set_step, limit_active};
+    rbsp_motion_queue_t queue;
+    assert(rbsp_motion_init(&queue, 1U));
+    rbsp_motion_segment_t segment =
+        make_segment(1U, 1000000ULL, 100000ULL, true);
+    segment.axis_count = 1U;
+    memset(segment.steps, 0, sizeof(segment.steps));
+    segment.steps[0] = 2;
+    assert(rbsp_motion_enqueue(&queue, &segment, 0U, NULL) ==
+           RBSP_MOTION_ENQUEUE_OK);
+
+    uint64_t deadline_ns = 0U;
+    assert(service_at(&queue, &io, 1000000ULL, &deadline_ns));
+    assert(service_at(&queue, &io, deadline_ns, &deadline_ns));
+    assert(io_step[0]);
+    const uint64_t late_fall = deadline_ns +
+        (uint64_t)(CONFIG_MOTION_MAX_COMPARE_LATENESS_US + 1U) *
+            1000ULL;
+    assert(service_at(&queue, &io, late_fall, &deadline_ns));
+    assert(queue.fault == RBSP_MOTION_FAULT_NONE);
+    assert(queue.state == RBSP_MOTION_RUNNING);
+    assert(queue.emitted_steps[0] == 1U);
+    assert(!io_step[0]);
+    assert(deadline_ns > late_fall);
+}
+
+static void test_late_segment_end_completes_without_fault(void) {
+    memset(io_enabled, 0, sizeof(io_enabled));
+    memset(io_direction, 0, sizeof(io_direction));
+    memset(io_step, 0, sizeof(io_step));
+    memset(io_limit, 0, sizeof(io_limit));
+    const rbsp_motion_io_t io = {
+        set_enable, set_direction, set_step, limit_active};
+    rbsp_motion_queue_t queue;
+    assert(rbsp_motion_init(&queue, 1U));
+    rbsp_motion_segment_t segment =
+        make_segment(1U, 1000000ULL, 100000ULL, true);
+    segment.axis_count = 1U;
+    memset(segment.steps, 0, sizeof(segment.steps));
+    segment.steps[0] = 1;
+    assert(rbsp_motion_enqueue(&queue, &segment, 0U, NULL) ==
+           RBSP_MOTION_ENQUEUE_OK);
+
+    uint64_t deadline_ns = 0U;
+    assert(service_at(&queue, &io, 1000000ULL, &deadline_ns));
+    assert(service_at(&queue, &io, deadline_ns, &deadline_ns));
+    assert(service_at(&queue, &io, deadline_ns, &deadline_ns));
+    assert(deadline_ns == 1100000ULL);
+    const uint64_t late_end = deadline_ns +
+        (uint64_t)(CONFIG_MOTION_MAX_COMPARE_LATENESS_US + 1U) *
+            1000ULL;
+    assert(service_at(&queue, &io, late_end, &deadline_ns));
+    assert(queue.fault == RBSP_MOTION_FAULT_NONE);
+    assert(queue.state == RBSP_MOTION_IDLE);
+    assert(queue.completed_segments == 1U);
+    assert(queue.emitted_steps[0] == 1U);
+    assert(!io_enabled[0]);
+    assert(!io_step[0]);
+}
+
 static void test_total_step_rate_budget(void) {
     rbsp_motion_queue_t queue;
     assert(rbsp_motion_init(&queue, CONFIG_MOTION_MAX_AXES));
@@ -432,6 +499,8 @@ int main(void) {
     test_timer_executor_underrun_stops_outputs();
     test_compare_deadlines_and_fractional_dda();
     test_compare_lateness_stops_instead_of_bursting();
+    test_late_fall_extends_pulse_without_fault();
+    test_late_segment_end_completes_without_fault();
     test_total_step_rate_budget();
     test_append_does_not_restart_running_segment();
     test_shared_enable_group();

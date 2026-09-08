@@ -25,6 +25,8 @@
 - 烧录后回读固件版本、UUID、配置哈希并给出明确结果；
 - 为批量生产增加非交互命令行入口，网页只调用同一后端；
 - 将实时 GPIO/PWM/WS2812 控制页通过 `toolbusd` 接入，不允许网页直连 CAN。
+- 为实体 STM32 Remote Core 补齐通用资源目录枚举，使 `resource-list` 与具体资源
+  命令使用同一静态资源表；当前该命令返回“不支持”。
 
 验收条件：不进入 `menuconfig`，从一份 Studio 工程可重复得到相同固件，完成构建、
 烧录、重启和回读核对；冲突配置在构建前被定位并拒绝。
@@ -81,10 +83,10 @@
 
 ## P2：UART 与工业现场使用
 
-普通 UART 已有协议、对象、流式接收、缓冲和 Mock；F103 USART1 已实现，G431 普通
-UART 后端待补。后续：
+普通 UART 已有协议、对象、流式接收、缓冲和 Mock；F103、G431三路均已完成
+115200全双工并发实测。后续：
 
-- 实现 G431 硬件 UART 和更多合法端点；
+- 评估F103/G431普通UART可选DMA后端、缓冲水位遥测和资源冲突规则；
 - 设计标准 RS-485 适配器：RX/TX、DE/RE、DMA/中断流式接收和每端口隔离；
 - 在 Linux 实现 Modbus RTU 轮询和 3.5 字符帧间隔，不把 Modbus 放入 MCU；
 - 实测 8 路并发轮询、GPS 持续输入、缓冲水位和 CAN 带宽配额；
@@ -117,7 +119,7 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 |---|---|---|
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN、GPIO、五轴与五路 TMC2209 基础实测 | compare 压力、波形、双模式 Katapult 切换、设备参数掉电测试 |
 | STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult | 五轴/TMC、波形、静态 Studio 固件、设备参数实板验收 |
-| STM32G431CBU6 / WeAct Core | CAN-FD、GPIO、PWM、单轴基础实测 | 五轴/TMC、USB Vendor Bulk、波形、双模式 Katapult、参数区验收 |
+| STM32G431CBU6 / WeAct Core | CAN-FD、GPIO、PWM、三路UART、单轴转动及Studio专用固件100 STEP空载调度实测 | 五轴/TMC持续负载、USB Vendor Bulk、WS2812波形、双模式 Katapult、参数区验收 |
 
 ## 持续验证要求
 

@@ -97,18 +97,18 @@ BOARDS = {
         "maximum_step_rate_hz": 50000,
         "mcu": "stm32f103cbt6",
         "reserved": {
-            "PA9": "USART1 TX", "PA10": "USART1 RX", "PA11": "Katapult USB DM",
+            "PA11": "Katapult USB DM",
             "PA12": "Katapult USB DP", "PA13": "SWDIO", "PA14": "SWCLK",
             "PB2": "板载呼吸灯", "PB8": "CAN RX", "PB9": "CAN TX",
             "PC14": "32.768kHz LSE", "PC15": "32.768kHz LSE",
             "PD0": "8MHz HSE OSC_IN", "PD1": "8MHz HSE OSC_OUT",
         },
         "defaults": [
-            ["PA1", "PA2", "PA3", "PA4", None],
-            ["PA5", "PA6", "PA7", "PA8", None],
-            ["PA15", "PB0", "PB1", "PC13", None],
-            ["PB3", "PB4", "PB5", "PB6", None],
-            ["PB7", "PB10", "PB11", "PB12", None],
+            ["PA1", "PA4", "PA5", "PA6", None],
+            ["PA7", "PA8", "PA15", "PB0", None],
+            ["PB1", "PB3", "PB4", "PB5", None],
+            ["PB6", "PB7", "PB12", "PB13", None],
+            ["PB14", "PB15", "PC13", None, None],
         ],
         "gpio_interfaces": [{
             "id": "user_button",
@@ -148,6 +148,32 @@ BOARDS = {
                     "baud_rate": 115200,
                     "minimum_baud_rate": 300,
                     "maximum_baud_rate": 4500000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart2_pa2_pa3",
+                    "enabled": True,
+                    "name": "uart_1",
+                    "port": 1,
+                    "rx_pin": "PA3",
+                    "tx_pin": "PA2",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 2250000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart3_pb10_pb11",
+                    "enabled": True,
+                    "name": "uart_2",
+                    "port": 2,
+                    "rx_pin": "PB11",
+                    "tx_pin": "PB10",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 2250000,
                     "backend_status": "implemented",
                 },
             ],
@@ -200,7 +226,7 @@ BOARDS = {
             "PA11": "Katapult USB DM", "PA12": "Katapult USB DP",
             "PA13": "SWDIO", "PA14": "SWCLK", "PB8": "CAN RX", "PB9": "CAN TX",
         },
-        "defaults": [["PA0", "PA1", "PA2", "PA3", None]],
+        "defaults": [["PA0", "PA1", "PB0", "PB1", None]],
         "gpio_interfaces": [{
             "id": "user_button",
             "label": "用户按键",
@@ -213,7 +239,62 @@ BOARDS = {
             "safe_level": None,
             "debounce_ms": 10,
         }],
-        "uart": {"endpoints": []},
+        "uart": {
+            "endpoints": [
+                {
+                    "endpoint_id": "usart1_pa9_pa10",
+                    "enabled": True,
+                    "name": "uart_0",
+                    "port": 0,
+                    "rx_pin": "PA10",
+                    "tx_pin": "PA9",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 10000000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart1_pb6_pb7",
+                    "enabled": False,
+                    "name": "uart_0",
+                    "port": 0,
+                    "rx_pin": "PB7",
+                    "tx_pin": "PB6",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 10000000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart2_pa2_pa3",
+                    "enabled": True,
+                    "name": "uart_1",
+                    "port": 1,
+                    "rx_pin": "PA3",
+                    "tx_pin": "PA2",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 10000000,
+                    "backend_status": "implemented",
+                },
+                {
+                    "endpoint_id": "usart3_pb10_pb11",
+                    "enabled": True,
+                    "name": "uart_2",
+                    "port": 2,
+                    "rx_pin": "PB11",
+                    "tx_pin": "PB10",
+                    "direction_pin": None,
+                    "baud_rate": 115200,
+                    "minimum_baud_rate": 300,
+                    "maximum_baud_rate": 10000000,
+                    "backend_status": "implemented",
+                },
+            ],
+        },
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pc6", "enabled": True,
@@ -301,6 +382,10 @@ def fixed_reservation_conditions(pin: str) -> list[str]:
         conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 0 && UART0_PINS_PA9_PA10)")
     if pin in {"PB6", "PB7"}:
         conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 0 && UART0_PINS_PB6_PB7)")
+    if pin in {"PA2", "PA3"}:
+        conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 1 && UART1_PINS_PA2_PA3)")
+    if pin in {"PB10", "PB11"}:
+        conditions.append("!(HARDWARE_UART_RESOURCE_COUNT > 2 && UART2_PINS_PB10_PB11)")
     if pin in {"PD0", "PD1"}:
         conditions.append("!F103_CLOCK_HSE_8MHZ")
     if pin in {"PC14", "PC15"}:
