@@ -182,6 +182,164 @@ void test_validation_and_capacity() {
     });
 }
 
+void test_timing_boundaries_and_configuration_parity() {
+    expect_motion_error(MotionError::InvalidConfiguration, [] {
+        MotionExecutor executor({});
+        static_cast<void>(executor);
+    });
+
+    const std::vector<MotionAxisConfig> slow_direction = {
+        {kAxisX, 250000, 2000, 2000, 10000},
+    };
+    MotionExecutor too_short(slow_direction, 8, 1000000ULL, 250000U);
+    expect_motion_error(MotionError::RateExceeded, [&] {
+        too_short.enqueue(
+            {1, 1000000ULL, 14000ULL, true, {{kAxisX, 2}}}, 0);
+    });
+
+    MotionExecutor exact_timing(slow_direction, 8, 1000000ULL, 250000U);
+    exact_timing.enqueue(
+        {1, 1000000ULL, 16000ULL, true, {{kAxisX, 2}}}, 0);
+    const auto edges = exact_timing.advance_to(1016000ULL);
+    assert(count_edges(edges, kAxisX, MotionSignal::Step, true) == 2);
+    assert(count_edges(edges, kAxisX, MotionSignal::Step, false) == 2);
+
+    MotionExecutor lead_boundary(two_axes());
+    lead_boundary.enqueue(
+        segment(1, 1000000ULL, 1000000ULL, true, 1, 0), 0);
+    MotionExecutor lead_too_short(two_axes());
+    expect_motion_error(MotionError::SegmentLate, [&] {
+        lead_too_short.enqueue(
+            segment(1, 999999ULL, 1000000ULL, true, 1, 0), 0);
+    });
+
+    MotionExecutor backwards(two_axes());
+    backwards.advance_to(10U);
+    expect_motion_error(MotionError::TimeWentBackwards, [&] {
+        backwards.enqueue(
+            segment(1, 1000010ULL, 1000000ULL, true, 1, 0), 9U);
+    });
+}
+
+void test_running_append_and_zero_step_axis_disable() {
+    MotionExecutor executor(two_axes());
+    executor.enqueue(
+        segment(1, 1000000ULL, 1000000ULL, false, 1, 1), 0);
+    executor.enqueue(
+        segment(2, 2000000ULL, 1000000ULL, false, 0, 1), 0);
+
+    const auto boundary_edges = executor.advance_to(2000000ULL);
+    assert(executor.status().state == MotionState::Running);
+    assert(count_edges(
+               boundary_edges, kAxisX, MotionSignal::Enable, false) == 1);
+    assert(!executor.status().axes[0].enabled);
+    assert(executor.status().axes[1].enabled);
+
+    executor.enqueue(
+        segment(3, 3000000ULL, 1000000ULL, true, 1, 0),
+        2000000ULL);
+    assert(executor.status().state == MotionState::Running);
+    executor.advance_to(4000000ULL);
+    const auto status = executor.status();
+    assert(status.state == MotionState::Idle);
+    assert(status.fault == MotionFault::None);
+    assert(status.axes[0].position_steps == 2);
+    assert(status.axes[1].position_steps == 2);
+    assert(!status.axes[0].enabled);
+    assert(!status.axes[1].enabled);
+}
+
+void test_reordered_duplicate_and_fault_recovery() {
+    MotionExecutor executor(two_axes());
+    expect_motion_error(MotionError::SequenceMismatch, [&] {
+        executor.enqueue(
+            segment(2, 1000000ULL, 1000000ULL, false, 1, 0), 0);
+    });
+    executor.enqueue(
+        segment(1, 1000000ULL, 1000000ULL, false, 1, 0), 0);
+    expect_motion_error(MotionError::SequenceMismatch, [&] {
+        executor.enqueue(
+            segment(1, 2000000ULL, 1000000ULL, false, 1, 0), 0);
+    });
+    expect_motion_error(MotionError::SequenceMismatch, [&] {
+        executor.enqueue(
+            segment(3, 2000000ULL, 1000000ULL, false, 1, 0), 0);
+    });
+    assert(executor.status().metrics.rejected_segments == 3);
+
+    executor.advance_to(2000000ULL);
+    assert(executor.status().fault == MotionFault::QueueUnderrun);
+    expect_motion_error(MotionError::FaultLatched, [&] {
+        executor.enqueue(
+            segment(2, 0, 1000000ULL, true, 1, 0), 2000000ULL);
+    });
+    executor.clear_fault();
+    const auto recovered = executor.enqueue(
+        segment(2, 0, 1000000ULL, true, 1, 0), 2000000ULL);
+    assert(recovered.start_time_ns == 3000000ULL);
+    executor.advance_to(4000000ULL);
+    const auto status = executor.status();
+    assert(status.state == MotionState::Idle);
+    assert(status.fault == MotionFault::None);
+    assert(status.last_accepted_sequence == 2);
+    assert(status.last_completed_sequence == 2);
+    assert(status.axes[0].position_steps == 2);
+    assert(status.metrics.queue_underruns == 1);
+    assert(status.metrics.rejected_segments == 4);
+}
+
+void test_long_running_continuous_multi_axis() {
+    constexpr std::uint32_t kSegmentCount = 512;
+    constexpr std::uint64_t kDurationNs = 1000000ULL;
+    MotionExecutor executor(two_axes(), 8);
+    std::uint32_t next_sequence = 1;
+    std::int64_t expected_x = 0;
+    std::int64_t expected_y = 0;
+    std::uint64_t expected_steps = 0;
+
+    auto enqueue_next = [&](std::uint64_t now_ns) {
+        const auto x = (next_sequence & 1U) != 0U ? 3 : -2;
+        const auto y = next_sequence % 3U == 0U ? -1 : 1;
+        executor.enqueue(
+            segment(next_sequence, 0, kDurationNs,
+                    next_sequence == kSegmentCount, x, y),
+            now_ns);
+        expected_x += x;
+        expected_y += y;
+        expected_steps += static_cast<std::uint64_t>(x < 0 ? -x : x);
+        expected_steps += static_cast<std::uint64_t>(y < 0 ? -y : y);
+        ++next_sequence;
+    };
+
+    while (next_sequence <= 8U) {
+        enqueue_next(0);
+    }
+    for (std::uint32_t completed = 1;
+         completed <= kSegmentCount; ++completed) {
+        const auto boundary =
+            1000000ULL + completed * kDurationNs;
+        executor.advance_to(boundary);
+        if (next_sequence <= kSegmentCount) {
+            enqueue_next(boundary);
+            assert(executor.status().state == MotionState::Running);
+        }
+    }
+
+    const auto status = executor.status();
+    assert(status.state == MotionState::Idle);
+    assert(status.fault == MotionFault::None);
+    assert(status.last_completed_sequence == kSegmentCount);
+    assert(status.metrics.accepted_segments == kSegmentCount);
+    assert(status.metrics.completed_segments == kSegmentCount);
+    assert(status.metrics.queue_underruns == 0);
+    assert(status.metrics.safety_stops == 0);
+    assert(status.metrics.emitted_steps == expected_steps);
+    assert(status.axes[0].position_steps == expected_x);
+    assert(status.axes[1].position_steps == expected_y);
+    assert(!status.axes[0].enabled);
+    assert(!status.axes[1].enabled);
+}
+
 void test_limit_switch_safe_stop() {
     MotionExecutor executor(two_axes());
     executor.enqueue(
@@ -207,6 +365,23 @@ void test_limit_switch_safe_stop() {
     executor.clear_fault();
     assert(executor.status().state == MotionState::Idle);
     assert(executor.status().fault == MotionFault::None);
+}
+
+void test_limit_while_armed_prevents_motion(void) {
+    MotionExecutor executor(two_axes());
+    executor.enqueue(
+        segment(1, 1000000ULL, 10000000ULL, true, 10, 0), 0);
+    const auto stop_edges = executor.trigger_limit(kAxisX, 999999ULL);
+    assert(stop_edges.empty());
+    const auto status = executor.status();
+    assert(status.state == MotionState::Faulted);
+    assert(status.fault == MotionFault::LimitTriggered);
+    assert(status.queue_depth == 0);
+    assert(status.metrics.limit_stops == 1);
+    assert(status.metrics.safety_stops == 1);
+    assert(status.axes[0].position_steps == 0);
+    assert(!status.axes[0].enabled);
+    assert(!status.axes[0].step_level);
 }
 
 void test_digital_twin_motion_and_fault_injection() {
@@ -292,7 +467,12 @@ int main() {
     test_synchronized_multi_axis_segment();
     test_auto_append_and_queue_underrun();
     test_validation_and_capacity();
+    test_timing_boundaries_and_configuration_parity();
+    test_running_append_and_zero_step_axis_disable();
+    test_reordered_duplicate_and_fault_recovery();
+    test_long_running_continuous_multi_axis();
     test_limit_switch_safe_stop();
+    test_limit_while_armed_prevents_motion();
     test_digital_twin_motion_and_fault_injection();
     test_axis_count_is_board_capability_not_three();
 }

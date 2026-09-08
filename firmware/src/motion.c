@@ -169,6 +169,7 @@ rbsp_motion_enqueue_result_t rbsp_motion_commit_segment(
     }
     if (requested->sequence !=
         queue->last_accepted_sequence + 1U) {
+        ++queue->rejected_segments;
         return RBSP_MOTION_ENQUEUE_SEQUENCE;
     }
     if (queue->size > 0U) {
@@ -176,6 +177,7 @@ rbsp_motion_enqueue_result_t rbsp_motion_commit_segment(
             (queue->head + queue->size - 1U) %
             CONFIG_MOTION_QUEUE_DEPTH);
         if (queue->segments[last_index].final_segment) {
+            ++queue->rejected_segments;
             return RBSP_MOTION_ENQUEUE_INVALID;
         }
     }
@@ -189,13 +191,16 @@ rbsp_motion_enqueue_result_t rbsp_motion_commit_segment(
                 ? queue->next_available_time_ns
                 : earliest;
     } else if (value.start_time_ns < earliest) {
+        ++queue->rejected_segments;
         return RBSP_MOTION_ENQUEUE_LATE;
     }
     if (queue->size > 0U &&
         value.start_time_ns != queue->next_available_time_ns) {
+        ++queue->rejected_segments;
         return RBSP_MOTION_ENQUEUE_DISCONTINUOUS;
     }
     if (UINT64_MAX - value.start_time_ns < value.duration_ns) {
+        ++queue->rejected_segments;
         return RBSP_MOTION_ENQUEUE_INVALID;
     }
 
@@ -455,7 +460,6 @@ static bool deadline_is_non_strict(
     const rbsp_motion_queue_t* queue,
     const rbsp_motion_segment_t* segment,
     uint64_t deadline_ns) {
-    (void)segment;
     if (queue->state != RBSP_MOTION_RUNNING) {
         return false;
     }
@@ -464,6 +468,13 @@ static bool deadline_is_non_strict(
             queue->active_next_rise_ns[axis] == deadline_ns) {
             return false;
         }
+    }
+    const uint64_t end_ns =
+        segment->start_time_ns + segment->duration_ns;
+    if (deadline_ns == end_ns && !segment->final_segment &&
+        queue->size > 1U) {
+        /* 连续段边界同时也是下一段起点，不能按纯收尾事件放宽。 */
+        return false;
     }
     return true;
 }
@@ -544,6 +555,10 @@ bool rbsp_motion_service(rbsp_motion_queue_t* queue,
         io->set_step == NULL) {
         return false;
     }
+    if (next_deadline_ns != NULL) {
+        /* 所有提前返回路径默认取消旧 compare，成功路径末尾再发布新期限。 */
+        *next_deadline_ns = RBSP_MOTION_NO_DEADLINE;
+    }
     if (queue->fault != RBSP_MOTION_FAULT_NONE) {
         stop_outputs(queue, io);
         queue->next_deadline_ns = RBSP_MOTION_NO_DEADLINE;
@@ -561,7 +576,9 @@ bool rbsp_motion_service(rbsp_motion_queue_t* queue,
                 stop_outputs(queue, io);
                 return false;
             }
-            if (active && queue->state == RBSP_MOTION_RUNNING) {
+            if (active &&
+                (queue->state == RBSP_MOTION_ARMED ||
+                 queue->state == RBSP_MOTION_RUNNING)) {
                 rbsp_motion_abort(queue, RBSP_MOTION_FAULT_LIMIT);
                 stop_outputs(queue, io);
                 return true;

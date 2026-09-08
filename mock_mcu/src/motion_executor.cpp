@@ -79,7 +79,8 @@ MotionExecutor::MotionExecutor(std::vector<MotionAxisConfig> axes,
       queue_capacity_(queue_capacity),
       minimum_lead_time_ns_(minimum_lead_time_ns),
       maximum_total_step_rate_hz_(maximum_total_step_rate_hz) {
-    if (axis_configs_.size() > protocol::kMaximumMotionAxes ||
+    if (axis_configs_.empty() ||
+        axis_configs_.size() > protocol::kMaximumMotionAxes ||
         queue_capacity_ == 0 || queue_capacity_ > 1024 ||
         minimum_lead_time_ns_ == 0) {
         throw MotionException(MotionError::InvalidConfiguration,
@@ -188,6 +189,7 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
                "运动段结束时间溢出");
     }
 
+    const bool queue_was_empty = queue_.empty();
     std::set<std::uint32_t> seen_axes;
     SegmentRuntime runtime;
     runtime.segment = segment;
@@ -207,20 +209,25 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
         }
         total_steps += count;
         if (count != 0) {
-            const std::uint64_t available_after_setup =
-                segment.duration_ns > axis.config.direction_setup_ns
-                    ? segment.duration_ns -
-                          axis.config.direction_setup_ns
-                    : 0;
-            const std::uint64_t minimum_period =
+            const std::uint64_t first_rise_delay = std::max(
                 static_cast<std::uint64_t>(
-                    axis.config.step_pulse_width_ns) +
+                    axis.config.direction_setup_ns),
+                static_cast<std::uint64_t>(
+                    axis.config.minimum_step_low_ns));
+            const std::uint64_t pulse_width =
+                axis.config.step_pulse_width_ns;
+            const std::uint64_t minimum_period =
+                pulse_width +
                 axis.config.minimum_step_low_ns;
-            if (available_after_setup <
-                    static_cast<std::uint64_t>(
-                        axis.config.step_pulse_width_ns) ||
-                count >
-                    available_after_setup / minimum_period + 1U ||
+            bool timing_valid =
+                segment.duration_ns >= first_rise_delay + pulse_width;
+            if (timing_valid && count > 1U) {
+                const auto span = segment.duration_ns -
+                                  first_rise_delay - pulse_width;
+                timing_valid =
+                    span / (count - 1U) >= minimum_period;
+            }
+            if (!timing_valid ||
                 !rate_allows(count, segment.duration_ns,
                              axis.config.maximum_step_rate_hz)) {
                 reject(MotionError::RateExceeded,
@@ -239,7 +246,9 @@ MotionSegment MotionExecutor::enqueue(MotionSegment segment,
         segment.start_time_ns + segment.duration_ns;
     last_accepted_sequence_ = segment.sequence;
     queue_.push_back(std::move(runtime));
-    state_ = MotionState::Armed;
+    if (queue_was_empty) {
+        state_ = MotionState::Armed;
+    }
     ++metrics_.accepted_segments;
     metrics_.maximum_queue_depth =
         std::max(metrics_.maximum_queue_depth, queue_.size());
@@ -409,14 +418,12 @@ std::vector<MotionEdge> MotionExecutor::collect_segment_edges(
     const auto effective_until = std::min(until_ns, end);
     for (auto& move : runtime.moves) {
         auto& axis = require_axis(move.move.resource_id);
-        if (move.step_count == 0) {
-            continue;
-        }
         if (!move.controls_emitted && effective_until >= start) {
-            if (!axis.enabled) {
+            const bool should_enable = move.step_count != 0U;
+            if (axis.enabled != should_enable) {
                 edges.push_back(
                     {start, start, move.move.resource_id,
-                     MotionSignal::Enable, true});
+                     MotionSignal::Enable, should_enable});
             }
             const bool direction_positive = move.move.steps >= 0;
             if (axis.direction_positive != direction_positive) {
@@ -426,8 +433,12 @@ std::vector<MotionEdge> MotionExecutor::collect_segment_edges(
             }
             move.controls_emitted = true;
         }
+        if (move.step_count == 0) {
+            continue;
+        }
         const auto first_rise =
-            start + axis.config.direction_setup_ns;
+            start + std::max(axis.config.direction_setup_ns,
+                             axis.config.minimum_step_low_ns);
         const auto last_rise =
             end - axis.config.step_pulse_width_ns;
         const auto span = last_rise - first_rise;
