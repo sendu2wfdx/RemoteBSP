@@ -6,6 +6,7 @@ add_library(remotebsp_remote_core
     src/mock_node.cpp
     src/motion_executor.cpp
     src/remote_core.cpp
+    src/time_sync_bsp.cpp
     src/uart_bsp.cpp
     src/waveform_bsp.cpp
     src/visual_state.cpp

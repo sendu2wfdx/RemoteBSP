@@ -52,7 +52,8 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                        std::shared_ptr<WaveformBsp> waveform,
                        std::shared_ptr<DeviceParameterStore>
                            device_parameters,
-                       std::shared_ptr<BusBsp> bus_bsp)
+                       std::shared_ptr<BusBsp> bus_bsp,
+                       std::shared_ptr<TimeSyncBsp> time_sync_bsp)
     : node_info_(node_info),
       capabilities_(capabilities),
       gpio_bsp_(std::move(gpio_bsp)),
@@ -61,6 +62,9 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
       waveform_(std::move(waveform)),
       device_parameters_(std::move(device_parameters)),
       bus_bsp_(std::move(bus_bsp)),
+      time_sync_bsp_(time_sync_bsp != nullptr
+                         ? std::move(time_sync_bsp)
+                         : std::make_shared<MockTimeSyncBsp>()),
       resources_(std::move(resources)),
       contracts_(std::move(contracts)) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
@@ -114,6 +118,8 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_get_capability(request);
         case protocol::Command::Ping:
             return handle_ping(request);
+        case protocol::Command::TimeSync:
+            return handle_time_sync(request, now);
         case protocol::Command::BootloaderEnter:
         case protocol::Command::BootloaderEnterUsb:
             return handle_bootloader_enter(request);
@@ -519,6 +525,35 @@ protocol::Packet RemoteCore::handle_ping(
     protocol::Packet response = make_response(request, StatusCode::Ok);
     response.payload.insert(response.payload.end(), request.payload.begin(),
                             request.payload.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_time_sync(
+    const protocol::Packet& request, TimePoint now) const {
+    try {
+        static_cast<void>(
+            protocol::decode_time_sync_request(request.payload));
+    } catch (const protocol::TimeSyncPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+
+    std::vector<std::uint8_t> encoded;
+    try {
+        const auto capture = time_sync_bsp_->capture(now);
+        encoded = protocol::encode_time_sync_response(
+            {protocol::kTimeSyncPayloadVersion,
+             capture.counter_bits,
+             0U,
+             capture.boot_epoch,
+             capture.nominal_tick_rate_hz,
+             capture.node_receive_tick,
+             capture.node_send_tick});
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    auto response = make_response(request, StatusCode::Ok);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
     return response;
 }
 

@@ -1,4 +1,5 @@
 #include "remotebsp/client.hpp"
+#include "remotebsp/cli_json.hpp"
 #include "remotebsp/tmc2209.hpp"
 
 #include <cstdint>
@@ -267,7 +268,7 @@ void print_lease(
 
 void print_usage() {
     std::cerr
-        << "用法: remote-cli [--socket 路径] [--node 节点ID] <命令> [参数]\n"
+        << "用法: remote-cli [--json] [--socket 路径] [--node 节点ID] <命令> [参数]\n"
         << "命令:\n"
         << "  ping <文本>\n"
         << "  bootloader-enter\n"
@@ -318,7 +319,8 @@ void print_usage() {
 }
 
 int run(const std::vector<std::string>& arguments,
-        const std::string& socket_path, std::uint32_t node_id) {
+        const std::string& socket_path, std::uint32_t node_id,
+        bool json_output) {
     if (arguments.empty()) {
         print_usage();
         return 2;
@@ -328,6 +330,10 @@ int run(const std::vector<std::string>& arguments,
 
     if (name == "traffic-status" && arguments.size() == 1) {
         const auto status = client.traffic_status();
+        if (json_output) {
+            remotebsp::cli_json::write_traffic_status(std::cout, status);
+            return 0;
+        }
         const auto available_permille =
             status.global_capacity_ns == 0
                 ? 0
@@ -371,7 +377,12 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
     if (name == "node-list" && arguments.size() == 1) {
-        for (const auto& node : client.list_nodes()) {
+        const auto nodes = client.list_nodes();
+        if (json_output) {
+            remotebsp::cli_json::write_node_list(std::cout, nodes);
+            return 0;
+        }
+        for (const auto& node : nodes) {
             std::cout << "node_id=" << node.node_id
                       << " online=" << (node.online ? 1 : 0)
                       << " ready=" << (node.ready ? 1 : 0)
@@ -492,7 +503,13 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
     if (name == "resource-list" && arguments.size() == 1) {
-        for (const auto& resource : client.list_resources()) {
+        const auto resources = client.list_resources();
+        if (json_output) {
+            remotebsp::cli_json::write_resource_list(
+                std::cout, node_id, resources);
+            return 0;
+        }
+        for (const auto& resource : resources) {
             print_resource(resource, true);
         }
         return 0;
@@ -506,6 +523,11 @@ int run(const std::vector<std::string>& arguments,
     if (name == "resource-status" && arguments.size() == 2) {
         const auto status =
             client.resource_status(parse_u32(arguments[1], "资源 ID"));
+        if (json_output) {
+            remotebsp::cli_json::write_resource_status(
+                std::cout, node_id, status);
+            return 0;
+        }
         std::cout << "resource_id=0x" << std::hex << status.resource_id
                   << std::dec << " health="
                   << static_cast<unsigned>(status.health)
@@ -977,13 +999,17 @@ int run(const std::vector<std::string>& arguments,
 }
 
 int main(int argc, char** argv) {
+    bool json_output = false;
     try {
         std::string socket_path = "/tmp/toolbusd.sock";
         std::uint32_t node_id = 1;
         int index = 1;
         while (index < argc) {
             const std::string option = argv[index];
-            if (option == "--socket" && index + 1 < argc) {
+            if (option == "--json") {
+                json_output = true;
+                index += 1;
+            } else if (option == "--socket" && index + 1 < argc) {
                 socket_path = argv[index + 1];
                 index += 2;
             } else if (option == "--node" && index + 1 < argc) {
@@ -997,7 +1023,15 @@ int main(int argc, char** argv) {
         for (; index < argc; ++index) {
             arguments.emplace_back(argv[index]);
         }
-        return run(arguments, socket_path, node_id);
+        if (json_output && (arguments.empty() ||
+            (arguments[0] != "traffic-status" &&
+             arguments[0] != "node-list" &&
+             arguments[0] != "resource-list" &&
+             arguments[0] != "resource-status"))) {
+            throw std::invalid_argument(
+                "--json当前仅支持四个Runtime只读命令");
+        }
+        return run(arguments, socket_path, node_id, json_output);
     } catch (const std::exception& error) {
         std::cerr << "remote-cli 错误: " << error.what() << '\n';
         return 1;

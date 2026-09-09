@@ -1,5 +1,6 @@
 add_library(remotebsp_request_manager
     src/clock_model.cpp
+    src/clock_sync_manager.cpp
     src/ipc.cpp
     src/node_registry.cpp
     src/request_manager.cpp

@@ -39,6 +39,9 @@ HTTP 层不能导入 SocketCAN、USB 或板卡实现。当前 Toolbusd Provider 
 `remote-cli → libremotebsp → toolbusd Unix Domain Socket` 边界读取信息，把节点枚举、
 资源目录和状态转换成同一快照；请求处理器本身不会发送 CAN/USB 帧。
 
+Provider 默认给四个命令添加 `--json`，只接受版本化结构化输出。`remote-cli` 未带
+`--json` 时继续输出原有的人类可读文本，不改变已有终端用法。
+
 ## 启动
 
 使用内置 Mock：
@@ -73,6 +76,45 @@ Toolbusd Provider 只执行 `traffic-status`、`node-list`、`resource-list` 和
 资源目录暂时不可用时，其他节点仍保留，该节点标记为 `degraded` 并产生告警；单个
 资源状态读取失败时，该资源保留但标记 `available=false`、`health=unknown`。单次
 快照默认最多查询 128 项资源，超过上限显式失败，避免异常目录造成无界请求放大。
+
+旧版 `remote-cli` 暂时只能输出文本时，必须显式使用
+`--toolbusd-legacy-text`。结构化输出解析失败不会静默回退到文本；否则升级不兼容可能
+被误判为合法设备状态。该开关仅用于过渡，不能与 `--toolbusd-socket` 分开使用。
+
+## remote-cli 结构化只读契约
+
+以下四种调用支持统一的全局 `--json` 开关：
+
+```sh
+remote-cli --json --socket /tmp/toolbusd.sock traffic-status
+remote-cli --json --socket /tmp/toolbusd.sock node-list
+remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-list
+remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-status 16777217
+```
+
+每次成功调用只在标准输出写入一个 JSON 文档，根信封固定为：
+
+```json
+{
+  "schema_version": 1,
+  "command": "node-list",
+  "data": {"nodes": []}
+}
+```
+
+四种 `data` 形状分别为：
+
+- `traffic-status`：`traffic` 对象，包含链路模式、速率、准入汇总和固定顺序的六类
+  业务计数器；
+- `node-list`：`nodes` 数组，固件版本使用 `{major, minor, patch}` 对象，UUID 使用
+  32 位十六进制字符串；
+- `resource-list`：目标 `node_id` 和 `resources` 数组；
+- `resource-status`：目标 `node_id` 和单个 `resource` 状态对象。
+
+Runtime Provider 对 v1 使用封闭字段集合，严格检查根信封、命令名、字段类型、数值
+范围、固定枚举、流量类别顺序，以及响应中的节点/资源 ID 是否与请求相符。未知版本、
+缺失或多余字段、非 UTF-8、超过 1 MiB、超时或非零退出均显式失败。版本升级应新增
+解析器并经过明确协商，不能让 v1 解析器猜测新字段语义。
 
 ## HTTP 契约
 
@@ -186,9 +228,9 @@ Toolbusd Provider 只执行 `traffic-status`、`node-list`、`resource-list` 和
 3. Runtime 与 `toolbusd` Unix Domain Socket 的权限组；
 4. Web UI 静态文件由 Runtime、反向代理还是独立服务托管。
 
-当前适配器为保持边界清晰而复用 `remote-cli` 文本输出，每次完整快照需要一次全局
+当前适配器为保持边界清晰而复用 `remote-cli` 的版本化 JSON 输出，每次完整快照需要一次全局
 状态、一次节点列表、每个就绪节点一次资源列表以及每项资源一次状态查询。正式长期
-运行前应给 libremotebsp 增加稳定的结构化本地接口或语言绑定，并在 Provider 层做
+运行前可进一步给 libremotebsp 增加原生语言绑定或单次快照 IPC，并在 Provider 层做
 有界并发与明确新鲜度的快照缓存；不能让 Web 请求数量直接放大为无界 IPC 请求。
 
 在这些部署决策完成前，Runtime API 只作为仓库内可启动、可测试的开发服务。

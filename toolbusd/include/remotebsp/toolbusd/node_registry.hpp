@@ -21,6 +21,7 @@ enum class NodeUpdate {
 enum class NodeClockRegistrationResult : std::uint8_t {
     Registered = 0,
     AlreadyRegistered,
+    ConfigurationMismatch,
     ReplacedBootEpoch,
     InvalidBootEpoch,
     UnknownNode,

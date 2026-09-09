@@ -4,6 +4,7 @@
 #include "remotebsp/mock_mcu/bus_bsp.hpp"
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
+#include "remotebsp/mock_mcu/time_sync_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
@@ -11,6 +12,7 @@
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
+#include "remotebsp/protocol/time_sync.hpp"
 
 #include <array>
 #include <chrono>
@@ -95,7 +97,8 @@ public:
                std::shared_ptr<WaveformBsp> waveform = nullptr,
                std::shared_ptr<DeviceParameterStore>
                    device_parameters = nullptr,
-               std::shared_ptr<BusBsp> bus_bsp = nullptr);
+               std::shared_ptr<BusBsp> bus_bsp = nullptr,
+               std::shared_ptr<TimeSyncBsp> time_sync_bsp = nullptr);
 
     protocol::Packet handle(
         const protocol::Packet& request,
@@ -115,6 +118,8 @@ private:
     protocol::Packet handle_get_capability(
         const protocol::Packet& request) const;
     protocol::Packet handle_ping(const protocol::Packet& request) const;
+    protocol::Packet handle_time_sync(
+        const protocol::Packet& request, TimePoint now) const;
     protocol::Packet handle_bootloader_enter(
         const protocol::Packet& request);
     protocol::Packet handle_resource_enum(
@@ -244,6 +249,7 @@ private:
     std::shared_ptr<WaveformBsp> waveform_;
     std::shared_ptr<DeviceParameterStore> device_parameters_;
     std::shared_ptr<BusBsp> bus_bsp_;
+    std::shared_ptr<TimeSyncBsp> time_sync_bsp_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;

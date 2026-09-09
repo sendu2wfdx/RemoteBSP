@@ -1,4 +1,7 @@
+import json
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from runtime_api.provider import RuntimeProviderError
 from runtime_api.toolbusd_provider import (
@@ -66,8 +69,8 @@ class FakeToolbusClient:
 
 
 class RemoteCliIpcClientTest(unittest.TestCase):
-    def test_parses_existing_read_only_cli_contract_without_shell(self):
-        """适配器只组合参数数组，并解析现有 remote-cli 只读输出。"""
+    def test_explicit_legacy_mode_parses_existing_text_without_shell(self):
+        """旧文本兼容必须显式启用，且仍只组合参数数组。"""
         calls = []
 
         def runner(command, timeout, maximum_output):
@@ -104,7 +107,7 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         client = RemoteCliIpcClient(
             "/tmp/test-toolbusd.sock", "/opt/remotebsp/remote-cli",
             timeout_seconds=1.5, maximum_output_bytes=4096,
-            runner=runner)
+            structured_output=False, runner=runner)
         self.assertEqual(client.traffic_status()["mode"], "fd")
         self.assertEqual(client.list_nodes()[0]["firmware"], (1, 2, 3))
         self.assertEqual(client.list_resources(1)[0]["kind"], "gpio")
@@ -113,6 +116,7 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         self.assertTrue(all(call[:3] == [
             "/opt/remotebsp/remote-cli", "--socket",
             "/tmp/test-toolbusd.sock"] for call in calls))
+        self.assertTrue(all("--json" not in call for call in calls))
         self.assertTrue(all(isinstance(call, list) for call in calls))
         self.assertEqual(calls[-1][-2:], ["resource-status", "16777217"])
 
@@ -122,7 +126,8 @@ class RemoteCliIpcClientTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ToolbusIpcProtocolError, "缺少字段"):
             RemoteCliIpcClient(
-                "/tmp/test.sock", runner=incomplete).list_nodes()
+                "/tmp/test.sock", structured_output=False,
+                runner=incomplete).list_nodes()
 
         def inconsistent(command, timeout, maximum_output):
             return (
@@ -132,7 +137,176 @@ class RemoteCliIpcClientTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ToolbusIpcProtocolError, "不一致"):
             RemoteCliIpcClient(
-                "/tmp/test.sock", runner=inconsistent).resource_status(1, 1)
+                "/tmp/test.sock", structured_output=False,
+                runner=inconsistent).resource_status(1, 1)
+
+    def test_structured_output_is_default_and_parses_all_read_operations(self):
+        calls = []
+
+        def document(command, data):
+            return json.dumps({
+                "schema_version": 1,
+                "command": command,
+                "data": data,
+            })
+
+        def runner(command, timeout, maximum_output):
+            calls.append((list(command), timeout, maximum_output))
+            operation = next(item for item in (
+                "traffic-status", "node-list", "resource-list",
+                "resource-status") if item in command)
+            if operation == "traffic-status":
+                counters = {
+                    "admitted_packets": 0,
+                    "rejected_packets": 0,
+                    "admitted_frames": 0,
+                    "estimated_wire_time_ns": 0,
+                }
+                traffic = {
+                    "mode": "fd",
+                    "arbitration_bitrate": 1000000,
+                    "data_bitrate": 5000000,
+                    "max_utilization_permille": 700,
+                    "burst_window_ms": 20,
+                    "available_permille": 900,
+                    "admitted_packets": 10,
+                    "rejected_packets": 1,
+                    "guaranteed_overruns": 0,
+                    "admitted_frames": 12,
+                    "estimated_wire_time_ns": 5000,
+                    "classes": [dict(counters, **{"class": name}) for name in (
+                        "safety", "motion", "system", "interactive",
+                        "streaming", "bulk")],
+                }
+                return document(operation, {"traffic": traffic})
+            if operation == "node-list":
+                return document(operation, {"nodes": [{
+                    "node_id": 1,
+                    "online": True,
+                    "ready": True,
+                    "board_type": 0x431,
+                    "firmware": {"major": 1, "minor": 2, "patch": 3},
+                    "protocol_version": 1,
+                    "uuid": "ab" * 16,
+                }]})
+            if operation == "resource-list":
+                return document(operation, {
+                    "node_id": 1,
+                    "resources": [{
+                        "resource_id": 0x01000001,
+                        "type": "gpio",
+                        "instance": 0,
+                        "source": "native",
+                        "rx_capacity": 1,
+                        "tx_capacity": 1,
+                    }],
+                })
+            return document(operation, {
+                "node_id": 1,
+                "resource": {
+                    "resource_id": 0x01000001,
+                    "health": 0,
+                    "health_name": "normal",
+                    "error_flags": 0,
+                    "rx_buffered": 0,
+                    "tx_buffered": 0,
+                    "rx_overruns": 0,
+                    "tx_overruns": 0,
+                },
+            })
+
+        client = RemoteCliIpcClient(
+            "/tmp/test-toolbusd.sock", timeout_seconds=1.25,
+            maximum_output_bytes=8192, runner=runner)
+        self.assertEqual(client.traffic_status()["available_permille"], 900)
+        self.assertEqual(client.list_nodes()[0]["firmware"], (1, 2, 3))
+        self.assertEqual(client.list_resources(1)[0]["kind"], "gpio")
+        self.assertEqual(
+            client.resource_status(1, 0x01000001)["health"], "normal")
+        self.assertTrue(all(call[0][1:4] == [
+            "--json", "--socket", "/tmp/test-toolbusd.sock"]
+                            for call in calls))
+        self.assertTrue(all(call[1:] == (1.25, 8192) for call in calls))
+
+    def test_structured_output_rejects_bad_envelope_without_legacy_fallback(self):
+        invalid_outputs = (
+            ("不是JSON", "合法JSON"),
+            ('{"schema_version":1,"schema_version":1,'
+             '"command":"node-list","data":{"nodes":[]}}', "重复字段"),
+            ('{"schema_version":NaN,"command":"node-list",'
+             '"data":{"nodes":[]}}', "非标准数值"),
+            (json.dumps({
+                "schema_version": 2, "command": "node-list",
+                "data": {"nodes": []},
+            }), "schema_version"),
+            (json.dumps({
+                "schema_version": 1, "command": "node-list",
+                "data": {"nodes": []}, "unexpected": True,
+            }), "字段不匹配"),
+            (json.dumps({
+                "schema_version": 1.0, "command": "node-list",
+                "data": {"nodes": []},
+            }), "JSON整数"),
+        )
+        for output, message in invalid_outputs:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ToolbusIpcProtocolError, message):
+                    RemoteCliIpcClient(
+                        "/tmp/test.sock",
+                        runner=lambda command, timeout, maximum: output,
+                    ).list_nodes()
+
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "输出超过"):
+            RemoteCliIpcClient(
+                "/tmp/test.sock", maximum_output_bytes=8,
+                runner=lambda command, timeout, maximum: "{}" * 5,
+            ).list_nodes()
+
+    def test_structured_output_rejects_wrong_parent_identifiers(self):
+        def wrong_resource_node(command, timeout, maximum):
+            return json.dumps({
+                "schema_version": 1,
+                "command": "resource-list",
+                "data": {"node_id": 2, "resources": []},
+            })
+
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "错误的节点ID"):
+            RemoteCliIpcClient(
+                "/tmp/test.sock", runner=wrong_resource_node,
+            ).list_resources(1)
+
+        def wrong_status_resource(command, timeout, maximum):
+            return json.dumps({
+                "schema_version": 1,
+                "command": "resource-status",
+                "data": {
+                    "node_id": 1,
+                    "resource": {
+                        "resource_id": 2,
+                        "health": 0,
+                        "health_name": "normal",
+                        "error_flags": 0,
+                        "rx_buffered": 0,
+                        "tx_buffered": 0,
+                        "rx_overruns": 0,
+                        "tx_overruns": 0,
+                    },
+                },
+            })
+
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "错误的资源ID"):
+            RemoteCliIpcClient(
+                "/tmp/test.sock", runner=wrong_status_resource,
+            ).resource_status(1, 1)
+
+    def test_subprocess_timeout_is_explicit(self):
+        with patch(
+                "runtime_api.toolbusd_provider.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("remote-cli", 0.1)):
+            with self.assertRaisesRegex(ToolbusIpcError, "调用失败"):
+                RemoteCliIpcClient(
+                    "/tmp/test.sock", timeout_seconds=0.1,
+                ).list_nodes()
 
 
 class ToolbusdSnapshotProviderTest(unittest.TestCase):

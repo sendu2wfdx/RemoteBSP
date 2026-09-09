@@ -5,6 +5,27 @@
 #include <utility>
 
 namespace remotebsp::toolbusd {
+namespace {
+
+bool same_clock_config(const ClockModelConfig& left,
+                       const ClockModelConfig& right) noexcept {
+    return left.nominal_tick_rate_hz == right.nominal_tick_rate_hz &&
+           left.node_counter_bits == right.node_counter_bits &&
+           left.window_size == right.window_size &&
+           left.low_rtt_sample_count == right.low_rtt_sample_count &&
+           left.minimum_samples == right.minimum_samples &&
+           left.minimum_fit_span_ns == right.minimum_fit_span_ns &&
+           left.maximum_round_trip_ns == right.maximum_round_trip_ns &&
+           left.synchronized_max_age_ns == right.synchronized_max_age_ns &&
+           left.model_expiry_ns == right.model_expiry_ns &&
+           left.maximum_error_bound_ns == right.maximum_error_bound_ns &&
+           left.minimum_drift_uncertainty_ppm ==
+               right.minimum_drift_uncertainty_ppm &&
+           left.maximum_rate_deviation_ppm ==
+               right.maximum_rate_deviation_ppm;
+}
+
+}
 
 NodeRegistry::NodeRegistry(std::chrono::milliseconds offline_timeout,
                            std::size_t maximum_clock_models)
@@ -154,7 +175,9 @@ NodeClockRegistrationResult NodeRegistry::register_clock_model(
     const auto found = clock_models_.find(node_id);
     if (found != clock_models_.end() &&
         found->second.boot_epoch == boot_epoch) {
-        return NodeClockRegistrationResult::AlreadyRegistered;
+        return same_clock_config(found->second.model.config(), config)
+                   ? NodeClockRegistrationResult::AlreadyRegistered
+                   : NodeClockRegistrationResult::ConfigurationMismatch;
     }
     if (found == clock_models_.end() &&
         clock_models_.size() >= maximum_clock_models_) {

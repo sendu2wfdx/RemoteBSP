@@ -209,6 +209,9 @@ def main() -> int:
                         help="remote-cli可执行文件，默认从PATH查找")
     parser.add_argument("--ipc-timeout-ms", type=int, default=2000,
                         help="每次只读IPC调用超时，默认2000毫秒")
+    parser.add_argument(
+        "--toolbusd-legacy-text", action="store_true",
+        help="显式兼容旧版remote-cli文本输出；不会自动回退")
     args = parser.parse_args()
     if args.host not in _LOOPBACK_HOSTS:
         parser.error("认证尚未实现，--host仅允许本机回环地址")
@@ -218,11 +221,14 @@ def main() -> int:
         parser.error("--ipc-timeout-ms必须位于100～10000")
     if args.remote_cli and not args.toolbusd_socket:
         parser.error("--remote-cli必须与--toolbusd-socket一起使用")
+    if args.toolbusd_legacy_text and not args.toolbusd_socket:
+        parser.error("--toolbusd-legacy-text必须与--toolbusd-socket一起使用")
     if args.toolbusd_socket:
         provider: RuntimeProvider = ToolbusdSnapshotProvider(
             RemoteCliIpcClient(
                 args.toolbusd_socket, args.remote_cli or "remote-cli",
-                timeout_seconds=args.ipc_timeout_ms / 1000.0))
+                timeout_seconds=args.ipc_timeout_ms / 1000.0,
+                structured_output=not args.toolbusd_legacy_text))
     elif args.snapshot:
         provider = FileSnapshotProvider(args.snapshot)
     else:

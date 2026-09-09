@@ -129,6 +129,7 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
         case protocol::Command::DiscoveryResponse:
         case protocol::Command::NodeAssign:
         case protocol::Command::Heartbeat:
+        case protocol::Command::TimeSync:
             return TrafficClass::System;
         case protocol::Command::UartWrite:
         case protocol::Command::UartRxEvent:

@@ -8,6 +8,14 @@ target_compile_options(protocol_tests PRIVATE
 
 add_test(NAME protocol_tests COMMAND protocol_tests)
 
+add_executable(time_sync_protocol_tests time_sync_protocol_tests.cpp)
+target_link_libraries(time_sync_protocol_tests PRIVATE remotebsp_protocol)
+target_compile_options(time_sync_protocol_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME time_sync_protocol_tests COMMAND time_sync_protocol_tests)
+
 add_executable(bus_stream_protocol_tests bus_stream_protocol_tests.cpp)
 target_link_libraries(bus_stream_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(bus_stream_protocol_tests PRIVATE
@@ -214,6 +222,7 @@ add_test(NAME request_manager_tests COMMAND request_manager_tests)
 
 add_executable(traffic_control_tests traffic_control_tests.cpp)
 target_link_libraries(traffic_control_tests PRIVATE
+    remotebsp
     remotebsp_request_manager
 )
 target_compile_options(traffic_control_tests PRIVATE
@@ -240,6 +249,17 @@ target_compile_options(node_clock_registry_tests PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
 )
 add_test(NAME node_clock_registry_tests COMMAND node_clock_registry_tests)
+
+add_executable(time_sync_e2e_tests time_sync_e2e_tests.cpp)
+target_link_libraries(time_sync_e2e_tests PRIVATE
+    remotebsp_remote_core
+    remotebsp_request_manager
+)
+target_compile_options(time_sync_e2e_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME time_sync_e2e_tests COMMAND time_sync_e2e_tests)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE

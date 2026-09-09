@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import time
@@ -25,6 +26,8 @@ _HEALTH_VALUES = {
     "failed": 3,
     "disabled": 4,
 }
+_TRAFFIC_CLASSES = (
+    "safety", "motion", "system", "interactive", "streaming", "bulk")
 
 
 class ToolbusIpcError(RuntimeError):
@@ -100,6 +103,64 @@ def _integer(text: str, name: str, *, minimum: int = 0,
     return value
 
 
+def _json_object(value: object, name: str) -> dict:
+    if not isinstance(value, dict):
+        raise ToolbusIpcProtocolError(f"{name}必须是JSON对象")
+    return value
+
+
+def _json_array(value: object, name: str) -> list:
+    if not isinstance(value, list):
+        raise ToolbusIpcProtocolError(f"{name}必须是JSON数组")
+    return value
+
+
+def _json_integer(value: object, name: str, *, minimum: int = 0,
+                  maximum: int = 0xFFFFFFFF) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or \
+            value < minimum or value > maximum:
+        raise ToolbusIpcProtocolError(f"{name}不是允许范围内的JSON整数")
+    return value
+
+
+def _json_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ToolbusIpcProtocolError(f"{name}必须是非空JSON字符串")
+    return value
+
+
+def _json_boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ToolbusIpcProtocolError(f"{name}必须是JSON布尔值")
+    return value
+
+
+def _exact_fields(value: dict, expected: set[str], name: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = expected - actual
+        extra = actual - expected
+        detail = []
+        if missing:
+            detail.append("缺少" + ",".join(sorted(missing)))
+        if extra:
+            detail.append("未知" + ",".join(sorted(extra)))
+        raise ToolbusIpcProtocolError(f"{name}字段不匹配：{'；'.join(detail)}")
+
+
+def _json_pairs(pairs: list[tuple[str, object]]) -> dict:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ToolbusIpcProtocolError(f"JSON包含重复字段：{name}")
+        result[name] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ToolbusIpcProtocolError(f"JSON包含非标准数值：{value}")
+
+
 class RemoteCliIpcClient:
     """以无 shell 子进程调用现有 remote-cli 的只读 libremotebsp API。"""
 
@@ -107,6 +168,7 @@ class RemoteCliIpcClient:
                  executable: str | Path = "remote-cli", *,
                  timeout_seconds: float = 2.0,
                  maximum_output_bytes: int = 1024 * 1024,
+                 structured_output: bool = True,
                  runner: CommandRunner = _run_remote_cli):
         if not str(socket_path) or "\x00" in str(socket_path):
             raise ValueError("toolbusd套接字路径无效")
@@ -118,11 +180,14 @@ class RemoteCliIpcClient:
         self.executable = str(executable)
         self.timeout_seconds = timeout_seconds
         self.maximum_output_bytes = maximum_output_bytes
+        self.structured_output = structured_output
         self.runner = runner
 
     def _run(self, operation: str, *, node_id: int | None = None,
              arguments: Sequence[str] = ()) -> str:
         command = [self.executable, "--socket", str(self.socket_path)]
+        if self.structured_output:
+            command.insert(1, "--json")
         if node_id is not None:
             if node_id < 1 or node_id > 127:
                 raise ToolbusIpcProtocolError("目标节点ID必须位于1～127")
@@ -130,19 +195,222 @@ class RemoteCliIpcClient:
         command.append(operation)
         command.extend(arguments)
         try:
-            return self.runner(
+            output = self.runner(
                 command, self.timeout_seconds, self.maximum_output_bytes)
         except UnicodeDecodeError as error:
             raise ToolbusIpcProtocolError(
                 "remote-cli输出不是UTF-8") from error
+        if not isinstance(output, str):
+            raise ToolbusIpcProtocolError("remote-cli执行器必须返回字符串")
+        if len(output.encode("utf-8")) > self.maximum_output_bytes:
+            raise ToolbusIpcProtocolError("remote-cli输出超过允许上限")
+        return output
 
     @staticmethod
     def _lines(output: str, command: str) -> list[dict[str, str]]:
         return [_parse_fields(line, command)
                 for line in output.splitlines() if line.strip()]
 
+    @staticmethod
+    def _document(output: str, command: str) -> dict:
+        try:
+            root = _json_object(json.loads(
+                output, object_pairs_hook=_json_pairs,
+                parse_constant=_reject_json_constant), command)
+        except (json.JSONDecodeError, RecursionError) as error:
+            raise ToolbusIpcProtocolError(
+                f"{command}输出不是合法JSON：{error}") from error
+        _exact_fields(root, {"schema_version", "command", "data"}, command)
+        version = _json_integer(
+            root["schema_version"], command + ".schema_version",
+            minimum=1, maximum=0xFFFFFFFF)
+        if version != 1:
+            raise ToolbusIpcProtocolError(
+                f"{command}结构化输出schema_version不受支持：{version}")
+        returned_command = _json_string(
+            root["command"], command + ".command")
+        if returned_command != command:
+            raise ToolbusIpcProtocolError(
+                f"{command}结构化输出命令不匹配：{returned_command}")
+        return _json_object(root["data"], command + ".data")
+
+    @staticmethod
+    def _json_traffic(output: str) -> dict:
+        data = RemoteCliIpcClient._document(output, "traffic-status")
+        _exact_fields(data, {"traffic"}, "traffic-status.data")
+        traffic = _json_object(data["traffic"], "traffic-status.data.traffic")
+        numeric_limits = {
+            "arbitration_bitrate": 0xFFFFFFFF,
+            "data_bitrate": 0xFFFFFFFF,
+            "max_utilization_permille": 1000,
+            "burst_window_ms": 0xFFFFFFFF,
+            "available_permille": 1000,
+            "admitted_packets": 0xFFFFFFFFFFFFFFFF,
+            "rejected_packets": 0xFFFFFFFFFFFFFFFF,
+            "guaranteed_overruns": 0xFFFFFFFFFFFFFFFF,
+            "admitted_frames": 0xFFFFFFFFFFFFFFFF,
+            "estimated_wire_time_ns": 0xFFFFFFFFFFFFFFFF,
+        }
+        _exact_fields(traffic, set(numeric_limits) | {"mode", "classes"},
+                      "traffic-status.data.traffic")
+        mode = _json_string(traffic["mode"], "traffic-status.mode")
+        if mode not in {"classical", "fd", "usb"}:
+            raise ToolbusIpcProtocolError(
+                f"traffic-status返回未知链路模式：{mode}")
+        result: dict[str, object] = {"mode": mode}
+        for name, maximum in numeric_limits.items():
+            result[name] = _json_integer(
+                traffic[name], "traffic-status." + name,
+                maximum=maximum)
+        classes = _json_array(traffic["classes"], "traffic-status.classes")
+        if len(classes) != len(_TRAFFIC_CLASSES):
+            raise ToolbusIpcProtocolError("traffic-status.classes数量无效")
+        normalized_classes = []
+        class_fields = {
+            "class", "admitted_packets", "rejected_packets",
+            "admitted_frames", "estimated_wire_time_ns",
+        }
+        for index, raw_class in enumerate(classes):
+            item = _json_object(raw_class, f"traffic-status.classes[{index}]")
+            _exact_fields(item, class_fields,
+                          f"traffic-status.classes[{index}]")
+            if item["class"] != _TRAFFIC_CLASSES[index]:
+                raise ToolbusIpcProtocolError(
+                    "traffic-status.classes顺序或名称无效")
+            normalized = {"class": item["class"]}
+            for name in class_fields - {"class"}:
+                normalized[name] = _json_integer(
+                    item[name], f"traffic-status.classes[{index}].{name}",
+                    maximum=0xFFFFFFFFFFFFFFFF)
+            normalized_classes.append(normalized)
+        result["classes"] = normalized_classes
+        return result
+
+    @staticmethod
+    def _json_nodes(output: str) -> list[dict]:
+        data = RemoteCliIpcClient._document(output, "node-list")
+        _exact_fields(data, {"nodes"}, "node-list.data")
+        nodes = []
+        expected = {
+            "node_id", "online", "ready", "board_type", "firmware",
+            "protocol_version", "uuid",
+        }
+        for index, raw_node in enumerate(_json_array(
+                data["nodes"], "node-list.data.nodes")):
+            item = _json_object(raw_node, f"node-list.nodes[{index}]")
+            _exact_fields(item, expected, f"node-list.nodes[{index}]")
+            firmware = _json_object(
+                item["firmware"], f"node-list.nodes[{index}].firmware")
+            _exact_fields(firmware, {"major", "minor", "patch"},
+                          f"node-list.nodes[{index}].firmware")
+            uuid = _json_string(item["uuid"], f"node-list.nodes[{index}].uuid")
+            if not _UUID.fullmatch(uuid):
+                raise ToolbusIpcProtocolError(
+                    "node-list.uuid必须为16字节十六进制")
+            nodes.append({
+                "node_id": _json_integer(
+                    item["node_id"], f"node-list.nodes[{index}].node_id",
+                    minimum=1, maximum=127),
+                "online": _json_boolean(
+                    item["online"], f"node-list.nodes[{index}].online"),
+                "ready": _json_boolean(
+                    item["ready"], f"node-list.nodes[{index}].ready"),
+                "board_type": _json_integer(
+                    item["board_type"], f"node-list.nodes[{index}].board_type"),
+                "firmware": tuple(_json_integer(
+                    firmware[name], f"node-list.firmware.{name}",
+                    maximum=0xFFFF) for name in ("major", "minor", "patch")),
+                "protocol_version": _json_integer(
+                    item["protocol_version"],
+                    f"node-list.nodes[{index}].protocol_version", maximum=0xFF),
+                "uuid": uuid.lower(),
+            })
+        return nodes
+
+    @staticmethod
+    def _json_resources(output: str, node_id: int) -> list[dict]:
+        data = RemoteCliIpcClient._document(output, "resource-list")
+        _exact_fields(data, {"node_id", "resources"}, "resource-list.data")
+        returned_node = _json_integer(
+            data["node_id"], "resource-list.data.node_id",
+            minimum=1, maximum=127)
+        if returned_node != node_id:
+            raise ToolbusIpcProtocolError("resource-list返回了错误的节点ID")
+        resources = []
+        expected = {
+            "resource_id", "type", "instance", "source",
+            "rx_capacity", "tx_capacity",
+        }
+        for index, raw_resource in enumerate(_json_array(
+                data["resources"], "resource-list.data.resources")):
+            item = _json_object(raw_resource,
+                                f"resource-list.resources[{index}]")
+            _exact_fields(item, expected,
+                          f"resource-list.resources[{index}]")
+            kind = _json_string(
+                item["type"], f"resource-list.resources[{index}].type")
+            source = _json_string(
+                item["source"], f"resource-list.resources[{index}].source")
+            if kind not in _RESOURCE_KINDS:
+                raise ToolbusIpcProtocolError(
+                    f"resource-list返回未知资源类型：{kind}")
+            if source not in {"native", "expanded"}:
+                raise ToolbusIpcProtocolError(
+                    f"resource-list返回未知资源来源：{source}")
+            resources.append({
+                "resource_id": _json_integer(
+                    item["resource_id"], "resource-list.resource_id",
+                    minimum=1),
+                "kind": kind.replace("-", "_"),
+                "instance": _json_integer(
+                    item["instance"], "resource-list.instance",
+                    maximum=0xFFFF),
+                "source": source,
+                "rx_capacity": _json_integer(
+                    item["rx_capacity"], "resource-list.rx_capacity"),
+                "tx_capacity": _json_integer(
+                    item["tx_capacity"], "resource-list.tx_capacity"),
+            })
+        return resources
+
+    @staticmethod
+    def _json_resource_status(output: str, node_id: int,
+                              resource_id: int) -> dict:
+        data = RemoteCliIpcClient._document(output, "resource-status")
+        _exact_fields(data, {"node_id", "resource"}, "resource-status.data")
+        returned_node = _json_integer(
+            data["node_id"], "resource-status.data.node_id",
+            minimum=1, maximum=127)
+        if returned_node != node_id:
+            raise ToolbusIpcProtocolError("resource-status返回了错误的节点ID")
+        item = _json_object(data["resource"], "resource-status.data.resource")
+        expected = {
+            "resource_id", "health", "health_name", "error_flags",
+            "rx_buffered", "tx_buffered", "rx_overruns", "tx_overruns",
+        }
+        _exact_fields(item, expected, "resource-status.data.resource")
+        health_name = _json_string(
+            item["health_name"], "resource-status.health_name")
+        if health_name not in _HEALTH_VALUES:
+            raise ToolbusIpcProtocolError(
+                f"resource-status返回未知健康状态：{health_name}")
+        health = _json_integer(
+            item["health"], "resource-status.health", maximum=0xFF)
+        if health != _HEALTH_VALUES[health_name]:
+            raise ToolbusIpcProtocolError("resource-status健康状态字段不一致")
+        result: dict[str, object] = {"health": health_name}
+        for name in expected - {"health", "health_name"}:
+            result[name] = _json_integer(
+                item[name], "resource-status." + name, maximum=0xFFFFFFFF)
+        if result["resource_id"] != resource_id:
+            raise ToolbusIpcProtocolError("resource-status返回了错误的资源ID")
+        return result
+
     def traffic_status(self) -> dict:
-        lines = self._lines(self._run("traffic-status"), "traffic-status")
+        output = self._run("traffic-status")
+        if self.structured_output:
+            return self._json_traffic(output)
+        lines = self._lines(output, "traffic-status")
         if not lines:
             raise ToolbusIpcProtocolError("traffic-status没有汇总行")
         fields = lines[0]
@@ -165,7 +433,10 @@ class RemoteCliIpcClient:
         return result
 
     def list_nodes(self) -> list[dict]:
-        lines = self._lines(self._run("node-list"), "node-list")
+        output = self._run("node-list")
+        if self.structured_output:
+            return self._json_nodes(output)
+        lines = self._lines(output, "node-list")
         nodes: list[dict] = []
         for fields in lines:
             _required(fields, {
@@ -198,8 +469,10 @@ class RemoteCliIpcClient:
         return nodes
 
     def list_resources(self, node_id: int) -> list[dict]:
-        lines = self._lines(
-            self._run("resource-list", node_id=node_id), "resource-list")
+        output = self._run("resource-list", node_id=node_id)
+        if self.structured_output:
+            return self._json_resources(output, node_id)
+        lines = self._lines(output, "resource-list")
         resources: list[dict] = []
         for fields in lines:
             _required(fields, {
@@ -231,9 +504,12 @@ class RemoteCliIpcClient:
         return resources
 
     def resource_status(self, node_id: int, resource_id: int) -> dict:
-        lines = self._lines(self._run(
+        output = self._run(
             "resource-status", node_id=node_id,
-            arguments=(str(resource_id),)), "resource-status")
+            arguments=(str(resource_id),))
+        if self.structured_output:
+            return self._json_resource_status(output, node_id, resource_id)
+        lines = self._lines(output, "resource-status")
         if len(lines) != 1:
             raise ToolbusIpcProtocolError(
                 "resource-status必须恰好返回一行")

@@ -1,9 +1,13 @@
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
+#include "remotebsp/cli_json.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace remotebsp;
@@ -155,6 +159,81 @@ void test_ipc_round_trip() {
     CHECK(usb_output.mode == toolbusd::TrafficBusMode::Usb);
 }
 
+void test_versioned_cli_json() {
+    DiscoveredNode node;
+    node.node_id = 7;
+    node.online = true;
+    node.ready = false;
+    node.identity.uuid[0] = 0xab;
+    node.identity.board_type = 0x431;
+    node.identity.firmware_major = 1;
+    node.identity.firmware_minor = 2;
+    node.identity.firmware_patch = 3;
+    node.identity.protocol_version = 4;
+    std::ostringstream nodes;
+    cli_json::write_node_list(nodes, {node});
+    CHECK(nodes.str().find(
+        "{\"schema_version\":1,\"command\":\"node-list\"") == 0);
+    CHECK(nodes.str().find("\"node_id\":7") != std::string::npos);
+    CHECK(nodes.str().find("\"online\":true") != std::string::npos);
+    CHECK(nodes.str().find("\"ready\":false") != std::string::npos);
+    CHECK(nodes.str().find("\"protocol_version\":4") != std::string::npos);
+    CHECK(nodes.str().find("\"uuid\":\"ab000000000000000000000000000000\"") !=
+          std::string::npos);
+
+    CanTrafficStatus traffic;
+    traffic.mode = LinkTrafficMode::CanFd;
+    traffic.arbitration_bits_per_second = 1000000;
+    traffic.data_bits_per_second = 5000000;
+    traffic.global_capacity_ns = 100;
+    traffic.global_available_ns = 75;
+    traffic.admitted_packets = std::numeric_limits<std::uint64_t>::max();
+    traffic.classes[0].admitted_packets = 9;
+    std::ostringstream traffic_output;
+    cli_json::write_traffic_status(traffic_output, traffic);
+    CHECK(traffic_output.str().find("\"command\":\"traffic-status\"") !=
+          std::string::npos);
+    CHECK(traffic_output.str().find("\"mode\":\"fd\"") !=
+          std::string::npos);
+    CHECK(traffic_output.str().find("\"available_permille\":750") !=
+          std::string::npos);
+    CHECK(traffic_output.str().find(
+        "\"admitted_packets\":18446744073709551615") !=
+          std::string::npos);
+    CHECK(traffic_output.str().find("\"class\":\"safety\"") !=
+          std::string::npos);
+
+    protocol::ResourceDescriptor descriptor;
+    descriptor.resource_id = 0x01000001;
+    descriptor.type = protocol::ResourceType::Gpio;
+    descriptor.instance = 2;
+    descriptor.flags = protocol::kResourceFlagExpanded;
+    descriptor.rx_capacity = 3;
+    descriptor.tx_capacity = 4;
+    std::ostringstream resources;
+    cli_json::write_resource_list(resources, 7, {descriptor});
+    CHECK(resources.str().find("\"command\":\"resource-list\"") !=
+          std::string::npos);
+    CHECK(resources.str().find("\"resource_id\":16777217") !=
+          std::string::npos);
+    CHECK(resources.str().find("\"source\":\"expanded\"") !=
+          std::string::npos);
+
+    protocol::ResourceStatusPayload status;
+    status.resource_id = descriptor.resource_id;
+    status.health = protocol::ResourceHealth::Degraded;
+    status.error_flags = protocol::kResourceErrorRxOverflow;
+    status.rx_overruns = 5;
+    std::ostringstream resource_status;
+    cli_json::write_resource_status(resource_status, 7, status);
+    CHECK(resource_status.str().find(
+        "\"command\":\"resource-status\"") != std::string::npos);
+    CHECK(resource_status.str().find("\"health_name\":\"degraded\"") !=
+          std::string::npos);
+    CHECK(resource_status.str().find("\"rx_overruns\":5") !=
+          std::string::npos);
+}
+
 }
 
 int main() {
@@ -164,6 +243,7 @@ int main() {
     test_classification();
     test_admission_and_refill();
     test_ipc_round_trip();
+    test_versioned_cli_json();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";
         return 1;
