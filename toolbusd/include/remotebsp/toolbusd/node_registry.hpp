@@ -52,6 +52,9 @@ struct HostToNodeTimeResult {
     NodeClockAccessStatus status{NodeClockAccessStatus::NotRegistered};
     std::optional<std::uint64_t> node_tick;
     std::optional<ClockEstimate> estimate;
+    // 每次注册新模型或接纳新样本都会变化。运动事务必须冻结此代数与换算结果，
+    // 但后续同步样本可以继续更新注册表中的活动模型。
+    std::optional<std::uint64_t> model_generation;
 };
 
 struct NodeRecord {
@@ -105,6 +108,8 @@ public:
     bool reset_clock_model(std::uint32_t node_id) noexcept;
     std::optional<std::uint64_t> clock_boot_epoch(
         std::uint32_t node_id) const noexcept;
+    std::optional<std::uint64_t> clock_model_generation(
+        std::uint32_t node_id) const noexcept;
     std::size_t clock_model_count() const noexcept;
 
     const NodeRecord* find(const protocol::NodeUuid& uuid) const noexcept;
@@ -120,17 +125,20 @@ private:
 
     struct NodeClockEntry {
         std::uint64_t boot_epoch{};
+        std::uint64_t generation{};
         ClockModel model;
     };
 
     const NodeClockEntry* find_clock_entry(
         std::uint32_t node_id, std::uint64_t boot_epoch) const noexcept;
     bool node_is_available(std::uint32_t node_id) const noexcept;
+    std::uint64_t allocate_clock_model_generation() noexcept;
 
     std::chrono::milliseconds offline_timeout_;
     std::size_t maximum_clock_models_;
     std::unordered_map<protocol::NodeUuid, NodeRecord, UuidHash> nodes_;
     std::unordered_map<std::uint32_t, NodeClockEntry> clock_models_;
+    std::uint64_t next_clock_model_generation_{1U};
 };
 
 }

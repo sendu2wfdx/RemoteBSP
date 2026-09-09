@@ -82,6 +82,21 @@ for _ in $(seq 1 100); do
 done
 grep -Fq 'pong=端到端测试' <<<"$ping_output"
 
+runtime_snapshot_output="$("$remote_cli_bin" --json --socket \
+    "$socket_path" runtime-snapshot 64 2000)"
+python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert value["schema_version"] == 1
+assert value["command"] == "runtime-snapshot"
+data = value["data"]
+assert data["snapshot_version"] == 1
+assert data["snapshot_sequence"] > 0
+assert len(data["nodes"]) == 1
+assert len(data["resources"]) == 30
+assert all(item["status_valid"] for item in data["resources"])
+' <<<"$runtime_snapshot_output"
+
 # 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。
 printf -v long_ping '%*s' 2023 ''
 long_ping="${long_ping// /x}"

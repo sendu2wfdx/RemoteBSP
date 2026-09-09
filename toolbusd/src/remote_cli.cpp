@@ -275,6 +275,7 @@ void print_usage() {
         << "  bootloader-enter-usb\n"
         << "  node-list\n"
         << "  traffic-status\n"
+        << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
         << "  resource-list\n"
@@ -399,6 +400,31 @@ int run(const std::vector<std::string>& arguments,
                 node.identity.uuid.begin(), node.identity.uuid.end());
             print_hex(uuid);
             std::cout << '\n';
+        }
+        return 0;
+    }
+    if (name == "runtime-snapshot" &&
+        (arguments.size() == 1 || arguments.size() == 3)) {
+        const auto maximum_resources = arguments.size() == 3
+            ? parse_u32(arguments[1], "最大资源数") : 128U;
+        const auto timeout_ms = arguments.size() == 3
+            ? parse_u32(arguments[2], "快照总超时") : 5000U;
+        if (maximum_resources == 0U || maximum_resources > 128U ||
+            timeout_ms == 0U || timeout_ms > 5000U) {
+            throw std::invalid_argument(
+                "Runtime 快照最大资源数或总超时超过上限");
+        }
+        const auto snapshot = client.runtime_snapshot(
+            static_cast<std::uint16_t>(maximum_resources), timeout_ms);
+        if (json_output) {
+            remotebsp::cli_json::write_runtime_snapshot(
+                std::cout, snapshot);
+        } else {
+            std::cout << "snapshot_version=" << snapshot.version
+                      << " snapshot_sequence=" << snapshot.sequence
+                      << " nodes=" << snapshot.nodes.size()
+                      << " resources=" << snapshot.resources.size()
+                      << '\n';
         }
         return 0;
     }
@@ -1026,10 +1052,11 @@ int main(int argc, char** argv) {
         if (json_output && (arguments.empty() ||
             (arguments[0] != "traffic-status" &&
              arguments[0] != "node-list" &&
+             arguments[0] != "runtime-snapshot" &&
              arguments[0] != "resource-list" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(
-                "--json当前仅支持四个Runtime只读命令");
+                "--json当前仅支持Runtime只读命令");
         }
         return run(arguments, socket_path, node_id, json_output);
     } catch (const std::exception& error) {

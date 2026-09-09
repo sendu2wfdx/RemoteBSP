@@ -165,4 +165,103 @@ inline void write_resource_status(
            << ",\"tx_overruns\":" << status.tx_overruns << "}}}\n";
 }
 
+inline void write_runtime_snapshot(std::ostream& output,
+                                   const RuntimeSnapshot& snapshot) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"runtime-snapshot\",\"data\":{"
+           << "\"snapshot_version\":" << snapshot.version
+           << ",\"snapshot_sequence\":" << snapshot.sequence
+           << ",\"traffic\":{\"mode\":\""
+           << traffic_mode(snapshot.traffic.mode) << '"'
+           << ",\"arbitration_bitrate\":"
+           << snapshot.traffic.arbitration_bits_per_second
+           << ",\"data_bitrate\":"
+           << snapshot.traffic.data_bits_per_second
+           << ",\"max_utilization_permille\":"
+           << snapshot.traffic.maximum_utilization_permille
+           << ",\"burst_window_ms\":" << snapshot.traffic.burst_window_ms
+           << ",\"available_permille\":"
+           << (snapshot.traffic.global_capacity_ns == 0U
+                   ? 0U
+                   : snapshot.traffic.global_available_ns * 1000U /
+                         snapshot.traffic.global_capacity_ns)
+           << ",\"admitted_packets\":" << snapshot.traffic.admitted_packets
+           << ",\"rejected_packets\":" << snapshot.traffic.rejected_packets
+           << ",\"guaranteed_overruns\":"
+           << snapshot.traffic.guaranteed_overruns
+           << ",\"admitted_frames\":" << snapshot.traffic.admitted_frames
+           << ",\"estimated_wire_time_ns\":"
+           << snapshot.traffic.estimated_wire_time_ns
+           << ",\"classes\":[";
+    for (std::size_t index = 0U; index < snapshot.traffic.classes.size();
+         ++index) {
+        if (index != 0U) output << ',';
+        const auto& counters = snapshot.traffic.classes[index];
+        output << "{\"class\":\"" << traffic_class(index) << '"'
+               << ",\"admitted_packets\":" << counters.admitted_packets
+               << ",\"rejected_packets\":" << counters.rejected_packets
+               << ",\"admitted_frames\":" << counters.admitted_frames
+               << ",\"estimated_wire_time_ns\":"
+               << counters.estimated_wire_time_ns << '}';
+    }
+    output << "]},\"nodes\":[";
+    for (std::size_t index = 0U; index < snapshot.nodes.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& node = snapshot.nodes[index];
+        output << "{\"node_id\":" << node.node_id
+               << ",\"online\":" << (node.online ? "true" : "false")
+               << ",\"ready\":" << (node.ready ? "true" : "false")
+               << ",\"board_type\":" << node.identity.board_type
+               << ",\"firmware\":{\"major\":"
+               << node.identity.firmware_major
+               << ",\"minor\":" << node.identity.firmware_minor
+               << ",\"patch\":" << node.identity.firmware_patch << '}'
+               << ",\"protocol_version\":"
+               << static_cast<unsigned>(node.identity.protocol_version)
+               << ",\"uuid\":\"";
+        write_uuid(output, node.identity.uuid);
+        output << "\"}";
+    }
+    output << "],\"resources\":[";
+    for (std::size_t index = 0U; index < snapshot.resources.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& resource = snapshot.resources[index];
+        output << "{\"node_id\":" << resource.node_id
+               << ",\"status_valid\":"
+               << (resource.status_valid ? "true" : "false")
+               << ",\"descriptor\":{\"resource_id\":"
+               << resource.descriptor.resource_id
+               << ",\"type\":\"" << resource_type(resource.descriptor.type)
+               << '"' << ",\"instance\":" << resource.descriptor.instance
+               << ",\"source\":\""
+               << ((resource.descriptor.flags &
+                    protocol::kResourceFlagExpanded) != 0U
+                       ? "expanded" : "native") << '"'
+               << ",\"rx_capacity\":" << resource.descriptor.rx_capacity
+               << ",\"tx_capacity\":" << resource.descriptor.tx_capacity
+               << "},\"status\":{\"resource_id\":"
+               << resource.status.resource_id
+               << ",\"health\":"
+               << static_cast<unsigned>(resource.status.health)
+               << ",\"health_name\":\""
+               << health_name(resource.status.health) << '"'
+               << ",\"error_flags\":" << resource.status.error_flags
+               << ",\"rx_buffered\":" << resource.status.rx_buffered
+               << ",\"tx_buffered\":" << resource.status.tx_buffered
+               << ",\"rx_overruns\":" << resource.status.rx_overruns
+               << ",\"tx_overruns\":" << resource.status.tx_overruns
+               << "}}";
+    }
+    output << "],\"node_issues\":[";
+    for (std::size_t index = 0U; index < snapshot.node_issues.size();
+         ++index) {
+        if (index != 0U) output << ',';
+        output << "{\"node_id\":" << snapshot.node_issues[index].node_id
+               << ",\"code\":"
+               << static_cast<unsigned>(snapshot.node_issues[index].code)
+               << '}';
+    }
+    output << "]}}\n";
+}
+
 }  // namespace remotebsp::cli_json

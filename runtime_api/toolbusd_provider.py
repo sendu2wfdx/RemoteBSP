@@ -52,6 +52,8 @@ class ToolbusIpcClient(Protocol):
 
     def resource_status(self, node_id: int, resource_id: int) -> dict: ...
 
+    def runtime_snapshot(self, maximum_resources: int) -> dict: ...
+
 
 CommandRunner = Callable[[Sequence[str], float, int], str]
 
@@ -409,6 +411,98 @@ class RemoteCliIpcClient:
             raise ToolbusIpcProtocolError("resource-status返回了错误的资源ID")
         return result
 
+    @staticmethod
+    def _json_runtime_snapshot(output: str) -> dict:
+        data = RemoteCliIpcClient._document(output, "runtime-snapshot")
+        _exact_fields(data, {
+            "snapshot_version", "snapshot_sequence", "traffic", "nodes",
+            "resources", "node_issues",
+        }, "runtime-snapshot.data")
+        version = _json_integer(
+            data["snapshot_version"], "runtime-snapshot.snapshot_version",
+            minimum=1, maximum=0xFFFF)
+        if version != 1:
+            raise ToolbusIpcProtocolError(
+                f"runtime-snapshot版本不受支持：{version}")
+        sequence = _json_integer(
+            data["snapshot_sequence"], "runtime-snapshot.snapshot_sequence",
+            minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+        envelope = lambda command, nested: json.dumps({
+            "schema_version": 1, "command": command, "data": nested,
+        }, separators=(",", ":"))
+        traffic = RemoteCliIpcClient._json_traffic(envelope(
+            "traffic-status", {"traffic": data["traffic"]}))
+        nodes = RemoteCliIpcClient._json_nodes(envelope(
+            "node-list", {"nodes": data["nodes"]}))
+        node_ids = {int(node["node_id"]) for node in nodes}
+        if len(node_ids) != len(nodes):
+            raise ToolbusIpcProtocolError(
+                "runtime-snapshot包含重复节点ID")
+
+        raw_resources = _json_array(
+            data["resources"], "runtime-snapshot.resources")
+        if len(raw_resources) > 128:
+            raise ToolbusIpcProtocolError(
+                "runtime-snapshot资源数量超过128项")
+        resources = []
+        identities: set[tuple[int, int]] = set()
+        for index, raw in enumerate(raw_resources):
+            item = _json_object(raw, f"runtime-snapshot.resources[{index}]")
+            _exact_fields(item, {
+                "node_id", "status_valid", "descriptor", "status",
+            }, f"runtime-snapshot.resources[{index}]")
+            node_id = _json_integer(
+                item["node_id"], "runtime-snapshot.resource.node_id",
+                minimum=1, maximum=127)
+            if node_id not in node_ids:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot资源引用未知节点")
+            descriptor = RemoteCliIpcClient._json_resources(envelope(
+                "resource-list", {
+                    "node_id": node_id, "resources": [item["descriptor"]],
+                }), node_id)[0]
+            resource_id = int(descriptor["resource_id"])
+            identity = (node_id, resource_id)
+            if identity in identities:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot包含重复资源")
+            identities.add(identity)
+            status = RemoteCliIpcClient._json_resource_status(envelope(
+                "resource-status", {
+                    "node_id": node_id, "resource": item["status"],
+                }), node_id, resource_id)
+            resources.append({
+                "node_id": node_id,
+                "status_valid": _json_boolean(
+                    item["status_valid"],
+                    "runtime-snapshot.resource.status_valid"),
+                "descriptor": descriptor,
+                "status": status,
+            })
+
+        issues = []
+        issue_nodes: set[int] = set()
+        for index, raw in enumerate(_json_array(
+                data["node_issues"], "runtime-snapshot.node_issues")):
+            item = _json_object(raw, f"runtime-snapshot.node_issues[{index}]")
+            _exact_fields(item, {"node_id", "code"},
+                          f"runtime-snapshot.node_issues[{index}]")
+            node_id = _json_integer(
+                item["node_id"], "runtime-snapshot.issue.node_id",
+                minimum=1, maximum=127)
+            code = _json_integer(
+                item["code"], "runtime-snapshot.issue.code",
+                minimum=1, maximum=1)
+            if node_id not in node_ids or node_id in issue_nodes:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot节点错误项重复或引用未知节点")
+            issue_nodes.add(node_id)
+            issues.append({"node_id": node_id, "code": code})
+        return {
+            "version": version, "sequence": sequence, "traffic": traffic,
+            "nodes": nodes, "resources": resources, "node_issues": issues,
+        }
+
     def traffic_status(self) -> dict:
         output = self._run("traffic-status")
         if self.structured_output:
@@ -538,6 +632,59 @@ class RemoteCliIpcClient:
             raise ToolbusIpcProtocolError("resource-status返回了错误的资源ID")
         return result
 
+    def runtime_snapshot(self, maximum_resources: int) -> dict:
+        if maximum_resources < 1 or maximum_resources > 128:
+            raise ToolbusIpcProtocolError(
+                "Runtime快照资源上限必须位于1～128")
+        process_timeout_ms = int(self.timeout_seconds * 1000)
+        headroom_ms = min(100, max(1, process_timeout_ms // 10))
+        timeout_ms = min(
+            5000, max(1, process_timeout_ms - headroom_ms))
+        output = self._run(
+            "runtime-snapshot",
+            arguments=(str(maximum_resources), str(timeout_ms)))
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError(
+                "Runtime单次快照要求结构化remote-cli输出")
+        return self._json_runtime_snapshot(output)
+
+
+class _RuntimeSnapshotView:
+    """把单次 IPC 结果适配为既有快照组装接口，不再启动子进程。"""
+
+    def __init__(self, snapshot: dict):
+        self.snapshot = snapshot
+        self._resources: dict[int, list[dict]] = {}
+        self._statuses: dict[tuple[int, int], tuple[bool, dict]] = {}
+        self._inventory_failures = {
+            int(issue["node_id"]) for issue in snapshot["node_issues"]
+            if int(issue["code"]) == 1
+        }
+        for item in snapshot["resources"]:
+            node_id = int(item["node_id"])
+            descriptor = item["descriptor"]
+            resource_id = int(descriptor["resource_id"])
+            self._resources.setdefault(node_id, []).append(descriptor)
+            self._statuses[(node_id, resource_id)] = (
+                bool(item["status_valid"]), item["status"])
+
+    def traffic_status(self) -> dict:
+        return self.snapshot["traffic"]
+
+    def list_nodes(self) -> list[dict]:
+        return self.snapshot["nodes"]
+
+    def list_resources(self, node_id: int) -> list[dict]:
+        if node_id in self._inventory_failures:
+            raise ToolbusIpcError("单次快照中该节点资源目录不可用")
+        return self._resources.get(node_id, [])
+
+    def resource_status(self, node_id: int, resource_id: int) -> dict:
+        valid, status = self._statuses[(node_id, resource_id)]
+        if not valid:
+            raise ToolbusIpcError("单次快照中该资源状态不可用")
+        return status
+
 
 class ToolbusdSnapshotProvider(RuntimeProvider):
     """将现有 libremotebsp 只读调用聚合为一次 Runtime v1 快照。"""
@@ -591,11 +738,11 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             "occurred_at_ms": captured_at_ms,
         }
 
-    def _read_resource_status(self, node_id: int,
+    def _read_resource_status(self, client: ToolbusIpcClient, node_id: int,
                               descriptor: dict) -> tuple[dict | None,
                                                          ToolbusIpcError | None]:
         try:
-            return self.client.resource_status(
+            return client.resource_status(
                 node_id, int(descriptor["resource_id"])), None
         except ToolbusIpcProtocolError:
             raise
@@ -708,9 +855,26 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
 
     def _build_snapshot(self) -> dict:
         captured_at_ms = self._clock_value()
+        source_client: ToolbusIpcClient = self.client
+        source_sequence: int | None = None
+        snapshot_reader = getattr(self.client, "runtime_snapshot", None)
+        structured_output = getattr(self.client, "structured_output", True)
+        if callable(snapshot_reader) and structured_output:
+            try:
+                source = snapshot_reader(
+                    self.maximum_resources_per_snapshot)
+            except ToolbusIpcProtocolError as error:
+                raise RuntimeProviderError(
+                    f"toolbusd IPC协议不兼容：{error}") from error
+            except ToolbusIpcError as error:
+                raise RuntimeProviderError(
+                    f"toolbusd IPC不可用：{error}") from error
+            source_client = _RuntimeSnapshotView(source)
+            source_sequence = int(source["sequence"])
+            captured_at_ms = self._clock_value()
         try:
-            traffic = self.client.traffic_status()
-            source_nodes = self.client.list_nodes()
+            traffic = source_client.traffic_status()
+            source_nodes = source_client.list_nodes()
             link_kind = self._link_kind(str(traffic["mode"]))
         except (KeyError, ToolbusIpcError, ValueError) as error:
             raise RuntimeProviderError(f"toolbusd IPC不可用：{error}") from error
@@ -746,7 +910,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             runtime_error: str | None = None
             if online and ready:
                 try:
-                    descriptors = self.client.list_resources(numeric_id)
+                    descriptors = source_client.list_resources(numeric_id)
                 except ToolbusIpcProtocolError as error:
                     raise RuntimeProviderError(
                         f"toolbusd IPC协议不兼容：{error}") from error
@@ -768,7 +932,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                             thread_name_prefix="runtime-status") as executor:
                         status_results = list(executor.map(
                             lambda descriptor: self._read_resource_status(
-                                numeric_id, descriptor), descriptors))
+                                source_client, numeric_id, descriptor),
+                            descriptors))
                 except ToolbusIpcProtocolError as error:
                     raise RuntimeProviderError(
                         f"toolbusd IPC协议不兼容：{error}") from error
@@ -859,7 +1024,10 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         try:
             return normalize_snapshot({
                 "schema_version": 1,
-                "snapshot_id": f"toolbusd-{captured_at_ms}",
+                "snapshot_id": (
+                    f"toolbusd-{source_sequence}"
+                    if source_sequence is not None
+                    else f"toolbusd-{captured_at_ms}"),
                 "captured_at_ms": captured_at_ms,
                 "nodes": nodes,
                 "alerts": alerts,

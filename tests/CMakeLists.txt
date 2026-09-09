@@ -78,6 +78,16 @@ target_compile_options(motion_protocol_tests PRIVATE
 )
 add_test(NAME motion_protocol_tests COMMAND motion_protocol_tests)
 
+add_executable(motion_group_tests motion_group_tests.cpp)
+target_link_libraries(motion_group_tests PRIVATE
+    remotebsp_request_manager
+    remotebsp_remote_core)
+target_compile_options(motion_group_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME motion_group_tests COMMAND motion_group_tests)
+
 add_executable(waveform_protocol_tests waveform_protocol_tests.cpp)
 target_link_libraries(waveform_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(waveform_protocol_tests PRIVATE
@@ -272,6 +282,17 @@ target_compile_options(clock_sync_scheduler_tests PRIVATE
 )
 add_test(NAME clock_sync_scheduler_tests
     COMMAND clock_sync_scheduler_tests)
+
+add_executable(runtime_snapshot_ipc_tests
+    runtime_snapshot_ipc_tests.cpp)
+target_link_libraries(runtime_snapshot_ipc_tests PRIVATE
+    remotebsp_request_manager
+)
+target_compile_options(runtime_snapshot_ipc_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME runtime_snapshot_ipc_tests
+    COMMAND runtime_snapshot_ipc_tests)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE

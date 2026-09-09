@@ -291,6 +291,9 @@ def main() -> int:
         parser.error("--remote-cli必须与--toolbusd-socket一起使用")
     if args.toolbusd_legacy_text and not args.toolbusd_socket:
         parser.error("--toolbusd-legacy-text必须与--toolbusd-socket一起使用")
+    if not args.toolbusd_legacy_text and \
+            args.maximum_resource_queries > 128:
+        parser.error("结构化Runtime快照最多允许128项资源")
     if args.toolbusd_socket:
         provider: RuntimeProvider = ToolbusdSnapshotProvider(
             RemoteCliIpcClient(

@@ -15,6 +15,9 @@ constexpr std::size_t kMaximumIpcBodySize = 64U * 1024U;
 constexpr std::size_t kNodeInfoSize = 33;
 constexpr std::size_t kTrafficStatusHeaderSize = 76;
 constexpr std::size_t kTrafficClassCounterSize = 32;
+constexpr std::size_t kRuntimeSnapshotHeaderSize = 28U;
+constexpr std::size_t kRuntimeResourceSize = 50U;
+constexpr std::size_t kRuntimeNodeIssueSize = 8U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -160,7 +163,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] >
-            static_cast<std::uint8_t>(IpcRequestKind::UartStreamRead)) {
+            static_cast<std::uint8_t>(IpcRequestKind::RuntimeSnapshot)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -200,6 +203,25 @@ IpcRequest read_ipc_request(int socket) {
         request.node_id = node_id;
         request.object_id = object_id;
         request.maximum_length = maximum_length;
+        request.timeout_ms = timeout_ms;
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeSnapshot) {
+        if (body.size() != 9U || get_u16(body.data() + 1U) !=
+                                    kRuntimeSnapshotIpcVersion) {
+            throw IpcException("Runtime 快照请求版本或长度无效");
+        }
+        const auto maximum_resources = get_u16(body.data() + 3U);
+        const auto timeout_ms = get_u32(body.data() + 5U);
+        if (maximum_resources == 0U ||
+            maximum_resources > kMaximumRuntimeSnapshotResources ||
+            timeout_ms == 0U ||
+            timeout_ms > kMaximumRuntimeSnapshotTimeoutMs) {
+            throw IpcException("Runtime 快照请求参数超出上限");
+        }
+        IpcRequest request;
+        request.kind = kind;
+        request.maximum_length = maximum_resources;
         request.timeout_ms = timeout_ms;
         return request;
     }
@@ -250,6 +272,23 @@ void write_ipc_uart_stream_read_request(
     append_u32(body, node_id);
     append_u32(body, object_id);
     append_u32(body, maximum_length);
+    append_u32(body, timeout_ms);
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_snapshot_request(
+    int socket, std::uint16_t maximum_resources,
+    std::uint32_t timeout_ms) {
+    if (maximum_resources == 0U ||
+        maximum_resources > kMaximumRuntimeSnapshotResources ||
+        timeout_ms == 0U ||
+        timeout_ms > kMaximumRuntimeSnapshotTimeoutMs) {
+        throw IpcException("Runtime 快照请求参数超出上限");
+    }
+    std::vector<std::uint8_t> body{
+        static_cast<std::uint8_t>(IpcRequestKind::RuntimeSnapshot)};
+    append_u16(body, kRuntimeSnapshotIpcVersion);
+    append_u16(body, maximum_resources);
     append_u32(body, timeout_ms);
     send_body(socket, body);
 }
@@ -412,6 +451,201 @@ TrafficSnapshot decode_ipc_traffic_status(
         snapshot.classes[index].admitted_frames = get_u64(input + 16);
         snapshot.classes[index].estimated_wire_time_ns =
             get_u64(input + 24);
+    }
+    return snapshot;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
+    const IpcRuntimeSnapshot& snapshot) {
+    if (snapshot.version != kRuntimeSnapshotIpcVersion ||
+        snapshot.sequence == 0U || snapshot.nodes.size() > 127U ||
+        snapshot.resources.size() > kMaximumRuntimeSnapshotResources ||
+        snapshot.node_issues.size() > 127U) {
+        throw IpcException("Runtime 快照版本、序号或条目数量无效");
+    }
+    const auto node_body = encode_ipc_node_list(snapshot.nodes);
+    const auto traffic_body = encode_ipc_traffic_status(snapshot.traffic);
+    std::vector<std::uint32_t> node_ids;
+    node_ids.reserve(snapshot.nodes.size());
+    for (const auto& node : snapshot.nodes) {
+        if (node.node_id == 0U || node.node_id > 127U ||
+            std::find(node_ids.begin(), node_ids.end(), node.node_id) !=
+                node_ids.end()) {
+            throw IpcException("Runtime 快照节点 ID 无效或重复");
+        }
+        node_ids.push_back(node.node_id);
+    }
+    const auto expected_size = kRuntimeSnapshotHeaderSize +
+        node_body.size() + traffic_body.size() +
+        snapshot.resources.size() * kRuntimeResourceSize +
+        snapshot.node_issues.size() * kRuntimeNodeIssueSize;
+    if (expected_size > kMaximumIpcBodySize) {
+        throw IpcException("Runtime 快照超过本地 IPC 字节上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(expected_size);
+    append_u16(body, snapshot.version);
+    append_u16(body, 0U);
+    append_u64(body, snapshot.sequence);
+    append_u16(body, static_cast<std::uint16_t>(snapshot.nodes.size()));
+    append_u16(body, static_cast<std::uint16_t>(snapshot.resources.size()));
+    append_u16(body, static_cast<std::uint16_t>(snapshot.node_issues.size()));
+    append_u16(body, 0U);
+    append_u32(body, static_cast<std::uint32_t>(node_body.size()));
+    append_u32(body, static_cast<std::uint32_t>(traffic_body.size()));
+    body.insert(body.end(), node_body.begin(), node_body.end());
+    body.insert(body.end(), traffic_body.begin(), traffic_body.end());
+    std::vector<std::uint64_t> identities;
+    identities.reserve(snapshot.resources.size());
+    for (const auto& resource : snapshot.resources) {
+        const auto identity =
+            (static_cast<std::uint64_t>(resource.node_id) << 32U) |
+            resource.descriptor.resource_id;
+        if (resource.node_id == 0U || resource.node_id > 127U ||
+            resource.descriptor.resource_id == 0U ||
+            resource.status.resource_id != resource.descriptor.resource_id ||
+            std::find(node_ids.begin(), node_ids.end(), resource.node_id) ==
+                node_ids.end() ||
+            std::find(identities.begin(), identities.end(), identity) !=
+                identities.end()) {
+            throw IpcException("Runtime 快照资源归属或状态 ID 无效");
+        }
+        identities.push_back(identity);
+        append_u32(body, resource.node_id);
+        body.push_back(static_cast<std::uint8_t>(resource.status_valid));
+        body.push_back(0U);
+        append_u16(body, 0U);
+        const auto descriptor =
+            protocol::encode_resource_descriptor(resource.descriptor);
+        const auto status = protocol::encode_resource_status(resource.status);
+        body.insert(body.end(), descriptor.begin(), descriptor.end());
+        body.insert(body.end(), status.begin(), status.end());
+    }
+    std::vector<std::uint32_t> issue_nodes;
+    issue_nodes.reserve(snapshot.node_issues.size());
+    for (const auto& issue : snapshot.node_issues) {
+        if (issue.node_id == 0U || issue.node_id > 127U ||
+            issue.error != IpcRuntimeNodeError::ResourceInventoryUnavailable ||
+            std::find(node_ids.begin(), node_ids.end(), issue.node_id) ==
+                node_ids.end() ||
+            std::find(issue_nodes.begin(), issue_nodes.end(), issue.node_id) !=
+                issue_nodes.end()) {
+            throw IpcException("Runtime 快照节点错误项无效");
+        }
+        issue_nodes.push_back(issue.node_id);
+        append_u32(body, issue.node_id);
+        body.push_back(static_cast<std::uint8_t>(issue.error));
+        body.push_back(0U);
+        append_u16(body, 0U);
+    }
+    return body;
+}
+
+IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeSnapshotHeaderSize ||
+        get_u16(body.data()) != kRuntimeSnapshotIpcVersion ||
+        get_u16(body.data() + 2U) != 0U) {
+        throw IpcException("Runtime 快照响应版本或头部无效");
+    }
+    IpcRuntimeSnapshot snapshot;
+    snapshot.version = get_u16(body.data());
+    snapshot.sequence = get_u64(body.data() + 4U);
+    const auto node_count = get_u16(body.data() + 12U);
+    const auto resource_count = get_u16(body.data() + 14U);
+    const auto node_issue_count = get_u16(body.data() + 16U);
+    if (get_u16(body.data() + 18U) != 0U) {
+        throw IpcException("Runtime 快照响应保留字段非零");
+    }
+    const std::size_t node_size = get_u32(body.data() + 20U);
+    const std::size_t traffic_size = get_u32(body.data() + 24U);
+    const auto expected_size = kRuntimeSnapshotHeaderSize + node_size +
+        traffic_size + static_cast<std::size_t>(resource_count) *
+                           kRuntimeResourceSize +
+        static_cast<std::size_t>(node_issue_count) * kRuntimeNodeIssueSize;
+    if (snapshot.sequence == 0U || node_count > 127U ||
+        resource_count > kMaximumRuntimeSnapshotResources ||
+        node_issue_count > 127U ||
+        expected_size != body.size()) {
+        throw IpcException("Runtime 快照响应长度或条目数量无效");
+    }
+    auto cursor = body.begin() +
+                  static_cast<std::ptrdiff_t>(kRuntimeSnapshotHeaderSize);
+    const std::vector<std::uint8_t> node_body(
+        cursor, cursor + static_cast<std::ptrdiff_t>(node_size));
+    cursor += static_cast<std::ptrdiff_t>(node_size);
+    snapshot.nodes = decode_ipc_node_list(node_body);
+    if (snapshot.nodes.size() != node_count) {
+        throw IpcException("Runtime 快照节点数量不一致");
+    }
+    const std::vector<std::uint8_t> traffic_body(
+        cursor, cursor + static_cast<std::ptrdiff_t>(traffic_size));
+    cursor += static_cast<std::ptrdiff_t>(traffic_size);
+    snapshot.traffic = decode_ipc_traffic_status(traffic_body);
+    snapshot.resources.reserve(resource_count);
+    std::vector<std::uint32_t> node_ids;
+    node_ids.reserve(snapshot.nodes.size());
+    for (const auto& node : snapshot.nodes) {
+        if (node.node_id == 0U || node.node_id > 127U ||
+            std::find(node_ids.begin(), node_ids.end(), node.node_id) !=
+                node_ids.end()) {
+            throw IpcException("Runtime 快照节点 ID 无效或重复");
+        }
+        node_ids.push_back(node.node_id);
+    }
+    std::vector<std::uint64_t> identities;
+    identities.reserve(resource_count);
+    for (std::size_t index = 0U; index < resource_count; ++index) {
+        const auto node_id = get_u32(&*cursor);
+        cursor += 4;
+        if (cursor[0] > 1U || cursor[1] != 0U ||
+            get_u16(&cursor[2]) != 0U) {
+            throw IpcException("Runtime 快照资源状态标志无效");
+        }
+        const bool status_valid = cursor[0] != 0U;
+        cursor += 4;
+        const std::vector<std::uint8_t> descriptor_body(cursor, cursor + 17);
+        cursor += 17;
+        const std::vector<std::uint8_t> status_body(cursor, cursor + 25);
+        cursor += 25;
+        const auto descriptor =
+            protocol::decode_resource_descriptor(descriptor_body);
+        const auto status = protocol::decode_resource_status(status_body);
+        if (node_id == 0U || node_id > 127U ||
+            descriptor.resource_id == 0U ||
+            status.resource_id != descriptor.resource_id ||
+            std::find(node_ids.begin(), node_ids.end(), node_id) ==
+                node_ids.end()) {
+            throw IpcException("Runtime 快照资源归属或状态 ID 无效");
+        }
+        const auto identity =
+            (static_cast<std::uint64_t>(node_id) << 32U) |
+            descriptor.resource_id;
+        if (std::find(identities.begin(), identities.end(), identity) !=
+            identities.end()) {
+            throw IpcException("Runtime 快照包含重复资源");
+        }
+        identities.push_back(identity);
+        snapshot.resources.push_back(
+            {node_id, status_valid, descriptor, status});
+    }
+    snapshot.node_issues.reserve(node_issue_count);
+    std::vector<std::uint32_t> issue_nodes;
+    for (std::size_t index = 0U; index < node_issue_count; ++index) {
+        const auto node_id = get_u32(&*cursor);
+        const auto error = static_cast<IpcRuntimeNodeError>(cursor[4]);
+        if (node_id == 0U || node_id > 127U ||
+            error != IpcRuntimeNodeError::ResourceInventoryUnavailable ||
+            cursor[5] != 0U || get_u16(&cursor[6]) != 0U ||
+            std::find(node_ids.begin(), node_ids.end(), node_id) ==
+                node_ids.end() ||
+            std::find(issue_nodes.begin(), issue_nodes.end(), node_id) !=
+                issue_nodes.end()) {
+            throw IpcException("Runtime 快照节点错误项无效");
+        }
+        snapshot.node_issues.push_back({node_id, error});
+        issue_nodes.push_back(node_id);
+        cursor += static_cast<std::ptrdiff_t>(kRuntimeNodeIssueSize);
     }
     return snapshot;
 }

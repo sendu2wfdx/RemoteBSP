@@ -66,7 +66,8 @@ void append_u32(std::vector<std::uint8_t>& output, std::uint32_t value) {
     }
 }
 
-int connect_socket(const std::string& path) {
+int connect_socket(const std::string& path,
+                   std::uint32_t timeout_ms = 3000U) {
     if (path.empty() || path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         throw ClientException("Unix Domain Socket 路径无效或过长");
     }
@@ -75,7 +76,12 @@ int connect_socket(const std::string& path) {
         throw std::system_error(errno, std::generic_category(),
                                 "创建本地 IPC 套接字失败");
     }
-    const timeval timeout{3, 0};
+    if (timeout_ms == 0U || timeout_ms > 60000U) {
+        throw ClientException("本地 IPC 超时参数无效");
+    }
+    const timeval timeout{
+        static_cast<time_t>(timeout_ms / 1000U),
+        static_cast<suseconds_t>((timeout_ms % 1000U) * 1000U)};
     if (::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                      sizeof(timeout)) < 0 ||
         ::setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout,
@@ -271,6 +277,80 @@ CanTrafficStatus Client::traffic_status() const {
             snapshot.classes[index].estimated_wire_time_ns};
     }
     return status;
+}
+
+RuntimeSnapshot Client::runtime_snapshot(
+    std::uint16_t maximum_resources, std::uint32_t timeout_ms) const {
+    if (maximum_resources == 0U || maximum_resources >
+            toolbusd::kMaximumRuntimeSnapshotResources ||
+        timeout_ms == 0U || timeout_ms >
+            toolbusd::kMaximumRuntimeSnapshotTimeoutMs) {
+        throw ClientException("Runtime 快照参数超出允许范围");
+    }
+    SocketHandle socket(connect_socket(socket_path_, timeout_ms + 250U));
+    toolbusd::write_ipc_runtime_snapshot_request(
+        socket.get(), maximum_resources, timeout_ms);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status == toolbusd::IpcStatus::TimedOut) {
+        throw ClientException("Runtime 快照请求超时");
+    }
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto source =
+        toolbusd::decode_ipc_runtime_snapshot(response.body);
+    RuntimeSnapshot result;
+    result.version = source.version;
+    result.sequence = source.sequence;
+    for (const auto& node : source.nodes) {
+        NodeInfo identity;
+        identity.uuid = node.uuid;
+        identity.firmware_major = node.firmware_major;
+        identity.firmware_minor = node.firmware_minor;
+        identity.firmware_patch = node.firmware_patch;
+        identity.board_type = node.board_type;
+        identity.protocol_version = node.protocol_version;
+        result.nodes.push_back(
+            {identity, node.node_id, node.online, node.ready});
+    }
+    result.traffic.mode = static_cast<LinkTrafficMode>(source.traffic.mode);
+    result.traffic.can_fd =
+        source.traffic.mode == toolbusd::TrafficBusMode::CanFd;
+    result.traffic.arbitration_bits_per_second =
+        source.traffic.arbitration_bits_per_second;
+    result.traffic.data_bits_per_second =
+        source.traffic.data_bits_per_second;
+    result.traffic.maximum_utilization_permille =
+        source.traffic.maximum_utilization_permille;
+    result.traffic.burst_window_ms = source.traffic.burst_window_ms;
+    result.traffic.global_capacity_ns = source.traffic.global_capacity_ns;
+    result.traffic.global_available_ns = source.traffic.global_available_ns;
+    result.traffic.admitted_packets = source.traffic.admitted_packets;
+    result.traffic.rejected_packets = source.traffic.rejected_packets;
+    result.traffic.guaranteed_overruns = source.traffic.guaranteed_overruns;
+    result.traffic.admitted_frames = source.traffic.admitted_frames;
+    result.traffic.estimated_wire_time_ns =
+        source.traffic.estimated_wire_time_ns;
+    for (std::size_t index = 0U; index < result.traffic.classes.size();
+         ++index) {
+        const auto& counters = source.traffic.classes[index];
+        result.traffic.classes[index] = {
+            counters.admitted_packets, counters.rejected_packets,
+            counters.admitted_frames, counters.estimated_wire_time_ns};
+    }
+    result.resources.reserve(source.resources.size());
+    for (const auto& resource : source.resources) {
+        result.resources.push_back(
+            {resource.node_id, resource.status_valid,
+             resource.descriptor, resource.status});
+    }
+    result.node_issues.reserve(source.node_issues.size());
+    for (const auto& issue : source.node_issues) {
+        result.node_issues.push_back(
+            {issue.node_id, static_cast<std::uint8_t>(issue.error)});
+    }
+    return result;
 }
 
 std::optional<protocol::Packet> Client::next_event() const {

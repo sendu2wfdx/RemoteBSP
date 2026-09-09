@@ -17,6 +17,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -520,6 +521,180 @@ private:
         }
     }
 
+    std::vector<std::uint8_t> request_snapshot_resource(
+        std::uint32_t node_id, remotebsp::protocol::Command command,
+        std::vector<std::uint8_t> payload,
+        std::chrono::steady_clock::time_point deadline) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("Runtime 快照达到总时间上限");
+        }
+        remotebsp::protocol::Packet request;
+        request.header.message_type =
+            remotebsp::protocol::MessageType::Request;
+        request.header.command = static_cast<std::uint16_t>(command);
+        request.header.object_id = 0U;
+        request.header.session_id = session_id_;
+        request.payload = std::move(payload);
+
+        remotebsp::toolbusd::Submission submission;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(node_id);
+            if (node == nullptr || !node->online || !node->assigned) {
+                throw std::runtime_error(
+                    "Runtime 快照期间目标节点不可用");
+            }
+            submission = requests_.submit(std::move(request));
+            request_routes_[request_key(session_id_, submission.request_id)] =
+                kNodeRequestBaseRoute + node_id;
+        }
+        const auto key = request_key(session_id_, submission.request_id);
+        if (!send_packet(submission.packet,
+                         kNodeRequestBaseRoute + node_id)) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            requests_.cancel(session_id_, submission.request_id);
+            request_routes_.erase(key);
+            throw std::runtime_error(
+                "Runtime 快照查询被带宽准入拒绝");
+        }
+
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        const bool completed = state_changed_.wait_until(lock, deadline, [&] {
+            return !running_ || responses_.find(key) != responses_.end() ||
+                   timed_out_.find(key) != timed_out_.end();
+        });
+        const auto response = responses_.find(key);
+        if (completed && response != responses_.end()) {
+            auto packet = std::move(response->second);
+            responses_.erase(response);
+            request_routes_.erase(key);
+            lock.unlock();
+            if (packet.payload.empty() || packet.payload.front() != 0U ||
+                (packet.header.flags &
+                 remotebsp::protocol::kErrorResponseFlag) != 0U) {
+                throw std::runtime_error(
+                    "Runtime 快照远端只读查询失败");
+            }
+            return {packet.payload.begin() + 1U, packet.payload.end()};
+        }
+        requests_.cancel(session_id_, submission.request_id);
+        request_routes_.erase(key);
+        timed_out_.erase(key);
+        throw std::runtime_error(
+            completed ? "Runtime 快照远端请求超时"
+                      : "Runtime 快照达到总时间上限");
+    }
+
+    remotebsp::toolbusd::IpcRuntimeSnapshot build_runtime_snapshot(
+        std::uint16_t maximum_resources,
+        std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        remotebsp::toolbusd::IpcRuntimeSnapshot snapshot;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            for (const auto& node : nodes_.records()) {
+                snapshot.nodes.push_back(
+                    {node.identity.uuid, node.node_id, node.online,
+                     node.assigned, node.identity.firmware_major,
+                     node.identity.firmware_minor,
+                     node.identity.firmware_patch,
+                     node.identity.board_type,
+                     node.identity.protocol_version});
+            }
+        }
+        for (const auto& node : snapshot.nodes) {
+            if (!node.online || !node.ready) {
+                continue;
+            }
+            std::vector<std::uint8_t> descriptor_body;
+            try {
+                descriptor_body = request_snapshot_resource(
+                    node.node_id,
+                    remotebsp::protocol::Command::ResourceEnum, {},
+                    deadline);
+            } catch (const std::runtime_error&) {
+                snapshot.node_issues.push_back(
+                    {node.node_id,
+                     remotebsp::toolbusd::IpcRuntimeNodeError::
+                         ResourceInventoryUnavailable});
+                continue;
+            }
+            const auto descriptors =
+                remotebsp::protocol::decode_resource_list(descriptor_body);
+            if (descriptors.size() >
+                static_cast<std::size_t>(maximum_resources) -
+                    snapshot.resources.size()) {
+                throw std::runtime_error(
+                    "Runtime 快照资源数量超过请求上限");
+            }
+            for (const auto& descriptor : descriptors) {
+                std::vector<std::uint8_t> status_body;
+                try {
+                    status_body = request_snapshot_resource(
+                        node.node_id,
+                        remotebsp::protocol::Command::ResourceStatus,
+                        remotebsp::protocol::encode_resource_id(
+                            descriptor.resource_id),
+                        deadline);
+                } catch (const std::runtime_error&) {
+                    remotebsp::protocol::ResourceStatusPayload unavailable;
+                    unavailable.resource_id = descriptor.resource_id;
+                    snapshot.resources.push_back(
+                        {node.node_id, false, descriptor, unavailable});
+                    continue;
+                }
+                const auto status =
+                    remotebsp::protocol::decode_resource_status(status_body);
+                if (status.resource_id != descriptor.resource_id) {
+                    throw std::runtime_error(
+                        "Runtime 快照资源状态 ID 不匹配");
+                }
+                snapshot.resources.push_back(
+                    {node.node_id, true, descriptor, status});
+            }
+        }
+
+        std::vector<remotebsp::toolbusd::IpcNodeInfo> final_nodes;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            for (const auto& node : nodes_.records()) {
+                final_nodes.push_back(
+                    {node.identity.uuid, node.node_id, node.online,
+                     node.assigned, node.identity.firmware_major,
+                     node.identity.firmware_minor,
+                     node.identity.firmware_patch,
+                     node.identity.board_type,
+                     node.identity.protocol_version});
+            }
+        }
+        const auto same_node = [](const auto& left, const auto& right) {
+            return left.uuid == right.uuid &&
+                   left.node_id == right.node_id &&
+                   left.online == right.online &&
+                   left.ready == right.ready &&
+                   left.firmware_major == right.firmware_major &&
+                   left.firmware_minor == right.firmware_minor &&
+                   left.firmware_patch == right.firmware_patch &&
+                   left.board_type == right.board_type &&
+                   left.protocol_version == right.protocol_version;
+        };
+        if (snapshot.nodes.size() != final_nodes.size() ||
+            !std::equal(snapshot.nodes.begin(), snapshot.nodes.end(),
+                        final_nodes.begin(), same_node)) {
+            throw std::runtime_error(
+                "Runtime 快照期间节点拓扑发生变化");
+        }
+        {
+            std::lock_guard<std::mutex> lock(send_mutex_);
+            snapshot.traffic = traffic_.snapshot();
+        }
+        snapshot.sequence = next_runtime_snapshot_sequence_++;
+        if (snapshot.sequence == 0U) {
+            snapshot.sequence = next_runtime_snapshot_sequence_++;
+        }
+        return snapshot;
+    }
+
     void handle_client(int client) {
         try {
             auto ipc_request =
@@ -555,6 +730,37 @@ private:
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_traffic_status(
+                        snapshot));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::RuntimeSnapshot) {
+                const auto snapshot_deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(ipc_request.timeout_ms);
+                std::unique_lock<std::timed_mutex> snapshot_lock(
+                    runtime_snapshot_mutex_, std::defer_lock);
+                if (!snapshot_lock.try_lock_until(snapshot_deadline)) {
+                    throw std::runtime_error(
+                        "等待其他 Runtime 快照达到总时间上限");
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= snapshot_deadline) {
+                    throw std::runtime_error(
+                        "Runtime 快照达到总时间上限");
+                }
+                const auto remaining =
+                    std::max(std::chrono::milliseconds(1),
+                             std::chrono::duration_cast<
+                                 std::chrono::milliseconds>(
+                                 snapshot_deadline - now));
+                const auto snapshot = build_runtime_snapshot(
+                    static_cast<std::uint16_t>(
+                        ipc_request.maximum_length),
+                    remaining);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_snapshot(
                         snapshot));
                 return;
             }
@@ -810,6 +1016,7 @@ private:
     std::condition_variable clients_finished_;
     std::size_t active_clients_{0};
     std::mutex send_mutex_;
+    std::timed_mutex runtime_snapshot_mutex_;
     std::mutex state_mutex_;
     std::condition_variable state_changed_;
     std::unordered_map<std::uint64_t, remotebsp::protocol::Packet> responses_;
@@ -823,6 +1030,7 @@ private:
     std::atomic<std::uint16_t> next_transfer_id_{1};
     std::uint32_t next_control_request_id_{0x80000000U};
     std::uint32_t next_node_id_{1};
+    std::uint64_t next_runtime_snapshot_sequence_{1U};
     const std::uint32_t session_id_{make_session_id()};
 };
 

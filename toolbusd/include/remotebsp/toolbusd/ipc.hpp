@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/protocol/packet.hpp"
+#include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
 
 #include <cstdint>
@@ -23,7 +24,12 @@ enum class IpcRequestKind : std::uint8_t {
     NextEvent = 2,
     TrafficStatus = 3,
     UartStreamRead = 4,
+    RuntimeSnapshot = 5,
 };
+
+constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 1U;
+constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
+constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
 
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
@@ -57,6 +63,31 @@ struct IpcNodeInfo {
     std::uint8_t protocol_version{};
 };
 
+struct IpcRuntimeResource {
+    std::uint32_t node_id{};
+    bool status_valid{};
+    protocol::ResourceDescriptor descriptor;
+    protocol::ResourceStatusPayload status;
+};
+
+enum class IpcRuntimeNodeError : std::uint8_t {
+    ResourceInventoryUnavailable = 1U,
+};
+
+struct IpcRuntimeNodeIssue {
+    std::uint32_t node_id{};
+    IpcRuntimeNodeError error{IpcRuntimeNodeError::ResourceInventoryUnavailable};
+};
+
+struct IpcRuntimeSnapshot {
+    std::uint16_t version{kRuntimeSnapshotIpcVersion};
+    std::uint64_t sequence{};
+    std::vector<IpcNodeInfo> nodes;
+    TrafficSnapshot traffic;
+    std::vector<IpcRuntimeResource> resources;
+    std::vector<IpcRuntimeNodeIssue> node_issues;
+};
+
 class IpcException : public std::runtime_error {
 public:
     explicit IpcException(const std::string& message);
@@ -70,6 +101,9 @@ void write_ipc_traffic_status_request(int socket);
 void write_ipc_uart_stream_read_request(
     int socket, std::uint32_t node_id, std::uint32_t object_id,
     std::uint32_t maximum_length, std::uint32_t timeout_ms);
+void write_ipc_runtime_snapshot_request(
+    int socket, std::uint16_t maximum_resources,
+    std::uint32_t timeout_ms);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -83,6 +117,10 @@ TrafficSnapshot decode_ipc_traffic_status(
 std::vector<std::uint8_t> encode_ipc_uart_stream_chunk(
     const UartStreamChunk& chunk);
 UartStreamChunk decode_ipc_uart_stream_chunk(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
+    const IpcRuntimeSnapshot& snapshot);
+IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
     const std::vector<std::uint8_t>& body);
 
 void write_ipc_response(int socket, IpcStatus status,

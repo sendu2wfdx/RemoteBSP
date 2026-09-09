@@ -187,12 +187,14 @@ NodeClockRegistrationResult NodeRegistry::register_clock_model(
     ClockModel replacement(config);
     const bool replaced = found != clock_models_.end();
     if (replaced) {
-        found->second =
-            NodeClockEntry{boot_epoch, std::move(replacement)};
+        found->second = NodeClockEntry{
+            boot_epoch, allocate_clock_model_generation(),
+            std::move(replacement)};
     } else {
         clock_models_.emplace(
             node_id,
-            NodeClockEntry{boot_epoch, std::move(replacement)});
+            NodeClockEntry{boot_epoch, allocate_clock_model_generation(),
+                           std::move(replacement)});
     }
     return replaced
                ? NodeClockRegistrationResult::ReplacedBootEpoch
@@ -217,6 +219,9 @@ NodeClockSampleOutcome NodeRegistry::add_clock_sample(
         return {NodeClockAccessStatus::BootEpochMismatch, std::nullopt};
     }
     const auto sample_result = found->second.model.add_sample(sample);
+    if (sample_result == ClockSampleResult::Accepted) {
+        found->second.generation = allocate_clock_model_generation();
+    }
     return {sample_result == ClockSampleResult::Accepted
                 ? NodeClockAccessStatus::Ready
                 : NodeClockAccessStatus::SampleRejected,
@@ -286,6 +291,7 @@ HostToNodeTimeResult NodeRegistry::host_to_node_time(
         result.status = NodeClockAccessStatus::ConversionFailed;
         return result;
     }
+    result.model_generation = found->second.generation;
     result.status = NodeClockAccessStatus::Ready;
     return result;
 }
@@ -303,8 +309,28 @@ std::optional<std::uint64_t> NodeRegistry::clock_boot_epoch(
     return found->second.boot_epoch;
 }
 
+std::optional<std::uint64_t> NodeRegistry::clock_model_generation(
+    std::uint32_t node_id) const noexcept {
+    const auto found = clock_models_.find(node_id);
+    if (found == clock_models_.end()) {
+        return std::nullopt;
+    }
+    return found->second.generation;
+}
+
 std::size_t NodeRegistry::clock_model_count() const noexcept {
     return clock_models_.size();
+}
+
+std::uint64_t NodeRegistry::allocate_clock_model_generation() noexcept {
+    if (next_clock_model_generation_ == 0U) {
+        next_clock_model_generation_ = 1U;
+    }
+    const auto generation = next_clock_model_generation_++;
+    if (next_clock_model_generation_ == 0U) {
+        next_clock_model_generation_ = 1U;
+    }
+    return generation;
 }
 
 const NodeRecord* NodeRegistry::find(

@@ -30,7 +30,7 @@ Runtime HTTP 层
         │ Toolbusd Provider 只调用既有只读客户端
         ▼
 remote-cli / libremotebsp / toolbusd 本地套接字
-        │ 未来可替换为原生绑定或结构化 IPC
+        │ RuntimeSnapshot v1 聚合 IPC；旧命令继续兼容
         ▼
 toolbusd 管理的传输层
 ```
@@ -39,7 +39,7 @@ HTTP 层不能导入 SocketCAN、USB 或板卡实现。当前 Toolbusd Provider 
 `remote-cli → libremotebsp → toolbusd Unix Domain Socket` 边界读取信息，把节点枚举、
 资源目录和状态转换成同一快照；请求处理器本身不会发送 CAN/USB 帧。
 
-Provider 默认给四个命令添加 `--json`，只接受版本化结构化输出。`remote-cli` 未带
+Provider 默认使用一次 `runtime-snapshot --json`，只接受版本化结构化输出。`remote-cli` 未带
 `--json` 时继续输出原有的人类可读文本，不改变已有终端用法。
 
 ## 启动
@@ -72,8 +72,9 @@ python3 -m runtime_api.server \
 输入上限为 1 MiB；数据损坏、文件缺失或 schema 错误返回 HTTP 503，不回退到陈旧
 快照或演示数据，以免界面把旧状态误报为在线。
 
-Toolbusd Provider 只执行 `traffic-status`、`node-list`、`resource-list` 和
-`resource-status` 四种只读命令；命令使用参数数组启动，不经过 shell。全局 IPC
+Toolbusd Provider 默认只执行一次 `runtime-snapshot` 只读命令；命令使用参数数组启动，
+不经过 shell。显式旧文本兼容模式继续执行 `traffic-status`、`node-list`、
+`resource-list` 和 `resource-status`。全局 IPC
 连接失败、输出格式不兼容或基础节点目录无效时，HTTP API 返回 503。单个节点的
 资源目录暂时不可用时，其他节点仍保留，该节点标记为 `degraded` 并产生告警；单个
 资源状态读取失败时，该资源保留但标记 `available=false`、`health=unknown`。单次
@@ -85,9 +86,11 @@ Toolbusd Provider 默认使用 250 ms 的线程安全短时缓存。同一时刻
 成功快照。等待正在进行的刷新默认最多 5000 ms，超时也返回 503。可通过
 `--snapshot-cache-ms` 和 `--snapshot-refresh-wait-ms` 调整；缓存设为 0 表示禁用。
 
-单次刷新内的 `resource-status` 默认最多 8 路并发，并继续受 128 项总查询上限约束；
-分别由 `--status-query-workers`（1～32）和 `--maximum-resource-queries`（1～4096）
-配置。HTTP 服务默认最多保留 32 个活动请求线程，满载后在监听队列施加背压，可通过
+旧文本兼容路径单次刷新内的 `resource-status` 默认最多 8 路并发，并继续受资源总查询
+上限约束；
+分别由 `--status-query-workers`（1～32）和 `--maximum-resource-queries` 配置；
+结构化快照路径上限为 128，显式旧文本模式保留 1～4096 的过渡范围。HTTP 服务默认
+最多保留 32 个活动请求线程，满载后在监听队列施加背压，可通过
 `--http-workers`（1～256）调整。这些限制只控制 Runtime 进程内聚合，不绕过
 `remote-cli → libremotebsp → toolbusd` 边界。
 
@@ -97,13 +100,14 @@ Toolbusd Provider 默认使用 250 ms 的线程安全短时缓存。同一时刻
 
 ## remote-cli 结构化只读契约
 
-以下四种调用支持统一的全局 `--json` 开关：
+以下五种调用支持统一的全局 `--json` 开关：
 
 ```sh
 remote-cli --json --socket /tmp/toolbusd.sock traffic-status
 remote-cli --json --socket /tmp/toolbusd.sock node-list
 remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-list
 remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-status 16777217
+remote-cli --json --socket /tmp/toolbusd.sock runtime-snapshot 128 1900
 ```
 
 每次成功调用只在标准输出写入一个 JSON 文档，根信封固定为：
@@ -116,7 +120,7 @@ remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-status 16777217
 }
 ```
 
-四种 `data` 形状分别为：
+五种 `data` 形状分别为：
 
 - `traffic-status`：`traffic` 对象，包含链路模式、速率、准入汇总和固定顺序的六类
   业务计数器；
@@ -124,6 +128,21 @@ remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-status 16777217
   32 位十六进制字符串；
 - `resource-list`：目标 `node_id` 和 `resources` 数组；
 - `resource-status`：目标 `node_id` 和单个 `resource` 状态对象。
+- `runtime-snapshot`：快照 IPC 版本和守护进程序号、流量、节点、带状态有效位的资源，
+  以及封闭的节点级错误项。
+
+`RuntimeSnapshot IPC v1` 是 `IpcRequestKind::RuntimeSnapshot`。请求必须携带版本 1、
+1～128 的最大资源数和 1～5000 ms 的总时间上限；响应仍受本地 IPC 64 KiB 硬上限。
+守护进程一次只执行一个快照，防止昂贵刷新互相放大，但普通控制请求不获取这个互斥锁，
+慢快照不会在主机侧阻塞控制路径。快照开始时固定节点身份/路由/在线状态，结束时再次
+核对；期间拓扑变化则整份失败。流量计数在资源查询结束后锁存。
+
+这里的“一致”是单次本地 IPC、同一守护进程序号和起止拓扑稳定，不表示所有 MCU 的
+资源状态在同一物理时刻原子采样。toolbusd 内部仍使用现有 Remote Packet 分层逐项读取
+资源，但省去了 Runtime 刷新中的 N+1 进程和本地套接字连接。单个资源状态查询失败时
+保留描述符并置 `status_valid=false`；Provider 映射成 `available=false`、
+`health=unknown` 和告警。节点资源目录不可用使用封闭错误码 1，映射成节点降级告警。
+结构损坏、未知版本/错误码、重复或悬空 ID、资源超限和拓扑变化不会返回部分可信快照。
 
 Runtime Provider 对 v1 使用封闭字段集合，严格检查根信封、命令名、字段类型、数值
 范围、固定枚举、流量类别顺序，以及响应中的节点/资源 ID 是否与请求相符。未知版本、
@@ -264,10 +283,9 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 4. Web UI 静态文件由 Runtime、反向代理还是独立服务托管。
 
 当前适配器为保持边界清晰而复用 `remote-cli` 的版本化 JSON 输出。短时缓存、单飞刷新
-和有界并发已经阻断“Web 请求数 × 完整快照 IPC 数”的无界放大，但一次真正刷新仍需要
-一次全局状态、一次节点列表、每个就绪节点一次资源列表以及每项资源一次状态查询，仍是
-有明确上限的 N+1 查询。正式长期运行前应给 libremotebsp/toolbusd 增加单次一致快照 IPC
-或原生语言绑定，减少进程启动开销并保证所有资源来自同一 toolbusd 修订；Runtime 不能
-为消除 N+1 而直接访问 SocketCAN、USB 或传输层。
+和 `RuntimeSnapshot IPC v1` 已把一次真正刷新收敛为一个 `remote-cli` 进程和一次本地
+套接字请求。toolbusd 内部的远端资源读取仍是受总资源数和总时间限制的逐项请求；未来可
+用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
+SocketCAN、USB 或传输层。
 
 在这些部署决策完成前，Runtime API 只作为仓库内可启动、可测试的开发服务。

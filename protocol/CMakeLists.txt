@@ -5,6 +5,7 @@ add_library(remotebsp_protocol
     src/discovery.cpp
     src/fragmentation.cpp
     src/motion.cpp
+    src/motion_group.cpp
     src/packet.cpp
     src/resource.cpp
     src/time_sync.cpp

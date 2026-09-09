@@ -71,6 +71,70 @@ class FakeToolbusClient:
 
 
 class RemoteCliIpcClientTest(unittest.TestCase):
+    @staticmethod
+    def _runtime_snapshot_document():
+        counters = {
+            "admitted_packets": 0, "rejected_packets": 0,
+            "admitted_frames": 0, "estimated_wire_time_ns": 0,
+        }
+        return json.dumps({
+            "schema_version": 1,
+            "command": "runtime-snapshot",
+            "data": {
+                "snapshot_version": 1,
+                "snapshot_sequence": 7,
+                "traffic": {
+                    "mode": "fd", "arbitration_bitrate": 1000000,
+                    "data_bitrate": 5000000,
+                    "max_utilization_permille": 700,
+                    "burst_window_ms": 20, "available_permille": 900,
+                    "admitted_packets": 0, "rejected_packets": 0,
+                    "guaranteed_overruns": 0, "admitted_frames": 0,
+                    "estimated_wire_time_ns": 0,
+                    "classes": [dict(counters, **{"class": name})
+                                for name in ("safety", "motion", "system",
+                                             "interactive", "streaming",
+                                             "bulk")],
+                },
+                "nodes": [{
+                    "node_id": 1, "online": True, "ready": True,
+                    "board_type": 0x431,
+                    "firmware": {"major": 1, "minor": 2, "patch": 3},
+                    "protocol_version": 1, "uuid": "ab" * 16,
+                }],
+                "resources": [{
+                    "node_id": 1, "status_valid": False,
+                    "descriptor": {
+                        "resource_id": 0x01000001, "type": "gpio",
+                        "instance": 0, "source": "native",
+                        "rx_capacity": 1, "tx_capacity": 1,
+                    },
+                    "status": {
+                        "resource_id": 0x01000001, "health": 0,
+                        "health_name": "normal", "error_flags": 0,
+                        "rx_buffered": 0, "tx_buffered": 0,
+                        "rx_overruns": 0, "tx_overruns": 0,
+                    },
+                }],
+                "node_issues": [],
+            },
+        })
+
+    def test_runtime_snapshot_is_one_strict_structured_invocation(self):
+        calls = []
+
+        def runner(command, timeout, maximum_output):
+            calls.append(list(command))
+            return self._runtime_snapshot_document()
+
+        client = RemoteCliIpcClient(
+            "/tmp/test.sock", timeout_seconds=1.5, runner=runner)
+        snapshot = client.runtime_snapshot(64)
+        self.assertEqual(snapshot["sequence"], 7)
+        self.assertFalse(snapshot["resources"][0]["status_valid"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-3:], ["runtime-snapshot", "64", "1400"])
+
     def test_explicit_legacy_mode_parses_existing_text_without_shell(self):
         """旧文本兼容必须显式启用，且仍只组合参数数组。"""
         calls = []
@@ -312,6 +376,54 @@ class RemoteCliIpcClientTest(unittest.TestCase):
 
 
 class ToolbusdSnapshotProviderTest(unittest.TestCase):
+    def test_explicit_legacy_client_keeps_existing_fanout_path(self):
+        class LegacyCapableClient(FakeToolbusClient):
+            structured_output = False
+
+            def __init__(self):
+                self.snapshot_calls = 0
+
+            def runtime_snapshot(self, maximum_resources):
+                self.snapshot_calls += 1
+                raise AssertionError("显式旧文本模式不应调用单次快照")
+
+        client = LegacyCapableClient()
+        snapshot = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: 5).get_snapshot()
+        self.assertEqual(client.snapshot_calls, 0)
+        self.assertEqual(snapshot["snapshot_id"], "toolbusd-5")
+
+    def test_single_snapshot_path_preserves_resource_failure_isolation(self):
+        parsed = RemoteCliIpcClient._json_runtime_snapshot(
+            RemoteCliIpcClientTest._runtime_snapshot_document())
+
+        class AtomicClient:
+            def __init__(self):
+                self.calls = 0
+
+            def runtime_snapshot(self, maximum_resources):
+                self.calls += 1
+                self.maximum_resources = maximum_resources
+                return parsed
+
+            def traffic_status(self):
+                raise AssertionError("不应调用旧traffic-status")
+
+            def list_nodes(self):
+                raise AssertionError("不应调用旧node-list")
+
+        client = AtomicClient()
+        snapshot = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: 123).get_snapshot()
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.maximum_resources, 128)
+        self.assertEqual(snapshot["snapshot_id"], "toolbusd-7")
+        resource = snapshot["nodes"][0]["resources"][0]
+        self.assertEqual(resource["state"]["health"], "unknown")
+        self.assertFalse(resource["available"])
+        self.assertIn("resource_status_unavailable",
+                      {alert["code"] for alert in snapshot["alerts"]})
+
     def test_maps_nodes_resources_health_and_link_state(self):
         provider = ToolbusdSnapshotProvider(
             FakeToolbusClient(), clock_ms=lambda: 12345)

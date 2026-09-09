@@ -139,8 +139,11 @@ TrafficClass classify_traffic(const protocol::Packet& packet) noexcept {
         case protocol::Command::MotionEnqueue:
         case protocol::Command::MotionStatus:
         case protocol::Command::MotionContract:
+        case protocol::Command::MotionGroupPrepare:
+        case protocol::Command::MotionGroupCommit:
             return TrafficClass::Motion;
         case protocol::Command::MotionAbort:
+        case protocol::Command::MotionGroupAbort:
             return TrafficClass::Safety;
         case protocol::Command::BootloaderEnter:
         case protocol::Command::BootloaderEnterUsb:

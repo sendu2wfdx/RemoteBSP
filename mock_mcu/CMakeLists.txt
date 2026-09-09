@@ -5,6 +5,7 @@ add_library(remotebsp_remote_core
     src/gpio_bsp.cpp
     src/mock_node.cpp
     src/motion_executor.cpp
+    src/motion_group_participant.cpp
     src/remote_core.cpp
     src/time_sync_bsp.cpp
     src/uart_bsp.cpp

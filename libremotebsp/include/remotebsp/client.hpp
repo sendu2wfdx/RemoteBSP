@@ -74,6 +74,27 @@ struct CanTrafficStatus {
     std::array<CanTrafficClassCounters, 6> classes{};
 };
 
+struct RuntimeResourceSnapshot {
+    std::uint32_t node_id{};
+    bool status_valid{};
+    protocol::ResourceDescriptor descriptor;
+    protocol::ResourceStatusPayload status;
+};
+
+struct RuntimeNodeIssue {
+    std::uint32_t node_id{};
+    std::uint8_t code{};
+};
+
+struct RuntimeSnapshot {
+    std::uint16_t version{};
+    std::uint64_t sequence{};
+    std::vector<DiscoveredNode> nodes;
+    CanTrafficStatus traffic;
+    std::vector<RuntimeResourceSnapshot> resources;
+    std::vector<RuntimeNodeIssue> node_issues;
+};
+
 enum class GpioDirection : std::uint8_t {
     Input = 0,
     Output = 1,
@@ -132,6 +153,9 @@ public:
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     CanTrafficStatus traffic_status() const;
+    RuntimeSnapshot runtime_snapshot(
+        std::uint16_t maximum_resources = 128U,
+        std::uint32_t timeout_ms = 5000U) const;
     std::optional<protocol::Packet> next_event() const;
     void enter_bootloader() const;
     void enter_usb_bootloader() const;

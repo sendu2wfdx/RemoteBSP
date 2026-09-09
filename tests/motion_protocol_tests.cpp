@@ -1,4 +1,5 @@
 #include "remotebsp/protocol/motion.hpp"
+#include "remotebsp/protocol/motion_group.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -220,6 +221,59 @@ void test_rejection() {
     }
 }
 
+void test_group_transaction_payloads() {
+    using namespace remotebsp::protocol;
+    MotionGroupDigest digest{};
+    for (std::size_t index = 0U; index < digest.size(); ++index) {
+        digest[index] = static_cast<std::uint8_t>(index + 1U);
+    }
+    const MotionGroupIdentityPayload identity{
+        0x0102030405060708ULL, 5U, 7U, 9U, 11U, 123456U, digest};
+    const MotionSegmentPayload segment{
+        3U, 5000000000ULL, 1000000ULL, true,
+        {{0x09000001U, -20}}};
+
+    const auto prepare = decode_motion_group_prepare(
+        encode_motion_group_prepare({identity, segment}));
+    assert(prepare.identity.transaction_id == identity.transaction_id);
+    assert(prepare.identity.clock_model_generation == 11U);
+    assert(prepare.identity.node_start_tick == 123456U);
+    assert(prepare.identity.content_digest == digest);
+    assert(prepare.segment.axes[0].steps == -20);
+
+    const auto ready = decode_motion_group_ready(
+        encode_motion_group_ready({identity, MotionGroupReadyCode::Ready}));
+    assert(ready.code == MotionGroupReadyCode::Ready);
+    assert(ready.identity.boot_epoch == 9U);
+    const auto commit = decode_motion_group_commit(
+        encode_motion_group_commit({identity}));
+    assert(commit.identity.node_start_tick == 123456U);
+    const auto ack = decode_motion_group_commit_ack(
+        encode_motion_group_commit_ack(
+            {identity, MotionGroupCommitCode::Armed}));
+    assert(ack.code == MotionGroupCommitCode::Armed);
+    const auto abort = decode_motion_group_abort(
+        encode_motion_group_abort(
+            {identity, MotionGroupAbortReason::CommitTimedOut}));
+    assert(abort.reason == MotionGroupAbortReason::CommitTimedOut);
+
+    auto corrupt = encode_motion_group_ready(
+        {identity, MotionGroupReadyCode::Ready});
+    corrupt[81U] = 1U;
+    try {
+        static_cast<void>(decode_motion_group_ready(corrupt));
+        assert(false);
+    } catch (const MotionGroupPayloadException&) {
+    }
+    auto zero_digest = identity;
+    zero_digest.content_digest.fill(0U);
+    try {
+        static_cast<void>(encode_motion_group_commit({zero_digest}));
+        assert(false);
+    } catch (const MotionGroupPayloadException&) {
+    }
+}
+
 }
 
 int main() {
@@ -228,4 +282,5 @@ int main() {
     test_contract_round_trip_and_admission();
     test_single_node_maximum_axis_budget();
     test_rejection();
+    test_group_transaction_payloads();
 }
