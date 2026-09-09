@@ -809,7 +809,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                  maximum_resources_per_snapshot: int = 128,
                  cache_ttl_ms: int = 250,
                  maximum_concurrent_status_queries: int = 8,
-                 refresh_wait_timeout_ms: int = 5000):
+                 refresh_wait_timeout_ms: int = 5000,
+                 maximum_clock_error_bound_ns: int = 250_000,
+                 maximum_clock_sample_age_ms: int = 1_000):
         if maximum_resources_per_snapshot < 1:
             raise ValueError("每次快照资源查询上限必须大于0")
         if cache_ttl_ms < 0 or cache_ttl_ms > 60_000:
@@ -819,6 +821,12 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             raise ValueError("资源状态查询并发必须位于1～32")
         if refresh_wait_timeout_ms < 1 or refresh_wait_timeout_ms > 60_000:
             raise ValueError("快照刷新等待时间必须位于1～60000毫秒")
+        if maximum_clock_error_bound_ns < 1 or \
+                maximum_clock_error_bound_ns > 1_000_000_000:
+            raise ValueError("时钟估计误差告警阈值必须位于1～1000000000纳秒")
+        if maximum_clock_sample_age_ms < 1 or \
+                maximum_clock_sample_age_ms > 60_000:
+            raise ValueError("时钟样本年龄告警阈值必须位于1～60000毫秒")
         self.client = client
         self.clock_ms = clock_ms or (lambda: time.monotonic_ns() // 1_000_000)
         self.maximum_resources_per_snapshot = maximum_resources_per_snapshot
@@ -826,12 +834,36 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self.maximum_concurrent_status_queries = \
             maximum_concurrent_status_queries
         self.refresh_wait_timeout_ms = refresh_wait_timeout_ms
+        self.maximum_clock_error_bound_ns = maximum_clock_error_bound_ns
+        self.maximum_clock_sample_age_ms = maximum_clock_sample_age_ms
         self._cache_condition = threading.Condition()
         self._cached_snapshot: dict | None = None
         self._cache_stored_at_ms: int | None = None
         self._cached_error: str | None = None
         self._error_stored_at_ms: int | None = None
         self._refreshing = False
+
+    def runtime_capabilities(self) -> dict:
+        structured_output = bool(
+            getattr(self.client, "structured_output", True))
+        snapshot_available = structured_output and callable(
+            getattr(self.client, "runtime_snapshot", None))
+        return {
+            "clock_sync_quality": {
+                "available": snapshot_available,
+                "source": (
+                    "runtime_snapshot_v2" if snapshot_available
+                    else ("runtime_snapshot_unavailable"
+                          if structured_output else "legacy_text")),
+                "estimate_kind": (
+                    "host_model_estimate" if snapshot_available
+                    else "unavailable"),
+                "maximum_error_bound_ns":
+                    self.maximum_clock_error_bound_ns,
+                "maximum_sample_age_ms":
+                    self.maximum_clock_sample_age_ms,
+            },
+        }
 
     @staticmethod
     def _link_kind(mode: str) -> str:
@@ -863,6 +895,57 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             raise
         except ToolbusIpcError as error:
             return None, error
+
+    def _clock_quality_alerts(self, node_id: str, numeric_id: int,
+                              clock: dict,
+                              captured_at_ms: int) -> list[dict]:
+        if not bool(clock["source_available"]):
+            return [self._alert(
+                node_id, f"clock-observability-{numeric_id}",
+                "clock_sync_observability_unavailable",
+                "当前数据源不提供主机时钟模型质量观测，不能据此判断节点同步状态",
+                captured_at_ms, severity="info")]
+        if not bool(clock["registered"]):
+            return [self._alert(
+                node_id, f"clock-unregistered-{numeric_id}",
+                "clock_sync_unregistered",
+                "节点尚未注册主机时钟同步模型",
+                captured_at_ms, severity="warning")]
+
+        result: list[dict] = []
+        state = str(clock["state"])
+        if state == "unsynced":
+            result.append(self._alert(
+                node_id, f"clock-unsynced-{numeric_id}",
+                "clock_sync_unsynced",
+                "节点主机时钟模型未同步，不能用于跨板运动准入",
+                captured_at_ms, severity="warning"))
+        elif state == "degraded":
+            result.append(self._alert(
+                node_id, f"clock-degraded-{numeric_id}",
+                "clock_sync_degraded",
+                "节点主机时钟模型已降级，不能用于新的跨板运动准入",
+                captured_at_ms, severity="warning"))
+
+        if bool(clock["estimate_valid"]):
+            error_bound_ns = int(clock["error_bound_ns"])
+            if error_bound_ns > self.maximum_clock_error_bound_ns:
+                result.append(self._alert(
+                    node_id, f"clock-error-bound-{numeric_id}",
+                    "clock_sync_error_bound_exceeded",
+                    f"主机时钟模型估计误差上界{error_bound_ns}纳秒，超过Runtime告警阈值"
+                    f"{self.maximum_clock_error_bound_ns}纳秒",
+                    captured_at_ms, severity="warning"))
+            sample_age_ns = int(clock["sample_age_ns"])
+            age_threshold_ns = self.maximum_clock_sample_age_ms * 1_000_000
+            if sample_age_ns > age_threshold_ns:
+                result.append(self._alert(
+                    node_id, f"clock-sample-stale-{numeric_id}",
+                    "clock_sync_sample_stale",
+                    f"主机时钟模型入选样本年龄{sample_age_ns}纳秒，超过Runtime告警阈值"
+                    f"{self.maximum_clock_sample_age_ms}毫秒",
+                    captured_at_ms, severity="warning"))
+        return result
 
     def get_snapshot(self) -> dict:
         return self.read_snapshot().snapshot
@@ -1139,6 +1222,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 clock_runtime = copy.deepcopy(clock_quality)
                 clock_runtime.pop("node_id", None)
                 clock_runtime["source_available"] = True
+            alerts.extend(self._clock_quality_alerts(
+                node_id, numeric_id, clock_runtime, captured_at_ms))
             nodes.append({
                 "node_id": node_id,
                 "board_type": f"board-0x{int(source_node['board_type']):08x}",

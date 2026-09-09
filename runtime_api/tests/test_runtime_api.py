@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
+from runtime_api import server as runtime_server
 from runtime_api.models import RuntimeContractError, normalize_snapshot
 from runtime_api.provider import (
     FileSnapshotProvider,
@@ -154,9 +156,16 @@ class RuntimeHttpTest(unittest.TestCase):
         self.assertTrue(root["ok"])
         self.assertTrue(root["data"]["capabilities"]["read_only"])
         self.assertFalse(root["data"]["capabilities"]["write_commands"])
+        root_clock = root["data"]["capabilities"]["clock_sync_quality"]
+        self.assertFalse(root_clock["available"])
+        self.assertEqual(root_clock["estimate_kind"], "unavailable")
 
         health = self._get("/api/v1/health")
         self.assertEqual(health["data"]["snapshot_id"], "mock-1")
+        health_clock = health["data"]["capabilities"][
+            "clock_sync_quality"]
+        self.assertFalse(health_clock["available"])
+        self.assertIsNone(health_clock["maximum_error_bound_ns"])
         nodes = self._get("/api/v1/nodes")["data"]
         self.assertEqual(nodes[0]["resource_count"], 2)
         self.assertEqual(nodes[0]["active_alert_count"], 1)
@@ -188,6 +197,24 @@ class RuntimeHttpTest(unittest.TestCase):
             "cache_ttl_ms": None,
         })
 
+    def test_health_exposes_clock_quality_policy_without_calling_it_measured(self):
+        class CapabilityProvider(MockSnapshotProvider):
+            def runtime_capabilities(self):
+                return {"clock_sync_quality": {
+                    "available": True,
+                    "source": "runtime_snapshot_v2",
+                    "estimate_kind": "host_model_estimate",
+                    "maximum_error_bound_ns": 125_000,
+                    "maximum_sample_age_ms": 750,
+                }}
+
+        self.server.provider = CapabilityProvider()  # type: ignore[attr-defined]
+        health = self._get("/api/v1/health")["data"]
+        quality = health["capabilities"]["clock_sync_quality"]
+        self.assertEqual(quality["estimate_kind"], "host_model_estimate")
+        self.assertEqual(quality["maximum_error_bound_ns"], 125_000)
+        self.assertEqual(quality["maximum_sample_age_ms"], 750)
+
     def test_illegal_paths_queries_and_writes_are_bounded(self):
         for path, status, code in (
                 ("/api/v1/nodes/missing", 404, "node_not_found"),
@@ -218,6 +245,46 @@ class RuntimeHttpTest(unittest.TestCase):
             payload = json.loads(caught.exception.read())
             self.assertEqual(payload["error"]["code"],
                              "provider_unavailable")
+
+
+class RuntimeServerCliTest(unittest.TestCase):
+    def test_clock_warning_thresholds_are_forwarded_and_bounded(self):
+        class DummyServer:
+            server_port = 8780
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        with patch.object(
+                runtime_server, "RemoteCliIpcClient",
+                return_value=object()), patch.object(
+                    runtime_server, "ToolbusdSnapshotProvider",
+                    return_value=MockSnapshotProvider()) as provider_type, \
+                patch.object(runtime_server, "make_server",
+                             return_value=DummyServer()), patch(
+                    "sys.argv", [
+                        "runtime-api", "--toolbusd-socket", "/tmp/test.sock",
+                        "--clock-error-warning-ns", "125000",
+                        "--clock-sample-age-warning-ms", "750",
+                    ]):
+            self.assertEqual(runtime_server.main(), 0)
+        arguments = provider_type.call_args.kwargs
+        self.assertEqual(arguments["maximum_clock_error_bound_ns"], 125000)
+        self.assertEqual(arguments["maximum_clock_sample_age_ms"], 750)
+
+        for option, value in (
+                ("--clock-error-warning-ns", "0"),
+                ("--clock-error-warning-ns", "1000000001"),
+                ("--clock-sample-age-warning-ms", "0"),
+                ("--clock-sample-age-warning-ms", "60001")):
+            with self.subTest(option=option, value=value), patch(
+                    "sys.argv", ["runtime-api", option, value]), patch(
+                    "sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
 
 
 if __name__ == "__main__":

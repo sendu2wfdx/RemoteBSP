@@ -30,7 +30,7 @@ Runtime HTTP 层
         │ Toolbusd Provider 只调用既有只读客户端
         ▼
 remote-cli / libremotebsp / toolbusd 本地套接字
-        │ RuntimeSnapshot v1 聚合 IPC；旧命令继续兼容
+        │ RuntimeSnapshot v2 聚合 IPC；旧命令继续兼容
         ▼
 toolbusd 管理的传输层
 ```
@@ -65,7 +65,9 @@ python3 -m runtime_api.server \
   --remote-cli ./build-wsl/remote-cli \
   --ipc-timeout-ms 2000 \
   --snapshot-cache-ms 250 \
-  --status-query-workers 8
+  --status-query-workers 8 \
+  --clock-error-warning-ns 250000 \
+  --clock-sample-age-warning-ms 1000
 ```
 
 默认地址为 `http://127.0.0.1:8780/api/v1`。文件 Provider 每次请求重新读取文件，
@@ -93,6 +95,14 @@ Toolbusd Provider 默认使用 250 ms 的线程安全短时缓存。同一时刻
 最多保留 32 个活动请求线程，满载后在监听队列施加背压，可通过
 `--http-workers`（1～256）调整。这些限制只控制 Runtime 进程内聚合，不绕过
 `remote-cli → libremotebsp → toolbusd` 边界。
+
+Runtime 对主机时钟模型使用两个只读告警阈值：估计误差上界默认 250000 ns，最后入选
+样本年龄默认 1000 ms；分别由 `--clock-error-warning-ns`（1～1000000000）和
+`--clock-sample-age-warning-ms`（1～60000）配置。它们只决定 Runtime 告警，不改写
+toolbusd 模型、不替代运动准入门限，也不会向节点发送命令。`GET /api/v1` 与
+`GET /api/v1/health` 的 `capabilities.clock_sync_quality` 明确给出数据源、
+`estimate_kind=host_model_estimate` 和生效阈值；数据源没有 v2 快照能力时报告
+`available=false,estimate_kind=unavailable`。
 
 旧版 `remote-cli` 暂时只能输出文本时，必须显式使用
 `--toolbusd-legacy-text`。结构化输出解析失败不会静默回退到文本；否则升级不兼容可能
@@ -278,6 +288,21 @@ Toolbusd Provider 把 v2 时钟记录放入每个节点的 `runtime.clock_sync`�
 表示一个曾有效但已经过期的估计，此时 `estimate_valid=true` 且保留可审计数值，但不能
 据此准入跨板运动。这些数值来自主机模型及软件时间戳，只是估计和保守上界，不代表
 硬件时间戳精度、MCU 晶振规格或实体 CAN/CAN-FD 链路的实测精度。
+
+Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状态或观测能力告警，不是
+硬件故障诊断：
+
+| 告警码 | 条件 |
+|---|---|
+| `clock_sync_observability_unavailable` | 旧文本或第三方客户端没有 v2 质量观测，仅以 `info` 标记能力未知 |
+| `clock_sync_unregistered` | 节点尚未注册主机时钟模型 |
+| `clock_sync_unsynced` | 模型未同步或已过期 |
+| `clock_sync_degraded` | 模型状态为降级 |
+| `clock_sync_error_bound_exceeded` | 有效估计的误差上界超过 Runtime 配置阈值 |
+| `clock_sync_sample_stale` | 有效估计的样本年龄超过 Runtime 配置阈值 |
+
+同一节点可同时出现状态告警和阈值告警，以保留原因；能力未知时只产生
+`clock_sync_observability_unavailable`，不会猜测 `unregistered`、`unsynced` 或硬件失败。
 
 ## 写命令与事件流的预留原则
 

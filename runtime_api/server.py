@@ -115,6 +115,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "provider_unavailable", str(error))
             return None
 
+    def _runtime_capabilities(self) -> dict:
+        return self.provider.runtime_capabilities()
+
     @staticmethod
     def _node_summary(node: dict, alerts: list[dict]) -> dict:
         return {
@@ -149,6 +152,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     "write_commands": False,
                     "authentication": False,
                     "event_stream": False,
+                    **self._runtime_capabilities(),
                 },
                 "endpoints": ["health", "snapshot", "nodes", "resources",
                               "alerts"],
@@ -159,7 +163,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             if read is not None:
                 snapshot = read.snapshot
                 self._success({"status": "ok",
-                               "snapshot_id": snapshot["snapshot_id"]},
+                               "snapshot_id": snapshot["snapshot_id"],
+                               "capabilities":
+                                   self._runtime_capabilities()},
                               read=read)
             return
         if len(parts) < 3 or parts[:2] != ["api", API_VERSION]:
@@ -266,6 +272,12 @@ def main() -> int:
     parser.add_argument("--http-workers", type=int, default=32,
                         help="活动HTTP请求线程上限，默认32个")
     parser.add_argument(
+        "--clock-error-warning-ns", type=int, default=250_000,
+        help="主机时钟模型估计误差上界告警阈值，默认250000纳秒")
+    parser.add_argument(
+        "--clock-sample-age-warning-ms", type=int, default=1_000,
+        help="主机时钟模型样本年龄告警阈值，默认1000毫秒")
+    parser.add_argument(
         "--toolbusd-legacy-text", action="store_true",
         help="显式兼容旧版remote-cli文本输出；不会自动回退")
     args = parser.parse_args()
@@ -287,6 +299,12 @@ def main() -> int:
         parser.error("--status-query-workers必须位于1～32")
     if args.http_workers < 1 or args.http_workers > 256:
         parser.error("--http-workers必须位于1～256")
+    if args.clock_error_warning_ns < 1 or \
+            args.clock_error_warning_ns > 1_000_000_000:
+        parser.error("--clock-error-warning-ns必须位于1～1000000000")
+    if args.clock_sample_age_warning_ms < 1 or \
+            args.clock_sample_age_warning_ms > 60_000:
+        parser.error("--clock-sample-age-warning-ms必须位于1～60000")
     if args.remote_cli and not args.toolbusd_socket:
         parser.error("--remote-cli必须与--toolbusd-socket一起使用")
     if args.toolbusd_legacy_text and not args.toolbusd_socket:
@@ -303,7 +321,10 @@ def main() -> int:
             maximum_resources_per_snapshot=args.maximum_resource_queries,
             cache_ttl_ms=args.snapshot_cache_ms,
             maximum_concurrent_status_queries=args.status_query_workers,
-            refresh_wait_timeout_ms=args.snapshot_refresh_wait_ms)
+            refresh_wait_timeout_ms=args.snapshot_refresh_wait_ms,
+            maximum_clock_error_bound_ns=args.clock_error_warning_ns,
+            maximum_clock_sample_age_ms=
+                args.clock_sample_age_warning_ms)
     elif args.snapshot:
         provider = FileSnapshotProvider(args.snapshot)
     else:

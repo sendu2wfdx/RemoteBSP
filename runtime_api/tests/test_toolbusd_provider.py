@@ -451,6 +451,15 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
         self.assertFalse(clock["source_available"])
         self.assertIsNone(clock["registered"])
         self.assertEqual(clock["state"], "unknown")
+        codes = {alert["code"] for alert in snapshot["alerts"]}
+        self.assertIn("clock_sync_observability_unavailable", codes)
+        self.assertNotIn("clock_sync_unregistered", codes)
+        self.assertNotIn("clock_sync_unsynced", codes)
+        capability = ToolbusdSnapshotProvider(client).runtime_capabilities()[
+            "clock_sync_quality"]
+        self.assertFalse(capability["available"])
+        self.assertEqual(capability["source"], "legacy_text")
+        self.assertEqual(capability["estimate_kind"], "unavailable")
 
     def test_single_snapshot_path_preserves_resource_failure_isolation(self):
         parsed = RemoteCliIpcClient._json_runtime_snapshot(
@@ -505,13 +514,98 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
         failed = next(resource for resource in online["resources"]
                       if resource["state"]["health"] == "failed")
         self.assertFalse(failed["available"])
-        self.assertEqual(snapshot["alerts"][0]["code"], "resource_health")
+        self.assertIn("resource_health",
+                      {alert["code"] for alert in snapshot["alerts"]})
+        self.assertIn("clock_sync_observability_unavailable",
+                      {alert["code"] for alert in snapshot["alerts"]})
         self.assertEqual(offline["state"], "offline")
         self.assertEqual(offline["resources"], [])
         self.assertEqual(offline["last_seen_ms"], 0)
         self.assertFalse(offline["runtime"]["last_seen_known"])
         self.assertEqual(online["last_seen_ms"], 12345)
         self.assertTrue(online["runtime"]["last_seen_known"])
+
+        capability = provider.runtime_capabilities()["clock_sync_quality"]
+        self.assertFalse(capability["available"])
+        self.assertEqual(capability["source"],
+                         "runtime_snapshot_unavailable")
+        self.assertEqual(capability["estimate_kind"], "unavailable")
+
+    def test_clock_quality_alerts_are_stable_and_thresholds_are_bounded(self):
+        def build(clock_updates, *, error_limit=250_000,
+                  age_limit_ms=1_000):
+            document = json.loads(
+                RemoteCliIpcClientTest._runtime_snapshot_document())
+            document["data"]["clocks"][0].update(clock_updates)
+            parsed = RemoteCliIpcClient._json_runtime_snapshot(
+                json.dumps(document))
+
+            class AtomicClient:
+                def runtime_snapshot(self, maximum_resources):
+                    return parsed
+
+            provider = ToolbusdSnapshotProvider(
+                AtomicClient(), maximum_clock_error_bound_ns=error_limit,
+                maximum_clock_sample_age_ms=age_limit_ms,
+                cache_ttl_ms=0)
+            return provider.get_snapshot(), provider.runtime_capabilities()
+
+        null_estimate = {
+            "estimate_valid": False,
+            "state": "unsynced",
+            "rate_deviation_ppb": None,
+            "drift_uncertainty_ppm": None,
+            "minimum_network_rtt_ns": None,
+            "error_bound_ns": None,
+            "sample_age_ns": None,
+            "last_sample_host_time_ns": None,
+        }
+        unsynced, _ = build(null_estimate)
+        self.assertEqual(
+            {alert["code"] for alert in unsynced["alerts"]},
+            {"clock_sync_unsynced", "resource_status_unavailable"})
+
+        unregistered_fields = dict(null_estimate, **{
+            "registered": False,
+            "state": "unregistered",
+            "boot_epoch": None,
+            "model_generation": None,
+            "sample_count": 0,
+            "selected_sample_count": 0,
+        })
+        unregistered, _ = build(unregistered_fields)
+        self.assertEqual(
+            {alert["code"] for alert in unregistered["alerts"]},
+            {"clock_sync_unregistered", "resource_status_unavailable"})
+
+        degraded, capabilities = build({
+            "state": "degraded",
+            "error_bound_ns": 300_000,
+            "sample_age_ns": 1_500_000_000,
+        })
+        codes = {alert["code"] for alert in degraded["alerts"]}
+        self.assertTrue({
+            "clock_sync_degraded", "clock_sync_error_bound_exceeded",
+            "clock_sync_sample_stale",
+        }.issubset(codes))
+        quality = capabilities["clock_sync_quality"]
+        self.assertTrue(quality["available"])
+        self.assertEqual(quality["source"], "runtime_snapshot_v2")
+        self.assertEqual(quality["estimate_kind"], "host_model_estimate")
+        self.assertEqual(quality["maximum_error_bound_ns"], 250_000)
+        self.assertEqual(quality["maximum_sample_age_ms"], 1_000)
+
+        for keyword, value, message in (
+                ("maximum_clock_error_bound_ns", 0, "误差告警阈值"),
+                ("maximum_clock_error_bound_ns", 1_000_000_001,
+                 "误差告警阈值"),
+                ("maximum_clock_sample_age_ms", 0, "样本年龄告警阈值"),
+                ("maximum_clock_sample_age_ms", 60_001,
+                 "样本年龄告警阈值")):
+            with self.subTest(keyword=keyword, value=value):
+                with self.assertRaisesRegex(ValueError, message):
+                    ToolbusdSnapshotProvider(
+                        FakeToolbusClient(), **{keyword: value})
 
     def test_duplicate_numeric_node_id_fails_before_resource_fanout(self):
         """相同路由ID不能因UUID不同而被当作两个节点重复查询。"""

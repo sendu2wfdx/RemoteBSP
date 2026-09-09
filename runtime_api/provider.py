@@ -41,6 +41,18 @@ class RuntimeProvider(ABC):
             cache_ttl_ms=None,
         )
 
+    def runtime_capabilities(self) -> dict:
+        """返回不会随单次快照变化的只读 Runtime 能力。"""
+        return {
+            "clock_sync_quality": {
+                "available": False,
+                "source": "unavailable",
+                "estimate_kind": "unavailable",
+                "maximum_error_bound_ns": None,
+                "maximum_sample_age_ms": None,
+            },
+        }
+
 
 class MockSnapshotProvider(RuntimeProvider):
     """用于开发、演示和测试的内存快照来源。"""

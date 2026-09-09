@@ -214,6 +214,14 @@ API 再放入节点的 `runtime.clock_sync`。记录与同一快照的节点 ID 
 CLI 不调用 v2 快照，Runtime 使用 `source_available=false,state=unknown` 表示能力未知，
 不会把“未观测”伪装成“未注册”。
 
+Runtime 默认在主机模型估计误差上界超过 250000 ns、最后入选样本年龄超过 1000 ms
+时分别产生 `clock_sync_error_bound_exceeded` 和 `clock_sync_sample_stale` 告警；两个阈值
+可通过 Runtime 服务 CLI 在固定范围内调整。`unregistered`、`unsynced`、`degraded` 也有
+独立稳定告警码。旧文本或不支持单次 v2 快照的客户端只产生
+`clock_sync_observability_unavailable` 信息告警，不能据此推断同步失败或硬件故障。
+阈值、数据源与 `estimate_kind=host_model_estimate` 会在 Runtime 根能力和 health 能力中
+公开，避免调用者把告警阈值误当成 MCU 或总线的实测规格。
+
 频率偏差在线格式中以有符号 ppb 整数表达，避免跨语言浮点歧义；它由主机拟合结果四舍
 五入得出。误差、漂移和 RTT 都是当前软件模型基于主机单调时钟与协议收发边界计算的估计
 或保守上界，不是硬件时间戳精度，也不是实体板卡、晶振或总线的实测规格。
