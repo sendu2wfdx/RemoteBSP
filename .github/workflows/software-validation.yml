@@ -1,0 +1,115 @@
+name: 软件基线验证
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: software-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-and-mock:
+    name: Ubuntu 主机与 Mock 全量测试
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出完整源码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: 安装构建与虚拟 CAN 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build python3 iproute2 kmod libusb-1.0-0-dev
+
+      - name: 建立隔离的虚拟 CAN
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set up vcan0
+
+      - name: 配置
+        run: >-
+          cmake -S . -B build-ci -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DREMOTEBSP_VCAN_INTERFACE=vcan0
+
+      - name: 构建
+        run: cmake --build build-ci --parallel 32
+
+      - name: 执行全部软件测试
+        run: >-
+          ctest --test-dir build-ci
+          --output-on-failure
+          --output-junit software-test-results.xml
+
+      - name: 单独校验成熟度与公平对照门禁
+        run: |
+          python3 maturity/validate_maturity.py
+          python3 benchmarks/validate_comparison_plan.py
+
+      - name: 保存软件测试结果
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: software-test-results-${{ github.run_id }}
+          path: build-ci/software-test-results.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  stm32-cross-compile:
+    name: 三类 STM32 正式配置交叉编译
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出完整源码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: 安装固定构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build python3 python3-pip \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+          python3 -m pip install --break-system-packages kconfiglib==14.1.0
+
+      - name: 校验生成文件未漂移
+        run: python3 firmware/scripts/generate_pin_choices.py --check
+
+      - name: 获取固定版本 STM32 依赖
+        working-directory: firmware
+        run: bash scripts/fetch_stm32_deps.sh
+
+      - name: 编译 F072、F103 与 G431 正式配置
+        working-directory: firmware
+        env:
+          RBSP_BUILD_JOBS: 32
+        run: bash scripts/build_firmware.sh all
+
+      - name: 保存固件产物
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stm32-firmware-${{ github.sha }}
+          path: |
+            firmware/out/*.elf
+            firmware/out/*.bin
+            firmware/out/*.hex
+            firmware/out/*.map
+          if-no-files-found: error
+          retention-days: 30
