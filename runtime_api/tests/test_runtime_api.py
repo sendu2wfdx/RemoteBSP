@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from runtime_api import server as runtime_server
+from runtime_api.auth import ApiKeyAuthenticator
 from runtime_api.models import RuntimeContractError, normalize_snapshot
 from runtime_api.provider import (
     FileSnapshotProvider,
@@ -117,9 +118,18 @@ class RuntimeModelTest(unittest.TestCase):
 
 class RuntimeHttpTest(unittest.TestCase):
     def test_server_factory_enforces_loopback_boundary(self):
-        """库调用也不能绕过无认证阶段的本机监听限制。"""
-        with self.assertRaisesRegex(ValueError, "回环地址"):
+        """库调用也不能绕过非回环监听的认证限制。"""
+        with self.assertRaisesRegex(ValueError, "必须配置API密钥"):
             make_server("0.0.0.0", 0, MockSnapshotProvider())
+        with self.assertRaisesRegex(ValueError, "不能使用主机名"):
+            make_server("localhost", 0, MockSnapshotProvider())
+        authenticator = ApiKeyAuthenticator(["a" * 32])
+        with patch.object(runtime_server, "BoundedThreadingHTTPServer") \
+                as server_type:
+            server = make_server("0.0.0.0", 8780, MockSnapshotProvider(),
+                                 authenticator=authenticator)
+        self.assertIs(server.authenticator, authenticator)
+        server_type.assert_called_once()
         with self.assertRaisesRegex(ValueError, "HTTP工作线程数"):
             make_server("127.0.0.1", 0, MockSnapshotProvider(),
                         maximum_workers=0)
@@ -156,6 +166,9 @@ class RuntimeHttpTest(unittest.TestCase):
         self.assertTrue(root["ok"])
         self.assertTrue(root["data"]["capabilities"]["read_only"])
         self.assertFalse(root["data"]["capabilities"]["write_commands"])
+        self.assertFalse(root["data"]["capabilities"]["authentication"])
+        self.assertEqual(root["data"]["capabilities"]["authentication_mode"],
+                         "disabled_loopback")
         root_clock = root["data"]["capabilities"]["clock_sync_quality"]
         self.assertFalse(root_clock["available"])
         self.assertEqual(root_clock["estimate_kind"], "unavailable")
@@ -232,7 +245,8 @@ class RuntimeHttpTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as caught:
             urlopen(request)
         self.assertEqual(caught.exception.code, 405)
-        self.assertEqual(caught.exception.headers["Allow"], "GET, HEAD")
+        self.assertEqual(caught.exception.headers["Allow"],
+                         "GET, HEAD, OPTIONS")
 
     def test_provider_failure_returns_service_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +261,170 @@ class RuntimeHttpTest(unittest.TestCase):
                              "provider_unavailable")
 
 
+class RuntimeAuthenticationHttpTest(unittest.TestCase):
+    API_KEY = "runtime-test-key-0123456789-abcdef"
+
+    def setUp(self):
+        self.server = make_server(
+            "127.0.0.1", 0, MockSnapshotProvider(),
+            authenticator=ApiKeyAuthenticator([self.API_KEY]))
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def _error(self, request: str | Request):
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request)
+        return caught.exception, json.loads(caught.exception.read())
+
+    def test_protected_endpoint_rejects_missing_and_wrong_key(self):
+        for headers in ({}, {"Authorization": "Bearer " + "x" * 32},
+                        {"X-API-Key": "x" * 32}):
+            with self.subTest(headers=headers):
+                error, payload = self._error(Request(
+                    self.base + "/api/v1/snapshot", headers=headers))
+                self.assertEqual(error.code, 401)
+                self.assertEqual(payload["error"]["code"],
+                                 "authentication_required")
+                self.assertEqual(error.headers["WWW-Authenticate"],
+                                 'Bearer realm="RemoteBSP Runtime"')
+
+    def test_bearer_and_api_key_headers_are_accepted(self):
+        for headers in (
+                {"Authorization": f"Bearer {self.API_KEY}"},
+                {"X-API-Key": self.API_KEY}):
+            with self.subTest(headers=headers):
+                payload = json.loads(urlopen(Request(
+                    self.base + "/api/v1/snapshot", headers=headers)).read())
+                self.assertTrue(payload["ok"])
+
+        root = json.loads(urlopen(Request(
+            self.base + "/api/v1",
+            headers={"X-API-Key": self.API_KEY})).read())
+        self.assertTrue(root["data"]["capabilities"]["authentication"])
+        self.assertEqual(root["data"]["capabilities"]["authentication_mode"],
+                         "api_key")
+
+        error, payload = self._error(Request(
+            self.base + "/api/v1/snapshot", headers={
+                "Authorization": f"Bearer {self.API_KEY}",
+                "X-API-Key": self.API_KEY,
+            }))
+        self.assertEqual(error.code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_auth_header")
+
+    def test_query_string_credentials_are_rejected(self):
+        error, payload = self._error(
+            self.base + "/api/v1/snapshot?api_key=" + self.API_KEY)
+        self.assertEqual(error.code, 400)
+        self.assertEqual(payload["error"]["code"], "credential_in_query")
+
+    def test_health_probe_and_options_have_minimum_public_surface(self):
+        class ProbeMustNotReadProvider:
+            def read_snapshot(self):
+                raise AssertionError("公开存活探针不应读取Provider")
+
+            def runtime_capabilities(self):
+                raise AssertionError("公开存活探针不应读取能力")
+
+        provider = self.server.provider  # type: ignore[attr-defined]
+        self.server.provider = ProbeMustNotReadProvider()  # type: ignore[attr-defined]
+        health = json.loads(urlopen(
+            self.base + "/api/v1/health").read())
+        self.assertEqual(health["data"], {
+            "status": "ok", "scope": "liveness",
+        })
+        self.assertNotIn("meta", health)
+        self.server.provider = provider  # type: ignore[attr-defined]
+
+        error, payload = self._error(Request(
+            self.base + "/api/v1/health",
+            headers={"Authorization": "Bearer " + "x" * 32}))
+        self.assertEqual(error.code, 401)
+        self.assertEqual(payload["error"]["code"],
+                         "authentication_required")
+
+        authenticated_health = json.loads(urlopen(Request(
+            self.base + "/api/v1/health",
+            headers={"Authorization": f"Bearer {self.API_KEY}"})).read())
+        self.assertEqual(authenticated_health["data"]["snapshot_id"],
+                         "mock-1")
+
+        with urlopen(Request(self.base + "/api/v1/snapshot",
+                             method="OPTIONS")) as response:
+            self.assertEqual(response.status, 204)
+            self.assertEqual(response.headers["Allow"],
+                             "GET, HEAD, OPTIONS")
+            self.assertIsNone(response.headers["Access-Control-Allow-Origin"])
+
+        with urlopen(Request(self.base + "/api/v1/health",
+                             method="HEAD")) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"")
+
+    def test_write_method_authenticates_before_read_only_rejection(self):
+        request = Request(self.base + "/api/v1/nodes", data=b"{}",
+                          method="POST")
+        error, payload = self._error(request)
+        self.assertEqual(error.code, 401)
+        self.assertEqual(payload["error"]["code"],
+                         "authentication_required")
+
+        authenticated = Request(
+            self.base + "/api/v1/nodes", data=b"{}", method="POST",
+            headers={"X-API-Key": self.API_KEY})
+        error, payload = self._error(authenticated)
+        self.assertEqual(error.code, 405)
+        self.assertEqual(payload["error"]["code"], "read_only")
+
+
 class RuntimeServerCliTest(unittest.TestCase):
+    def test_api_key_file_is_required_for_non_loopback_and_forwarded(self):
+        with patch("sys.argv", ["runtime-api", "--host", "0.0.0.0"]), \
+                patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                runtime_server.main()
+
+        class DummyServer:
+            server_port = 8780
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "auth.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "api_keys": ["c" * 32],
+            }), encoding="utf-8")
+            with patch.object(runtime_server, "make_server",
+                              return_value=DummyServer()) as factory, patch(
+                    "sys.argv", [
+                        "runtime-api", "--host", "0.0.0.0",
+                        "--api-key-file", str(path),
+                    ]):
+                self.assertEqual(runtime_server.main(), 0)
+        authenticator = factory.call_args.kwargs["authenticator"]
+        self.assertTrue(authenticator.verify("c" * 32))
+
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory) / "invalid.json"
+            invalid.write_text("{}", encoding="utf-8")
+            with patch("sys.argv", [
+                    "runtime-api", "--api-key-file", str(invalid)]), patch(
+                    "sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+
     def test_clock_warning_thresholds_are_forwarded_and_bounded(self):
         class DummyServer:
             server_port = 8780

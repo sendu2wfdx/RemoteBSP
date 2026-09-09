@@ -10,12 +10,16 @@ Moonraker，但面向通用 RemoteBSP 节点和资源。本轮只实现可替换
 
 - GPIO、UART、运动等写命令；
 - 固件生成、构建和烧录；
-- 用户认证、授权与多租户；
+- 用户/角色授权、多租户与会话管理；
 - WebSocket、SSE 或遥测历史库；
 - 设备协议、运动学和具体设备业务。
 
-服务默认只允许绑定 `127.0.0.1`、`localhost` 或 `::1`。认证实现前不能直接监听
-局域网地址；远程访问也不应通过修改此限制临时开放。
+服务默认绑定 `127.0.0.1`，此时可使用明确标记的无认证回环开发模式。`--host` 只接受
+数字 IP 地址；即使是 `localhost` 也会被拒绝，避免名称解析误配把无认证服务绑定到
+非回环接口。监听任何
+非回环数字 IP 地址时必须在启动阶段成功加载 API 密钥文件，否则进程显式失败；不能
+通过库调用绕过该边界。API 密钥只提供请求认证，不提供链路加密。跨主机部署必须在
+受控网络中由 TLS 反向代理终止 HTTPS，不能把明文 HTTP 直接暴露到不可信网络。
 
 ## 分层
 
@@ -111,6 +115,60 @@ toolbusd 模型、不替代运动准入门限，也不会向节点发送命令�
 旧版 `remote-cli` 暂时只能输出文本时，必须显式使用
 `--toolbusd-legacy-text`。结构化输出解析失败不会静默回退到文本；否则升级不兼容可能
 被误判为合法设备状态。该开关仅用于过渡，不能与 `--toolbusd-socket` 分开使用。
+
+## HTTP 认证边界
+
+回环开发模式无需密钥，能力声明为
+`authentication=false,authentication_mode="disabled_loopback"`。即使在回环地址，也可
+显式提供 `--api-key-file` 来启用与部署环境相同的认证路径。非回环监听必须提供该文件：
+
+```json
+{
+  "schema_version": 1,
+  "api_keys": ["REPLACE_WITH_RANDOM_ASCII_KEY_AT_LEAST_32_BYTES"]
+}
+```
+
+```sh
+chmod 600 /etc/remotebsp/runtime-auth.json
+python3 -m runtime_api.server \
+  --host 192.0.2.10 \
+  --api-key-file /etc/remotebsp/runtime-auth.json
+```
+
+认证配置最多 16 KiB、16 个密钥；每个密钥为 32～128 字节的非空白可打印 ASCII，
+重复密钥、未知字段、未知版本、空数组和格式错误都会使启动失败。密钥只从文件读取，
+不提供容易进入进程列表和终端历史的明文命令行参数。生产密钥应由密码学安全随机源生成，
+并通过同时保留新旧两个密钥完成有限时间轮换；修改文件后需重启服务加载。
+
+当前加载器验证文件内容和大小，但不把跨平台文件所有者、POSIX mode 或符号链接来源
+当作已验证的信任证据。部署者必须让服务管理器传入受控的常规文件路径，限制目录和文件
+只对服务账号可读写，并避免可由低权限用户替换的符号链接；上面的 `chmod 600` 是部署
+要求，不是 Runtime 已自动执行或验证的权限修复。
+
+客户端只能选择一种请求头：
+
+```http
+Authorization: Bearer <api-key>
+```
+
+或：
+
+```http
+X-API-Key: <api-key>
+```
+
+服务对全部已配置密钥使用常量时间比较原语且不在首个匹配处提前返回。缺少密钥和错误
+密钥统一返回 HTTP 401、`authentication_required`；重复认证头、同时提供两种认证方式
+或 Bearer 格式错误返回 HTTP 400、`invalid_auth_header`。任何名为 `api_key`、
+`api-key`、`apikey`、`x-api-key`、`access_token` 或 `token` 的查询参数均以 HTTP 400、
+`credential_in_query` 拒绝，避免密钥进入访问日志、浏览器历史和代理缓存。
+
+认证启用时，`/api/v1` 下除下述边界外均受同一中间件保护，包括尚未实现的写方法；
+写请求通过认证后仍返回只读错误。`GET/HEAD /api/v1/health` 在未携带认证头时只返回
+`status=ok,scope=liveness`，不读取 Provider，也不暴露快照、节点或能力；携带有效密钥
+时返回完整健康信息。携带错误密钥不会降级成公开探针，而是返回 401。
+`OPTIONS /api/v1...` 无需密钥并只返回方法边界，不启用 CORS、也不允许凭据跨域。
 
 ## remote-cli 结构化只读契约
 
@@ -212,7 +270,7 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 | 方法与路径 | 内容 |
 |---|---|
 | `GET /api/v1` | schema 版本、端点和未实现能力声明 |
-| `GET /api/v1/health` | Provider 可用性和当前 `snapshot_id` |
+| `GET /api/v1/health` | 未认证时仅存活探针；认证后含 Provider 可用性和当前 `snapshot_id` |
 | `GET /api/v1/snapshot` | 完整、同一时刻的节点/资源/告警快照 |
 | `GET /api/v1/nodes` | 节点摘要、资源数和活动告警数 |
 | `GET /api/v1/nodes/{node_id}` | 单节点详情与运行态 |
@@ -221,8 +279,10 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 | `GET /api/v1/resources` | 全部资源，并补充所属 `node_id` |
 | `GET /api/v1/alerts` | 全部告警 |
 
-`HEAD` 与对应 `GET` 返回相同状态和头部但没有响应体。任何写方法返回 HTTP 405；
-未知版本或路径返回 404；本轮不接受查询参数，避免形成未定义的过滤/分页语义。
+`HEAD` 与对应 `GET` 返回相同状态和头部但没有响应体。认证通过后的任何写方法返回
+HTTP 405；`OPTIONS` 返回 HTTP 204 和 `Allow: GET, HEAD, OPTIONS`；未知版本或路径
+返回 404。本轮不接受查询参数，避免形成未定义的过滤/分页语义，认证信息尤其不得放入
+查询字符串。
 
 ## 快照 JSON v1
 
@@ -332,4 +392,6 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。
 
-在这些部署决策完成前，Runtime API 只作为仓库内可启动、可测试的开发服务。
+这一认证竖切只解决“谁可以读取 API”的最低部署边界；TLS、反向代理信任边界、细粒度
+授权、密钥热加载/撤销、速率限制与安全审计仍是后续部署门槛，不能把本轮的软件测试当作
+公网暴露或硬件环境的安全实测证据。

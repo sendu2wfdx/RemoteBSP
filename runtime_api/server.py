@@ -4,14 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import socket
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 
+from .auth import (
+    MAXIMUM_API_KEY_BYTES,
+    ApiKeyAuthenticator,
+    AuthConfigurationError,
+    load_api_key_authenticator,
+)
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION
 from .provider import (
     FileSnapshotProvider,
@@ -24,7 +32,9 @@ from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 
 
 API_VERSION = "v1"
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_QUERY_CREDENTIAL_NAMES = {
+    "api_key", "api-key", "apikey", "x-api-key", "access_token", "token",
+}
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -62,6 +72,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     @property
     def provider(self) -> RuntimeProvider:
         return self.server.provider  # type: ignore[attr-defined]
+
+    @property
+    def authenticator(self) -> ApiKeyAuthenticator | None:
+        return self.server.authenticator  # type: ignore[attr-defined]
 
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK,
                    *, headers: dict[str, str] | None = None) -> None:
@@ -107,6 +121,94 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             }
         self._send_json(payload, status, headers=headers)
 
+    def _send_empty(self, status: HTTPStatus, *,
+                    headers: dict[str, str] | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+
+    def _parse_request_target(self) -> ParseResult | None:
+        parsed = urlparse(self.path)
+        if parsed.query:
+            try:
+                names = {name.lower() for name, _ in
+                         parse_qsl(parsed.query, keep_blank_values=True,
+                                   max_num_fields=64)}
+            except ValueError:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_query",
+                            "查询参数编码无效")
+                return None
+            if names & _QUERY_CREDENTIAL_NAMES:
+                self._error(HTTPStatus.BAD_REQUEST, "credential_in_query",
+                            "认证信息不得放入URL查询参数")
+            else:
+                self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
+                            "当前只读API不接受查询参数")
+            return None
+        if parsed.fragment:
+            self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
+                        "当前只读API不接受查询参数")
+            return None
+        return parsed
+
+    def _path_parts(self, path: str) -> list[str] | None:
+        try:
+            return [
+                unquote(part, encoding="utf-8", errors="strict")
+                for part in path.strip("/").split("/") if part
+            ]
+        except UnicodeDecodeError:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "路径编码无效")
+            return None
+
+    def _authorize(self, path: str, *, public_health: bool) -> str | None:
+        if self.authenticator is None:
+            return "disabled_loopback"
+
+        authorization = self.headers.get_all("Authorization", [])
+        api_keys = self.headers.get_all("X-API-Key", [])
+        if not authorization and not api_keys and public_health and \
+                path == f"/api/{API_VERSION}/health":
+            return "public_health"
+        if not authorization and not api_keys:
+            self._error(
+                HTTPStatus.UNAUTHORIZED, "authentication_required",
+                "需要有效的API密钥",
+                headers={"WWW-Authenticate":
+                         'Bearer realm="RemoteBSP Runtime"'})
+            return None
+        if len(authorization) + len(api_keys) != 1:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_auth_header",
+                        "必须且只能使用一种认证请求头")
+            return None
+
+        if authorization:
+            pieces = authorization[0].split(" ")
+            if len(pieces) != 2 or pieces[0].lower() != "bearer" or \
+                    not pieces[1]:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_auth_header",
+                            "Authorization必须使用Bearer格式")
+                return None
+            candidate = pieces[1]
+        else:
+            candidate = api_keys[0]
+            if not candidate or candidate.strip() != candidate:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_auth_header",
+                            "X-API-Key格式无效")
+                return None
+        if len(candidate) > MAXIMUM_API_KEY_BYTES or \
+                not self.authenticator.verify(candidate):
+            self._error(
+                HTTPStatus.UNAUTHORIZED, "authentication_required",
+                "需要有效的API密钥",
+                headers={"WWW-Authenticate":
+                         'Bearer realm="RemoteBSP Runtime"'})
+            return None
+        return "authenticated"
+
     def _snapshot(self) -> SnapshotRead | None:
         try:
             return self.provider.read_snapshot()
@@ -132,17 +234,22 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         }
 
     def _handle_read(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.query or parsed.fragment:
-            self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
-                        "当前只读API不接受查询参数")
+        parsed = self._parse_request_target()
+        if parsed is None:
             return
-        try:
-            parts = [unquote(part) for part in parsed.path.strip("/").split("/")
-                     if part]
-        except UnicodeDecodeError:
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "路径编码无效")
+        parts = self._path_parts(parsed.path)
+        if parts is None:
             return
+
+        api_path = len(parts) >= 2 and parts[:2] == ["api", API_VERSION]
+        if api_path:
+            auth_context = self._authorize(
+                parsed.path, public_health=self.command in ("GET", "HEAD"))
+            if auth_context is None:
+                return
+            if auth_context == "public_health":
+                self._success({"status": "ok", "scope": "liveness"})
+                return
 
         if parts == ["api", API_VERSION]:
             self._success({
@@ -150,7 +257,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 "capabilities": {
                     "read_only": True,
                     "write_commands": False,
-                    "authentication": False,
+                    "authentication": self.authenticator is not None,
+                    "authentication_mode": (
+                        "api_key" if self.authenticator is not None
+                        else "disabled_loopback"),
                     "event_stream": False,
                     **self._runtime_capabilities(),
                 },
@@ -221,37 +331,69 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         self._handle_read()
 
     def do_POST(self) -> None:  # noqa: N802
+        parsed = self._parse_request_target()
+        if parsed is None:
+            return
+        parts = self._path_parts(parsed.path)
+        if parts is None:
+            return
+        if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
+            if self._authorize(parsed.path, public_health=False) is None:
+                return
         self._error(HTTPStatus.METHOD_NOT_ALLOWED, "read_only",
                     "本轮Runtime API只允许读取",
-                    headers={"Allow": "GET, HEAD"})
+                    headers={"Allow": "GET, HEAD, OPTIONS"})
 
     do_PUT = do_POST  # type: ignore[assignment]
     do_PATCH = do_POST  # type: ignore[assignment]
     do_DELETE = do_POST  # type: ignore[assignment]
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        parsed = self._parse_request_target()
+        if parsed is None:
+            return
+        parts = self._path_parts(parsed.path)
+        if parts is None:
+            return
+        if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
+            self._send_empty(HTTPStatus.NO_CONTENT,
+                             headers={"Allow": "GET, HEAD, OPTIONS"})
+            return
+        self._error(HTTPStatus.NOT_FOUND, "not_found", "API路径不存在")
+
     def log_message(self, format: str, *args: object) -> None:
         if args and str(args[1]).startswith(("4", "5")):
-            super().log_message(format, *args)
+            # 请求目标可能含被拒绝的查询参数，不能把密钥写入日志。
+            sys.stderr.write(f"Runtime HTTP请求失败：{args[1]}\n")
 
 
 def make_server(host: str, port: int,
                 provider: RuntimeProvider, *,
-                maximum_workers: int = 32) -> ThreadingHTTPServer:
-    if host not in _LOOPBACK_HOSTS:
-        raise ValueError("认证尚未实现，Runtime服务仅允许绑定本机回环地址")
-    server_type = IPv6ThreadingHTTPServer if host == "::1" \
+                maximum_workers: int = 32,
+                authenticator: ApiKeyAuthenticator | None = None
+                ) -> ThreadingHTTPServer:
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError as error:
+        raise ValueError("--host必须是数字IP地址；不能使用主机名") from error
+    if not loopback and authenticator is None:
+        raise ValueError("非回环监听必须配置API密钥认证")
+    server_type = IPv6ThreadingHTTPServer if ":" in host \
         else BoundedThreadingHTTPServer
     server = server_type((host, port), RuntimeRequestHandler,
                          maximum_workers=maximum_workers)
     server.provider = provider  # type: ignore[attr-defined]
+    server.authenticator = authenticator  # type: ignore[attr-defined]
     return server
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1",
-                        help="监听地址；无认证阶段仅允许本机回环地址")
+                        help="监听数字IP地址；非回环地址必须配置API密钥")
     parser.add_argument("--port", type=int, default=8780, help="监听端口")
+    parser.add_argument("--api-key-file", type=Path,
+                        help="版本化API密钥JSON文件；不支持命令行明文密钥")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--snapshot", type=Path,
                         help="Runtime v1 快照JSON；省略数据源时使用内置Mock")
@@ -281,8 +423,6 @@ def main() -> int:
         "--toolbusd-legacy-text", action="store_true",
         help="显式兼容旧版remote-cli文本输出；不会自动回退")
     args = parser.parse_args()
-    if args.host not in _LOOPBACK_HOSTS:
-        parser.error("认证尚未实现，--host仅允许本机回环地址")
     if args.port < 0 or args.port > 65535:
         parser.error("--port必须位于0～65535")
     if args.ipc_timeout_ms < 100 or args.ipc_timeout_ms > 10000:
@@ -312,6 +452,18 @@ def main() -> int:
     if not args.toolbusd_legacy_text and \
             args.maximum_resource_queries > 128:
         parser.error("结构化Runtime快照最多允许128项资源")
+    authenticator = None
+    if args.api_key_file:
+        try:
+            authenticator = load_api_key_authenticator(args.api_key_file)
+        except AuthConfigurationError as error:
+            parser.error(f"--api-key-file无效：{error}")
+    try:
+        loopback = ipaddress.ip_address(args.host).is_loopback
+    except ValueError:
+        parser.error("--host必须是数字IP地址；不能使用主机名")
+    if not loopback and authenticator is None:
+        parser.error("非回环监听必须配置--api-key-file")
     if args.toolbusd_socket:
         provider: RuntimeProvider = ToolbusdSnapshotProvider(
             RemoteCliIpcClient(
@@ -330,10 +482,12 @@ def main() -> int:
     else:
         provider = MockSnapshotProvider()
     server = make_server(args.host, args.port, provider,
-                         maximum_workers=args.http_workers)
+                         maximum_workers=args.http_workers,
+                         authenticator=authenticator)
     display_host = f"[{args.host}]" if ":" in args.host else args.host
+    auth_mode = "API密钥认证" if authenticator is not None else "回环开发模式"
     print(f"RemoteBSP Runtime 只读API已启动：http://{display_host}:"
-          f"{server.server_port}/api/{API_VERSION}")
+          f"{server.server_port}/api/{API_VERSION}（{auth_mode}）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
