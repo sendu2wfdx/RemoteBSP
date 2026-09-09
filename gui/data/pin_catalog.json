@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "boards": [
     {
       "id": "mellow-fly-d5-v1",
@@ -210,6 +210,22 @@
             "max_pixels": 32,
             "color_order": "GRB",
             "reset_time_us": 80
+          }
+        ]
+      },
+      "bus": {
+        "i2c": {
+          "endpoints": []
+        },
+        "spi": {
+          "endpoints": []
+        },
+        "internal_controllers": [
+          {
+            "type": "spi",
+            "controller": "SPI1",
+            "instance": 1,
+            "owner": "expanded-uart-bank-0"
           }
         ]
       },
@@ -611,6 +627,83 @@
           }
         ]
       },
+      "bus": {
+        "i2c": {
+          "endpoints": [
+            {
+              "endpoint_id": "i2c1_pb6_pb7",
+              "controller": "I2C1",
+              "instance": 1,
+              "scl_pin": "PB6",
+              "sda_pin": "PB7",
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 400000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 100,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 1000,
+              "flags": [
+                "repeated_start",
+                "recovery"
+              ]
+            }
+          ]
+        },
+        "spi": {
+          "endpoints": [
+            {
+              "endpoint_id": "spi1_pa5_pa6_pa7",
+              "controller": "SPI1",
+              "instance": 1,
+              "sck_pin": "PA5",
+              "miso_pin": "PA6",
+              "mosi_pin": "PA7",
+              "chip_select_pins": [
+                "PA4",
+                "PA15"
+              ],
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 18000000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 50,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 2000,
+              "flags": [
+                "full_duplex",
+                "keep_chip_select"
+              ]
+            },
+            {
+              "endpoint_id": "spi2_pb13_pb14_pb15",
+              "controller": "SPI2",
+              "instance": 2,
+              "sck_pin": "PB13",
+              "miso_pin": "PB14",
+              "mosi_pin": "PB15",
+              "chip_select_pins": [
+                "PB12"
+              ],
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 18000000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 50,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 2000,
+              "flags": [
+                "full_duplex",
+                "keep_chip_select"
+              ]
+            }
+          ]
+        },
+        "internal_controllers": []
+      },
       "motion_defaults": [
         {
           "step": "PA1",
@@ -988,6 +1081,83 @@
             "reset_time_us": 80
           }
         ]
+      },
+      "bus": {
+        "i2c": {
+          "endpoints": [
+            {
+              "endpoint_id": "i2c1_pb6_pb7",
+              "controller": "I2C1",
+              "instance": 1,
+              "scl_pin": "PB6",
+              "sda_pin": "PB7",
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 400000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 100,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 1000,
+              "flags": [
+                "repeated_start",
+                "recovery"
+              ]
+            }
+          ]
+        },
+        "spi": {
+          "endpoints": [
+            {
+              "endpoint_id": "spi1_pa5_pa6_pa7",
+              "controller": "SPI1",
+              "instance": 1,
+              "sck_pin": "PA5",
+              "miso_pin": "PA6",
+              "mosi_pin": "PA7",
+              "chip_select_pins": [
+                "PA4",
+                "PA15"
+              ],
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 32000000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 50,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 2000,
+              "flags": [
+                "full_duplex",
+                "keep_chip_select"
+              ]
+            },
+            {
+              "endpoint_id": "spi2_pb13_pb14_pb15",
+              "controller": "SPI2",
+              "instance": 2,
+              "sck_pin": "PB13",
+              "miso_pin": "PB14",
+              "mosi_pin": "PB15",
+              "chip_select_pins": [
+                "PB12"
+              ],
+              "exposure": "public",
+              "backend_status": "mock_only",
+              "maximum_clock_hz": 32000000,
+              "maximum_transfer_bytes": 64,
+              "queue_capacity": 4,
+              "minimum_timeout_us": 50,
+              "maximum_timeout_us": 100000,
+              "maximum_operations_per_second": 2000,
+              "flags": [
+                "full_duplex",
+                "keep_chip_select"
+              ]
+            }
+          ]
+        },
+        "internal_controllers": []
       },
       "motion_defaults": [
         {

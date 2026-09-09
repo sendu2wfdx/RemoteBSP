@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "name": "studio-bus-digital-twin",
+  "board_id": "weact-bluepill-plus-v1",
+  "gpio": {"resources": []},
+  "uart": {"ports": []},
+  "motion": {"axes": []},
+  "pwm": {"channels": []},
+  "timed_bitstream": {"ws2812": []},
+  "i2c": {
+    "buses": [{
+      "name": "i2c_main",
+      "endpoint_id": "i2c1_pb6_pb7",
+      "maximum_clock_hz": 400000,
+      "maximum_transfer_bytes": 16,
+      "queue_capacity": 2,
+      "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 1000,
+      "flags": ["repeated_start", "recovery"]
+    }],
+    "devices": [{
+      "name": "sensor_48",
+      "parent_bus": "i2c_main",
+      "address": 72,
+      "maximum_transfer_bytes": 16,
+      "queue_capacity": 2,
+      "maximum_timeout_us": 10000,
+      "initial_data": [0, 1, 2, 3, 4, 5]
+    }]
+  },
+  "spi": {
+    "buses": [{
+      "name": "spi_main",
+      "endpoint_id": "spi2_pb13_pb14_pb15",
+      "maximum_clock_hz": 12000000,
+      "maximum_transfer_bytes": 16,
+      "queue_capacity": 2,
+      "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 2000,
+      "flags": ["full_duplex", "keep_chip_select"]
+    }],
+    "devices": [{
+      "name": "converter",
+      "parent_bus": "spi_main",
+      "chip_select_pin": "PB12",
+      "mode": 3,
+      "bits_per_word": 8,
+      "maximum_transfer_bytes": 16,
+      "queue_capacity": 2,
+      "maximum_timeout_us": 10000,
+      "deterministic_response": [170, 85, 17]
+    }]
+  }
+}

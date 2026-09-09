@@ -102,6 +102,29 @@ void test_v2_manifest_instantiates_bus_backend() {
     assert(timeout.status == protocol::BusTransactionStatus::Timeout);
 }
 
+void test_studio_generated_manifest_drives_digital_twin() {
+    auto manifest = mock_mcu::load_board_manifest(TEST_STUDIO_BUS_MANIFEST);
+    assert(manifest.schema_version == 2);
+    assert(manifest.bus_resources.size() == 4);
+    mock_mcu::DigitalTwin twin(std::move(manifest));
+    auto core = mock_mcu::make_remote_core(twin, 2);
+
+    const auto i2c = protocol::decode_bus_transfer_result(body(core.handle(
+        request(protocol::Command::I2cTransfer,
+                protocol::encode_i2c_transfer_request(
+                    {201326593, 1000, protocol::kI2cTransferRepeatedStart,
+                     2, {1}})))));
+    assert(i2c.status == protocol::BusTransactionStatus::Ok);
+    assert(i2c.data == std::vector<std::uint8_t>({1, 2}));
+
+    const auto spi = protocol::decode_bus_transfer_result(body(core.handle(
+        request(protocol::Command::SpiTransfer,
+                protocol::encode_spi_transfer_request(
+                    {234881025, 1000, 0, 3, 0xFF, {0x80}})))));
+    assert(spi.status == protocol::BusTransactionStatus::Ok);
+    assert(spi.data == std::vector<std::uint8_t>({0xAA, 0x55, 0x11}));
+}
+
 void test_manifest_rejects_invalid_bus_graphs() {
     const auto valid = read_text(TEST_BUS_MANIFEST);
 
@@ -138,5 +161,6 @@ void test_manifest_rejects_invalid_bus_graphs() {
 
 int main() {
     test_v2_manifest_instantiates_bus_backend();
+    test_studio_generated_manifest_drives_digital_twin();
     test_manifest_rejects_invalid_bus_graphs();
 }

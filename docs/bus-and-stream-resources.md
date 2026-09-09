@@ -12,7 +12,8 @@ RemoteBSP 不把所有板级总线透明隧道到 Linux。系统把硬件适配�
 - `I2C_DEVICE` / `SPI_DEVICE`：静态绑定到总线的可访问端点；
 - `STREAM`：连续采样、高速 UART、网络数据或大块传输的数据通道。
 
-当前代码只提供协议合同、编解码、主机 API，以及 Mock I2C/SPI 原子事务竖切。
+当前代码提供协议合同、编解码、主机 API、Studio 静态资源图生成，
+以及 Mock I2C/SPI 原子事务竖切。
 不访问实体板卡，不实现真实 MCU BSP，不把 Ethernet 加入现有传输层，也不提供
 可运行的通用流会话。
 
@@ -145,8 +146,8 @@ STREAM_CONTRACT → STREAM_OPEN → STREAM_DATA / STREAM_CREDIT
 
 ## 9. 后续实现顺序
 
-1. 将总线/设备静态字段接入统一能力源、Studio 校验与固件生成；
-2. 实现 STM32 I2C/SPI BSP、有界队列、恢复和遥测，先做 Mock 对等测试；
+1. 实现 STM32 I2C/SPI BSP、有界队列、恢复和遥测，并让实体后端通过
+   现有 Mock 对等测试；
 3. 在 `toolbusd` 增加合同缓存、按父总线仲裁及链路预算提示；
 4. 实现 USB Bulk 上的 STREAM 会话与信用流控；
 5. 待真实吞吐需求明确后，再设计 Ethernet `LinkTransport` 和多链路路由；
@@ -195,3 +196,37 @@ Mock 专用静态字段包括：
 内部转换器占用仍通过 `reserved_resources` 表达。例如 SPI 1 被 UART 扩展器
 占用后，描述中不得再公开枚举实例 1 的旧式 `spi` 或新版 `spi_bus`。Linux 只
 能看到转换后的 `expanded` 逻辑资源。
+
+## 11. Studio 工程与机器可读能力共模
+
+Studio 工程 schema v2 新增 `i2c.buses/devices` 和
+`spi.buses/devices`。v0/v1 工程在加载时只会补充空组，不会自动公开
+任何外设。工程只能引用 `gui/data/pin_catalog.json` 中完整的板级 AF
+端点，不能自由拼接 SCL/SDA 或 SCK/MISO/MOSI。SPI 片选也必须从
+该端点的 `chip_select_pins` 白名单中选择。
+
+能力目录对每个公开端点声明：
+
+- 控制器实例、成套引脚和公开属性；
+- 最大时钟、最大事务长度、有界队列、超时区间和操作频率；
+- repeated-start/recovery 或 full-duplex/keep-CS 标志上限；
+- `backend_status=mock_only`，明确表示尚未通过 STM32 BSP 验收。
+
+校验器会同时检查全工程引脚冲突、单控制器唯一公开、设备父总线类型、
+同总线 I2C 地址/SPI 片选唯一性，以及子合同不超过父合同与板卡端点上限。
+`/api/project/generate-mock-manifest` 可将通过校验的工程导出为 Mock
+板卡描述 schema v2，同一份生成物由 Python 黄金清单测试和 C++
+`DigitalTwin` 原子事务测试共用。
+当前该导出器是“仅总线”竖切；若同一工程还含 GPIO、UART、运动、
+PWM 或 WS2812，导出会列出未支持的资源类型并失败，不会生成丢字段的
+部分板卡清单。待后续将其他资源也映射到版本化 Mock schema 后，再放开
+混合工程导出。
+
+Mellow FLY-D5 的 SPI1 以 `internal_controllers` 标记为内部 UART
+扩展银行占用，且不出现在公开 SPI 端点列表。生成器仍把该占用写入
+`reserved_resources`，因此即使能力目录未来误配，Mock 加载器也会再次拒绝
+将同一 SPI 控制器向 Linux 枚举。
+
+本轮没有添加 STM32 I2C/SPI 驱动。带非空总线图的工程调用实体
+`.config`/固件生成路径时会明确拒绝，直到对应板卡的时钟、AF、开漏上拉、
+DMA/中断和超时恢复策略在实体环境完成验收。

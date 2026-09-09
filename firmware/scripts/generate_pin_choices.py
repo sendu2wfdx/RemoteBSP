@@ -33,6 +33,55 @@ MCUS = {
     },
 }
 
+
+def i2c_endpoint(endpoint_id: str, controller: str, instance: int,
+                 scl_pin: str, sda_pin: str) -> dict:
+    """声明经板级审核的完整 I2C AF 端点。
+
+    backend_status=mock_only 表示 Studio 现阶段只能生成数字孪生
+    清单，不能生成声称支持该总线的 STM32 固件。
+    """
+    return {
+        "endpoint_id": endpoint_id,
+        "controller": controller,
+        "instance": instance,
+        "scl_pin": scl_pin,
+        "sda_pin": sda_pin,
+        "exposure": "public",
+        "backend_status": "mock_only",
+        "maximum_clock_hz": 400000,
+        "maximum_transfer_bytes": 64,
+        "queue_capacity": 4,
+        "minimum_timeout_us": 100,
+        "maximum_timeout_us": 100000,
+        "maximum_operations_per_second": 1000,
+        "flags": ["repeated_start", "recovery"],
+    }
+
+
+def spi_endpoint(endpoint_id: str, controller: str, instance: int,
+                 sck_pin: str, miso_pin: str, mosi_pin: str,
+                 chip_select_pins: list[str], maximum_clock_hz: int) -> dict:
+    """声明不允许任意拼接的完整 SPI AF 端点。"""
+    return {
+        "endpoint_id": endpoint_id,
+        "controller": controller,
+        "instance": instance,
+        "sck_pin": sck_pin,
+        "miso_pin": miso_pin,
+        "mosi_pin": mosi_pin,
+        "chip_select_pins": chip_select_pins,
+        "exposure": "public",
+        "backend_status": "mock_only",
+        "maximum_clock_hz": maximum_clock_hz,
+        "maximum_transfer_bytes": 64,
+        "queue_capacity": 4,
+        "minimum_timeout_us": 50,
+        "maximum_timeout_us": 100000,
+        "maximum_operations_per_second": 2000,
+        "flags": ["full_duplex", "keep_chip_select"],
+    }
+
 BOARDS = {
     "mellow-fly-d5-v1": {
         "label": "STM32F072RBT6 / Mellow FLY-D5",
@@ -52,6 +101,14 @@ BOARDS = {
         ],
         "gpio_interfaces": [],
         "uart": {"endpoints": []},
+        "bus": {
+            "i2c": {"endpoints": []},
+            "spi": {"endpoints": []},
+            "internal_controllers": [{
+                "type": "spi", "controller": "SPI1", "instance": 1,
+                "owner": "expanded-uart-bank-0",
+            }],
+        },
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
@@ -178,6 +235,20 @@ BOARDS = {
                 },
             ],
         },
+        "bus": {
+            "i2c": {"endpoints": [
+                i2c_endpoint("i2c1_pb6_pb7", "I2C1", 1, "PB6", "PB7"),
+            ]},
+            "spi": {"endpoints": [
+                spi_endpoint("spi1_pa5_pa6_pa7", "SPI1", 1,
+                             "PA5", "PA6", "PA7", ["PA4", "PA15"],
+                             18000000),
+                spi_endpoint("spi2_pb13_pb14_pb15", "SPI2", 2,
+                             "PB13", "PB14", "PB15", ["PB12"],
+                             18000000),
+            ]},
+            "internal_controllers": [],
+        },
         "waveform": {
             "pwm": [
                 {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
@@ -294,6 +365,20 @@ BOARDS = {
                     "backend_status": "implemented",
                 },
             ],
+        },
+        "bus": {
+            "i2c": {"endpoints": [
+                i2c_endpoint("i2c1_pb6_pb7", "I2C1", 1, "PB6", "PB7"),
+            ]},
+            "spi": {"endpoints": [
+                spi_endpoint("spi1_pa5_pa6_pa7", "SPI1", 1,
+                             "PA5", "PA6", "PA7", ["PA4", "PA15"],
+                             32000000),
+                spi_endpoint("spi2_pb13_pb14_pb15", "SPI2", 2,
+                             "PB13", "PB14", "PB15", ["PB12"],
+                             32000000),
+            ]},
+            "internal_controllers": [],
         },
         "waveform": {
             "pwm": [
@@ -588,6 +673,11 @@ def generate_catalog() -> str:
                 if endpoint.get("enabled", False)
             ],
             "waveform": normalized_waveform,
+            "bus": board.get("bus", {
+                "i2c": {"endpoints": []},
+                "spi": {"endpoints": []},
+                "internal_controllers": [],
+            }),
             "motion_defaults": [
                 {"step": item[0], "dir": item[1], "enable": item[2],
                  "dir_inverted": False,
@@ -597,7 +687,7 @@ def generate_catalog() -> str:
                 for item in board["defaults"]
             ],
         })
-    return json.dumps({"schema_version": 1, "boards": boards}, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps({"schema_version": 2, "boards": boards}, ensure_ascii=False, indent=2) + "\n"
 
 
 def main() -> int:

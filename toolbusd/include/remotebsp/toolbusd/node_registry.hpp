@@ -2,6 +2,7 @@
 
 #include "remotebsp/protocol/discovery.hpp"
 #include "remotebsp/protocol/packet.hpp"
+#include "remotebsp/toolbusd/clock_model.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -15,6 +16,41 @@ namespace remotebsp::toolbusd {
 enum class NodeUpdate {
     Added,
     Updated,
+};
+
+enum class NodeClockRegistrationResult : std::uint8_t {
+    Registered = 0,
+    AlreadyRegistered,
+    ReplacedBootEpoch,
+    InvalidBootEpoch,
+    UnknownNode,
+    NodeUnavailable,
+    CapacityReached,
+};
+
+enum class NodeClockAccessStatus : std::uint8_t {
+    Ready = 0,
+    UnknownNode,
+    NodeUnavailable,
+    NotRegistered,
+    BootEpochMismatch,
+    SampleRejected,
+    TargetInPast,
+    Unsynced,
+    Degraded,
+    ErrorBoundExceeded,
+    ConversionFailed,
+};
+
+struct NodeClockSampleOutcome {
+    NodeClockAccessStatus status{NodeClockAccessStatus::NotRegistered};
+    std::optional<ClockSampleResult> sample_result;
+};
+
+struct HostToNodeTimeResult {
+    NodeClockAccessStatus status{NodeClockAccessStatus::NotRegistered};
+    std::optional<std::uint64_t> node_tick;
+    std::optional<ClockEstimate> estimate;
 };
 
 struct NodeRecord {
@@ -31,7 +67,8 @@ public:
     using TimePoint = Clock::time_point;
 
     explicit NodeRegistry(std::chrono::milliseconds offline_timeout =
-                              std::chrono::milliseconds(2000));
+                              std::chrono::milliseconds(2000),
+                          std::size_t maximum_clock_models = 128U);
 
     protocol::Packet make_discovery_request(
         std::uint32_t request_id,
@@ -47,6 +84,28 @@ public:
                           TimePoint now = Clock::now());
     std::vector<protocol::NodeUuid> expire(TimePoint now = Clock::now());
 
+    /*
+     * boot_epoch 由未来同步协议或可靠的启动身份源提供；当前发现/心跳
+     * 协议不会推测该值。同一 node_id 只保留当前启动代次的有界模型。
+     */
+    NodeClockRegistrationResult register_clock_model(
+        std::uint32_t node_id, std::uint64_t boot_epoch,
+        ClockModelConfig config = {});
+    NodeClockSampleOutcome add_clock_sample(
+        std::uint32_t node_id, std::uint64_t boot_epoch,
+        const FourTimestampSample& sample);
+    std::optional<ClockEstimate> clock_estimate(
+        std::uint32_t node_id, std::uint64_t boot_epoch,
+        std::uint64_t host_now_ns) const;
+    HostToNodeTimeResult host_to_node_time(
+        std::uint32_t node_id, std::uint64_t boot_epoch,
+        std::uint64_t host_time_ns, std::uint64_t host_now_ns,
+        std::uint64_t maximum_error_bound_ns) const;
+    bool reset_clock_model(std::uint32_t node_id) noexcept;
+    std::optional<std::uint64_t> clock_boot_epoch(
+        std::uint32_t node_id) const noexcept;
+    std::size_t clock_model_count() const noexcept;
+
     const NodeRecord* find(const protocol::NodeUuid& uuid) const noexcept;
     const NodeRecord* find_by_node_id(std::uint32_t node_id) const noexcept;
     std::size_t size() const noexcept;
@@ -58,8 +117,19 @@ private:
         std::size_t operator()(const protocol::NodeUuid& uuid) const noexcept;
     };
 
+    struct NodeClockEntry {
+        std::uint64_t boot_epoch{};
+        ClockModel model;
+    };
+
+    const NodeClockEntry* find_clock_entry(
+        std::uint32_t node_id, std::uint64_t boot_epoch) const noexcept;
+    bool node_is_available(std::uint32_t node_id) const noexcept;
+
     std::chrono::milliseconds offline_timeout_;
+    std::size_t maximum_clock_models_;
     std::unordered_map<protocol::NodeUuid, NodeRecord, UuidHash> nodes_;
+    std::unordered_map<std::uint32_t, NodeClockEntry> clock_models_;
 };
 
 }

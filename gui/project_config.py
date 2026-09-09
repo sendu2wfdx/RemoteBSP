@@ -37,6 +37,20 @@ class ProjectConfigResult:
     summary: dict
 
 
+@dataclass(frozen=True)
+class MockBoardManifestResult:
+    """Studio 工程生成的、可由 Mock MCU 直接加载的板卡清单。"""
+
+    manifest: dict
+    board_id: str
+    resource_count: int
+    project_sha256: str
+    project_schema_version: int
+    original_schema_version: int
+    migrations: tuple[str, ...]
+    summary: dict
+
+
 BOARD_CONFIGS = {
     "mellow-fly-d5-v1": (
         "configs/stm32f072_mellow_fly_d5_defconfig",
@@ -73,9 +87,194 @@ def _pin_symbol(pin: object) -> str:
     return pin.upper()
 
 
-def _validate_and_collect(draft: dict, catalog: dict) -> tuple[dict, dict]:
-    if not isinstance(draft, dict) or draft.get("schema_version") != 1:
-        raise ProjectConfigError("工程schema_version必须为1")
+def _bounded_integer(item: dict, key: str, label: str, minimum: int,
+                     maximum: int, default: int) -> int:
+    value = item.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProjectConfigError(f"{label}.{key}必须是整数")
+    if value < minimum or value > maximum:
+        raise ProjectConfigError(
+            f"{label}.{key}超出合同范围{minimum}～{maximum}")
+    return value
+
+
+def _byte_array(item: dict, key: str, label: str,
+                maximum_length: int) -> list[int]:
+    value = item.get(key, [])
+    if not isinstance(value, list) or any(
+            isinstance(byte, bool) or not isinstance(byte, int) or
+            byte < 0 or byte > 255 for byte in value):
+        raise ProjectConfigError(f"{label}.{key}必须是字节数组")
+    if len(value) > maximum_length:
+        raise ProjectConfigError(f"{label}.{key}超过合同最大事务长度")
+    return list(value)
+
+
+def _bus_contract(item: dict, limit: dict, label: str,
+                  allowed_flags: set[str]) -> dict:
+    flags = item.get("flags", limit.get("flags", []))
+    if not isinstance(flags, list) or not all(
+            isinstance(flag, str) for flag in flags):
+        raise ProjectConfigError(f"{label}.flags必须是字符串数组")
+    if len(set(flags)) != len(flags) or not set(flags) <= allowed_flags:
+        raise ProjectConfigError(f"{label}.flags含重复或超出端点能力")
+    maximum_clock_hz = _bounded_integer(
+        item, "maximum_clock_hz", label, 1,
+        int(limit["maximum_clock_hz"]), int(limit["maximum_clock_hz"]))
+    maximum_transfer_bytes = _bounded_integer(
+        item, "maximum_transfer_bytes", label, 1,
+        min(1024, int(limit["maximum_transfer_bytes"])),
+        int(limit["maximum_transfer_bytes"]))
+    queue_capacity = _bounded_integer(
+        item, "queue_capacity", label, 1, int(limit["queue_capacity"]),
+        int(limit["queue_capacity"]))
+    minimum_timeout_us = _bounded_integer(
+        item, "minimum_timeout_us", label,
+        int(limit["minimum_timeout_us"]),
+        int(limit["maximum_timeout_us"]),
+        int(limit["minimum_timeout_us"]))
+    maximum_timeout_us = _bounded_integer(
+        item, "maximum_timeout_us", label, minimum_timeout_us,
+        int(limit["maximum_timeout_us"]),
+        int(limit["maximum_timeout_us"]))
+    maximum_operations_per_second = _bounded_integer(
+        item, "maximum_operations_per_second", label, 1,
+        int(limit["maximum_operations_per_second"]),
+        int(limit["maximum_operations_per_second"]))
+    return {
+        "flags": flags,
+        "maximum_clock_hz": maximum_clock_hz,
+        "maximum_transfer_bytes": maximum_transfer_bytes,
+        "queue_capacity": queue_capacity,
+        "minimum_timeout_us": minimum_timeout_us,
+        "maximum_timeout_us": maximum_timeout_us,
+        "maximum_operations_per_second": maximum_operations_per_second,
+    }
+
+
+def _validate_bus_resources(draft: dict, board: dict, claim) -> dict:
+    groups = {
+        "i2c_buses": _items(draft, "i2c", "buses"),
+        "i2c_devices": _items(draft, "i2c", "devices"),
+        "spi_buses": _items(draft, "spi", "buses"),
+        "spi_devices": _items(draft, "spi", "devices"),
+    }
+    catalog = board.get("bus", {})
+    internal = {
+        (item.get("type"), item.get("controller"))
+        for item in catalog.get("internal_controllers", [])
+    }
+    names: set[str] = set()
+    parents: dict[tuple[str, str], dict] = {}
+    controllers: set[tuple[str, int]] = set()
+
+    for kind in ("i2c", "spi"):
+        endpoints = catalog.get(kind, {}).get("endpoints", [])
+        for index, item in enumerate(groups[f"{kind}_buses"]):
+            label = f"{kind.upper()} BUS {index + 1}"
+            name = item.get("name")
+            if not isinstance(name, str) or not name or len(name) > 32:
+                raise ProjectConfigError(f"{label}.name长度必须位于1～32")
+            if name in names:
+                raise ProjectConfigError(f"总线/设备名称重复：{name}")
+            names.add(name)
+            endpoint = _find(endpoints, "endpoint_id", item.get("endpoint_id"))
+            if endpoint is None or endpoint.get("exposure") != "public":
+                raise ProjectConfigError(f"{label}引用了未公开的总线端点")
+            if (kind, endpoint.get("controller")) in internal:
+                raise ProjectConfigError(f"{label}引用了内部转换器占用的控制器")
+            if endpoint.get("backend_status") != "mock_only":
+                raise ProjectConfigError(f"{label}端点状态不适用于数字孪生")
+            pins = ([endpoint["scl_pin"], endpoint["sda_pin"]]
+                    if kind == "i2c" else
+                    [endpoint["sck_pin"], endpoint["miso_pin"],
+                     endpoint["mosi_pin"]])
+            controller_key = (kind, int(endpoint["instance"]))
+            if controller_key in controllers:
+                raise ProjectConfigError(f"{label}重复公开同一硬件控制器")
+            controllers.add(controller_key)
+            for pin in pins:
+                claim(pin, f"{label} {endpoint['controller']}")
+            normalized = {
+                "name": name,
+                "kind": f"{kind}_bus",
+                "endpoint_id": endpoint["endpoint_id"],
+                "controller": endpoint["controller"],
+                "instance": int(endpoint["instance"]),
+                "contract": _bus_contract(
+                    item, endpoint, label, set(endpoint.get("flags", []))),
+                "endpoint": endpoint,
+            }
+            parents[(kind, name)] = normalized
+            item.clear()
+            item.update(normalized)
+
+    i2c_addresses: set[tuple[str, int]] = set()
+    for index, item in enumerate(groups["i2c_devices"]):
+        label = f"I2C DEVICE {index + 1}"
+        name = item.get("name")
+        if not isinstance(name, str) or not name or len(name) > 32 or name in names:
+            raise ProjectConfigError(f"{label}.name无效或重复")
+        names.add(name)
+        parent_name = item.get("parent_bus")
+        parent = parents.get(("i2c", parent_name))
+        if parent is None:
+            raise ProjectConfigError(f"{label}父总线缺失或类型错配")
+        address = _bounded_integer(item, "address", label, 1, 0x7F, 0)
+        if (parent_name, address) in i2c_addresses:
+            raise ProjectConfigError(f"{label}与同父总线设备地址重复")
+        i2c_addresses.add((parent_name, address))
+        contract = _bus_contract(
+            item, parent["contract"], label, set(parent["contract"]["flags"]))
+        normalized = {
+            "name": name, "kind": "i2c_device",
+            "parent_bus": parent_name, "address": address,
+            "contract": contract,
+            "initial_data": _byte_array(
+                item, "initial_data", label, contract["maximum_transfer_bytes"]),
+        }
+        item.clear()
+        item.update(normalized)
+
+    spi_selects: set[tuple[str, str]] = set()
+    for index, item in enumerate(groups["spi_devices"]):
+        label = f"SPI DEVICE {index + 1}"
+        name = item.get("name")
+        if not isinstance(name, str) or not name or len(name) > 32 or name in names:
+            raise ProjectConfigError(f"{label}.name无效或重复")
+        names.add(name)
+        parent_name = item.get("parent_bus")
+        parent = parents.get(("spi", parent_name))
+        if parent is None:
+            raise ProjectConfigError(f"{label}父总线缺失或类型错配")
+        chip_select_pin = _pin_symbol(item.get("chip_select_pin"))
+        if chip_select_pin not in parent["endpoint"].get("chip_select_pins", []):
+            raise ProjectConfigError(f"{label}片选不是端点白名单引脚")
+        if (parent_name, chip_select_pin) in spi_selects:
+            raise ProjectConfigError(f"{label}与同父总线设备片选重复")
+        spi_selects.add((parent_name, chip_select_pin))
+        claim(chip_select_pin, f"{label} CS")
+        contract = _bus_contract(
+            item, parent["contract"], label, set(parent["contract"]["flags"]))
+        mode = _bounded_integer(item, "mode", label, 0, 3, 0)
+        bits = _bounded_integer(item, "bits_per_word", label, 4, 16, 8)
+        normalized = {
+            "name": name, "kind": "spi_device",
+            "parent_bus": parent_name, "chip_select_pin": chip_select_pin,
+            "mode": mode, "bits_per_word": bits, "contract": contract,
+            "deterministic_response": _byte_array(
+                item, "deterministic_response", label,
+                contract["maximum_transfer_bytes"]),
+        }
+        item.clear()
+        item.update(normalized)
+    return groups
+
+
+def _validate_and_collect(draft: dict, catalog: dict, *,
+                          allow_mock_bus: bool = False) -> tuple[dict, dict]:
+    if not isinstance(draft, dict) or draft.get("schema_version") != 2:
+        raise ProjectConfigError("工程schema_version必须为2")
     board = _find(catalog.get("boards", []), "id", draft.get("board_id"))
     if board is None or board["id"] not in BOARD_CONFIGS:
         raise ProjectConfigError("工程引用了未知或不支持生成固件的板卡")
@@ -193,8 +392,15 @@ def _validate_and_collect(draft: dict, catalog: dict) -> tuple[dict, dict]:
     if total_rate > 500_000:
         raise ProjectConfigError("全部轴的STEP频率预算之和不能超过500000 Hz")
 
+    bus = _validate_bus_resources(draft, board, claim)
+    bus_count = sum(len(items) for items in bus.values())
+    if bus_count and not allow_mock_bus:
+        raise ProjectConfigError(
+            "I2C/SPI当前仅支持生成Mock数字孪生清单，"
+            "STM32 BSP尚未验收")
+
     return board, {"gpio": gpio, "uart": uart, "axes": axes,
-                   "pwm": pwm, "strips": strips}
+                   "pwm": pwm, "strips": strips, **bus}
 
 
 def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
@@ -344,6 +550,144 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
         config, board["id"], target, count, prepared.sha256,
         prepared.schema_version, prepared.original_schema_version,
         prepared.migrations, prepared.summary)
+
+
+_BUS_RESOURCE_BASES = {
+    "i2c_bus": 0x0B000000,
+    "i2c_device": 0x0C000000,
+    "spi_bus": 0x0D000000,
+    "spi_device": 0x0E000000,
+}
+
+
+def _manifest_resource(kind: str, instance: int, resource_id: int,
+                       contract: dict, device: bool) -> tuple[dict, dict]:
+    group = {
+        "type": kind,
+        "first_instance": instance,
+        "count": 1,
+        "id_base": resource_id,
+        "source": "native",
+        "rx_capacity": contract["maximum_transfer_bytes"] if device else 0,
+        "tx_capacity": contract["maximum_transfer_bytes"] if device else 0,
+        "contract": {
+            "access": ["read", "write"] if device else ["read"],
+            "timing_resolution_ns": max(
+                1, 1_000_000_000 // contract["maximum_clock_hz"]),
+            "worst_case_latency_us": contract["maximum_timeout_us"],
+            "maximum_operations_per_second":
+                contract["maximum_operations_per_second"],
+            "queue_capacity": contract["queue_capacity"],
+            "maximum_rx_bits_per_second": contract["maximum_clock_hz"],
+            "maximum_tx_bits_per_second": contract["maximum_clock_hz"],
+        },
+    }
+    bus_contract = {
+        "resource_id": resource_id,
+        "kind": kind,
+        **contract,
+    }
+    return group, bus_contract
+
+
+def generate_mock_board_manifest(draft: dict, catalog: dict
+                                 ) -> MockBoardManifestResult:
+    """把 Studio 静态总线图生成 Mock 板卡描述 schema v2。
+
+    该路径不生成 STM32 Kconfig，也不暗示实体 BSP 已实现。
+    """
+    prepared = prepare_project(draft)
+    document = prepared.document
+    board, resources = _validate_and_collect(
+        document, catalog, allow_mock_bus=True)
+    omitted = {
+        "GPIO": resources["gpio"],
+        "UART": resources["uart"],
+        "motion": resources["axes"],
+        "PWM": resources["pwm"],
+        "WS2812": resources["strips"],
+    }
+    unsupported = [name for name, items in omitted.items() if items]
+    if unsupported:
+        raise ProjectConfigError(
+            "Mock总线清单导出仅支持I2C/SPI，不会静默省略：" +
+            "、".join(unsupported))
+    resource_groups: list[dict] = []
+    bus_resources: list[dict] = []
+    bus_ids: dict[tuple[str, str], int] = {}
+
+    for kind in ("i2c", "spi"):
+        for item in resources[f"{kind}_buses"]:
+            resource_kind = f"{kind}_bus"
+            instance = item["instance"]
+            resource_id = _BUS_RESOURCE_BASES[resource_kind] + instance
+            group, contract = _manifest_resource(
+                resource_kind, instance, resource_id, item["contract"], False)
+            contract["parent_bus_resource_id"] = 0
+            resource_groups.append(group)
+            bus_resources.append(contract)
+            bus_ids[(kind, item["name"])] = resource_id
+
+    for kind in ("i2c", "spi"):
+        for index, item in enumerate(resources[f"{kind}_devices"], start=1):
+            resource_kind = f"{kind}_device"
+            resource_id = _BUS_RESOURCE_BASES[resource_kind] + index
+            group, contract = _manifest_resource(
+                resource_kind, index, resource_id, item["contract"], True)
+            contract["parent_bus_resource_id"] = bus_ids[
+                (kind, item["parent_bus"])]
+            if kind == "i2c":
+                contract["i2c_address"] = item["address"]
+                if item["initial_data"]:
+                    contract["initial_data"] = item["initial_data"]
+            else:
+                contract.update({
+                    "spi_mode": item["mode"],
+                    "bits_per_word": item["bits_per_word"],
+                    "spi_chip_select": _pin_symbol_value(
+                        item["chip_select_pin"]),
+                })
+                if item["deterministic_response"]:
+                    contract["deterministic_response"] = \
+                        item["deterministic_response"]
+            resource_groups.append(group)
+            bus_resources.append(contract)
+
+    capabilities = [kind for kind in ("i2c", "spi")
+                    if resources[f"{kind}_buses"]]
+    internal = board.get("bus", {}).get("internal_controllers", [])
+    name = document.get("name", f"studio-{board['id']}")
+    if not isinstance(name, str) or not name or len(name.encode("utf-8")) > 64:
+        raise ProjectConfigError("Mock板卡名称长度必须位于1～64字节")
+    board_type = board["board_type"]
+    if isinstance(board_type, str):
+        board_type = int(board_type, 0)
+    manifest = {
+        "schema_version": 2,
+        "name": name,
+        "board_type": board_type,
+        "uuid": prepared.sha256[:32].upper(),
+        "firmware_version": [0, 3, 0],
+        "capabilities": capabilities,
+        "resource_groups": resource_groups,
+        "reserved_resources": [{
+            "type": item["type"],
+            "instance": item["instance"],
+            "owner": item["owner"],
+        } for item in internal],
+        "bus_resources": bus_resources,
+    }
+    count = len(bus_resources)
+    return MockBoardManifestResult(
+        manifest, board["id"], count, prepared.sha256,
+        prepared.schema_version, prepared.original_schema_version,
+        prepared.migrations, prepared.summary)
+
+
+def _pin_symbol_value(pin: str) -> int:
+    """将 PA0..PZ15 转为 Mock 片选编号；仅是数字孪生稳定键。"""
+    pin = _pin_symbol(pin)
+    return (ord(pin[1]) - ord("A")) * 16 + int(pin[2:])
 
 
 def main() -> int:

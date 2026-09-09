@@ -19,7 +19,11 @@ from firmware_builder import (
     build_firmware_project,
     resolve_artifact,
 )
-from project_config import ProjectConfigError, generate_project_config
+from project_config import (
+    ProjectConfigError,
+    generate_mock_board_manifest,
+    generate_project_config,
+)
 from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
 
 
@@ -160,6 +164,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path not in ("/api/project/inspect", "/api/project/generate",
+                        "/api/project/generate-mock-manifest",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -170,7 +175,32 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path in ("/api/project/inspect", "/api/project/generate"):
+            if path == "/api/project/generate-mock-manifest":
+                generated = generate_mock_board_manifest(project, catalog)
+                manifest_bytes = (json.dumps(
+                    generated.manifest, ensure_ascii=False, indent=2) +
+                    "\n").encode("utf-8")
+                response = {
+                    "ok": True,
+                    "format": "MOCK_BOARD_MANIFEST_V2",
+                    "board_id": generated.board_id,
+                    "resource_count": generated.resource_count,
+                    "project_schema_version":
+                        generated.project_schema_version,
+                    "project_original_schema_version":
+                        generated.original_schema_version,
+                    "project_migrations": list(generated.migrations),
+                    "project_sha256": generated.project_sha256,
+                    "summary": generated.summary,
+                    "manifest_sha256":
+                        hashlib.sha256(manifest_bytes).hexdigest(),
+                    "byte_count": len(manifest_bytes),
+                    "filename": f"{generated.board_id}-mock-v2.json",
+                    "manifest": generated.manifest,
+                    "manifest_base64": base64.b64encode(
+                        manifest_bytes).decode("ascii"),
+                }
+            elif path in ("/api/project/inspect", "/api/project/generate"):
                 result = generate_project_config(project, catalog)
                 response = {
                     "ok": True,

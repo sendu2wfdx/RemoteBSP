@@ -130,7 +130,7 @@ function loadBoard(id){
   $('#reservedPins').innerHTML=board.reserved.map(x=>`<span class="chip" title="${x.owner}">${x.pin} · ${x.owner}</span>`).join('');
   renderResources();
 }
-function currentManifest(){return {schema_version:1,board_id:board.id,generated_by:'RemoteBSP Studio',gpio:{resources:gpios},uart:{ports:uarts.map(x=>({name:x.name,endpoint_id:x.endpoint_id,port:x.port,baud_rate:x.baud_rate,direction_pin:x.direction_pin}))},pwm:{channels:pwms.map(x=>({name:x.name,endpoint_id:x.endpoint_id,channel:x.channel,pin:x.pin,frequency_hz:x.frequency_hz,default_duty_percent:x.default_duty_percent,active_low:x.active_low}))},timed_bitstream:{ws2812:pixelStrips.map(x=>({name:x.name,endpoint_id:x.endpoint_id,channel:x.channel,pin:x.pin,pixel_count:x.pixel_count,color_order:x.color_order,reset_time_us:x.reset_time_us}))},motion:{axes}}}
+function currentManifest(){return {schema_version:2,board_id:board.id,generated_by:'RemoteBSP Studio',gpio:{resources:gpios},uart:{ports:uarts.map(x=>({name:x.name,endpoint_id:x.endpoint_id,port:x.port,baud_rate:x.baud_rate,direction_pin:x.direction_pin}))},pwm:{channels:pwms.map(x=>({name:x.name,endpoint_id:x.endpoint_id,channel:x.channel,pin:x.pin,frequency_hz:x.frequency_hz,default_duty_percent:x.default_duty_percent,active_low:x.active_low}))},timed_bitstream:{ws2812:pixelStrips.map(x=>({name:x.name,endpoint_id:x.endpoint_id,channel:x.channel,pin:x.pin,pixel_count:x.pixel_count,color_order:x.color_order,reset_time_us:x.reset_time_us}))},motion:{axes},i2c:{buses:[],devices:[]},spi:{buses:[],devices:[]}}}
 function exportManifest(){
   const manifest=currentManifest();
   const blob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'}),link=document.createElement('a');

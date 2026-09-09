@@ -255,7 +255,7 @@ def resolve_artifact(build_id: str, filename: str,
 
 def _default_project(board: dict) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "board_id": board["id"],
         "gpio": {"resources": copy.deepcopy(board.get("gpio_defaults", []))},
         "uart": {"ports": copy.deepcopy(board.get("uart_defaults", []))},
@@ -268,6 +268,8 @@ def _default_project(board: dict) -> dict:
             item for item in board.get("waveform", {}).get("ws2812", [])
             if item.get("enabled")
         ])},
+        "i2c": {"buses": [], "devices": []},
+        "spi": {"buses": [], "devices": []},
     }
 
 

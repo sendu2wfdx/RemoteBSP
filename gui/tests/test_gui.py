@@ -32,7 +32,7 @@ class GuiTest(unittest.TestCase):
     @staticmethod
     def _default_project(board):
         return {
-            "schema_version": 1,
+            "schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
             "board_id": board["id"],
             "gpio": {"resources": board["gpio_defaults"]},
             "uart": {"ports": board.get("uart_defaults", [])},
@@ -45,6 +45,8 @@ class GuiTest(unittest.TestCase):
                 item for item in board["waveform"]["ws2812"]
                 if item["enabled"]
             ]},
+            "i2c": {"buses": [], "devices": []},
+            "spi": {"buses": [], "devices": []},
         }
 
     def test_all_board_defaults_generate_static_firmware_config(self):
@@ -91,8 +93,8 @@ class GuiTest(unittest.TestCase):
         self.assertEqual(prepared.original_schema_version, 0)
         self.assertEqual(prepared.schema_version,
                          CURRENT_PROJECT_SCHEMA_VERSION)
-        self.assertEqual(prepared.document["schema_version"], 1)
-        self.assertEqual(len(prepared.migrations), 1)
+        self.assertEqual(prepared.document["schema_version"], 2)
+        self.assertEqual(len(prepared.migrations), 2)
         generated = generate_project_config(legacy, catalog)
         self.assertEqual(generated.project_sha256, prepared.sha256)
 
@@ -103,7 +105,7 @@ class GuiTest(unittest.TestCase):
 
     def test_pin_catalog_has_unique_defaults(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(catalog["schema_version"], 1)
+        self.assertEqual(catalog["schema_version"], 2)
         self.assertEqual(len(catalog["boards"]), 3)
         for board in catalog["boards"]:
             reserved = {item["pin"] for item in board["reserved"]}
@@ -229,7 +231,7 @@ class GuiTest(unittest.TestCase):
             self.assertRegex(result.build_id,
                              r"^mellow-fly-d5-v1-[0-9a-f]{16}$")
             self.assertEqual(result.record["parallel_jobs"], 32)
-            self.assertEqual(result.record["project_schema_version"], 1)
+            self.assertEqual(result.record["project_schema_version"], 2)
             self.assertEqual(result.record["project_migrations"], [])
             self.assertEqual(result.record["project_summary"][
                 "resource_count"], result.record["resource_count"])
@@ -291,7 +293,7 @@ class GuiTest(unittest.TestCase):
                 self.assertEqual(target["mode"], "static-firmware")
                 self.assertTrue(target["build_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
-                self.assertEqual(target["project_schema_version"], 1)
+                self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
                 board = catalog["boards"][0]
                 inspect_request = Request(
@@ -303,7 +305,7 @@ class GuiTest(unittest.TestCase):
                     method="POST")
                 inspected = json.loads(urlopen(inspect_request).read())
                 self.assertEqual(inspected["format"], "PROJECT_INSPECTION")
-                self.assertEqual(inspected["project_schema_version"], 1)
+                self.assertEqual(inspected["project_schema_version"], 2)
                 self.assertRegex(inspected["project_sha256"],
                                  r"^[0-9a-f]{64}$")
                 self.assertEqual(inspected["summary"]["resource_count"],

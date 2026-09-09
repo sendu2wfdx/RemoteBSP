@@ -1,0 +1,100 @@
+{
+  "schema_version": 2,
+  "name": "studio-bus-digital-twin",
+  "board_type": 66507,
+  "uuid": "10CA161C2AB011928ACBFFF3E7D7C2F0",
+  "firmware_version": [0, 3, 0],
+  "capabilities": ["i2c", "spi"],
+  "resource_groups": [
+    {
+      "type": "i2c_bus", "first_instance": 1, "count": 1,
+      "id_base": 184549377, "source": "native",
+      "rx_capacity": 0, "tx_capacity": 0,
+      "contract": {
+        "access": ["read"], "timing_resolution_ns": 2500,
+        "worst_case_latency_us": 10000,
+        "maximum_operations_per_second": 1000, "queue_capacity": 2,
+        "maximum_rx_bits_per_second": 400000,
+        "maximum_tx_bits_per_second": 400000
+      }
+    },
+    {
+      "type": "spi_bus", "first_instance": 2, "count": 1,
+      "id_base": 218103810, "source": "native",
+      "rx_capacity": 0, "tx_capacity": 0,
+      "contract": {
+        "access": ["read"], "timing_resolution_ns": 83,
+        "worst_case_latency_us": 10000,
+        "maximum_operations_per_second": 2000, "queue_capacity": 2,
+        "maximum_rx_bits_per_second": 12000000,
+        "maximum_tx_bits_per_second": 12000000
+      }
+    },
+    {
+      "type": "i2c_device", "first_instance": 1, "count": 1,
+      "id_base": 201326593, "source": "native",
+      "rx_capacity": 16, "tx_capacity": 16,
+      "contract": {
+        "access": ["read", "write"], "timing_resolution_ns": 2500,
+        "worst_case_latency_us": 10000,
+        "maximum_operations_per_second": 1000, "queue_capacity": 2,
+        "maximum_rx_bits_per_second": 400000,
+        "maximum_tx_bits_per_second": 400000
+      }
+    },
+    {
+      "type": "spi_device", "first_instance": 1, "count": 1,
+      "id_base": 234881025, "source": "native",
+      "rx_capacity": 16, "tx_capacity": 16,
+      "contract": {
+        "access": ["read", "write"], "timing_resolution_ns": 83,
+        "worst_case_latency_us": 10000,
+        "maximum_operations_per_second": 2000, "queue_capacity": 2,
+        "maximum_rx_bits_per_second": 12000000,
+        "maximum_tx_bits_per_second": 12000000
+      }
+    }
+  ],
+  "reserved_resources": [],
+  "bus_resources": [
+    {
+      "resource_id": 184549377, "kind": "i2c_bus",
+      "flags": ["repeated_start", "recovery"],
+      "maximum_clock_hz": 400000, "maximum_transfer_bytes": 16,
+      "queue_capacity": 2, "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 1000,
+      "parent_bus_resource_id": 0
+    },
+    {
+      "resource_id": 218103810, "kind": "spi_bus",
+      "flags": ["full_duplex", "keep_chip_select"],
+      "maximum_clock_hz": 12000000, "maximum_transfer_bytes": 16,
+      "queue_capacity": 2, "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 2000,
+      "parent_bus_resource_id": 0
+    },
+    {
+      "resource_id": 201326593, "kind": "i2c_device",
+      "flags": ["repeated_start", "recovery"],
+      "maximum_clock_hz": 400000, "maximum_transfer_bytes": 16,
+      "queue_capacity": 2, "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 1000,
+      "parent_bus_resource_id": 184549377,
+      "i2c_address": 72, "initial_data": [0, 1, 2, 3, 4, 5]
+    },
+    {
+      "resource_id": 234881025, "kind": "spi_device",
+      "flags": ["full_duplex", "keep_chip_select"],
+      "maximum_clock_hz": 12000000, "maximum_transfer_bytes": 16,
+      "queue_capacity": 2, "minimum_timeout_us": 100,
+      "maximum_timeout_us": 10000,
+      "maximum_operations_per_second": 2000,
+      "parent_bus_resource_id": 218103810,
+      "spi_mode": 3, "bits_per_word": 8, "spi_chip_select": 28,
+      "deterministic_response": [170, 85, 17]
+    }
+  ]
+}

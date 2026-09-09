@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 
 
-CURRENT_PROJECT_SCHEMA_VERSION = 1
+CURRENT_PROJECT_SCHEMA_VERSION = 2
 
 
 class ProjectContractError(ValueError):
@@ -55,6 +55,10 @@ def _resource_summary(project: dict) -> dict:
         ("motion", "axes"),
         ("pwm", "channels"),
         ("timed_bitstream", "ws2812"),
+        ("i2c", "buses"),
+        ("i2c", "devices"),
+        ("spi", "buses"),
+        ("spi", "devices"),
     )
     counts: dict[str, int] = {}
     for group, key in paths:
@@ -92,6 +96,14 @@ def prepare_project(project: object) -> PreparedProject:
         document["schema_version"] = 1
         raw_version = 1
         migrations.append("v0->v1：补充工程schema_version")
+    if raw_version == 1:
+        # v2 引入总线父子资源图；旧工程显式补空组，
+        # 不会因升级 Studio 而暴露任何硬件总线。
+        document.setdefault("i2c", {"buses": [], "devices": []})
+        document.setdefault("spi", {"buses": [], "devices": []})
+        document["schema_version"] = 2
+        raw_version = 2
+        migrations.append("v1->v2：补充I2C/SPI静态资源图")
 
     canonical = canonical_project_bytes(document)
     return PreparedProject(

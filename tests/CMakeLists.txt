@@ -28,6 +28,7 @@ target_link_libraries(bus_manifest_tests PRIVATE remotebsp_remote_core)
 target_compile_definitions(bus_manifest_tests PRIVATE
     TEST_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json"
     TEST_BUS_FAULT_SCENARIO="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_fault_scenario.json"
+    TEST_STUDIO_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/studio_bus_manifest_v2.json"
 )
 target_compile_options(bus_manifest_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
@@ -229,6 +230,16 @@ target_compile_options(clock_model_tests PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
 )
 add_test(NAME clock_model_tests COMMAND clock_model_tests)
+
+add_executable(node_clock_registry_tests node_clock_registry_tests.cpp)
+target_link_libraries(node_clock_registry_tests PRIVATE
+    remotebsp_request_manager
+)
+target_compile_options(node_clock_registry_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME node_clock_registry_tests COMMAND node_clock_registry_tests)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE
