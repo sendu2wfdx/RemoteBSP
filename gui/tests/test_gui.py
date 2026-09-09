@@ -1,10 +1,12 @@
 import base64
 import copy
+import io
 import json
 import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from urllib.request import Request, urlopen
 from unittest.mock import patch
@@ -292,6 +294,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["enabled"])
                 self.assertEqual(target["mode"], "static-firmware")
                 self.assertTrue(target["build_enabled"])
+                self.assertTrue(target["project_reports_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -322,6 +325,26 @@ class GuiTest(unittest.TestCase):
                 self.assertEqual(validated["format"], "PROJECT_VALIDATION")
                 self.assertEqual(validated["resource_count"],
                                  inspected["resource_count"])
+                reports_request = Request(
+                    base + "/api/project/generate-reports",
+                    data=json.dumps({
+                        "project": self._default_project(board)
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                reports = json.loads(urlopen(reports_request).read())
+                self.assertTrue(reports["ok"])
+                self.assertEqual(reports["format"], "PROJECT_REPORTS_V1")
+                self.assertEqual(reports["project_sha256"],
+                                 inspected["project_sha256"])
+                self.assertRegex(reports["resource_set_sha256"],
+                                 r"^[0-9a-f]{64}$")
+                with zipfile.ZipFile(io.BytesIO(base64.b64decode(
+                        reports["archive_base64"]))) as archive:
+                    self.assertIn("SHA256SUMS", archive.namelist())
+                    self.assertTrue(any(
+                        name.endswith("接线表.md")
+                        for name in archive.namelist()))
                 request = Request(
                     base + "/api/project/generate",
                     data=json.dumps({
@@ -367,7 +390,8 @@ class GuiTest(unittest.TestCase):
                                b"spiBusTable", b"spiDeviceTable",
                                b"stripTable", b"controlGpio", b"controlPwm",
                                b"controlStrips", b"compileConfig",
-                               b"buildFirmware"):
+                               b"buildFirmware", b"exportReports",
+                               b"reportResult"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

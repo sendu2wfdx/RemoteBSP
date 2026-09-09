@@ -12,7 +12,7 @@ from pathlib import Path
 
 import kconfiglib
 
-from project_contract import prepare_project
+from project_contract import PreparedProject, prepare_project
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +62,15 @@ class ProjectValidationResult:
     original_schema_version: int
     migrations: tuple[str, ...]
     summary: dict
+
+
+@dataclass(frozen=True)
+class ValidatedProjectInventory:
+    """已经通过统一静态校验、可供 Studio 派生产物使用的工程库存。"""
+
+    prepared: PreparedProject
+    board: dict
+    resources: dict
 
 
 BOARD_CONFIGS = {
@@ -565,11 +574,21 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
         prepared.migrations, prepared.summary)
 
 
-def validate_project(draft: dict, catalog: dict) -> ProjectValidationResult:
-    """用与生成器相同的规则校验 Studio 工程，不生成固件。"""
+def collect_validated_project(draft: dict, catalog: dict
+                              ) -> ValidatedProjectInventory:
+    """迁移并校验工程，返回派生产物共用的规范资源库存。"""
     prepared = prepare_project(draft)
     board, resources = _validate_and_collect(
         prepared.document, catalog, allow_mock_bus=True)
+    return ValidatedProjectInventory(prepared, board, resources)
+
+
+def validate_project(draft: dict, catalog: dict) -> ProjectValidationResult:
+    """用与生成器相同的规则校验 Studio 工程，不生成固件。"""
+    inventory = collect_validated_project(draft, catalog)
+    prepared = inventory.prepared
+    board = inventory.board
+    resources = inventory.resources
     return ProjectValidationResult(
         board["id"], sum(len(items) for items in resources.values()),
         prepared.sha256, prepared.schema_version,

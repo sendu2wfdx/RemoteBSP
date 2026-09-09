@@ -183,6 +183,10 @@ async function exportManifest(){
   const manifest=currentManifest();
   try{const response=await fetch('/api/project/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:manifest})}),value=await response.json();if(!response.ok||!value.ok)throw new Error(value.error||'后端校验失败');const blob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`${board.id}-resources.json`;link.click();URL.revokeObjectURL(link.href)}catch(error){$('#validation').className='invalid';$('#validation').innerHTML=`<div>• 导出已取消：${escapeHtml(error.message)}</div>`}
 }
+async function exportReports(){
+  const result=$('#reportResult'),button=$('#exportReports');button.disabled=true;result.textContent='正在复用后端规则校验并生成工程资料包…';result.className='compile-result';
+  try{const response=await fetch('/api/project/generate-reports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:currentManifest()})}),value=await response.json();if(!response.ok||!value.ok)throw new Error(value.error||'生成资料包失败');const bytes=Uint8Array.from(atob(value.archive_base64),x=>x.charCodeAt(0)),blob=new Blob([bytes],{type:'application/zip'}),url=URL.createObjectURL(blob),items=value.artifacts.map(item=>`${escapeHtml(item.filename)} · ${formatBytes(item.byte_count)}`).join('<br>');result.innerHTML=`<b>✓ 工程资料包已生成</b><small>资源集合 SHA-256 ${escapeHtml(value.resource_set_sha256)}<br>资料包 SHA-256 ${escapeHtml(value.archive_sha256)}</small><a class="report-download" href="${url}" download="${escapeHtml(value.archive_filename)}">下载 ${escapeHtml(value.archive_filename)} · ${formatBytes(value.archive_byte_count)}</a><small>${items}</small>`;result.className='compile-result valid'}catch(error){result.textContent=`生成资料包失败：${error.message}`;result.className='compile-result invalid'}finally{button.disabled=false}
+}
 async function compileManifest(){
   const result=$('#compileResult');result.textContent='正在校验资源并生成固件配置…';result.className='compile-result';
   try{const response=await fetch('/api/project/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project:currentManifest()})}),value=await response.json();if(!response.ok||!value.ok)throw new Error(value.error||'生成失败');const bytes=Uint8Array.from(atob(value.config_base64),x=>x.charCodeAt(0)),blob=new Blob([bytes],{type:'text/plain;charset=utf-8'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=value.filename;link.click();URL.revokeObjectURL(link.href);result.textContent=`✓ 已生成 ${value.firmware_target} 固件配置：${value.resource_count} 项资源，${value.byte_count} 字节；复制到 firmware/.config 后构建`;result.className='compile-result valid'}catch(error){result.textContent=`生成失败：${error.message}`;result.className='compile-result invalid'}
@@ -251,7 +255,7 @@ async function init(){
   $('#addPwm').onclick=addPwmResource;$('#addStrip').onclick=addStripResource;
   $('#addI2cBus').onclick=()=>addBus('i2c');$('#addI2cDevice').onclick=()=>addDevice('i2c');
   $('#addSpiBus').onclick=()=>addBus('spi');$('#addSpiDevice').onclick=()=>addDevice('spi');
-  $('#exportConfig').onclick=exportManifest;$('#compileConfig').onclick=compileManifest;$('#buildFirmware').onclick=buildFirmware;$('#refresh').onclick=refresh;$('#demoMotion').onclick=()=>{demoRunning=!demoRunning;$('#demoMotion').textContent=demoRunning?'停止演示':'演示运动'};
+  $('#exportConfig').onclick=exportManifest;$('#exportReports').onclick=exportReports;$('#compileConfig').onclick=compileManifest;$('#buildFirmware').onclick=buildFirmware;$('#refresh').onclick=refresh;$('#demoMotion').onclick=()=>{demoRunning=!demoRunning;$('#demoMotion').textContent=demoRunning?'停止演示':'演示运动'};
   await refresh();setInterval(()=>{if(demoRunning&&state?.source==='demo')animateDemo();else refresh()},250);
 }
 init();

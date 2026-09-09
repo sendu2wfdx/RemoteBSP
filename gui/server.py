@@ -26,6 +26,7 @@ from project_config import (
     validate_project,
 )
 from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
+from project_artifacts import generate_project_reports
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -140,6 +141,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "mode": "static-firmware",
                 "enabled": True,
                 "build_enabled": True,
+                "project_reports_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
@@ -166,6 +168,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in ("/api/project/inspect", "/api/project/validate",
                         "/api/project/generate",
+                        "/api/project/generate-reports",
                         "/api/project/generate-mock-manifest",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
@@ -177,7 +180,33 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/validate":
+            if path == "/api/project/generate-reports":
+                generated = generate_project_reports(project, catalog)
+                response = {
+                    "ok": True,
+                    "format": "PROJECT_REPORTS_V1",
+                    "board_id": generated.board_id,
+                    "resource_count": generated.resource_count,
+                    "project_schema_version":
+                        generated.project_schema_version,
+                    "project_original_schema_version":
+                        generated.original_schema_version,
+                    "project_migrations": list(generated.migrations),
+                    "project_sha256": generated.project_sha256,
+                    "resource_set_sha256": generated.resource_set_sha256,
+                    "archive_filename": generated.archive_filename,
+                    "archive_sha256": generated.archive_sha256,
+                    "archive_byte_count": len(generated.archive),
+                    "archive_base64": base64.b64encode(
+                        generated.archive).decode("ascii"),
+                    "artifacts": [{
+                        "filename": artifact.filename,
+                        "content_type": artifact.content_type,
+                        "byte_count": len(artifact.content),
+                        "sha256": artifact.sha256,
+                    } for artifact in generated.artifacts],
+                }
+            elif path == "/api/project/validate":
                 validated = validate_project(project, catalog)
                 response = {
                     "ok": True,

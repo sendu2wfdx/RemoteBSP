@@ -85,6 +85,8 @@
 .artifact-links {display:grid;gap:5px;margin-top:9px}
 .artifact-links a {color:var(--cyan);text-decoration:none;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:#0b141d}
 .artifact-links a:hover {border-color:var(--cyan)}
+.report-download {display:block;margin-top:9px;padding:7px;border:1px solid var(--cyan);border-radius:6px;color:var(--cyan);text-align:center;text-decoration:none;background:rgba(67,217,189,.07)}
+.report-download:hover {background:rgba(67,217,189,.13)}
 .inspector .wide + .wide {margin-top:8px}
 
 .endpoint-field { grid-column:span 2; }
