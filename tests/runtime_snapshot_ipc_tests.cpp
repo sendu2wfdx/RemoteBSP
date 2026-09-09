@@ -150,12 +150,68 @@ void test_invalid_limits_and_duplicates() {
     }
 }
 
+void test_daemon_identity_round_trip_and_validation() {
+    int sockets[2]{};
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    toolbusd::write_ipc_daemon_identity_request(sockets[0]);
+    const auto request = toolbusd::read_ipc_request(sockets[1]);
+    assert(request.kind == toolbusd::IpcRequestKind::DaemonIdentity);
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+
+    toolbusd::IpcDaemonIdentity identity;
+    identity.instance_id[0] = 0x42U;
+    identity.instance_id[15] = 0xA5U;
+    const auto encoded = toolbusd::encode_ipc_daemon_identity(identity);
+    const auto decoded = toolbusd::decode_ipc_daemon_identity(encoded);
+    assert(decoded.version == toolbusd::kDaemonIdentityIpcVersion);
+    assert(decoded.instance_id == identity.instance_id);
+
+    try {
+        toolbusd::IpcDaemonIdentity zero;
+        static_cast<void>(toolbusd::encode_ipc_daemon_identity(zero));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    auto wrong_version = encoded;
+    wrong_version[0] = 2U;
+    try {
+        static_cast<void>(
+            toolbusd::decode_ipc_daemon_identity(wrong_version));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    auto nonzero_reserved = encoded;
+    nonzero_reserved[2] = 1U;
+    try {
+        static_cast<void>(
+            toolbusd::decode_ipc_daemon_identity(nonzero_reserved));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    auto truncated = encoded;
+    truncated.pop_back();
+    try {
+        static_cast<void>(toolbusd::decode_ipc_daemon_identity(truncated));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    auto trailing = encoded;
+    trailing.push_back(0U);
+    try {
+        static_cast<void>(toolbusd::decode_ipc_daemon_identity(trailing));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+}
+
 }  // namespace
 
 int main() {
     test_request_round_trip();
     test_snapshot_round_trip_and_strict_flags();
     test_invalid_limits_and_duplicates();
+    test_daemon_identity_round_trip_and_validation();
     std::cout << "Runtime 单次快照 IPC 测试通过\n";
     return 0;
 }

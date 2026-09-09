@@ -541,6 +541,11 @@ class RuntimeServerCliTest(unittest.TestCase):
                     runtime_server.main()
 
     def test_clock_warning_thresholds_are_forwarded_and_bounded(self):
+        class DummyIpcClient:
+            @staticmethod
+            def daemon_identity():
+                return "1" * 32
+
         class DummyServer:
             server_port = 8780
 
@@ -552,7 +557,7 @@ class RuntimeServerCliTest(unittest.TestCase):
 
         with patch.object(
                 runtime_server, "RemoteCliIpcClient",
-                return_value=object()), patch.object(
+                return_value=DummyIpcClient()), patch.object(
                     runtime_server, "ToolbusdSnapshotProvider",
                     return_value=MockSnapshotProvider()) as provider_type, \
                 patch.object(runtime_server, "make_server",

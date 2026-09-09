@@ -36,6 +36,7 @@ from .control_leases import (
     ControlLeaseConflict,
     ControlLeaseError,
     ControlLeaseManager,
+    DaemonBoundControlLeaseManager,
     ControlLeaseNotFound,
     ControlLeaseOwnershipError,
     validate_control_id,
@@ -595,6 +596,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
                         str(error))
             return
+        except ControlLeaseError as error:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_lease_unavailable", str(error))
+            return
         self._send_empty(HTTPStatus.NO_CONTENT,
                          audit_result="control_lease_released")
 
@@ -654,6 +659,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "available": self.control_leases_available,
                         "schema_version": CONTROL_LEASE_SCHEMA_VERSION,
                         "maximum_active": self.control_leases.capacity,
+                        "backend_binding":
+                            "toolbusd_instance" if isinstance(
+                                self.control_leases,
+                                DaemonBoundControlLeaseManager)
+                            else "runtime_process",
                         "downstream_commands": False,
                         "loopback_only": True,
                     },
@@ -1020,12 +1030,14 @@ def main() -> int:
         parser.error("--host必须是数字IP地址；不能使用主机名")
     if not loopback and authenticator is None:
         parser.error("非回环监听必须配置--api-key-file")
+    control_lease_manager = None
     if args.toolbusd_socket:
+        ipc_client = RemoteCliIpcClient(
+            args.toolbusd_socket, args.remote_cli or "remote-cli",
+            timeout_seconds=args.ipc_timeout_ms / 1000.0,
+            structured_output=not args.toolbusd_legacy_text)
         provider: RuntimeProvider = ToolbusdSnapshotProvider(
-            RemoteCliIpcClient(
-                args.toolbusd_socket, args.remote_cli or "remote-cli",
-                timeout_seconds=args.ipc_timeout_ms / 1000.0,
-                structured_output=not args.toolbusd_legacy_text),
+            ipc_client,
             maximum_resources_per_snapshot=args.maximum_resource_queries,
             cache_ttl_ms=args.snapshot_cache_ms,
             maximum_concurrent_status_queries=args.status_query_workers,
@@ -1033,6 +1045,9 @@ def main() -> int:
             maximum_clock_error_bound_ns=args.clock_error_warning_ns,
             maximum_clock_sample_age_ms=
                 args.clock_sample_age_warning_ms)
+        control_lease_manager = DaemonBoundControlLeaseManager(
+            ipc_client.daemon_identity,
+            capacity=args.control_lease_capacity)
     elif args.snapshot:
         provider = FileSnapshotProvider(args.snapshot)
     else:
@@ -1041,7 +1056,11 @@ def main() -> int:
                          maximum_workers=args.http_workers,
                          authenticator=authenticator,
                          event_capacity=args.event_capacity,
-                         control_lease_capacity=args.control_lease_capacity,
+                         control_lease_manager=control_lease_manager,
+                         control_lease_capacity=(
+                             DEFAULT_CONTROL_LEASE_CAPACITY
+                             if control_lease_manager is not None
+                             else args.control_lease_capacity),
                          request_io_timeout_seconds=
                          args.http_request_timeout_ms / 1000.0)
     display_host = f"[{args.host}]" if ":" in args.host else args.host

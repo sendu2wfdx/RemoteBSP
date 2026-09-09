@@ -22,6 +22,7 @@ constexpr std::size_t kRuntimeClockQualitySize = 68U;
 constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
+constexpr std::size_t kDaemonIdentitySize = 20U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -181,12 +182,13 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] >
-            static_cast<std::uint8_t>(IpcRequestKind::MotionGroupCancel)) {
+            static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
     if (kind == IpcRequestKind::ListNodes ||
-        kind == IpcRequestKind::TrafficStatus) {
+        kind == IpcRequestKind::TrafficStatus ||
+        kind == IpcRequestKind::DaemonIdentity) {
         if (body.size() != 1) {
             throw IpcException("本地状态请求载荷无效");
         }
@@ -289,6 +291,11 @@ IpcRequest read_ipc_request(int socket) {
     request.node_id = node_id;
     request.packet = protocol::decode(packet);
     return request;
+}
+
+void write_ipc_daemon_identity_request(int socket) {
+    send_body(socket,
+              {static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)});
 }
 
 void write_ipc_traffic_status_request(int socket) {
@@ -1012,6 +1019,40 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
         cursor += static_cast<std::ptrdiff_t>(kRuntimeClockQualitySize);
     }
     return snapshot;
+}
+
+std::vector<std::uint8_t> encode_ipc_daemon_identity(
+    const IpcDaemonIdentity& identity) {
+    if (identity.version != kDaemonIdentityIpcVersion ||
+        std::all_of(identity.instance_id.begin(), identity.instance_id.end(),
+                    [](std::uint8_t value) { return value == 0U; })) {
+        throw IpcException("toolbusd 实例身份无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kDaemonIdentitySize);
+    append_u16(body, identity.version);
+    append_u16(body, 0U);
+    body.insert(body.end(), identity.instance_id.begin(),
+                identity.instance_id.end());
+    return body;
+}
+
+IpcDaemonIdentity decode_ipc_daemon_identity(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() != kDaemonIdentitySize ||
+        get_u16(body.data()) != kDaemonIdentityIpcVersion ||
+        get_u16(body.data() + 2U) != 0U) {
+        throw IpcException("toolbusd 实例身份版本或长度无效");
+    }
+    IpcDaemonIdentity identity;
+    identity.version = get_u16(body.data());
+    std::copy_n(body.begin() + 4, identity.instance_id.size(),
+                identity.instance_id.begin());
+    if (std::all_of(identity.instance_id.begin(), identity.instance_id.end(),
+                    [](std::uint8_t value) { return value == 0U; })) {
+        throw IpcException("toolbusd 实例身份不能为零");
+    }
+    return identity;
 }
 
 void write_ipc_response(int socket, IpcStatus status,

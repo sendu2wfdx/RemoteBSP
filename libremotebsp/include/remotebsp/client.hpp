@@ -35,6 +35,11 @@ struct DiscoveredNode {
     bool ready{};
 };
 
+struct DaemonIdentity {
+    std::uint16_t version{};
+    std::array<std::uint8_t, 16> instance_id{};
+};
+
 enum class CanTrafficClass : std::uint8_t {
     Safety = 0,
     Motion = 1,
@@ -218,6 +223,7 @@ public:
     NodeInfo get_info() const;
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
+    DaemonIdentity daemon_identity() const;
     CanTrafficStatus traffic_status() const;
     RuntimeSnapshot runtime_snapshot(
         std::uint16_t maximum_resources = 128U,

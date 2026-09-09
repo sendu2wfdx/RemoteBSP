@@ -264,6 +264,19 @@ std::vector<DiscoveredNode> Client::list_nodes() const {
     return result;
 }
 
+DaemonIdentity Client::daemon_identity() const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_daemon_identity_request(socket.get());
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto source =
+        toolbusd::decode_ipc_daemon_identity(response.body);
+    return {source.version, source.instance_id};
+}
+
 CanTrafficStatus Client::traffic_status() const {
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_traffic_status_request(socket.get());

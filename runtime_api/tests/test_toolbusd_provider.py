@@ -154,6 +154,34 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-3:], ["runtime-snapshot", "64", "1400"])
 
+    def test_daemon_identity_is_strict_and_normalized(self):
+        calls = []
+
+        def runner(command, timeout, maximum_output):
+            calls.append(list(command))
+            return json.dumps({
+                "schema_version": 1,
+                "command": "daemon-identity",
+                "data": {"ipc_version": 1, "instance_id": "AB" * 16},
+            })
+
+        client = RemoteCliIpcClient(
+            "/tmp/test.sock", timeout_seconds=1.5, runner=runner)
+        self.assertEqual(client.daemon_identity(), "ab" * 16)
+        self.assertEqual(calls[0][-1], "daemon-identity")
+
+        for value in ("0" * 32, "ab" * 15, "z" * 32):
+            with self.subTest(value=value), self.assertRaises(
+                    ToolbusIpcProtocolError):
+                client = RemoteCliIpcClient(
+                    "/tmp/test.sock", runner=lambda *_: json.dumps({
+                        "schema_version": 1,
+                        "command": "daemon-identity",
+                        "data": {"ipc_version": 1,
+                                 "instance_id": value},
+                    }))
+                client.daemon_identity()
+
     def test_runtime_snapshot_v2_rejects_v1_and_bad_clock_quality(self):
         def document():
             return json.loads(self._runtime_snapshot_document())

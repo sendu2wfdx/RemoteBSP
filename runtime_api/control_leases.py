@@ -254,3 +254,116 @@ class ControlLeaseManager:
             now_ns = self._monotonic_ns()
             self._expire_locked(now_ns)
             return len(self._by_id)
+
+    def invalidate_all(self) -> None:
+        """立即撤销当前世代的全部活动租约和幂等历史。"""
+        with self._lock:
+            self._by_id.clear()
+            self._by_scope.clear()
+            self._by_idempotency.clear()
+            self._completed_by_idempotency.clear()
+            self._completed_by_id.clear()
+
+
+class DaemonBoundControlLeaseManager:
+    """把进程内租约绑定到 toolbusd 实例身份。
+
+    同一时刻只进行一次身份读取，并发请求共享该次结果；租约变更仍在身份锁内
+    串行提交。这样既不会倒序应用身份，也不会在 daemon 故障时串行累积外部超时。
+    身份不可读时立即清空租约并失败关闭。
+    """
+
+    def __init__(self, identity_reader: Callable[[], str],
+                 capacity: int = DEFAULT_CONTROL_LEASE_CAPACITY, *,
+                 manager: ControlLeaseManager | None = None):
+        if not callable(identity_reader):
+            raise ValueError("toolbusd实例身份读取器必须可调用")
+        if manager is not None and capacity != DEFAULT_CONTROL_LEASE_CAPACITY:
+            raise ValueError("不能同时注入租约管理器和非默认容量")
+        self._identity_reader = identity_reader
+        self._manager = manager or ControlLeaseManager(capacity)
+        self._daemon_instance_id: str | None = None
+        self._binding_condition = threading.Condition()
+        self._identity_refreshing = False
+        self._identity_refresh_generation = 0
+        self._identity_completed_generation = 0
+        self._identity_invalidated_generation = 0
+        self._identity_refresh_error: str | None = None
+
+    @property
+    def capacity(self) -> int:
+        return self._manager.capacity
+
+    @property
+    def daemon_instance_id(self) -> str | None:
+        with self._binding_condition:
+            return self._daemon_instance_id
+
+    def _read_identity(self) -> str:
+        try:
+            identity = self._identity_reader()
+        except Exception as error:
+            raise ControlLeaseError(
+                f"无法确认toolbusd实例身份：{error}") from error
+        if not isinstance(identity, str) or \
+                re.fullmatch(r"[0-9a-f]{32}", identity) is None or \
+                identity == "0" * 32:
+            raise ControlLeaseError("toolbusd返回了无效的实例身份")
+        return identity
+
+    def _with_current_identity(self, operation: Callable[[], object]):
+        with self._binding_condition:
+            if self._identity_refreshing:
+                generation = self._identity_refresh_generation
+                while self._identity_completed_generation < generation:
+                    self._binding_condition.wait()
+                if self._identity_refresh_error is not None:
+                    raise ControlLeaseError(self._identity_refresh_error)
+                return operation()
+            self._identity_refreshing = True
+            self._identity_refresh_generation += 1
+            generation = self._identity_refresh_generation
+        try:
+            identity = self._read_identity()
+            error_message = None
+        except ControlLeaseError as error:
+            identity = None
+            error_message = str(error)
+        with self._binding_condition:
+            self._identity_refreshing = False
+            self._identity_completed_generation = generation
+            if generation <= self._identity_invalidated_generation:
+                error_message = "toolbusd实例身份读取已被显式作废"
+                identity = None
+            self._identity_refresh_error = error_message
+            if error_message is not None:
+                self._manager.invalidate_all()
+                self._daemon_instance_id = None
+                self._binding_condition.notify_all()
+                raise ControlLeaseError(error_message)
+            if identity != self._daemon_instance_id:
+                self._manager.invalidate_all()
+                self._daemon_instance_id = identity
+            self._binding_condition.notify_all()
+            return operation()
+
+    def acquire(self, **arguments) -> tuple[ControlLease, bool]:
+        return self._with_current_identity(
+            lambda: self._manager.acquire(**arguments))
+
+    def release(self, lease_id: str, *, requester_key_id: str,
+                allow_foreign: bool = False) -> ControlLease:
+        return self._with_current_identity(
+            lambda: self._manager.release(
+                lease_id, requester_key_id=requester_key_id,
+                allow_foreign=allow_foreign))
+
+    def active_count(self) -> int:
+        return self._with_current_identity(self._manager.active_count)
+
+    def invalidate_all(self) -> None:
+        with self._binding_condition:
+            self._identity_invalidated_generation = \
+                self._identity_refresh_generation
+            self._manager.invalidate_all()
+            self._daemon_instance_id = None

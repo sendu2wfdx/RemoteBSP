@@ -30,8 +30,10 @@ enum class IpcRequestKind : std::uint8_t {
     MotionGroupSubmit = 6,
     MotionGroupStatus = 7,
     MotionGroupCancel = 8,
+    DaemonIdentity = 9,
 };
 
+constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
 constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 2U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
@@ -41,6 +43,11 @@ constexpr std::uint16_t kMaximumIpcMotionGroupMembers = 32U;
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
     std::vector<std::uint8_t> body;
+};
+
+struct IpcDaemonIdentity {
+    std::uint16_t version{kDaemonIdentityIpcVersion};
+    std::array<std::uint8_t, 16> instance_id{};
 };
 
 struct IpcRequest {
@@ -141,6 +148,7 @@ void write_ipc_motion_group_status_request(
 void write_ipc_motion_group_cancel_request(
     int socket, std::uint64_t transaction_id, std::uint32_t group_id,
     std::uint32_t plan_generation);
+void write_ipc_daemon_identity_request(int socket);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -166,6 +174,10 @@ MotionGroupPlan decode_ipc_motion_group_plan(
 std::vector<std::uint8_t> encode_ipc_motion_group_snapshot(
     const MotionGroupServiceSnapshot& snapshot);
 MotionGroupServiceSnapshot decode_ipc_motion_group_snapshot(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_daemon_identity(
+    const IpcDaemonIdentity& identity);
+IpcDaemonIdentity decode_ipc_daemon_identity(
     const std::vector<std::uint8_t>& body);
 
 void write_ipc_response(int socket, IpcStatus status,

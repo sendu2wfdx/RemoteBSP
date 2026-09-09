@@ -14,6 +14,7 @@
 #include "remotebsp/transport/socketcan_transport.hpp"
 
 #include <poll.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -39,6 +41,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -127,6 +130,36 @@ std::uint32_t make_session_id() noexcept {
     mixed ^= mixed >> 33U;
     const auto value = static_cast<std::uint32_t>(mixed);
     return value == 0 ? 1U : value;
+}
+
+std::array<std::uint8_t, 16> make_daemon_instance_id(
+    std::uint32_t session_id) {
+    std::array<std::uint8_t, 16> result{};
+    std::size_t received = 0U;
+    while (received < result.size()) {
+        const auto count = ::getrandom(result.data() + received,
+                                       result.size() - received, 0U);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            throw std::system_error(
+                count < 0 ? errno : EIO, std::generic_category(),
+                "生成toolbusd实例身份失败");
+        }
+        received += static_cast<std::size_t>(count);
+    }
+    // 额外混入实际 Remote Packet 会话身份，使本地实例标识与本次链路
+    // 会话显式相关；唯一性的根仍是内核提供的完整 128 位随机数。
+    for (std::size_t index = 0U; index < sizeof(session_id); ++index) {
+        result[index] ^= static_cast<std::uint8_t>(
+            session_id >> (index * 8U));
+    }
+    if (std::all_of(result.begin(), result.end(),
+                    [](std::uint8_t value) { return value == 0U; })) {
+        result[0] = 1U;
+    }
+    return result;
 }
 
 class ToolbusDaemon {
@@ -1083,6 +1116,16 @@ private:
                 return;
             }
             if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::DaemonIdentity) {
+                remotebsp::toolbusd::IpcDaemonIdentity identity;
+                identity.instance_id = daemon_instance_id_;
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_daemon_identity(
+                        identity));
+                return;
+            }
+            if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::RuntimeSnapshot) {
                 const auto snapshot_deadline =
                     std::chrono::steady_clock::now() +
@@ -1644,6 +1687,8 @@ private:
     std::uint32_t next_node_id_{1};
     std::uint64_t next_runtime_snapshot_sequence_{1U};
     const std::uint32_t session_id_{make_session_id()};
+    const std::array<std::uint8_t, 16> daemon_instance_id_{
+        make_daemon_instance_id(session_id_)};
 };
 
 }

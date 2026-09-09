@@ -4,7 +4,7 @@
 
 Runtime API 是位于 `toolbusd` 和浏览器/上层应用之间的长期运行服务边界，作用类似
 Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现可替换 Provider 之上的只读
-状态面，以及进程内短时控制租约；控制租约只协调上位机写意图，不访问 SocketCAN、
+状态面，以及绑定 toolbusd 实例的进程内短时控制租约；控制租约只协调上位机写意图，不访问 SocketCAN、
 USB 或实体板，也不表示设备命令已经执行。
 
 当前明确不提供：
@@ -309,6 +309,7 @@ X-API-Key: <api-key>
 
 ```sh
 remote-cli --json --socket /tmp/toolbusd.sock traffic-status
+remote-cli --json --socket /tmp/toolbusd.sock daemon-identity
 remote-cli --json --socket /tmp/toolbusd.sock node-list
 remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-list
 remote-cli --json --socket /tmp/toolbusd.sock --node 1 resource-status 16777217
@@ -554,8 +555,18 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 防线；生产部署仍应在反向代理设置独立的头部、请求体和总请求期限以及连接数限制。
 
 这不是分布式锁，也不是安全执行令牌。租约只存在于单个 Runtime 进程，重启后全部丢失；
-当前没有续租、列表或跨实例一致性。它尚未绑定 `toolbusd` 的远端 session，不能阻止同机
-其他进程绕过 Runtime 连接 `toolbusd`，也不会发送任何设备写命令。因此能力声明保持
+当前没有续租、列表或跨 Runtime 实例一致性。使用 `--toolbusd-socket` 时，Runtime 会在
+每次申请、释放或撤销前，通过版本化 `daemon-identity` 本地 IPC 读取 toolbusd 本次进程
+的非零 128 位随机实例标识。并发请求共享一次在锁外执行的身份读取，身份结果与租约变更
+则在进程锁内串行提交；标识变化、不可读或格式无效都会立即清空当前租约与幂等历史并
+失败关闭。因此 toolbusd 重启后，旧 Runtime
+租约不能继续释放或被后续命令路径误用；重新申请从新实例世代开始。未配置 toolbusd 的
+Mock/文件 Provider 仍使用 `runtime_process` 进程世代。能力字段
+`control_leases.backend_binding` 分别报告 `toolbusd_instance` 或 `runtime_process`。
+
+这个绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`，也不会发送任何设备写命令。
+身份检查与未来实际命令之间仍可能发生 daemon 重启；真正的写命令竖切必须把实例标识和
+租约校验带入 toolbusd 的同一原子准入点，而不能只在 HTTP 入口预检。因此能力声明保持
 `write_commands=false`、`control_leases.downstream_commands=false`，且
 `control_leases.loopback_only=true`。未来写命令入口
 必须在同一原子决策中校验身份、租约所有权和命令范围，并由 toolbusd 重新执行最终准入；
@@ -592,7 +603,7 @@ API 已有本地租约状态写入口，不能据此推断设备可写；是否�
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。
 
-当前认证授权和短租约竖切解决的是“哪个密钥身份可以读、申请、本人释放或监督撤销”以及
-单进程内并发写意图互斥。TLS、反向代理信任边界、用户目录和动态角色、密钥热加载/撤销、
-速率限制、租约与 toolbusd session 的原子绑定，以及审计异步持久化与完整性保护仍是后续
+当前认证授权和短租约竖切解决的是“哪个密钥身份可以读、申请、本人释放或监督撤销”、
+单进程内并发写意图互斥，以及 toolbusd 进程重启后的旧租约失效。TLS、反向代理信任边界、
+用户目录和动态角色、密钥热加载/撤销、速率限制、租约与设备命令的原子准入绑定，以及审计异步持久化与完整性保护仍是后续
 部署门槛，不能把本轮的软件测试当作公网暴露、真实设备控制或硬件环境的安全实测证据。

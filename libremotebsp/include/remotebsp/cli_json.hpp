@@ -101,6 +101,16 @@ inline void write_node_list(std::ostream& output,
     output << "]}}\n";
 }
 
+inline void write_daemon_identity(std::ostream& output,
+                                  const DaemonIdentity& identity) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"daemon-identity\",\"data\":{"
+           << "\"ipc_version\":" << identity.version
+           << ",\"instance_id\":\"";
+    write_uuid(output, identity.instance_id);
+    output << "\"}}\n";
+}
+
 inline void write_traffic_status(std::ostream& output,
                                  const CanTrafficStatus& status) {
     const auto available_permille =

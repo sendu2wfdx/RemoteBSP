@@ -15,11 +15,13 @@ from runtime_api.auth import (
     ApiKeyCredential,
 )
 from runtime_api.control_leases import (
+    ControlLeaseError,
     ControlLeaseCapacityExceeded,
     ControlLeaseConflict,
     ControlLeaseManager,
     ControlLeaseNotFound,
     ControlLeaseOwnershipError,
+    DaemonBoundControlLeaseManager,
 )
 from runtime_api.provider import MockSnapshotProvider
 from runtime_api.server import make_server
@@ -120,6 +122,7 @@ class ControlLeaseManagerTest(unittest.TestCase):
         self.assertEqual(len(conflicts), 7)
         self.assertEqual(self.manager.active_count(), 1)
 
+
     def test_validation_rejects_bool_ttl_and_unbounded_identifiers(self):
         for changes in (
                 {"ttl_ms": True}, {"ttl_ms": 99}, {"ttl_ms": 30001},
@@ -184,6 +187,133 @@ class ControlLeaseManagerTest(unittest.TestCase):
         self.manager._lock = AdvancingLock(self.clock)
         self._acquire()
         self.assertEqual(self.manager.active_count(), 1)
+
+
+class DaemonBoundControlLeaseManagerTest(unittest.TestCase):
+    def setUp(self):
+        self.identity = "1" * 32
+        identifiers = iter(("a" * 32, "b" * 32, "c" * 32))
+        inner = ControlLeaseManager(
+            4, lease_id_factory=lambda: next(identifiers))
+        self.manager = DaemonBoundControlLeaseManager(
+            lambda: self.identity, manager=inner)
+
+    def _acquire(self, idempotency="request-1"):
+        return self.manager.acquire(
+            owner_key_id="operator-a", node_id="node-1",
+            resource_id="gpio-0", command_group="write", ttl_ms=1000,
+            idempotency_key=idempotency)
+
+    def test_daemon_restart_atomically_invalidates_old_generation(self):
+        old, replayed = self._acquire()
+        self.assertFalse(replayed)
+        self.assertEqual(self.manager.daemon_instance_id, "1" * 32)
+
+        self.identity = "2" * 32
+        with self.assertRaises(ControlLeaseNotFound):
+            self.manager.release(
+                old.lease_id, requester_key_id="operator-a")
+        replacement, replayed = self._acquire()
+        self.assertFalse(replayed)
+        self.assertNotEqual(replacement.lease_id, old.lease_id)
+        self.assertEqual(self.manager.daemon_instance_id, "2" * 32)
+
+    def test_unavailable_or_invalid_identity_fails_closed(self):
+        self._acquire()
+
+        def unavailable():
+            raise RuntimeError("socket unavailable")
+
+        self.manager._identity_reader = unavailable
+        with self.assertRaisesRegex(ControlLeaseError, "无法确认"):
+            self.manager.active_count()
+        self.assertIsNone(self.manager.daemon_instance_id)
+
+        self.manager._identity_reader = lambda: "0" * 32
+        with self.assertRaisesRegex(ControlLeaseError, "无效"):
+            self._acquire("request-2")
+
+    def test_concurrent_identity_reads_are_single_flight(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        reader_lock = threading.Lock()
+        calls = 0
+
+        def reader():
+            nonlocal calls
+            with reader_lock:
+                calls += 1
+            first_started.set()
+            self.assertTrue(release_first.wait(timeout=2))
+            return "1" * 32
+
+        identifiers = iter(("d" * 32, "e" * 32))
+        inner = ControlLeaseManager(
+            4, lease_id_factory=lambda: next(identifiers))
+        manager = DaemonBoundControlLeaseManager(reader, manager=inner)
+        outcomes = []
+
+        def request(resource_id, idempotency_key):
+            try:
+                outcomes.append(manager.acquire(
+                    owner_key_id="operator-a", node_id="node-1",
+                    resource_id=resource_id, command_group="write",
+                    ttl_ms=1000, idempotency_key=idempotency_key))
+            except Exception as error:  # 测试线程必须把异常带回主线程。
+                outcomes.append(error)
+
+        first = threading.Thread(
+            target=request, args=("gpio-0", "request-1"))
+        second = threading.Thread(
+            target=request, args=("gpio-1", "request-2"))
+        first.start()
+        self.assertTrue(first_started.wait(timeout=2))
+        second.start()
+        threading.Event().wait(0.05)
+        with reader_lock:
+            self.assertEqual(calls, 1)
+        release_first.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(outcomes), 2)
+        self.assertTrue(all(isinstance(value, tuple) for value in outcomes))
+        self.assertEqual(manager.daemon_instance_id, "1" * 32)
+        self.assertEqual(inner.active_count(), 2)
+
+    def test_inflight_identity_result_cannot_revive_explicit_invalidation(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def reader():
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return "1" * 32
+
+        manager = DaemonBoundControlLeaseManager(reader, capacity=4)
+        outcome = []
+
+        def request():
+            try:
+                manager.acquire(
+                    owner_key_id="operator-a", node_id="node-1",
+                    resource_id="gpio-0", command_group="write",
+                    ttl_ms=1000, idempotency_key="request-1")
+            except Exception as error:  # 测试线程必须把异常带回主线程。
+                outcome.append(error)
+
+        worker = threading.Thread(target=request)
+        worker.start()
+        self.assertTrue(started.wait(timeout=2))
+        manager.invalidate_all()
+        release.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], ControlLeaseError)
+        self.assertRegex(str(outcome[0]), "显式作废")
+        self.assertIsNone(manager.daemon_instance_id)
 
 
 def authenticator() -> ApiKeyAuthenticator:
@@ -326,6 +456,47 @@ class ControlLeaseHttpTest(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "read_only")
         self.assertEqual(
             self.server.control_leases.active_count(), 0)  # type: ignore[attr-defined]
+
+    def test_daemon_unavailable_release_maps_to_503(self):
+        identity = ["1" * 32]
+
+        def reader():
+            if identity[0] is None:
+                raise RuntimeError("daemon unavailable")
+            return identity[0]
+
+        manager = DaemonBoundControlLeaseManager(reader, capacity=4)
+        server = make_server(
+            "127.0.0.1", 0, MockSnapshotProvider(),
+            authenticator=authenticator(), control_lease_manager=manager)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            request = Request(
+                base + "/api/v1/control-leases",
+                data=json.dumps(self._body()).encode("utf-8"),
+                headers={"X-API-Key": "a" * 32,
+                         "Content-Type": "application/json"},
+                method="POST")
+            with urlopen(request) as response:
+                lease_id = json.loads(response.read())["data"]["lease"][
+                    "lease_id"]
+            identity[0] = None
+            release = Request(
+                base + f"/api/v1/control-leases/{lease_id}",
+                headers={"X-API-Key": "a" * 32}, method="DELETE")
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(release)
+            self.assertEqual(caught.exception.code, 503)
+            payload = json.loads(caught.exception.read())
+            self.assertEqual(payload["error"]["code"],
+                             "control_lease_unavailable")
+            self.assertIsNone(manager.daemon_instance_id)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_transfer_encoding_is_rejected_even_with_content_length(self):
         body = json.dumps(self._body()).encode("utf-8")

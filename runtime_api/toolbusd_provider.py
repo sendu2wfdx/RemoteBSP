@@ -46,6 +46,8 @@ class ToolbusIpcClient(Protocol):
 
     def traffic_status(self) -> dict: ...
 
+    def daemon_identity(self) -> str: ...
+
     def list_nodes(self) -> list[dict]: ...
 
     def list_resources(self, node_id: int) -> list[dict]: ...
@@ -297,6 +299,24 @@ class RemoteCliIpcClient:
             normalized_classes.append(normalized)
         result["classes"] = normalized_classes
         return result
+
+    @staticmethod
+    def _json_daemon_identity(output: str) -> str:
+        data = RemoteCliIpcClient._document(output, "daemon-identity")
+        _exact_fields(data, {"ipc_version", "instance_id"},
+                      "daemon-identity.data")
+        version = _json_integer(
+            data["ipc_version"], "daemon-identity.ipc_version",
+            minimum=1, maximum=0xFFFF)
+        if version != 1:
+            raise ToolbusIpcProtocolError(
+                f"daemon-identity IPC版本不受支持：{version}")
+        instance_id = _json_string(
+            data["instance_id"], "daemon-identity.instance_id")
+        if not _UUID.fullmatch(instance_id) or instance_id == "0" * 32:
+            raise ToolbusIpcProtocolError(
+                "daemon-identity.instance_id必须是非零128位十六进制")
+        return instance_id.lower()
 
     @staticmethod
     def _json_nodes(output: str) -> list[dict]:
@@ -643,6 +663,29 @@ class RemoteCliIpcClient:
             result[name] = _integer(fields[name], "traffic-status." + name,
                                     maximum=0xFFFFFFFFFFFFFFFF)
         return result
+
+    def daemon_identity(self) -> str:
+        output = self._run("daemon-identity")
+        if self.structured_output:
+            return self._json_daemon_identity(output)
+        lines = self._lines(output, "daemon-identity")
+        if len(lines) != 1:
+            raise ToolbusIpcProtocolError(
+                "daemon-identity必须恰好返回一行")
+        fields = lines[0]
+        _required(fields, {"ipc_version", "instance_id"},
+                  "daemon-identity")
+        if set(fields) != {"ipc_version", "instance_id"}:
+            raise ToolbusIpcProtocolError("daemon-identity包含未知字段")
+        if _integer(fields["ipc_version"], "daemon-identity.ipc_version",
+                    minimum=1, maximum=0xFFFF) != 1:
+            raise ToolbusIpcProtocolError(
+                "daemon-identity IPC版本不受支持")
+        instance_id = fields["instance_id"].lower()
+        if not _UUID.fullmatch(instance_id) or instance_id == "0" * 32:
+            raise ToolbusIpcProtocolError(
+                "daemon-identity.instance_id必须是非零128位十六进制")
+        return instance_id
 
     def list_nodes(self) -> list[dict]:
         output = self._run("node-list")

@@ -372,6 +372,7 @@ void print_usage() {
         << "  bootloader-enter-usb\n"
         << "  node-list\n"
         << "  traffic-status\n"
+        << "  daemon-identity\n"
         << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
@@ -430,6 +431,22 @@ int run(const std::vector<std::string>& arguments,
     }
     const auto& name = arguments[0];
     remotebsp::Client client(socket_path, node_id);
+
+    if (name == "daemon-identity" && arguments.size() == 1) {
+        const auto identity = client.daemon_identity();
+        if (json_output) {
+            remotebsp::cli_json::write_daemon_identity(
+                std::cout, identity);
+        } else {
+            std::cout << "ipc_version=" << identity.version
+                      << " instance_id=";
+            const std::vector<std::uint8_t> bytes(
+                identity.instance_id.begin(), identity.instance_id.end());
+            print_hex(bytes);
+            std::cout << '\n';
+        }
+        return 0;
+    }
 
     if (name == "traffic-status" && arguments.size() == 1) {
         const auto status = client.traffic_status();
@@ -1195,6 +1212,7 @@ int main(int argc, char** argv) {
         }
         if (json_output && (arguments.empty() ||
             (arguments[0] != "traffic-status" &&
+             arguments[0] != "daemon-identity" &&
              arguments[0] != "node-list" &&
              arguments[0] != "runtime-snapshot" &&
              arguments[0] != "resource-list" &&
