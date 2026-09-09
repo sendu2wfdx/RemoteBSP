@@ -1,6 +1,6 @@
 # Remote BSP 文档导航与项目状态
 
-> 最后整理：2026-08-15
+> 最后整理：2026-09-09
 
 ## 文档导航
 
@@ -20,6 +20,8 @@
 - [Studio 与上位机运行时边界](studio-runtime-design.md)
 - [总线设备与高速流资源设计](bus-and-stream-resources.md)
 - [运动可靠性与跨板同步验证计划](motion-reliability-plan.md)
+- [主机时钟同步模型](clock-synchronization.md)
+- [只读 Runtime API](runtime-api.md)
 
 ## 一句话说明
 
@@ -57,11 +59,12 @@ flowchart LR
 | 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护 |
 | GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致 |
 | PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM对象命令已实测，实体WS2812波形待验收 |
-| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；G431完成100 STEP空载调度，持续负载与跨板同步待实现 |
+| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；主机四时间戳时钟模型已完成纯软件测试，跨板组事务与实体时序验收待实现 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
 | Studio | 构建阶段已实现 | GUI工程、冲突检查、Mock可视化、生成`.config`、32线程构建、产物/日志/哈希归档和下载；G431工程已手工烧录验收，GUI自动烧录回读待实现 |
 | I2C / SPI | 协议与 Mock 第一阶段已实现 | 总线/设备合同、原子事务、主机API和设备级故障隔离已测试；Studio端点和STM32 BSP待实现 |
 | 高速 Stream | 协议骨架已实现、已测试 | 合同、打开、数据、信用和状态编解码；运行时会话及USB数据面待实现 |
+| Runtime API | 只读骨架已实现、已测试 | 版本化REST快照、节点、资源、告警接口；当前仅Mock/文件Provider，toolbusd接入、认证、写操作和事件流待实现 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
 ## 正式板卡

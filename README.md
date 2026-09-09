@@ -153,8 +153,9 @@ ctest --test-dir build-wsl --output-on-failure
 
 自动测试覆盖协议、CRC、设备参数 schema/存储/远程调用、运动与波形线格式、分片、
 CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链路，以及发现、
-心跳、多节点、超时与去重、GPIO、UART、资源合同/租约、数字孪生故障隔离、运动
-欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、流量准入、Kconfig生成和GUI API。
+心跳、多节点、超时与去重、GPIO、UART、I2C/SPI资源合同与Mock故障隔离、资源租约、
+数字孪生、主机时钟模型、运动欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、
+流量准入、Kconfig生成、GUI API和只读Runtime API。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 
@@ -398,6 +399,8 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [Studio 与上位机运行时边界](docs/studio-runtime-design.md)
 - [总线设备与高速流资源设计](docs/bus-and-stream-resources.md)
 - [运动可靠性与跨板同步验证计划](docs/motion-reliability-plan.md)
+- [主机时钟同步模型](docs/clock-synchronization.md)
+- [只读 Runtime API](docs/runtime-api.md)
 - [智能实时资源与多轴运动控制设计](docs/intelligent-motion-resources.md)
 - [libremotebsp 客户端 API](docs/libremotebsp-api.md)
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)
