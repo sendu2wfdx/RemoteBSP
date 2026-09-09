@@ -29,6 +29,18 @@ from .audit import (
     DEFAULT_AUDIT_CAPACITY,
     new_audit_record,
 )
+from .events import (
+    DEFAULT_EVENT_CAPACITY,
+    DEFAULT_EVENT_PAGE_LIMIT,
+    EVENT_SCHEMA_VERSION,
+    MAXIMUM_EVENT_CAPACITY,
+    MAXIMUM_EVENT_PAGE_LIMIT,
+    EventLogError,
+    ExpiredEventCursor,
+    InvalidEventCursor,
+    RuntimeEventLog,
+    validate_event_cursor,
+)
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION
 from .provider import (
     FileSnapshotProvider,
@@ -99,6 +111,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def audit_sink(self) -> BoundedAuditSink:
         return self.server.audit_sink  # type: ignore[attr-defined]
 
+    @property
+    def event_log(self) -> RuntimeEventLog:
+        return self.server.event_log  # type: ignore[attr-defined]
+
     def _begin_request_audit(self) -> None:
         self._audit_request_id = secrets.token_hex(16)
         self._audit_key_id: str | None = None
@@ -119,7 +135,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return "root"
         if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
                 parts[2] in {"health", "snapshot", "nodes", "resources",
-                             "alerts"}:
+                             "alerts", "events"}:
             return parts[2]
         return "unknown"
 
@@ -162,11 +178,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(encoded)
 
     def _error(self, status: HTTPStatus, code: str, message: str,
-               *, headers: dict[str, str] | None = None) -> None:
+               *, headers: dict[str, str] | None = None,
+               details: dict | None = None) -> None:
+        error_payload = {"code": code, "message": message}
+        if details is not None:
+            error_payload["details"] = details
         self._send_json({
             "api_version": API_VERSION,
             "ok": False,
-            "error": {"code": code, "message": message},
+            "error": error_payload,
         }, status, headers=headers, audit_result=code)
 
     def _success(self, data: object, status: HTTPStatus = HTTPStatus.OK,
@@ -205,13 +225,20 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
 
-    def _parse_request_target(self) -> ParseResult | None:
-        parsed = urlparse(self.path)
+    def _parse_request_target(self, *,
+                              allow_event_query: bool = False
+                              ) -> ParseResult | None:
+        try:
+            parsed = urlparse(self.path)
+        except ValueError:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "请求路径无效")
+            return None
+        self._query_pairs: list[tuple[str, str]] = []
         if parsed.query:
             try:
-                names = {name.lower() for name, _ in
-                         parse_qsl(parsed.query, keep_blank_values=True,
-                                   max_num_fields=64)}
+                self._query_pairs = parse_qsl(
+                    parsed.query, keep_blank_values=True, max_num_fields=64)
+                names = {name.lower() for name, _ in self._query_pairs}
             except ValueError:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_query",
                             "查询参数编码无效")
@@ -219,6 +246,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             if names & _QUERY_CREDENTIAL_NAMES:
                 self._error(HTTPStatus.BAD_REQUEST, "credential_in_query",
                             "认证信息不得放入URL查询参数")
+            elif allow_event_query and \
+                    parsed.path == f"/api/{API_VERSION}/events":
+                return parsed
             else:
                 self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
                             "当前只读API不接受查询参数")
@@ -228,6 +258,44 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "当前只读API不接受查询参数")
             return None
         return parsed
+
+    def _event_parameters(self) -> tuple[str | None, int] | None:
+        values: dict[str, str] = {}
+        for name, value in self._query_pairs:
+            if name not in {"cursor", "limit"} or name in values:
+                self._error(HTTPStatus.BAD_REQUEST, "event_query_invalid",
+                            "事件查询只允许各一个cursor和limit参数")
+                return None
+            values[name] = value
+        cursor = values.get("cursor")
+        if cursor == "":
+            self._error(HTTPStatus.BAD_REQUEST, "event_cursor_invalid",
+                        "事件游标不能为空")
+            return None
+        if cursor is not None:
+            try:
+                validate_event_cursor(cursor)
+            except InvalidEventCursor as error:
+                self._error(HTTPStatus.BAD_REQUEST, "event_cursor_invalid",
+                            str(error))
+                return None
+        limit_text = values.get("limit")
+        if limit_text is None:
+            limit = DEFAULT_EVENT_PAGE_LIMIT
+        elif len(limit_text) > 3 or not limit_text.isascii() or \
+                not limit_text.isdigit() or \
+                (len(limit_text) > 1 and limit_text.startswith("0")):
+            self._error(HTTPStatus.BAD_REQUEST, "event_limit_invalid",
+                        "事件页大小必须是规范十进制整数")
+            return None
+        else:
+            limit = int(limit_text)
+            if limit < 1 or limit > MAXIMUM_EVENT_PAGE_LIMIT:
+                self._error(
+                    HTTPStatus.BAD_REQUEST, "event_limit_invalid",
+                    f"事件页大小必须位于1～{MAXIMUM_EVENT_PAGE_LIMIT}")
+                return None
+        return cursor, limit
 
     def _path_parts(self, path: str) -> list[str] | None:
         try:
@@ -295,11 +363,13 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
-            return self.provider.read_snapshot()
+            read = self.provider.read_snapshot()
         except RuntimeProviderError as error:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "provider_unavailable", str(error))
             return None
+        self.event_log.observe(read.snapshot)
+        return read
 
     def _runtime_capabilities(self) -> dict:
         return self.provider.runtime_capabilities()
@@ -318,7 +388,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         }
 
     def _handle_read(self) -> None:
-        parsed = self._parse_request_target()
+        parsed = self._parse_request_target(allow_event_query=True)
         if parsed is None:
             return
         parts = self._path_parts(parsed.path)
@@ -348,10 +418,17 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "api_key" if self.authenticator is not None
                         else "disabled_loopback"),
                     "event_stream": False,
+                    "incremental_events": {
+                        "available": True,
+                        "schema_version": EVENT_SCHEMA_VERSION,
+                        "transport": "short_poll",
+                        "maximum_page_size": MAXIMUM_EVENT_PAGE_LIMIT,
+                        "capacity": self.event_log.capacity,
+                    },
                     **self._runtime_capabilities(),
                 },
                 "endpoints": ["health", "snapshot", "nodes", "resources",
-                              "alerts"],
+                              "alerts", "events"],
             })
             return
         if parts == ["api", API_VERSION, "health"]:
@@ -363,6 +440,45 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                "capabilities":
                                    self._runtime_capabilities()},
                               read=read)
+            return
+        if parts == ["api", API_VERSION, "events"]:
+            parameters = self._event_parameters()
+            if parameters is None:
+                return
+            cursor, limit = parameters
+            if cursor is not None:
+                try:
+                    self.event_log.validate_cursor_incarnation(cursor)
+                except ExpiredEventCursor as error:
+                    self._error(
+                        HTTPStatus.CONFLICT, "event_cursor_expired",
+                        str(error),
+                        details={"reset_cursor": error.reset_cursor})
+                    return
+            read = self._snapshot()
+            if read is None:
+                return
+            try:
+                page = self.event_log.read_page(cursor, limit)
+            except ExpiredEventCursor as error:
+                self._error(
+                    HTTPStatus.CONFLICT, "event_cursor_expired", str(error),
+                    details={"reset_cursor": error.reset_cursor})
+                return
+            except InvalidEventCursor as error:
+                self._error(HTTPStatus.BAD_REQUEST, "event_cursor_invalid",
+                            str(error))
+                return
+            except EventLogError as error:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "event_log_unavailable", str(error))
+                return
+            self._success({
+                "event_schema_version": EVENT_SCHEMA_VERSION,
+                "events": [event.to_dict() for event in page.events],
+                "next_cursor": page.next_cursor,
+                "has_more": page.has_more,
+            }, read=read)
             return
         if len(parts) < 3 or parts[:2] != ["api", API_VERSION]:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "API路径不存在")
@@ -464,7 +580,9 @@ def make_server(host: str, port: int,
                 maximum_workers: int = 32,
                 authenticator: ApiKeyAuthenticator | None = None,
                 audit_capacity: int = DEFAULT_AUDIT_CAPACITY,
-                audit_output: Callable[[dict], None] | None = None
+                audit_output: Callable[[dict], None] | None = None,
+                event_capacity: int = DEFAULT_EVENT_CAPACITY,
+                event_incarnation: str | None = None
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -472,6 +590,8 @@ def make_server(host: str, port: int,
         raise ValueError("--host必须是数字IP地址；不能使用主机名") from error
     if not loopback and authenticator is None:
         raise ValueError("非回环监听必须配置API密钥认证")
+    event_log = RuntimeEventLog(
+        event_capacity, incarnation=event_incarnation)
     server_type = IPv6ThreadingHTTPServer if ":" in host \
         else BoundedThreadingHTTPServer
     server = server_type((host, port), RuntimeRequestHandler,
@@ -480,6 +600,7 @@ def make_server(host: str, port: int,
     server.authenticator = authenticator  # type: ignore[attr-defined]
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
         capacity=audit_capacity, output=audit_output)
+    server.event_log = event_log  # type: ignore[attr-defined]
     return server
 
 
@@ -509,6 +630,9 @@ def main() -> int:
                         help="资源状态IPC并发上限，默认8路")
     parser.add_argument("--http-workers", type=int, default=32,
                         help="活动HTTP请求线程上限，默认32个")
+    parser.add_argument("--event-capacity", type=int,
+                        default=DEFAULT_EVENT_CAPACITY,
+                        help="进程内增量事件保留条数，默认1024条")
     parser.add_argument(
         "--clock-error-warning-ns", type=int, default=250_000,
         help="主机时钟模型估计误差上界告警阈值，默认250000纳秒")
@@ -535,6 +659,8 @@ def main() -> int:
         parser.error("--status-query-workers必须位于1～32")
     if args.http_workers < 1 or args.http_workers > 256:
         parser.error("--http-workers必须位于1～256")
+    if args.event_capacity < 1 or args.event_capacity > MAXIMUM_EVENT_CAPACITY:
+        parser.error(f"--event-capacity必须位于1～{MAXIMUM_EVENT_CAPACITY}")
     if args.clock_error_warning_ns < 1 or \
             args.clock_error_warning_ns > 1_000_000_000:
         parser.error("--clock-error-warning-ns必须位于1～1000000000")
@@ -579,7 +705,8 @@ def main() -> int:
         provider = MockSnapshotProvider()
     server = make_server(args.host, args.port, provider,
                          maximum_workers=args.http_workers,
-                         authenticator=authenticator)
+                         authenticator=authenticator,
+                         event_capacity=args.event_capacity)
     display_host = f"[{args.host}]" if ":" in args.host else args.host
     auth_mode = "API密钥认证" if authenticator is not None else "回环开发模式"
     print(f"RemoteBSP Runtime 只读API已启动：http://{display_host}:"

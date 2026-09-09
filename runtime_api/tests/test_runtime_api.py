@@ -182,6 +182,11 @@ class RuntimeHttpTest(unittest.TestCase):
         self.assertFalse(root["data"]["capabilities"]["authentication"])
         self.assertEqual(root["data"]["capabilities"]["authentication_mode"],
                          "disabled_loopback")
+        events = root["data"]["capabilities"]["incremental_events"]
+        self.assertTrue(events["available"])
+        self.assertEqual(events["schema_version"], 1)
+        self.assertEqual(events["transport"], "short_poll")
+        self.assertEqual(events["maximum_page_size"], 100)
         root_clock = root["data"]["capabilities"]["clock_sync_quality"]
         self.assertFalse(root_clock["available"])
         self.assertEqual(root_clock["estimate_kind"], "unavailable")
@@ -476,10 +481,12 @@ class RuntimeServerCliTest(unittest.TestCase):
                     "sys.argv", [
                         "runtime-api", "--host", "0.0.0.0",
                         "--api-key-file", str(path),
+                        "--event-capacity", "64",
                     ]):
                 self.assertEqual(runtime_server.main(), 0)
         authenticator = factory.call_args.kwargs["authenticator"]
         self.assertTrue(authenticator.verify("c" * 32))
+        self.assertEqual(factory.call_args.kwargs["event_capacity"], 64)
 
         with tempfile.TemporaryDirectory() as directory:
             invalid = Path(directory) / "invalid.json"
@@ -487,6 +494,13 @@ class RuntimeServerCliTest(unittest.TestCase):
             with patch("sys.argv", [
                     "runtime-api", "--api-key-file", str(invalid)]), patch(
                     "sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+
+        for value in ("0", "4097"):
+            with self.subTest(event_capacity=value), patch(
+                    "sys.argv", ["runtime-api", "--event-capacity", value]), \
+                    patch("sys.stderr"):
                 with self.assertRaises(SystemExit):
                     runtime_server.main()
 

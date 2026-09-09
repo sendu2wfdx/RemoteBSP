@@ -70,6 +70,7 @@ python3 -m runtime_api.server \
   --ipc-timeout-ms 2000 \
   --snapshot-cache-ms 250 \
   --status-query-workers 8 \
+  --event-capacity 1024 \
   --clock-error-warning-ns 250000 \
   --clock-sample-age-warning-ms 1000
 ```
@@ -204,7 +205,8 @@ POST、PUT、PATCH 或 DELETE 绕过只读边界。
 ```
 
 `method_category` 只会是 `read`、`write`、`options` 或 `other`；`path_category` 只会是
-`root`、`health`、`snapshot`、`nodes`、`resources`、`alerts` 或 `unknown`。未认证请求的
+`root`、`health`、`snapshot`、`nodes`、`resources`、`alerts`、`events` 或 `unknown`。
+未认证请求的
 `key_id` 为 `null`。`result` 使用稳定 API 错误码，成功读取为 `allowed`，公开存活探针为
 `public_probe`，预检为 `options`。记录不会保存 API 密钥、Authorization、X-API-Key、
 原始路径、节点 ID、查询参数、请求体或响应体；即使攻击者把秘密放入 URL，也只会留下
@@ -222,6 +224,76 @@ POST、PUT、PATCH 或 DELETE 绕过只读边界。
 HTTP 服务关闭时会通知输出线程停止，并最多等待 1 秒排空；输出端永久阻塞时关闭仍有界，
 守护线程不会阻止进程退出。输出回调不应执行递归审计，也必须自行负责可靠落盘、文件轮换
 和完整性保护。默认环形缓冲不是持久审计存储；跨进程可靠交付和集中采集仍是后续部署边界。
+
+## 增量事件短轮询
+
+`GET /api/v1/events` 提供 `RuntimeEvent v1` 的立即返回式短轮询，不建立 WebSocket、SSE
+或服务端等待线程。它与其他只读端点调用同一个 `RuntimeProvider.read_snapshot()`；一次
+成功的 RuntimeSnapshot 会在进程内差分为节点、资源、告警和时钟质量事件。Provider
+缓存命中仍由既有缓存策略合并，读取失败返回原有 `provider_unavailable`，不会推进事件
+状态或游标；恢复后的首个成功快照再与失败前状态比较。
+
+首次调用不带 `cursor` 时，服务先观察当前快照，然后返回空 `events` 和当前
+`next_cursor`，作为增量基线。客户端应先取得该基线游标，再读取完整 `/snapshot`，此后
+携带游标短轮询；基线与完整快照之间的变化可能被重复应用，但不会因该顺序漏掉，客户端
+应按实体 ID 幂等更新。事件不能替代完整快照，也不能作为控制命令。
+
+```http
+GET /api/v1/events?cursor=e1:0123456789abcdef0123456789abcdef:42&limit=50
+X-API-Key: <api-key>
+```
+
+成功数据为：
+
+```json
+{
+  "event_schema_version": 1,
+  "events": [{
+    "event_schema_version": 1,
+    "sequence": 43,
+    "cursor": "e1:0123456789abcdef0123456789abcdef:43",
+    "snapshot_id": "snapshot-42",
+    "captured_at_ms": 42000,
+    "entity_type": "resource",
+    "change": "updated",
+    "node_id": "toolboard-1",
+    "resource_id": "gpio-0",
+    "alert_id": null,
+    "payload": {"resource_id": "gpio-0"},
+    "payload_omitted": false
+  }],
+  "next_cursor": "e1:0123456789abcdef0123456789abcdef:43",
+  "has_more": false
+}
+```
+
+游标是严格的 `e1:<128位小写十六进制日志incarnation>:<十进制序号>`，不能猜测为
+时间戳。incarnation 在 Runtime 进程创建事件日志时随机生成；测试或嵌入调用可以显式注入，
+但线上不得复用旧进程的值。`limit` 默认 50，只允许规范十进制 1～100；参数重复、未知
+参数、未知版本、负数、前导零、超长或领先服务端的游标均返回稳定 400 错误。日志默认
+保留 1024 条，可由 `--event-capacity` 配置为 1～4096 条。游标早于保留窗口或 incarnation
+与当前进程不匹配时返回 HTTP 409、`event_cursor_expired`，并在
+`error.details.reset_cursor` 提供当前游标；客户端必须重新读取完整快照后才能使用重置
+游标，不能把日志轮换或进程重启造成的缺口伪装成连续事件。incarnation 使用 128 位系统
+随机数防止跨进程误接受，但它不是持久计数器；其唯一性保证仍是概率性的。
+
+同一快照和内容相同的后续快照不会重复产生事件。单次差分按 `node`、`resource`、
+`alert`、`clock_quality` 固定类别顺序，再按稳定实体 ID 排序；并发观察由同一锁串行分配
+递增序号。节点事件只比较身份、显示信息、在线状态和链路，不因 `last_seen_ms` 或队列
+水位产生事件风暴。时钟质量比较忽略只随读取时间增长的 `sample_age_ms`，但保留模型代次、
+状态、误差/漂移估计和最后样本等真实模型变化；样本跨越陈旧阈值仍会通过既有告警变化
+显式呈现。`captured_at_ms` 更旧的迟到快照不会逆向覆盖状态；相同采集时间若对应不同
+`snapshot_id` 或不同规范事件内容，日志无法建立可靠全序，会 fail-closed 返回
+`event_log_unavailable`。下一份采集时间更大的合法快照可恢复日志。已经被更新状态判定为
+过旧的异常快照也不会污染当前健康日志。
+
+日志最多跟踪 4096 个实体和 2 MiB 规范状态。单事件 payload 最大 4096 字节，超出时
+仍保留身份、变化类别和顺序，但置 `payload=null,payload_omitted=true`，提示客户端读取
+完整快照。每页最多 100 项，因此响应大小和序列化工作有固定上限。慢客户端只持有一次
+有限响应的请求线程；服务端不等待下一事件，也不允许通过长轮询持续占用工作线程。
+所有事件读取都要求 `runtime.read`，公开健康探针边界不变，且没有任何事件写入或确认 API。
+事件只表示 Runtime 两次成功快照之间观察到的状态差异；在没有快照读取的间隔内发生并
+恢复的瞬态变化可能不可见，不能把该软件日志当作 MCU 主动推送、总线抓包或硬件实测证据。
 
 ## remote-cli 结构化只读契约
 
@@ -331,11 +403,12 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 | `GET /api/v1/nodes/{node_id}/alerts` | 单节点告警 |
 | `GET /api/v1/resources` | 全部资源，并补充所属 `node_id` |
 | `GET /api/v1/alerts` | 全部告警 |
+| `GET /api/v1/events` | 版本化增量事件游标分页；只做立即返回短轮询 |
 
 `HEAD` 与对应 `GET` 返回相同状态和头部但没有响应体。认证通过后的任何写方法返回
 HTTP 405；`OPTIONS` 返回 HTTP 204 和 `Allow: GET, HEAD, OPTIONS`；未知版本或路径
-返回 404。本轮不接受查询参数，避免形成未定义的过滤/分页语义，认证信息尤其不得放入
-查询字符串。
+返回 404。除 `/events` 的封闭 `cursor`、`limit` 外不接受查询参数，认证信息在所有路径
+都不得放入查询字符串。
 
 ## 快照 JSON v1
 
