@@ -9,14 +9,14 @@ GPIO、UART、运动轴、PWM、WS2812 等接线关系。
 ```mermaid
 flowchart LR
     A["RemoteBSP Studio 工程 JSON"] --> B["板卡与 MCU 能力校验"]
-    B --> C["生成 Kconfig .config"]
-    C --> D["固件构建"]
+    B --> C["生成 Kconfig .config + 只读静态资源表"]
+    C --> D["固件构建并校验板型"]
     D --> E["ELF / BIN / HEX / MAP"]
     E --> F["ST-Link / CAN Katapult / USB Katapult"]
     F --> G["重启后使用固定资源表"]
 ```
 
-Studio 工程是配置真相；Kconfig 是生成器和构建系统之间的稳定接口。
+Studio 工程是配置真相；Kconfig 与生成的 C 只读表是生成器和构建系统之间的稳定接口。
 `menuconfig` 仍保留给开发、CI、故障排查和没有 GUI 的场合，但普通用户不需要直接
 编辑它。
 
@@ -34,6 +34,16 @@ Studio 工程是配置真相；Kconfig 是生成器和构建系统之间的稳�
 
 未启用模块不得进入最终 ELF，也不得占用静态 RAM、定时器、DMA 或中断资源。
 资源映射编译进 APP，启动时建立一次；修改映射必须重新生成、构建、烧录并重启。
+
+当前已经打通第一条实体固件静态表纵切：Studio 从同一份 `pin_catalog.json` 和
+通过统一校验的工程生成 `remotebsp_static_resources.h`。表内只包含普通 GPIO 的
+编码引脚与启动安全模式；三块 STM32 固件在启动配置和运行时 GPIO 白名单检查中
+直接消费该表。表携带工程 SHA-256 与板型编号，板型与 `.config` 不一致会在编译期
+失败；表文件和组合输入哈希也进入构建归档，从而能发现工程、配置与静态表漂移。
+
+这一步没有把 UART、运动、PWM、WS2812 或 I2C/SPI 改成新表格式：它们仍走既有
+Kconfig 路径。特别是 I2C/SPI 实体端点仍由 Studio 拒绝构建，不因公共 Core/HAL
+骨架存在而宣称板卡 AF、DMA、上拉或片选已经验证。
 
 ## 固定功能引脚与冲突检查
 
@@ -110,6 +120,8 @@ WS2812/定时位流端点，并检查单轴及整板步频预算。后续扩展�
 - 后端 `/api/project/build`，固定命令与目录、32线程构建、产物归档和白名单下载；
 - 归档Studio工程、`.config`、ELF/BIN/HEX/MAP、日志、工具链/Git信息和SHA-256，
   并从链接器输出提取结构化Flash/RAM占用；
+- 从统一能力目录和工程生成实体固件直接消费的普通 GPIO 只读表，归档其独立哈希
+  与固件组合输入哈希，并在编译期拒绝串板；
 - 生成可下载的中文接线表、JSON资源占用摘要、稳定排序资源清单及`SHA256SUMS`，
   接线资料和固件配置复用同一套后端静态校验；
 - 提供两份版本化工程的只读比较接口与图形入口，区分 schema、板卡、资源增删、
@@ -142,6 +154,7 @@ WS2812/定时位流端点，并检查单轴及整板步频预算。后续扩展�
 当前一次构建保存：
 
 - Studio 工程 JSON 与最终 `.config`；
+- Studio 生成的 `remotebsp_static_resources.h` 及其 SHA-256；
 - `.elf`、`.bin`、`.hex`、`.map`；
 - MCU、板卡、Git 提交、配置哈希和工具链版本；
 - Flash/RAM 占用与构建日志；

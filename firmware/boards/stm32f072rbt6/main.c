@@ -13,6 +13,14 @@
 #include "remotebsp_embedded/soft_half_duplex_uart.h"
 #endif
 #include "remotebsp_embedded/startup_gpio.h"
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+#include "remotebsp_static_resources.h"
+_Static_assert(RBSP_STUDIO_RESOURCE_SCHEMA_VERSION ==
+                   RBSP_STARTUP_GPIO_TABLE_SCHEMA_VERSION,
+               "Studio静态资源表schema版本不受固件支持");
+_Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
+               "Studio静态资源表与固件板型不匹配");
+#endif
 
 #include <string.h>
 
@@ -719,6 +727,11 @@ static bool board_startup_gpio_apply(
 }
 
 static void startup_gpio_configure(void) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_startup_gpio_apply_table(
+            rbsp_studio_gpio_resources, RBSP_STUDIO_GPIO_RESOURCE_COUNT,
+            board_startup_gpio_apply)) {
+#else
     if (!rbsp_startup_gpio_apply(
             CONFIG_STARTUP_GPIO_OUTPUT_LOW,
             CONFIG_STARTUP_GPIO_OUTPUT_HIGH,
@@ -726,6 +739,7 @@ static void startup_gpio_configure(void) {
             CONFIG_STARTUP_GPIO_INPUT_PULLUP,
             CONFIG_STARTUP_GPIO_INPUT_PULLDOWN,
             board_startup_gpio_apply)) {
+#endif
         fatal_error();
     }
 }
@@ -770,12 +784,18 @@ static bool board_gpio_configure_pull(uint16_t encoded_pin,
 static bool board_gpio_resource_allowed(
     uint16_t pin, rbsp_gpio_direction_t direction) {
     rbsp_startup_gpio_mode_t mode;
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_startup_gpio_find_table(
+            rbsp_studio_gpio_resources, RBSP_STUDIO_GPIO_RESOURCE_COUNT,
+            pin, &mode)) {
+#else
     if (!rbsp_startup_gpio_find(
             CONFIG_STARTUP_GPIO_OUTPUT_LOW,
             CONFIG_STARTUP_GPIO_OUTPUT_HIGH,
             CONFIG_STARTUP_GPIO_INPUT_FLOATING,
             CONFIG_STARTUP_GPIO_INPUT_PULLUP,
             CONFIG_STARTUP_GPIO_INPUT_PULLDOWN, pin, &mode)) {
+#endif
         return false;
     }
     return direction == RBSP_GPIO_OUTPUT

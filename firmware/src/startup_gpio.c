@@ -128,3 +128,52 @@ bool rbsp_startup_gpio_find(
     }
     return found;
 }
+
+static bool validate_table(const rbsp_startup_gpio_entry_t* entries,
+                           uint16_t count) {
+    if (count > 128U || (count != 0U && entries == NULL)) {
+        return false;
+    }
+    bool used[128] = {false};
+    for (uint16_t index = 0U; index < count; ++index) {
+        const uint16_t pin = entries[index].encoded_pin;
+        const rbsp_startup_gpio_mode_t mode = entries[index].mode;
+        if (pin >= 128U || (unsigned int)mode >
+                (unsigned int)RBSP_STARTUP_GPIO_INPUT_PULLDOWN ||
+                used[pin]) {
+            return false;
+        }
+        used[pin] = true;
+    }
+    return true;
+}
+
+bool rbsp_startup_gpio_apply_table(
+    const rbsp_startup_gpio_entry_t* entries, uint16_t count,
+    rbsp_startup_gpio_apply_fn apply) {
+    if (apply == NULL || !validate_table(entries, count)) {
+        return false;
+    }
+    for (uint16_t index = 0U; index < count; ++index) {
+        if (!apply(entries[index].encoded_pin, entries[index].mode)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool rbsp_startup_gpio_find_table(
+    const rbsp_startup_gpio_entry_t* entries, uint16_t count,
+    uint16_t encoded_pin, rbsp_startup_gpio_mode_t* mode) {
+    if (mode == NULL || encoded_pin >= 128U ||
+            !validate_table(entries, count)) {
+        return false;
+    }
+    for (uint16_t index = 0U; index < count; ++index) {
+        if (entries[index].encoded_pin == encoded_pin) {
+            *mode = entries[index].mode;
+            return true;
+        }
+    }
+    return false;
+}

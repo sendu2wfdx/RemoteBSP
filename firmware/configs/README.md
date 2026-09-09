@@ -12,9 +12,8 @@
 UART、PWM和WS2812接线由RemoteBSP Studio工程保存为资源清单，默认编译进板卡
 专用固件；不要为每种产品接线长期增加手写defconfig组合。
 
-启用`CONFIG_REMOTEBSP_RUNTIME_CONFIG`时，构建系统会调用
-`scripts/generate_factory_manifest.py`，把解析后的UART、运动槽、共享EN、TMC绑定、
-PWM和定时位流默认值生成代数1的只读RBSM C数组。GPIO配置只有容量、没有静态引脚
-映射，因此不会被生成器猜测；普通GPIO应由RemoteBSP Studio工程显式定义。当前
-生成器仍从Kconfig兼容槽位产生出厂RBSM；后续由Studio工程直接生成完整只读RBSM
-和对应`.config`。启用Flash A/B覆盖时，同一出厂RBSM也是两槽无效时的安全回退基线。
+Studio 固件构建会同时生成 `.config` 与 `remotebsp_static_resources.h`。当前 C 表先
+覆盖普通 GPIO 的编码引脚和启动安全模式，固件启动配置与运行时 GPIO 白名单直接
+消费它；表内板型与 `.config` 不一致时编译失败。UART、运动槽、PWM、WS2812仍由
+Kconfig 编译期映射提供，不存在运行时资源覆盖路径。I2C/SPI 实体端点尚未验收，
+Studio 仍拒绝为它们生成实体固件，不能用数字孪生目录推断真实 AF/DMA/电气能力。

@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import io
 import json
 import sys
@@ -8,6 +9,7 @@ import threading
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
@@ -19,6 +21,7 @@ from firmware_builder import (  # noqa: E402
     BuildArtifact,
     FirmwareBuildError,
     FirmwareBuildResult,
+    _vendor_dependency_identity,
     build_firmware_project,
     resolve_artifact,
 )
@@ -64,6 +67,14 @@ class GuiTest(unittest.TestCase):
                               result.config)
                 self.assertIn("CONFIG_REMOTEBSP_STATIC_GPIO_MAP=y",
                               result.config)
+                self.assertIn(
+                    "#define RBSP_STUDIO_RESOURCE_BOARD_TYPE",
+                    result.static_resource_header)
+                self.assertIn(
+                    f'"{result.project_sha256}"',
+                    result.static_resource_header)
+                self.assertRegex(result.static_resource_sha256,
+                                 r"^[0-9a-f]{64}$")
                 if board["id"] == "weact-bluepill-plus-v1":
                     self.assertIn(
                         "CONFIG_HARDWARE_UART_RESOURCE_COUNT=3",
@@ -207,6 +218,49 @@ class GuiTest(unittest.TestCase):
         with self.assertRaisesRegex(ProjectConfigError, "重复使用"):
             generate_project_config(project, catalog)
 
+    def test_static_gpio_table_is_deterministic_and_detects_drift(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        board = next(item for item in catalog["boards"]
+                     if item["id"] == "weact-bluepill-plus-v1")
+        project = self._default_project(board)
+        project["motion"]["axes"] = []
+        project["uart"]["ports"] = []
+        project["gpio"]["resources"] = [{
+            "name": "input", "pin": "PA0", "direction": "input",
+            "pull": "down", "active_low": False, "safe_level": None,
+            "debounce_ms": 10,
+        }]
+        first = generate_project_config(project, catalog)
+        reordered = json.loads(json.dumps(project, sort_keys=True))
+        second = generate_project_config(reordered, catalog)
+        self.assertEqual(first.static_resource_header,
+                         second.static_resource_header)
+        self.assertEqual(first.static_resource_sha256,
+                         second.static_resource_sha256)
+        self.assertIn("{0U, RBSP_STARTUP_GPIO_INPUT_PULLDOWN}",
+                      first.static_resource_header)
+
+        changed = copy.deepcopy(project)
+        changed["gpio"]["resources"][0]["debounce_ms"] = 11
+        third = generate_project_config(changed, catalog)
+        self.assertNotEqual(first.static_resource_sha256,
+                            third.static_resource_sha256)
+
+        broken = copy.deepcopy(project)
+        broken["gpio"]["resources"][0]["pin"] = "PA13"
+        with self.assertRaisesRegex(ProjectConfigError, "保留引脚"):
+            generate_project_config(broken, catalog)
+
+        broken = copy.deepcopy(project)
+        broken["gpio"]["resources"][0]["safe_level"] = False
+        with self.assertRaisesRegex(ProjectConfigError, "不能设置safe_level"):
+            generate_project_config(broken, catalog)
+
+        broken = copy.deepcopy(project)
+        broken["gpio"]["resources"][0]["debounce_ms"] = True
+        with self.assertRaisesRegex(ProjectConfigError, "debounce_ms"):
+            generate_project_config(broken, catalog)
+
     def test_firmware_builder_archives_bounded_artifacts(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
         board = catalog["boards"][0]
@@ -217,6 +271,14 @@ class GuiTest(unittest.TestCase):
 
             def fake_runner(command, timeout):
                 self.assertEqual(timeout, 12)
+                if "--build" not in command:
+                    resource_option = next(
+                        item for item in command
+                        if item.startswith("-DRBSP_STATIC_RESOURCE_TABLE="))
+                    resource_path = Path(resource_option.split("=", 1)[1])
+                    self.assertTrue(resource_path.is_file())
+                    self.assertIn("RBSP_STUDIO_GPIO_RESOURCE_COUNT",
+                                  resource_path.read_text(encoding="utf-8"))
                 if "--build" in command:
                     build_dir = Path(command[2])
                     for suffix in ("elf", "bin", "hex", "map"):
@@ -227,10 +289,19 @@ class GuiTest(unittest.TestCase):
                         "RAM: 1024 B 20 KB 5.00%\n"
                         "FLASH: 4096 B 126 KB 3.17%\n")
 
-            result = build_firmware_project(
-                self._default_project(board), catalog, jobs=32,
-                build_root=build_root, output_root=output_root,
-                runner=fake_runner, timeout=12)
+            with patch("firmware_builder._firmware_source_sha256",
+                       side_effect=["e" * 64, "e" * 64,
+                                    "f" * 64, "f" * 64]):
+                result = build_firmware_project(
+                    self._default_project(board), catalog, jobs=32,
+                    build_root=build_root, output_root=output_root,
+                    runner=fake_runner, timeout=12)
+                other_source = build_firmware_project(
+                    self._default_project(board), catalog, jobs=32,
+                    build_root=root / "other-build",
+                    output_root=root / "other-out",
+                    runner=fake_runner, timeout=12)
+            self.assertNotEqual(result.build_id, other_source.build_id)
             self.assertRegex(result.build_id,
                              r"^mellow-fly-d5-v1-[0-9a-f]{16}$")
             self.assertEqual(result.record["parallel_jobs"], 32)
@@ -239,6 +310,10 @@ class GuiTest(unittest.TestCase):
             self.assertEqual(result.record["project_summary"][
                 "resource_count"], result.record["resource_count"])
             self.assertRegex(result.record["project_sha256"],
+                             r"^[0-9a-f]{64}$")
+            self.assertRegex(result.record["static_resource_sha256"],
+                             r"^[0-9a-f]{64}$")
+            self.assertRegex(result.record["firmware_input_sha256"],
                              r"^[0-9a-f]{64}$")
             self.assertEqual(result.record["project_sha256"],
                              next(item.sha256 for item in result.artifacts
@@ -251,15 +326,51 @@ class GuiTest(unittest.TestCase):
                 126 * 1024)
             self.assertEqual(
                 {item.filename for item in result.artifacts},
-                {"studio-project.json", "firmware.config", "build.log", "firmware.elf",
-                 "firmware.bin", "firmware.hex", "firmware.map",
-                 "build-record.json"})
+                {"studio-project.json", "firmware.config",
+                 "remotebsp_static_resources.h", "build.log",
+                 "firmware.elf", "firmware.bin", "firmware.hex",
+                 "firmware.map", "build-record.json"})
             artifact = resolve_artifact(
                 result.build_id, "firmware.bin", output_root)
             self.assertEqual(artifact.read_bytes(), b"test-bin")
+            artifact.write_bytes(b"tampered")
+            with self.assertRaisesRegex(FirmwareBuildError, "SHA-256"):
+                resolve_artifact(result.build_id, "firmware.bin",
+                                 output_root)
+            artifact.unlink()
+            outside = root / "outside.bin"
+            outside.write_bytes(b"test-bin")
+            artifact.symlink_to(outside)
+            with self.assertRaises(FirmwareBuildError):
+                resolve_artifact(result.build_id, "firmware.bin",
+                                 output_root)
             with self.assertRaises(FirmwareBuildError):
                 resolve_artifact(result.build_id, "../firmware.bin",
                                  output_root)
+
+    def test_vendor_dependency_identity_captures_index_and_untracked_content(self):
+        revision = SimpleNamespace(stdout=b"a" * 40, returncode=0)
+        clean = SimpleNamespace(stdout=b"", returncode=0)
+        with tempfile.TemporaryDirectory() as directory:
+            dependency = Path(directory) / "cmsis-core"
+            source = dependency / "Core" / "Include" / "new.h"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"#define VALUE 1\n")
+            with patch("firmware_builder.subprocess.run",
+                       side_effect=[revision, clean, clean, clean]):
+                base = _vendor_dependency_identity(dependency)
+            staged = SimpleNamespace(stdout=b":100644 100644 a b M\0",
+                                     returncode=0)
+            with patch("firmware_builder.subprocess.run",
+                       side_effect=[revision, staged, clean, clean]):
+                changed_index = _vendor_dependency_identity(dependency)
+            untracked = SimpleNamespace(
+                stdout=b"Core/Include/new.h\0", returncode=0)
+            with patch("firmware_builder.subprocess.run",
+                       side_effect=[revision, clean, untracked, clean]):
+                changed_worktree = _vendor_dependency_identity(dependency)
+            self.assertNotEqual(base, changed_index)
+            self.assertNotEqual(base, changed_worktree)
 
     def test_http_apis_and_mock_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -277,7 +388,11 @@ class GuiTest(unittest.TestCase):
             artifact_dir.mkdir(parents=True)
             (artifact_dir / "firmware.bin").write_bytes(b"test")
             (artifact_dir / "build-record.json").write_text(json.dumps({
-                "artifacts": [{"filename": "firmware.bin"}]
+                "build_id": "test-board-0123456789abcdef",
+                "artifacts": [{
+                    "filename": "firmware.bin", "size": 4,
+                    "sha256": hashlib.sha256(b"test").hexdigest(),
+                }]
             }), encoding="utf-8")
             server = make_server(
                 "127.0.0.1", 0, state_path,

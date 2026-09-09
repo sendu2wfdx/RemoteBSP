@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define RBSP_STARTUP_GPIO_TABLE_SCHEMA_VERSION 1U
+
 typedef enum {
     RBSP_STARTUP_GPIO_OUTPUT_LOW = 0,
     RBSP_STARTUP_GPIO_OUTPUT_HIGH = 1,
@@ -13,6 +15,11 @@ typedef enum {
 
 typedef bool (*rbsp_startup_gpio_apply_fn)(
     uint16_t encoded_pin, rbsp_startup_gpio_mode_t mode);
+
+typedef struct {
+    uint16_t encoded_pin;
+    rbsp_startup_gpio_mode_t mode;
+} rbsp_startup_gpio_entry_t;
 
 /*
  * 解析menuconfig中的PA0,PB2形式，并保证五个列表之间不存在重复引脚。
@@ -29,3 +36,12 @@ bool rbsp_startup_gpio_find(
     const char* input_floating, const char* input_pullup,
     const char* input_pulldown, uint16_t encoded_pin,
     rbsp_startup_gpio_mode_t* mode);
+
+/* 消费 Studio 生成的只读静态表；重复引脚、越界模式和空指针均拒绝。 */
+bool rbsp_startup_gpio_apply_table(
+    const rbsp_startup_gpio_entry_t* entries, uint16_t count,
+    rbsp_startup_gpio_apply_fn apply);
+
+bool rbsp_startup_gpio_find_table(
+    const rbsp_startup_gpio_entry_t* entries, uint16_t count,
+    uint16_t encoded_pin, rbsp_startup_gpio_mode_t* mode);

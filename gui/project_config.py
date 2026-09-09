@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import threading
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,8 @@ class ProjectConfigError(ValueError):
 @dataclass(frozen=True)
 class ProjectConfigResult:
     config: str
+    static_resource_header: str
+    static_resource_sha256: str
     board_id: str
     firmware_target: str
     resource_count: int
@@ -35,6 +38,9 @@ class ProjectConfigResult:
     original_schema_version: int
     migrations: tuple[str, ...]
     summary: dict
+
+
+STATIC_RESOURCE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -346,6 +352,18 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
             raise ProjectConfigError(f"{owner}方向不符合板级电路约束")
         if item.get("pull", "none") not in interface.get("allowed_pulls", []):
             raise ProjectConfigError(f"{owner}上下拉不符合板级电路约束")
+        if not isinstance(item.get("active_low", False), bool):
+            raise ProjectConfigError(f"{owner}.active_low必须是布尔值")
+        debounce_ms = item.get("debounce_ms", 0)
+        if isinstance(debounce_ms, bool) or not isinstance(debounce_ms, int) \
+                or debounce_ms < 0 or debounce_ms > 60_000:
+            raise ProjectConfigError(f"{owner}.debounce_ms必须位于0～60000")
+        safe_level = item.get("safe_level")
+        if item.get("direction") == "output":
+            if not isinstance(safe_level, bool):
+                raise ProjectConfigError(f"{owner}.safe_level必须是布尔值")
+        elif safe_level is not None:
+            raise ProjectConfigError(f"{owner}输入资源不能设置safe_level")
 
     uart_catalog = board.get("uart", {}).get("endpoints", [])
     for index, item in enumerate(uart):
@@ -423,6 +441,58 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
 
     return board, {"gpio": gpio, "uart": uart, "axes": axes,
                    "pwm": pwm, "strips": strips, **bus}
+
+
+def _generate_static_resource_header(board: dict, resources: dict,
+                                     project_sha256: str) -> str:
+    """生成实体固件直接消费的只读 GPIO 表。
+
+    这里只编码已由统一板卡能力目录校验过的普通 GPIO。UART、运动、波形和
+    I2C/SPI 仍沿用现有 Kconfig 路径，避免把未验证的实体外设能力扩入本切片。
+    """
+    mode_names = {
+        ("output", False): "RBSP_STARTUP_GPIO_OUTPUT_LOW",
+        ("output", True): "RBSP_STARTUP_GPIO_OUTPUT_HIGH",
+        ("input", "none"): "RBSP_STARTUP_GPIO_INPUT_FLOATING",
+        ("input", "up"): "RBSP_STARTUP_GPIO_INPUT_PULLUP",
+        ("input", "down"): "RBSP_STARTUP_GPIO_INPUT_PULLDOWN",
+    }
+    entries: list[tuple[int, str, str]] = []
+    for item in resources["gpio"]:
+        pin = _pin_symbol(item["pin"])
+        encoded = (ord(pin[1]) - ord("A")) * 16 + int(pin[2:])
+        if item["direction"] == "output":
+            key = ("output", item.get("safe_level") is True)
+        else:
+            key = ("input", item.get("pull", "none"))
+        entries.append((encoded, pin, mode_names[key]))
+    entries.sort(key=lambda value: value[0])
+
+    board_type = board["board_type"]
+    if isinstance(board_type, str):
+        board_type = int(board_type, 0)
+    storage_count = max(1, len(entries))
+    lines = [
+        "/* RemoteBSP Studio生成；输入已经过统一板卡能力目录校验。 */",
+        "#pragma once",
+        "",
+        "#include <stdint.h>",
+        '#include "remotebsp_embedded/startup_gpio.h"',
+        "",
+        f"#define RBSP_STUDIO_RESOURCE_SCHEMA_VERSION {STATIC_RESOURCE_SCHEMA_VERSION}U",
+        f"#define RBSP_STUDIO_RESOURCE_BOARD_TYPE UINT32_C(0x{board_type:08X})",
+        f'#define RBSP_STUDIO_RESOURCE_PROJECT_SHA256 "{project_sha256}"',
+        f"#define RBSP_STUDIO_GPIO_RESOURCE_COUNT {len(entries)}U",
+        f"static const rbsp_startup_gpio_entry_t rbsp_studio_gpio_resources[{storage_count}] = {{",
+    ]
+    if entries:
+        for encoded, pin, mode in entries:
+            lines.append(f"    {{{encoded}U, {mode}}}, /* {pin} */")
+    else:
+        lines.append(
+            "    {0U, RBSP_STARTUP_GPIO_INPUT_FLOATING}, /* 空表占位，不计入数量 */")
+    lines.extend(["};", ""])
+    return "\n".join(lines)
 
 
 def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
@@ -567,9 +637,14 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
         if f"CONFIG_{name}=y" not in config:
             raise ProjectConfigError(
                 f"{name}被Kconfig依赖拒绝，通常表示引脚或外设资源冲突")
+    static_resource_header = _generate_static_resource_header(
+        board, resources, prepared.sha256)
+    static_resource_sha256 = hashlib.sha256(
+        static_resource_header.encode("utf-8")).hexdigest()
     count = sum(len(value) for value in resources.values())
     return ProjectConfigResult(
-        config, board["id"], target, count, prepared.sha256,
+        config, static_resource_header, static_resource_sha256,
+        board["id"], target, count, prepared.sha256,
         prepared.schema_version, prepared.original_schema_version,
         prepared.migrations, prepared.summary)
 

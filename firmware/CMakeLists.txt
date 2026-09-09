@@ -6,10 +6,20 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(RBSP_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/.config" CACHE FILEPATH
     "Kconfig 配置文件")
+set(RBSP_STATIC_RESOURCE_TABLE "" CACHE FILEPATH
+    "Studio生成的实体固件静态资源表；为空时兼容Kconfig静态GPIO列表")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(GENERATED_CONFIG "${GENERATED_DIR}/remotebsp_config.h")
+if(RBSP_STATIC_RESOURCE_TABLE)
+    if(NOT EXISTS "${RBSP_STATIC_RESOURCE_TABLE}")
+        message(FATAL_ERROR "Studio静态资源表不存在：${RBSP_STATIC_RESOURCE_TABLE}")
+    endif()
+    configure_file("${RBSP_STATIC_RESOURCE_TABLE}"
+                   "${GENERATED_DIR}/remotebsp_static_resources.h" COPYONLY)
+    set(RBSP_STUDIO_RESOURCE_DEFINITION RBSP_STUDIO_STATIC_RESOURCE_TABLE=1)
+endif()
 
 file(STRINGS "${RBSP_CONFIG}" RBSP_MOTION_LINES
      REGEX "^CONFIG_REMOTEBSP_MOTION=y$")
@@ -118,6 +128,10 @@ function(rbsp_common_target target cpu linker_script)
         -ffunction-sections -fdata-sections
         -Wall -Wextra -Wpedantic
     )
+    if(RBSP_STUDIO_RESOURCE_DEFINITION)
+        target_compile_definitions(${target} PRIVATE
+            ${RBSP_STUDIO_RESOURCE_DEFINITION})
+    endif()
     target_link_options(${target} PRIVATE
         -mcpu=${cpu} -mthumb
         -T${linker_script}
