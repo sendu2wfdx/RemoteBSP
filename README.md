@@ -63,9 +63,10 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
 | 总线与高速流 | I2C/SPI 原子事务、设备级 NACK/超时/忙/故障结果、主机 API 和 Mock 已实现；Stream 合同、打开、数据、信用和状态编解码已实现，实体 BSP 与流会话待实现 |
-| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；跨板事务服务已通过 RequestManager 驱动两块 Mock Remote Core 完成 PREPARE/COMMIT，失败、超时、重启和取消会全组 ABORT；守护进程主循环与实体固件尚未接入 |
+| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；跨板事务已接入 `toolbusd` 主循环、版本化 IPC、C++ API 与 CLI，并通过双节点 Mock USB 进程级 PREPARE/COMMIT/显式取消闭环；实体固件尚未接入 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 生成、32线程构建和产物归档；可确定性导出差异 JSON/中文报告、接线资料包及生产记录，严格区分设计、软件构建、烧录和硬件实测状态。自动烧录/回读尚未实现 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 生成、32线程构建和产物归档；可确定性导出差异 JSON/中文报告、接线资料包、生产记录及带清单/校验和的生产批次包，并按工程哈希、构建 ID、板卡和记录哈希追溯。自动烧录/回读和持久化历史检索尚未实现 |
+| 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立，按确定性、资源模型、跨节点同步、故障隔离、可观测性、配置构建、升级恢复、Runtime/API、安全边界和硬件证据分层记录；当前整体对比结论明确为 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
@@ -96,9 +97,11 @@ DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 10
 最终超时会清理同步状态。跨板运动事务已增加版本化 PREPARE/READY/COMMIT/ABORT
 线格式、冻结时钟模型与节点 tick 的主机协调器，以及幂等参与者 Mock。参与者现已
 接入 Mock Remote Core 和实际 Mock 运动队列，覆盖租约与普通停止的安全失效；独立
-运动组服务已把协调器接入 RequestManager，并以两块 Mock Remote Core 验证全员
-READY 后才 COMMIT，以及失败、超时、重启和取消时全组 ABORT。该服务尚未接入
-`toolbusd` 主循环，STM32 也未实现，不能作为跨板实体同步完成的结论。
+运动组服务已把协调器接入 RequestManager、`toolbusd` 主循环、版本化本地 IPC、
+`libremotebsp` 和 CLI。双节点 Mock USB 进程级回归验证了全员 READY 后才 COMMIT、
+短连接提交者退出不取消事务，以及显式取消在 COMMIT 前触发全组 ABORT；直接绕过
+事务 IPC 向单节点发送运动组命令会被守护进程拒绝。COMMIT 后的 ABORT 只保证尽力
+停止，不能声称物理回滚；STM32 参与者和实体跨板同步仍未实现。
 
 具体 GPIO、UART、运动、TMC、PWM 和定时位流映射由 Studio 生成到 Kconfig，构建为
 静态资源表。TMC2209 单线端点固定为 40000 bit/s，帧、CRC 和寄存器语义仍由 Linux
@@ -123,6 +126,7 @@ firmware/       STM32 Remote Core、板级 BSP、Katapult 配置和构建脚本
 gui/            本地板卡配置器与 Mock 数字孪生可视化
 tests/          单元、端到端、vcan 和实体 CAN 测试
 docs/           架构、硬件、构建、升级和 API 文档
+maturity/       机器可读成熟度基线、Schema、验证器和证据口径
 ```
 
 生成物不属于源码结构：主机默认构建到 `build-wsl/`，STM32 按目标构建到
@@ -164,10 +168,11 @@ CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链�
 心跳、多节点、超时与去重、GPIO、UART、I2C/SPI资源合同与Mock故障隔离、资源租约、
 数字孪生、主机时钟模型、运动欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、
 流量准入、Kconfig生成、Studio总线图形编辑到Mock清单的黄金路径、TimeSync v1
-四时间戳闭环、跨板事务纯软件状态机、GUI API，以及默认使用版本化
+四时间戳闭环、跨板事务纯软件状态机和双节点进程级闭环、GUI API，以及默认使用版本化
 `remote-cli --json` 的只读 Runtime API。Runtime 已通过单次本地 IPC 快照消除一次刷新
 中的 N+1 进程与套接字连接，并保留拓扑稳定校验、资源/节点故障隔离和显式旧文本兼容；
-Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不会回退陈旧快照。
+Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不会回退陈旧快照；
+缓存有效期还会受时钟样本陈旧阈值约束，不能跨过阈值继续返回无告警旧结果。
 RuntimeSnapshot IPC 已升级到 v2，把每个节点的启动代次、模型代次、同步状态、样本数、
 漂移及误差估计贯通到 Runtime API；Runtime 会按可配置误差与样本年龄阈值输出稳定
 质量告警，旧文本源只标记观测能力未知。这些是软件模型观测值，不代表硬件已达到相同精度。

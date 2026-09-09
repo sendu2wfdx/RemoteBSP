@@ -21,7 +21,8 @@
 - 继续演进已落地的工程 schema v2、迁移规则和规范配置哈希，并补充向后兼容样例；
 - 把 MCU/板卡完整 AF、定时器、DMA、EXTI、ADC 能力整理为机器可读数据源；
 - 已生成确定性中文接线表、资源占用摘要、稳定资源清单和校验文件，并提供有界、
-  确定性的工程差异、差异资料包和生产记录；下一步增加生产批次组织与历史检索；
+  确定性的工程差异、差异资料包、生产记录和带清单/校验和的生产批次包；下一步
+  增加持久化批次历史、检索、签名和权限边界；
 - 接入 ST-Link、CAN Katapult 和 USB Katapult 烧录；
 - 烧录后回读固件版本、UUID、配置哈希并给出明确结果；
 - 为批量生产增加非交互命令行入口，网页只调用同一后端；
@@ -57,9 +58,10 @@
 - 主机四时间戳模型、`TimeSync v1`、Mock `boot_epoch`、同步管理器和 `toolbusd`
   有界周期调度已接入；下一步增加同步质量观测、实体计数器 BSP 和可靠启动代次来源，
   并验证真实 CAN/CAN-FD 传输边界；
-- 跨板运动组的版本化线格式、时钟冻结、协调器、RequestManager 服务桥接与双 Mock
-  Remote Core 可执行闭环已经完成；下一步把服务接入 `toolbusd` 事件循环，再实现
-  实体固件参与者，并加入开始前许可租约，处理部分 COMMIT 已送达后的网络分区；
+- 跨板运动组的版本化线格式、时钟冻结、协调器、RequestManager 服务桥接、
+  `toolbusd` 主循环、版本化 IPC/API/CLI 与双节点 Mock USB 进程级闭环已经完成；
+  下一步实现实体固件参与者，形成开始前许可租约策略，并处理部分 COMMIT 已送达
+  后的网络分区、尽力停止和运维恢复；
 - 完善分段轨迹、队列水位、欠载预警、迟到段拒绝与平滑停车；
 - 限位和 TMC DIAG 使用本地中断/定时滤波，形成有界安全事件；
 - 每块板的最大轴数由 CPU、定时器、GPIO、步频总预算和其他已启用模块共同决定；
@@ -117,7 +119,8 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 纯软件测试。后续继续采用类似 Moonraker 与 Fluidd 的分层，但不复制打印机业务：
 
 - Runtime 默认使用版本化 `remote-cli --json`，单次本地 IPC 快照 v2 已贯通节点时钟
-  同步质量，误差上界和样本年龄阈值告警已实现，并保留短缓存、失败合并和明确新鲜度；
+  同步质量，误差上界和样本年龄阈值告警已实现，并保留受陈旧阈值约束的短缓存、
+  失败合并和明确新鲜度；
   下一步增加认证、事件流和写操作租约，并评估进程内绑定；
 - Runtime API 只通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
 - 提供版本化 REST/WebSocket API、节点/资源对象、事件订阅和遥测流；
@@ -154,6 +157,15 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN、GPIO、五轴与五路 TMC2209 基础实测 | compare 压力、波形、双模式 Katapult 切换、设备参数掉电测试 |
 | STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult | 五轴/TMC、波形、静态 Studio 固件、设备参数实板验收 |
 | STM32G431CBU6 / WeAct Core | CAN-FD、GPIO、PWM、三路UART、单轴转动及Studio专用固件100 STEP空载调度实测 | 五轴/TMC持续负载、USB Vendor Bulk、WS2812波形、双模式 Katapult、参数区验收 |
+
+## 可审计成熟度门槛
+
+- `maturity/remotebsp-maturity-v1.json` 是当前证据基线，必须通过 Schema 与语义验证；
+- Mock、自动测试、交叉编译和实体硬件证据分层记录，禁止相互替代；
+- 当前整体对比结论保持 blocked：实体证据矩阵尚未完成，也没有与目标 Klipper 版本、
+  硬件、负载和测量方法一致的可复现对照基准；
+- 只有所有适用维度达到验证门槛、无未关闭 blocker 且对照基准可复现时，才允许把
+  `overall_comparison.allowed` 改为 `true`。
 
 ## 持续验证要求
 
