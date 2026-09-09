@@ -37,6 +37,11 @@ from comparison_export import (
     comparison_export_response,
     export_project_comparison,
 )
+from production_batch import (
+    export_production_batch,
+    production_batch_response,
+    validate_production_batch_manifest,
+)
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -155,6 +160,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "project_compare_enabled": True,
                 "project_comparison_export_enabled": True,
                 "production_record_enabled": True,
+                "production_batch_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
@@ -186,6 +192,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/project/generate-production-record",
                         "/api/project/compare",
                         "/api/project/export-comparison",
+                        "/api/production-batch/export",
+                        "/api/production-batch/validate",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -194,9 +202,19 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             if length <= 0 or length > 262144:
                 raise ProjectConfigError("请求长度无效或超过256 KiB")
             request = json.loads(self.rfile.read(length).decode("utf-8"))
-            catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+            catalog = None if path.startswith("/api/production-batch/") else \
+                json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/export-comparison":
+            if path == "/api/production-batch/validate":
+                response = validate_production_batch_manifest(
+                    request.get("manifest"))
+            elif path == "/api/production-batch/export":
+                response = production_batch_response(export_production_batch(
+                    batch_id=request.get("batch_id"),
+                    name=request.get("name"), note=request.get("note", ""),
+                    production_records=request.get("production_records"),
+                    comparison_exports=request.get("comparison_exports", [])))
+            elif path == "/api/project/export-comparison":
                 response = comparison_export_response(
                     export_project_comparison(
                         request.get("left"), request.get("right"), catalog))

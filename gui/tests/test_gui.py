@@ -298,6 +298,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["project_compare_enabled"])
                 self.assertTrue(target["project_comparison_export_enabled"])
                 self.assertTrue(target["production_record_enabled"])
+                self.assertTrue(target["production_batch_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -396,6 +397,37 @@ class GuiTest(unittest.TestCase):
                     production["record_base64"]))
                 self.assertEqual(production_document["execution_status"]
                                  ["firmware_flash"], "not_performed")
+                batch_request = Request(
+                    base + "/api/production-batch/export",
+                    data=json.dumps({
+                        "batch_id": "http-smoke-001",
+                        "name": "HTTP批次冒烟测试",
+                        "note": "纯软件",
+                        "production_records": [{
+                            "record": production["record"],
+                            "record_sha256": production["record_sha256"],
+                        }],
+                        "comparison_exports": [],
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                batch = json.loads(urlopen(batch_request).read())
+                self.assertEqual(batch["format"],
+                                 "PRODUCTION_BATCH_EXPORT_V1")
+                self.assertTrue(batch["validation"]["valid"])
+                with zipfile.ZipFile(io.BytesIO(base64.b64decode(
+                        batch["archive_base64"]))) as archive:
+                    self.assertIn("SHA256SUMS", archive.namelist())
+                    self.assertTrue(any(name.endswith("生产批次清单-v1.json")
+                                        for name in archive.namelist()))
+                batch_validation_request = Request(
+                    base + "/api/production-batch/validate",
+                    data=json.dumps({"manifest": batch["manifest"]}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                batch_validation = json.loads(urlopen(
+                    batch_validation_request).read())
+                self.assertTrue(batch_validation["valid"])
                 linked_production_request = Request(
                     base + "/api/project/generate-production-record",
                     data=json.dumps({
@@ -461,6 +493,10 @@ class GuiTest(unittest.TestCase):
                                b"compareResult", b"productionBuildId",
                                b"exportProductionRecord",
                                b"productionResult", b"exportComparison"):
+                    self.assertIn(marker, page)
+                for marker in (b"exportProductionBatch",
+                               b"validateProductionBatch",
+                               b"batchManifestFile", b"batchResult"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

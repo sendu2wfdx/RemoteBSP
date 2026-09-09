@@ -113,9 +113,37 @@ def export_project_comparison(left: object, right: object, catalog: dict
                               ) -> ComparisonExportResult:
     """只比较一次，并从同一结果生成 JSON、Markdown 和校验文件。"""
     comparison = compare_projects(left, right, catalog)
-    base = f"{comparison['left']['board_id']}-to-{comparison['right']['board_id']}"
-    json_content = _json_bytes(comparison)
-    markdown_content = _markdown(comparison)
+    return export_existing_project_comparison(comparison)
+
+
+def export_existing_project_comparison(
+        comparison: object) -> ComparisonExportResult:
+    """校验并重新打包已有比较结果，不再次比较工程。"""
+    if not isinstance(comparison, dict):
+        raise ProjectConfigError("工程差异记录必须是JSON对象")
+    if comparison.get("format") != "PROJECT_COMPARISON_V1" or \
+            comparison.get("schema_version") != 1:
+        raise ProjectConfigError("工程差异记录格式或版本不受支持")
+    claimed_sha256 = comparison.get("comparison_sha256")
+    if not isinstance(claimed_sha256, str) or len(claimed_sha256) != 64:
+        raise ProjectConfigError("工程差异记录缺少有效的比较结果SHA-256")
+    hash_input = dict(comparison)
+    hash_input.pop("comparison_sha256", None)
+    canonical = (json.dumps(
+        hash_input, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":")) + "\n").encode("utf-8")
+    if _sha256(canonical) != claimed_sha256:
+        raise ProjectConfigError("工程差异记录SHA-256不匹配，内容可能已被修改")
+    try:
+        left = comparison["left"]
+        right = comparison["right"]
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            raise KeyError("left/right")
+        base = f"{left['board_id']}-to-{right['board_id']}"
+        json_content = _json_bytes(comparison)
+        markdown_content = _markdown(comparison)
+    except (KeyError, TypeError) as error:
+        raise ProjectConfigError(f"工程差异记录缺少导出字段：{error}") from error
     artifacts = (
         ReportArtifact(f"{base}-工程差异-v1.json", "application/json",
                        json_content, _sha256(json_content)),
