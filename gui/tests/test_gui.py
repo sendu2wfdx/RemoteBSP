@@ -296,6 +296,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["build_enabled"])
                 self.assertTrue(target["project_reports_enabled"])
                 self.assertTrue(target["project_compare_enabled"])
+                self.assertTrue(target["project_comparison_export_enabled"])
                 self.assertTrue(target["production_record_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
@@ -360,6 +361,26 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(comparison["equal"])
                 self.assertEqual(comparison["format"],
                                  "PROJECT_COMPARISON_V1")
+                export_comparison_request = Request(
+                    base + "/api/project/export-comparison",
+                    data=json.dumps({
+                        "left": self._default_project(board),
+                        "right": self._default_project(board),
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                comparison_export = json.loads(urlopen(
+                    export_comparison_request).read())
+                self.assertEqual(comparison_export["format"],
+                                 "PROJECT_COMPARISON_EXPORT_V1")
+                self.assertEqual(comparison_export["comparison"], comparison)
+                with zipfile.ZipFile(io.BytesIO(base64.b64decode(
+                        comparison_export["archive_base64"]))) as archive:
+                    self.assertIn("SHA256SUMS", archive.namelist())
+                    self.assertTrue(any(name.endswith("工程差异-v1.json")
+                                        for name in archive.namelist()))
+                    self.assertTrue(any(name.endswith("工程差异报告-v1.md")
+                                        for name in archive.namelist()))
                 production_request = Request(
                     base + "/api/project/generate-production-record",
                     data=json.dumps({
@@ -439,7 +460,7 @@ class GuiTest(unittest.TestCase):
                                b"compareLeftFile", b"compareRightFile",
                                b"compareResult", b"productionBuildId",
                                b"exportProductionRecord",
-                               b"productionResult"):
+                               b"productionResult", b"exportComparison"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

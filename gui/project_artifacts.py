@@ -367,7 +367,8 @@ def _summary(board: dict, project_sha256: str,
     }
 
 
-def _deterministic_zip(artifacts: tuple[ReportArtifact, ...]) -> bytes:
+def deterministic_zip(artifacts: tuple[ReportArtifact, ...]) -> bytes:
+    """按固定顺序、时间戳、权限和无压缩方式生成稳定 ZIP。"""
     output = io.BytesIO()
     # 文件很小，使用 STORE 避免压缩库版本造成字节差异。
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -427,7 +428,7 @@ def generate_project_reports(project: dict, catalog: dict
         "SHA256SUMS", "text/plain; charset=utf-8", checksums,
         _sha256(checksums))
     artifacts += (checksum_artifact,)
-    archive = _deterministic_zip(artifacts)
+    archive = deterministic_zip(artifacts)
     return ProjectReportBundle(
         board_id=board["id"], project_sha256=prepared.sha256,
         project_schema_version=prepared.schema_version,

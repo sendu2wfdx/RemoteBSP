@@ -33,6 +33,10 @@ from production_record import (
     generate_production_record,
     production_record_response,
 )
+from comparison_export import (
+    comparison_export_response,
+    export_project_comparison,
+)
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -149,6 +153,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "build_enabled": True,
                 "project_reports_enabled": True,
                 "project_compare_enabled": True,
+                "project_comparison_export_enabled": True,
                 "production_record_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
@@ -180,6 +185,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/project/generate-mock-manifest",
                         "/api/project/generate-production-record",
                         "/api/project/compare",
+                        "/api/project/export-comparison",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -190,7 +196,11 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/compare":
+            if path == "/api/project/export-comparison":
+                response = comparison_export_response(
+                    export_project_comparison(
+                        request.get("left"), request.get("right"), catalog))
+            elif path == "/api/project/compare":
                 response = compare_projects(
                     request.get("left"), request.get("right"), catalog)
             elif path == "/api/project/generate-production-record":
