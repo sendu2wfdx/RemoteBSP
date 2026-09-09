@@ -15,14 +15,18 @@ ClockSyncManagerError ClockSyncManagerException::code() const noexcept {
 
 ClockSyncManager::ClockSyncManager(ClockSyncManagerConfig config)
     : config_(std::move(config)) {
-    if (config_.maximum_pending_requests == 0U) {
+    if (config_.maximum_pending_requests == 0U ||
+        config_.maximum_tracked_nodes == 0U ||
+        config_.maximum_submissions_per_poll == 0U ||
+        config_.sync_interval <= std::chrono::milliseconds::zero()) {
         throw ClockSyncManagerException(
             ClockSyncManagerError::InvalidConfiguration,
-            "时钟同步待处理请求容量必须大于零");
+            "时钟同步容量、单轮派发上限和采样周期必须大于零");
     }
     /* 提前验证除节点报告频率和位宽外的基础模型配置。 */
     static_cast<void>(ClockModel(config_.clock_model_config));
     pending_.reserve(config_.maximum_pending_requests);
+    next_due_.reserve(config_.maximum_tracked_nodes);
 }
 
 Submission ClockSyncManager::submit(RequestManager& requests,
@@ -165,6 +169,57 @@ ClockSyncResponseOutcome ClockSyncManager::accept_response(
             sample};
 }
 
+std::vector<ClockSyncDispatch> ClockSyncManager::poll_schedule(
+    RequestManager& requests, const NodeRegistry& nodes,
+    std::uint32_t session_id, TimePoint now) {
+    const auto records = nodes.records();
+    for (auto iterator = next_due_.begin(); iterator != next_due_.end();) {
+        const auto* node = nodes.find_by_node_id(iterator->first);
+        if (node != nullptr && node->online && node->assigned) {
+            ++iterator;
+            continue;
+        }
+        static_cast<void>(cancel_node(requests, iterator->first));
+        iterator = next_due_.begin();
+    }
+
+    std::vector<ClockSyncDispatch> result;
+    result.reserve(config_.maximum_submissions_per_poll);
+    for (const auto& node : records) {
+        if (!node.online || !node.assigned || node.node_id == 0U) {
+            continue;
+        }
+        auto due = next_due_.find(node.node_id);
+        if (due == next_due_.end()) {
+            if (next_due_.size() >= config_.maximum_tracked_nodes) {
+                continue;
+            }
+            due = next_due_.emplace(node.node_id, now).first;
+        }
+        if (now < due->second || has_pending_node(node.node_id)) {
+            continue;
+        }
+        if (result.size() >= config_.maximum_submissions_per_poll) {
+            break;
+        }
+        if (pending_.size() >= config_.maximum_pending_requests) {
+            break;
+        }
+        auto submission = submit(requests, node.node_id, session_id, now);
+        due->second = now + config_.sync_interval;
+        result.push_back({node.node_id, std::move(submission)});
+    }
+    return result;
+}
+
+bool ClockSyncManager::handle_request_event(
+    RequestManager& requests, const RequestEvent& event) noexcept {
+    if (event.type != RequestEventType::TimedOut) {
+        return false;
+    }
+    return cancel(requests, event.session_id, event.request_id);
+}
+
 bool ClockSyncManager::cancel(RequestManager& requests,
                               std::uint32_t session_id,
                               std::uint32_t request_id) noexcept {
@@ -175,6 +230,7 @@ bool ClockSyncManager::cancel(RequestManager& requests,
 
 std::size_t ClockSyncManager::cancel_node(
     RequestManager& requests, std::uint32_t node_id) noexcept {
+    next_due_.erase(node_id);
     std::size_t removed = 0U;
     for (auto iterator = pending_.begin(); iterator != pending_.end();) {
         if (iterator->second.node_id != node_id) {
@@ -203,6 +259,10 @@ bool ClockSyncManager::has_pending_node(
 
 std::size_t ClockSyncManager::pending_count() const noexcept {
     return pending_.size();
+}
+
+std::size_t ClockSyncManager::tracked_node_count() const noexcept {
+    return next_due_.size();
 }
 
 std::uint64_t ClockSyncManager::key(std::uint32_t session_id,

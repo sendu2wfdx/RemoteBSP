@@ -1,4 +1,5 @@
 #include "remotebsp/protocol/fragmentation.hpp"
+#include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
@@ -24,6 +25,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -185,7 +187,8 @@ private:
     bool send_packet(
         const remotebsp::protocol::Packet& packet, std::uint32_t route,
         remotebsp::toolbusd::AdmissionPolicy policy =
-            remotebsp::toolbusd::AdmissionPolicy::Enforce) {
+            remotebsp::toolbusd::AdmissionPolicy::Enforce,
+        const std::function<void()>& on_first_frame = {}) {
         /*
          * 同一把锁同时保护传输 ID 分配和整包发送。这样多个 IPC 客户端
          * 不会竞争 next_transfer_id_，不同远程包的分片也不会相互穿插。
@@ -208,7 +211,12 @@ private:
         if (!traffic_.admit(traffic_class, frame_lengths, policy)) {
             return false;
         }
+        bool first_frame = true;
         for (const auto& frame : frames) {
+            if (first_frame && on_first_frame) {
+                on_first_frame();
+            }
+            first_frame = false;
             transport_->send({route, frame});
         }
         return true;
@@ -243,6 +251,7 @@ private:
                     handle_link_frame(*message);
                 }
                 process_request_timers();
+                process_clock_sync_schedule();
             } catch (const std::exception& error) {
                 std::cerr << "CAN 事件循环错误: " << error.what() << '\n';
             }
@@ -268,6 +277,9 @@ private:
             !result.packet.has_value()) {
             return;
         }
+        /* 完整响应形成后立即取时，避免解码和锁等待混入往返时延。 */
+        const auto response_complete_at =
+            remotebsp::toolbusd::ClockSyncManager::Clock::now();
         const auto packet = remotebsp::protocol::decode(*result.packet);
 
         std::optional<remotebsp::protocol::Packet> assignment;
@@ -287,6 +299,11 @@ private:
                 if (message.route > kProvisionalResponseBaseRoute &&
                     message.route <=
                         kProvisionalResponseBaseRoute + kMaximumNodeId) {
+                    const auto* previous = nodes_.find(identity.uuid);
+                    if (previous != nullptr && previous->node_id != 0U) {
+                        static_cast<void>(clock_sync_.cancel_node(
+                            requests_, previous->node_id));
+                    }
                     nodes_.mark_assignment_unconfirmed(identity.uuid);
                 }
                 const auto* node = nodes_.find(identity.uuid);
@@ -376,6 +393,13 @@ private:
                 const auto target = request_routes_.find(key);
                 const auto response_node_id =
                     message.route - kNodeResponseBaseRoute;
+                if (packet.header.command == static_cast<std::uint16_t>(
+                        remotebsp::protocol::Command::TimeSync)) {
+                    static_cast<void>(clock_sync_.accept_response(
+                        requests_, nodes_, packet, response_node_id,
+                        response_complete_at));
+                    return;
+                }
                 if (target == request_routes_.end() ||
                     target->second !=
                         kNodeRequestBaseRoute + response_node_id) {
@@ -413,26 +437,86 @@ private:
                     const auto key =
                         request_key(event.session_id, event.request_id);
                     const auto target = request_routes_.find(key);
-                    if (target != request_routes_.end()) {
+                    if (event.packet->header.command ==
+                        static_cast<std::uint16_t>(
+                            remotebsp::protocol::Command::TimeSync)) {
+                        retries.push_back(
+                            {*event.packet,
+                             kNodeRequestBaseRoute +
+                                 event.packet->header.object_id});
+                    } else if (target != request_routes_.end()) {
                         retries.push_back({*event.packet, target->second});
                     }
                 } else if (event.type ==
                            remotebsp::toolbusd::RequestEventType::TimedOut) {
-                    timed_out_.insert(
-                        request_key(event.session_id, event.request_id));
-                    request_routes_.erase(
-                        request_key(event.session_id, event.request_id));
-                    state_changed_.notify_all();
+                    const bool clock_sync_timeout =
+                        clock_sync_.handle_request_event(requests_, event);
+                    if (!clock_sync_timeout) {
+                        timed_out_.insert(request_key(
+                            event.session_id, event.request_id));
+                        request_routes_.erase(request_key(
+                            event.session_id, event.request_id));
+                        state_changed_.notify_all();
+                    }
                 }
             }
-            if (!nodes_.expire().empty()) {
+            const auto offline = nodes_.expire();
+            for (const auto& uuid : offline) {
+                const auto* node = nodes_.find(uuid);
+                if (node != nullptr && node->node_id != 0U) {
+                    static_cast<void>(clock_sync_.cancel_node(
+                        requests_, node->node_id));
+                }
+            }
+            if (!offline.empty()) {
                 state_changed_.notify_all();
             }
         }
         for (const auto& retry : retries) {
+            const bool is_clock_sync =
+                retry.packet.header.command ==
+                static_cast<std::uint16_t>(
+                    remotebsp::protocol::Command::TimeSync);
             static_cast<void>(send_packet(
                 retry.packet, retry.route,
-                remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
+                is_clock_sync
+                    ? remotebsp::toolbusd::AdmissionPolicy::Enforce
+                    : remotebsp::toolbusd::AdmissionPolicy::Guaranteed,
+                is_clock_sync
+                    ? std::function<void()>([this, &retry] {
+                          std::lock_guard<std::mutex> lock(state_mutex_);
+                          static_cast<void>(clock_sync_.mark_sent(
+                              retry.packet.header.session_id,
+                              retry.packet.header.request_id));
+                      })
+                    : std::function<void()>{}));
+        }
+    }
+
+    void process_clock_sync_schedule() {
+        std::vector<remotebsp::toolbusd::ClockSyncDispatch> dispatches;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            dispatches = clock_sync_.poll_schedule(
+                requests_, nodes_, session_id_);
+        }
+        for (const auto& dispatch : dispatches) {
+            const auto& packet = dispatch.submission.packet;
+            const bool sent = send_packet(
+                packet, kNodeRequestBaseRoute + dispatch.node_id,
+                remotebsp::toolbusd::AdmissionPolicy::Enforce,
+                [this, &packet] {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    static_cast<void>(clock_sync_.mark_sent(
+                        packet.header.session_id,
+                        packet.header.request_id));
+                });
+            if (!sent) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                static_cast<void>(clock_sync_.cancel(
+                    requests_, packet.header.session_id,
+                    packet.header.request_id));
+            }
         }
     }
 
@@ -716,6 +800,7 @@ private:
     remotebsp::protocol::Reassembler reassembler_;
     remotebsp::toolbusd::TrafficController traffic_;
     remotebsp::toolbusd::RequestManager requests_;
+    remotebsp::toolbusd::ClockSyncManager clock_sync_;
     remotebsp::toolbusd::NodeRegistry nodes_;
     std::string socket_path_;
     int server_socket_{-1};

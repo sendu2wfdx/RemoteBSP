@@ -261,6 +261,18 @@ target_compile_options(time_sync_e2e_tests PRIVATE
 )
 add_test(NAME time_sync_e2e_tests COMMAND time_sync_e2e_tests)
 
+add_executable(clock_sync_scheduler_tests
+    clock_sync_scheduler_tests.cpp)
+target_link_libraries(clock_sync_scheduler_tests PRIVATE
+    remotebsp_request_manager
+)
+target_compile_options(clock_sync_scheduler_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME clock_sync_scheduler_tests
+    COMMAND clock_sync_scheduler_tests)
+
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE
     remotebsp_remote_core

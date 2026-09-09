@@ -10,11 +10,15 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace remotebsp::toolbusd {
 
 struct ClockSyncManagerConfig {
     std::size_t maximum_pending_requests{128U};
+    std::size_t maximum_tracked_nodes{128U};
+    std::size_t maximum_submissions_per_poll{4U};
+    std::chrono::milliseconds sync_interval{500U};
     ClockModelConfig clock_model_config{};
 };
 
@@ -63,6 +67,11 @@ struct ClockSyncResponseOutcome {
     std::optional<NodeClockSampleOutcome> sample_outcome;
 };
 
+struct ClockSyncDispatch {
+    std::uint32_t node_id{};
+    Submission submission;
+};
+
 class ClockSyncManager {
 public:
     using Clock = std::chrono::steady_clock;
@@ -81,12 +90,24 @@ public:
         const protocol::Packet& response, std::uint32_t response_node_id,
         TimePoint host_receive_time = Clock::now());
 
+    /*
+     * 为在线且已分配的节点生成有界数量的周期同步请求。首次见到节点时
+     * 立即采样；后续采样不会与同一节点尚未完成的请求重叠。
+     */
+    std::vector<ClockSyncDispatch> poll_schedule(
+        RequestManager& requests, const NodeRegistry& nodes,
+        std::uint32_t session_id,
+        TimePoint now = Clock::now());
+    bool handle_request_event(RequestManager& requests,
+                              const RequestEvent& event) noexcept;
+
     bool cancel(RequestManager& requests, std::uint32_t session_id,
                 std::uint32_t request_id) noexcept;
     std::size_t cancel_node(RequestManager& requests,
                             std::uint32_t node_id) noexcept;
     bool has_pending_node(std::uint32_t node_id) const noexcept;
     std::size_t pending_count() const noexcept;
+    std::size_t tracked_node_count() const noexcept;
 
 private:
     struct PendingSync {
@@ -101,6 +122,7 @@ private:
 
     ClockSyncManagerConfig config_;
     std::unordered_map<std::uint64_t, PendingSync> pending_;
+    std::unordered_map<std::uint32_t, TimePoint> next_due_;
 };
 
 }
