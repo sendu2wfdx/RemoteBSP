@@ -47,12 +47,13 @@
     {
       "id": "resource_model",
       "title": "通用资源模型",
-      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；STM32 总线公共 Core 默认关闭，H2N Stream 仍只到 Mock，ADC、Timer、Storage 与实体数据面缺失。",
+      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；I2C/SPI 已有 toolbusd 父总线仲裁和默认关闭的 STM32 公共 Core，H2N Stream 仍只到 Mock，ADC、Timer、Storage 与实体数据面缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "resource_contract_document", "kind": "document", "path": "docs/bus-and-stream-resources.md", "note": "定义总线、设备与高速流资源边界。"},
-          {"id": "resource_protocol_source", "kind": "source", "path": "protocol/src/resource.cpp", "note": "资源描述、合同和状态协议实现。"}
+          {"id": "resource_protocol_source", "kind": "source", "path": "protocol/src/resource.cpp", "note": "资源描述、合同和状态协议实现。"},
+          {"id": "resource_bus_runtime_source", "kind": "source", "path": "toolbusd/src/bus_runtime.cpp", "note": "有界设备合同缓存、首访单飞、父总线非阻塞仲裁和节点失效处理。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -62,7 +63,8 @@
           {"id": "resource_model_test", "kind": "host_test", "path": "tests/resource_tests.cpp", "note": "资源协议与约束测试。"},
           {"id": "resource_bus_mock_test", "kind": "mock_test", "path": "tests/bus_resource_tests.cpp", "note": "I2C/SPI 为 Mock 事务验证，不代表实体外设验证。"},
           {"id": "resource_bus_embedded_test", "kind": "host_test", "path": "firmware/tests/bus_core_tests.c", "note": "默认关闭的嵌入式公共总线 Core/HAL 边界测试，不代表板级 HAL 可用。"},
-          {"id": "resource_stream_session_test", "kind": "mock_test", "path": "tests/stream_session_tests.cpp", "note": "H2N 有界会话、租约、序号、背压与清理测试；Mock 不是实体实测，且未绑定真实高速链路。"}
+          {"id": "resource_stream_session_test", "kind": "mock_test", "path": "tests/stream_session_tests.cpp", "note": "H2N 有界会话、租约、序号、背压与清理测试；Mock 不是实体实测，且未绑定真实高速链路。"},
+          {"id": "resource_bus_runtime_test", "kind": "host_test", "path": "tests/bus_runtime_tests.cpp", "note": "覆盖合同边界、首访单飞、父总线争用、跨节点隔离和失效期间 ABA 防护；不代表实体总线时序。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -100,7 +102,7 @@
         "evidence": [
           {"id": "sync_scheduler_test", "kind": "host_test", "path": "tests/clock_sync_scheduler_tests.cpp", "note": "覆盖容量、周期、离线和超时。"},
           {"id": "sync_group_mock_test", "kind": "mock_test", "path": "tests/motion_group_service_tests.cpp", "note": "双 Mock Remote Core 事务测试，不是跨板实测。"},
-          {"id": "sync_group_process_test", "kind": "mock_test", "path": "tests/multi_node_e2e.sh", "note": "双节点 Mock USB 进程级 PREPARE/COMMIT/取消闭环，不是实体跨板实测。"},
+          {"id": "sync_group_process_test", "kind": "mock_test", "path": "tests/multi_node_e2e.sh", "note": "双节点 vcan 与 Mock USB 进程级 PREPARE/COMMIT/取消闭环；纯软件测试使用 10 ms 时钟门槛，不是实体跨板精度实测。"},
           {"id": "sync_embedded_host_test", "kind": "host_test", "path": "firmware/tests/motion_group_tests.c", "note": "参与者状态机、防重放、启动代次和调度失败安全路径测试。"}
         ],
         "blocker_ids": []
@@ -117,13 +119,14 @@
     {
       "id": "fault_isolation",
       "title": "故障隔离",
-      "summary": "请求去重、超时、节点离线、资源级错误和 Runtime 单项失败隔离已有软件闭环；网络分区和实体压力恢复仍不完整。",
+      "summary": "请求去重、超时、节点离线、资源级错误、I2C/SPI 父总线隔离和 Runtime 单项失败隔离已有软件闭环；网络分区和实体压力恢复仍不完整。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "fault_request_source", "kind": "source", "path": "toolbusd/src/request_manager.cpp", "note": "有界请求、重试、取消和响应匹配。"},
           {"id": "fault_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "资源级失败隔离、缓存失败合并和时钟质量告警。"},
-          {"id": "fault_embedded_lease_source", "kind": "source", "path": "firmware/src/core.c", "note": "STEPGEN 租约释放、过期、会话结束和复位联动安全停机。"}
+          {"id": "fault_embedded_lease_source", "kind": "source", "path": "firmware/src/core.c", "note": "STEPGEN 与总线设备租约释放、过期、会话结束及复位联动。"},
+          {"id": "fault_bus_runtime_source", "kind": "source", "path": "toolbusd/src/bus_runtime.cpp", "note": "同父总线非阻塞互斥、异常释放和节点合同失效。"}
         ],
         "blocker_ids": ["partial_failure_recovery"]
       },
@@ -132,7 +135,8 @@
         "evidence": [
           {"id": "fault_request_test", "kind": "host_test", "path": "tests/request_manager_tests.cpp", "note": "请求超时、重试和匹配测试。"},
           {"id": "fault_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "资源、节点、缓存和时钟告警隔离测试。"},
-          {"id": "fault_embedded_lease_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "租约令牌/会话隔离、过期、释放、会话结束和节点初始化清理测试。"}
+          {"id": "fault_embedded_lease_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "STEPGEN/BUS 联合路由、租约令牌/会话隔离、过期、释放、会话结束和节点初始化清理测试。"},
+          {"id": "fault_bus_runtime_test", "kind": "host_test", "path": "tests/bus_runtime_tests.cpp", "note": "同总线争用、跨总线/跨节点隔离、单飞和节点失效 ABA 测试。"}
         ],
         "blocker_ids": []
       },
@@ -171,11 +175,12 @@
     {
       "id": "configuration_build",
       "title": "配置与构建",
-      "summary": "Studio 工程、Kconfig 生成、冲突校验、构建归档、生产批次包及有界本地历史检索已部分实现；自动烧录和回读闭环缺失。",
+      "summary": "Studio 工程、Kconfig 与普通 GPIO 静态表生成、冲突校验、带源码身份的构建归档、生产批次包及有界本地历史检索已部分实现；自动烧录和回读闭环缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
-          {"id": "config_project_source", "kind": "source", "path": "gui/project_config.py", "note": "版本化工程规范化、配置生成与 Mock 清单。"},
+          {"id": "config_project_source", "kind": "source", "path": "gui/project_config.py", "note": "版本化工程规范化、Kconfig、普通 GPIO 固件静态表与 Mock 清单生成。"},
+          {"id": "config_builder_source", "kind": "source", "path": "gui/firmware_builder.py", "note": "构建 ID 纳入源码、依赖和工具链身份；构建期漂移拒绝归档，下载复核边界、大小与哈希。"},
           {"id": "config_record_source", "kind": "source", "path": "gui/production_record.py", "note": "区分设计、构建、烧录和硬件证据的生产记录。"},
           {"id": "config_history_source", "kind": "source", "path": "gui/production_history.py", "note": "按内容哈希原子保存、复核、隔离和有界检索生产批次历史。"}
         ],
@@ -184,7 +189,7 @@
       "automated_test": {
         "status": "partial",
         "evidence": [
-          {"id": "config_gui_test", "kind": "host_test", "path": "gui/tests/test_gui.py", "note": "Studio API 和工程校验测试。"},
+          {"id": "config_gui_test", "kind": "host_test", "path": "gui/tests/test_gui.py", "note": "Studio API、静态表确定性、源码身份隔离、归档完整性和工程校验测试。"},
           {"id": "config_production_test", "kind": "host_test", "path": "gui/tests/test_production_record.py", "note": "生产记录证据分类测试。"},
           {"id": "config_history_test", "kind": "host_test", "path": "gui/tests/test_production_history.py", "note": "历史目录所有权、原子保存、损坏隔离、容量和查询边界测试。"}
         ],
@@ -243,15 +248,16 @@
     {
       "id": "runtime_api",
       "title": "Runtime 与 API",
-      "summary": "只读 Runtime API、单次快照、缓存、故障隔离、时钟告警、API key 身份、只读权限、有界安全审计和增量事件短轮询已实现；主动推送、跨重启事件和写控制面尚未实现。",
+      "summary": "Runtime 读取、单次快照、缓存、故障隔离、时钟告警、增量事件短轮询，以及仅回环认证开放的进程内短时控制租约与细粒度权限已实现；主动推送、跨重启事件、toolbusd 会话绑定和设备写命令尚未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "runtime_server_source", "kind": "source", "path": "runtime_api/server.py", "note": "只读版本化 HTTP API 与有界线程服务。"},
           {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存和故障隔离。"},
-          {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "非回环强制的有界 API key 身份、固定长度摘要比较和只读权限。"},
+          {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "有界 API key 身份、固定长度摘要比较、读取及控制租约细粒度权限。"},
           {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"},
-          {"id": "runtime_events_source", "kind": "source", "path": "runtime_api/events.py", "note": "进程实例游标、有界保留、稳定差分和明确过期的增量事件短轮询。"}
+          {"id": "runtime_events_source", "kind": "source", "path": "runtime_api/events.py", "note": "进程实例游标、有界保留、稳定差分和明确过期的增量事件短轮询。"},
+          {"id": "runtime_control_lease_source", "kind": "source", "path": "runtime_api/control_leases.py", "note": "进程内短时排他租约、有界终态幂等保护和线程安全裁决；不代表下游命令执行。"}
         ],
         "blocker_ids": ["runtime_control_plane"]
       },
@@ -261,7 +267,8 @@
           {"id": "runtime_http_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "HTTP 契约、错误和缓存测试。"},
           {"id": "runtime_provider_contract_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "严格 JSON、单次快照、阈值和故障隔离测试。"},
           {"id": "runtime_auth_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "身份、权限、固定长度密钥摘要、配置上限和攻击输入测试。"},
-          {"id": "runtime_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计脱敏、容量、慢输出非阻塞、丢弃计数、异常隔离和关闭测试。"}
+          {"id": "runtime_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计脱敏、容量、慢输出非阻塞、丢弃计数、异常隔离和关闭测试。"},
+          {"id": "runtime_control_lease_test", "kind": "host_test", "path": "runtime_api/tests/test_control_leases.py", "note": "覆盖权限、并发排他、过期、幂等终态、请求总期限、非回环失败关闭和异常输入。"}
         ],
         "blocker_ids": []
       },
@@ -271,11 +278,11 @@
     {
       "id": "security_boundaries",
       "title": "安全边界",
-      "summary": "API key 身份与只读权限、有界脱敏审计、数字回环边界、Unix 套接字权限和威胁模型已实现；TLS、细粒度角色、持久审计和总线消息认证仍缺失。",
+      "summary": "API key 身份与读取/控制租约权限、有界脱敏审计、控制入口回环限制、请求总期限、Unix 套接字权限和威胁模型已实现；TLS、设备命令授权、持久审计和总线消息认证仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
-          {"id": "security_runtime_source", "kind": "source", "path": "runtime_api/auth.py", "note": "数字回环开发模式和非回环 API key 边界。"},
+          {"id": "security_runtime_source", "kind": "source", "path": "runtime_api/auth.py", "note": "数字回环开发模式、非回环 API key 边界和控制租约三权限。"},
           {"id": "security_socket_source", "kind": "source", "path": "toolbusd/src/main.cpp", "note": "本地套接字 0660 权限、所有者检查和 device/inode 安全清理。"},
           {"id": "security_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "不记录密钥或原始目标的结构化审计与非阻塞有界输出。"},
           {"id": "security_threat_document", "kind": "document", "path": "docs/security-threat-model.md", "note": "保护目标、信任边界、攻击者、控制、剩余风险和验收口径。"}
@@ -286,6 +293,7 @@
         "status": "partial",
         "evidence": [
           {"id": "security_http_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "认证、权限、密钥上限、凭据位置、错误结构和公开探针测试。"},
+          {"id": "security_control_test", "kind": "host_test", "path": "runtime_api/tests/test_control_leases.py", "note": "控制权限、越权撤销、非回环失败关闭、头部/请求体总期限和请求走私边界测试。"},
           {"id": "security_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计容量、脱敏、非阻塞输出、丢弃和异常隔离测试。"},
           {"id": "security_socket_test", "kind": "host_test", "path": "tests/e2e_vcan.sh", "note": "进程级回归校验 toolbusd 套接字权限为 0660。"},
           {"id": "security_protocol_test", "kind": "host_test", "path": "tests/protocol_tests.cpp", "note": "协议长度、版本和字段边界测试。"}
@@ -334,7 +342,7 @@
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
     {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
-    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有只读身份、权限、进程内审计和增量事件短轮询，但缺少主动推送、跨重启事件、写命令租约、细粒度角色及持久审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有读取、增量事件和进程内短时控制租约，但租约尚未绑定 toolbusd session 或设备命令，且缺少主动推送、跨重启事件、TLS 与持久审计。", "requires_hardware": false, "closure_evidence": "先把租约绑定到版本化 toolbusd 控制命令、补齐权限矩阵与并发冲突审计，再实现跨重启事件和持久完整性。"},
     {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限和有界审计已建立，但 TLS/密钥生命周期、审计完整性、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、持久审计完整性、攻击面测试、总线认证和部署加固验证。"},
     {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
     {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},

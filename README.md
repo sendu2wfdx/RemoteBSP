@@ -59,23 +59,25 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
-| 静态资源配置 | Studio 工程生成完整 Kconfig `.config`；固件启动时建立固定资源表，严格检查引脚方向、共享 EN、TMC 引用、端点和容量，不提供在线改线 |
+| 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和普通 GPIO 只读静态表；三板在编译期校验 schema/板型，并用同一表完成启动安全配置和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
-| 总线与高速流 | I2C/SPI 原子事务、主机/Mock 及默认关闭的 STM32 公共 Core/HAL 骨架已实现；首个 H2N Mock Stream 会话具备独占租约、序号、信用、背压和会话清理。实体 I2C/SPI BSP、N2H/双向 Stream 与真实高速数据面待实现 |
+| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 有界合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；首个 H2N Mock Stream 会话具备独占租约、序号、信用、背压和会话清理。实体 I2C/SPI BSP、N2H/双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 生成、32线程构建和产物归档；可确定性导出生产资料，并以内容哈希原子保存有界本地批次历史，支持复核、损坏隔离和四类追溯检索；非交互 CLI 复用同一校验/构建/批次/历史后端，支持严格 JSON、稳定退出码、dry-run 和原子无覆盖归档。自动烧录/回读尚未实现 |
-| Runtime API | 只读 HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警及有界增量事件短轮询已实现；非回环强制 API key 身份与 `runtime.read` 权限，安全审计使用脱敏请求 ID 和有界非阻塞输出。TLS、主动推送、写控制租约、跨重启事件与审计持久化/完整性仍待实现 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与普通 GPIO 只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警及有界增量事件短轮询已实现；回环认证模式另提供进程内短时控制租约、三类细粒度权限、绝对请求期限和有界幂等墓碑，但不下发设备命令。TLS、主动推送、跨重启事件、toolbusd 会话绑定与审计持久化/完整性仍待实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
 
 I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码、Mock BSP、
-设备级故障隔离、Studio 静态端点/合同图形编辑，以及默认关闭的 STM32 公共
+设备级故障隔离、Studio 静态端点/合同图形编辑、`toolbusd` 合同懒加载与父总线
+非阻塞仲裁，以及默认关闭的 STM32 公共
 Remote Core/HAL 骨架。嵌入式切片把端点、长度、超时、flags、独占租约与同步原子
-事务边界固定下来；三块板仍没有真实 HAL 映射，含总线资源的实体构建继续被 Studio
+事务边界固定下来；合同首访单飞、节点代次失效和跨节点/跨总线隔离已有软件测试。
+三块板仍没有真实 HAL 映射，含总线资源的实体构建继续被 Studio
 拒绝。高速 Stream 已完成首个 H2N Mock 会话状态机，但未绑定实际 CAN/USB 链路；
 N2H、双向、USB Bulk 和 Ethernet 数据面仍未实现。
 ADC、通用 Timer 和 Storage 仍按当前优先级后置。
@@ -186,9 +188,11 @@ Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不
 RuntimeSnapshot IPC 已升级到 v2，把每个节点的启动代次、模型代次、同步状态、样本数、
 漂移及误差估计贯通到 Runtime API；Runtime 会按可配置误差与样本年龄阈值输出稳定
 质量告警，旧文本源只标记观测能力未知。这些是软件模型观测值，不代表硬件已达到相同精度。
-Runtime 的认证授权竖切只解决 API key 身份和 `runtime.read` 最小权限：密钥以固定长度
-摘要比较，审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出，但仍不提供链路加密、细粒度
-角色或持久完整性。增量事件采用带进程实例标识的严格游标、有界分页和过期重同步，
+Runtime 的认证授权已包含 API key 身份、`runtime.read` 及控制租约申请/释放/撤销权限：
+密钥以固定长度摘要比较，审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出。控制租约仅在
+回环监听且启用认证时开放，按节点+资源排他并有 100～30000 ms TTL、终态幂等保护和请求
+总期限；它仍是进程内协调元数据，不调用 `toolbusd`、不代表设备执行成功，也不提供链路
+加密或持久完整性。增量事件采用带进程实例标识的严格游标、有界分页和过期重同步，
 只表示成功快照之间的差分，不是 WebSocket，也不能捕获两次轮询间出现后又恢复的瞬态。
 非回环部署仍必须由受控 TLS 反向代理、密钥文件权限和限速补齐。
 `toolbusd` 本地控制套接字固定为 `0660`，拒绝删除其他用户的同名对象，并在退出时按
