@@ -51,6 +51,16 @@ typedef enum {
 
 typedef rbsp_link_mode_t rbsp_can_mode_t;
 
+#if defined(CONFIG_REMOTEBSP_MOTION)
+typedef struct {
+    bool active;
+    uint64_t lease_id;
+    uint32_t owner_session_id;
+    uint32_t granted_duration_ms;
+    uint32_t expires_at_ms;
+} rbsp_stepgen_lease_t;
+#endif
+
 typedef enum {
     RBSP_GPIO_INPUT = 0,
     RBSP_GPIO_OUTPUT = 1,
@@ -284,6 +294,10 @@ typedef struct {
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;
     rbsp_motion_group_participant_t motion_group;
+    rbsp_stepgen_lease_t stepgen_leases[CONFIG_MOTION_MAX_AXES];
+    uint64_t next_stepgen_lease_id;
+    uint64_t motion_resource_mask;
+    uint32_t motion_owner_session_id;
     uint8_t default_motion_axis_count;
 #endif
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
@@ -312,6 +326,8 @@ void rbsp_core_accept_link(rbsp_core_t* core,
 #if defined(CONFIG_REMOTEBSP_MOTION)
 bool rbsp_core_motion_service(rbsp_core_t* core);
 bool rbsp_core_motion_tick(rbsp_core_t* core);
+/* 传输层确认会话结束时调用；返回被释放的 STEPGEN 租约数。 */
+size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id);
 #endif
 
 #ifdef __cplusplus

@@ -41,12 +41,16 @@ int main(void) {
     ++wrong_boot.boot_epoch;
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &wrong_boot, &prepared,
-               0x1234U, 1000000U) ==
+               UINT64_C(3), 0x1234U, 1000000U) ==
            RBSP_MOTION_GROUP_CLOCK_MISMATCH);
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &frozen, &prepared,
-               0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
+               UINT64_C(3), 0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
     assert(participant.state == RBSP_MOTION_GROUP_PREPARED);
+    assert(rbsp_motion_group_owned_by(&participant, 0x1234U));
+    assert(rbsp_motion_group_uses_axis(&participant, 0U));
+    assert(rbsp_motion_group_uses_axis(&participant, 1U));
+    assert(!rbsp_motion_group_uses_axis(&participant, 2U));
     assert(queue.size == 0U);
     assert(queue.accepted_segments == 0U);
     assert(rbsp_motion_group_blocks_enqueue(&participant));
@@ -54,15 +58,19 @@ int main(void) {
     /* 不同 request_id 形成的重复 PREPARE/COMMIT 仍必须幂等。 */
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &frozen, &prepared,
-               0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
+               UINT64_C(3), 0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &frozen, &prepared,
-               0x9999U, 1000000U) == RBSP_MOTION_GROUP_BUSY);
+               UINT64_C(3), 0x9999U, 1000000U) == RBSP_MOTION_GROUP_BUSY);
     rbsp_motion_segment_t conflict = prepared;
     ++conflict.steps[0];
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &frozen, &conflict,
-               0x1234U, 1000000U) == RBSP_MOTION_GROUP_BUSY);
+               UINT64_C(3), 0x1234U, 1000000U) == RBSP_MOTION_GROUP_BUSY);
+    assert(rbsp_motion_group_prepare(
+               &participant, &queue, &frozen, &prepared,
+               UINT64_C(1), 0x1234U, 1000000U) ==
+           RBSP_MOTION_GROUP_BUSY);
 
     rbsp_motion_group_identity_t wrong = frozen;
     ++wrong.clock_model_generation;
@@ -93,7 +101,7 @@ int main(void) {
     /* 已 ABORT 的同组旧代次不能复活；更高代次可重新预备。 */
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &frozen, &prepared,
-               0x1234U, 2000000U) == RBSP_MOTION_GROUP_BUSY);
+               UINT64_C(3), 0x1234U, 2000000U) == RBSP_MOTION_GROUP_BUSY);
     rbsp_motion_abort(&queue, RBSP_MOTION_FAULT_ABORTED);
     assert(rbsp_motion_clear_fault(&queue, 2000000U));
     rbsp_motion_group_identity_t next = identity(2U);
@@ -103,7 +111,7 @@ int main(void) {
     prepared.start_time_ns = next.node_start_tick;
     assert(rbsp_motion_group_prepare(
                &participant, &queue, &next, &prepared,
-               0x1234U, 3000000U) == RBSP_MOTION_GROUP_READY);
+               UINT64_C(3), 0x1234U, 3000000U) == RBSP_MOTION_GROUP_READY);
     assert(rbsp_motion_group_emergency_abort(&participant));
     assert(participant.state == RBSP_MOTION_GROUP_ABORTED);
 
@@ -115,7 +123,7 @@ int main(void) {
     prepared = segment();
     assert(rbsp_motion_group_prepare(
                &completed, &completed_queue, &frozen, &prepared,
-               0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
+               UINT64_C(3), 0x1234U, 1000000U) == RBSP_MOTION_GROUP_READY);
     assert(rbsp_motion_group_commit(
                &completed, &completed_queue, &frozen, 0x1234U,
                2000000U, NULL) == RBSP_MOTION_GROUP_COMMIT_ARMED);
@@ -129,7 +137,7 @@ int main(void) {
     assert(completed_queue.size == 0U);
     assert(rbsp_motion_group_prepare(
                &completed, &completed_queue, &frozen, &prepared,
-               0x1234U, 3000000U) == RBSP_MOTION_GROUP_BUSY);
+               UINT64_C(3), 0x1234U, 3000000U) == RBSP_MOTION_GROUP_BUSY);
     assert(completed_queue.size == 0U &&
            completed_queue.accepted_segments == 1U);
     rbsp_motion_segment_t ordinary = prepared;
@@ -148,6 +156,6 @@ int main(void) {
     prepared.start_time_ns = next.node_start_tick;
     assert(rbsp_motion_group_prepare(
                &completed, &completed_queue, &next, &prepared,
-               0x1234U, 3000000U) == RBSP_MOTION_GROUP_READY);
+               UINT64_C(3), 0x1234U, 3000000U) == RBSP_MOTION_GROUP_READY);
     return 0;
 }

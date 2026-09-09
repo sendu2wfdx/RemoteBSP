@@ -95,16 +95,16 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t* data,
     return crc;
 }
 
-static uint16_t make_request(uint8_t* packet, uint16_t command,
-                             uint32_t request_id, uint32_t object_id,
-                             const uint8_t* payload,
-                             uint16_t payload_length) {
+static uint16_t make_request_for_session(
+    uint8_t* packet, uint16_t command, uint32_t session_id,
+    uint32_t request_id, uint32_t object_id, const uint8_t* payload,
+    uint16_t payload_length) {
     const uint16_t size = (uint16_t)(24U + payload_length);
     memset(packet, 0, size);
     packet[0] = 1U;
     packet[1] = 1U;
     put_u16(packet + 2U, command);
-    put_u32(packet + 4U, 0x12345678U);
+    put_u32(packet + 4U, session_id);
     put_u32(packet + 8U, request_id);
     put_u32(packet + 12U, object_id);
     put_u16(packet + 16U, payload_length);
@@ -115,6 +115,15 @@ static uint16_t make_request(uint8_t* packet, uint16_t command,
     crc = crc32_update(crc, packet + 24U, payload_length);
     put_u32(packet + 20U, ~crc);
     return size;
+}
+
+static uint16_t make_request(uint8_t* packet, uint16_t command,
+                             uint32_t request_id, uint32_t object_id,
+                             const uint8_t* payload,
+                             uint16_t payload_length) {
+    return make_request_for_session(
+        packet, command, 0x12345678U, request_id, object_id,
+        payload, payload_length);
 }
 
 static bool fake_can_send(const rbsp_can_frame_t* frame) {
@@ -475,17 +484,34 @@ int main(void) {
                 no_epoch_request_size);
     assert(reassemble_sent(response, 0x59AU) == 25U);
     assert(response[24U] == 6U);
-    rbsp_motion_segment_t local_segment;
-    memset(&local_segment, 0, sizeof(local_segment));
-    local_segment.sequence = 1U;
-    local_segment.start_time_ns = 10000000U;
-    local_segment.duration_ns = 2000000U;
-    local_segment.final_segment = true;
-    local_segment.axis_count = 2U;
-    local_segment.steps[0] = 1;
-    assert(rbsp_motion_enqueue(
-               &no_epoch_core.motion, &local_segment, 0U, NULL) ==
-           RBSP_MOTION_ENQUEUE_OK);
+    uint8_t no_epoch_lease[9U];
+    put_u32(no_epoch_lease, 0x09000000U);
+    put_u32(no_epoch_lease + 4U, 1000U);
+    no_epoch_lease[8U] = 2U;
+    no_epoch_request_size = make_request(
+        request, 0x0035U, 98U, 0U, no_epoch_lease,
+        sizeof(no_epoch_lease));
+    clear_sent();
+    feed_packet(&no_epoch_core, 0x61AU, 98U, request,
+                no_epoch_request_size);
+    assert(reassemble_sent(response, 0x59AU) == 52U);
+    assert(response[24U] == 0U);
+    uint8_t no_epoch_segment[32U] = {0U};
+    put_u32(no_epoch_segment, 1U);
+    put_u64(no_epoch_segment + 4U, 10000000U);
+    put_u64(no_epoch_segment + 12U, 2000000U);
+    no_epoch_segment[20U] = 1U;
+    no_epoch_segment[21U] = 1U;
+    put_u32(no_epoch_segment + 24U, 0x09000000U);
+    put_u32(no_epoch_segment + 28U, 1U);
+    no_epoch_request_size = make_request(
+        request, 0x0900U, 97U, 0U, no_epoch_segment,
+        sizeof(no_epoch_segment));
+    clear_sent();
+    feed_packet(&no_epoch_core, 0x61AU, 97U, request,
+                no_epoch_request_size);
+    assert(reassemble_sent(response, 0x59AU) == 49U);
+    assert(response[24U] == 0U && no_epoch_core.motion.size == 1U);
     clear_sent();
 #endif
     const uint8_t discovery[] = {1U, 1U};
@@ -509,6 +535,77 @@ int main(void) {
     assert(response[24] == 0U);
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
+    /* STEPGEN 资源公开租约合同，并且只接受有界的独占租约。 */
+    uint8_t resource_id_payload[4U];
+    put_u32(resource_id_payload, 0x09000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0034U, 90U, 0U,
+                                resource_id_payload,
+                                sizeof(resource_id_payload));
+    feed_packet(&core, 0x619U, 90U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 57U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x09000000U);
+    assert(response[29U] == 1U && response[30U] == 0U);
+    assert(response[31U] == 0x3AU && response[32U] == 0U);
+
+    uint8_t lease_request[9U];
+    put_u32(lease_request, 0x09000000U);
+    put_u32(lease_request + 4U, 1000U);
+    lease_request[8U] = 2U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 91U, 0U,
+                                lease_request, sizeof(lease_request));
+    feed_packet(&core, 0x619U, 91U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    const uint64_t stepgen_lease_id = get_u64(response + 29U);
+    assert(response[24U] == 0U && stepgen_lease_id != 0U);
+    assert(get_u32(response + 37U) == 0x12345678U);
+    assert(core.stepgen_leases[0].active);
+
+    /* 相同请求命中去重缓存，不分配第二个租约；其它会话不能争用。 */
+    clear_sent();
+    feed_packet(&core, 0x619U, 92U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(get_u64(response + 29U) == stepgen_lease_id);
+    assert(core.next_stepgen_lease_id == 2U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0035U, 0x87654321U, 92U, 0U,
+        lease_request, sizeof(lease_request));
+    feed_packet(&core, 0x619U, 93U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 8U);
+
+    uint8_t lease_token[16U];
+    put_u32(lease_token, 0x09000000U);
+    put_u64(lease_token + 4U, stepgen_lease_id);
+    put_u32(lease_token + 12U, 2000U);
+    clear_sent();
+    request_size = make_request(request, 0x0036U, 93U, 0U,
+                                lease_token, sizeof(lease_token));
+    feed_packet(&core, 0x619U, 94U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U && get_u64(response + 29U) == stepgen_lease_id);
+    assert(get_u32(response + 45U) == 2000U);
+
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0036U, 0x87654321U, 95U, 0U,
+        lease_token, sizeof(lease_token));
+    feed_packet(&core, 0x619U, 96U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 4U);
+
+    /* 状态查询不泄露能力令牌，但会报告当前所有者和剩余时间。 */
+    clear_sent();
+    request_size = make_request(request, 0x0038U, 94U, 0U,
+                                resource_id_payload,
+                                sizeof(resource_id_payload));
+    feed_packet(&core, 0x619U, 95U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U && get_u64(response + 29U) == 0U);
+    assert(get_u32(response + 37U) == 0x12345678U);
+
     /* TIME_SYNC 暴露本次启动代次和与运动执行器一致的 1 GHz 节点时钟。 */
     clear_sent();
     const uint8_t time_sync[] = {1U, 0U, 0U, 0U};
@@ -640,6 +737,141 @@ int main(void) {
     assert(response[24U] == 0U &&
            core.motion_group.state == RBSP_MOTION_GROUP_ABORTED &&
            core.motion.fault == RBSP_MOTION_FAULT_ABORTED);
+
+    /* 独立 Core 覆盖租约缺失、过期、COMMIT 重检和会话释放。 */
+    rbsp_core_t lease_core;
+    now_ms = 0U;
+    assert(rbsp_core_init(&lease_core, &hal, RBSP_CAN_CLASSICAL, &info));
+    lease_core.node_id = 27U;
+    uint8_t ordinary_segment[32U];
+    memset(ordinary_segment, 0, sizeof(ordinary_segment));
+    put_u32(ordinary_segment, 1U);
+    put_u64(ordinary_segment + 4U, 10000000U);
+    put_u64(ordinary_segment + 12U, 2000000U);
+    ordinary_segment[20U] = 1U;
+    ordinary_segment[21U] = 1U;
+    put_u32(ordinary_segment + 24U, 0x09000000U);
+    put_u32(ordinary_segment + 28U, 4U);
+    clear_sent();
+    request_size = make_request(request, 0x0900U, 1U, 0U,
+                                ordinary_segment,
+                                sizeof(ordinary_segment));
+    feed_packet(&lease_core, 0x61BU, 1U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 25U);
+    assert(response[24U] == 4U && lease_core.motion.size == 0U);
+
+    put_u32(lease_request + 4U, 100U);
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 2U, 0U,
+                                lease_request, sizeof(lease_request));
+    feed_packet(&lease_core, 0x61BU, 2U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 52U);
+    assert(response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0900U, 3U, 0U,
+                                ordinary_segment,
+                                sizeof(ordinary_segment));
+    feed_packet(&lease_core, 0x61BU, 3U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 49U);
+    assert(response[24U] == 0U && lease_core.motion.size == 1U);
+    assert(lease_core.motion_owner_session_id == 0x12345678U);
+    now_ms = 100U;
+    clear_sent();
+    rbsp_core_poll(&lease_core);
+    assert(!lease_core.stepgen_leases[0].active);
+    assert(lease_core.motion.size == 0U &&
+           lease_core.motion.fault == RBSP_MOTION_FAULT_ABORTED);
+    assert(lease_core.motion_owner_session_id == 0U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0903U, 4U, 0U, NULL, 0U);
+    feed_packet(&lease_core, 0x61BU, 4U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 25U);
+    assert(response[24U] == 0U);
+
+    /* PREPARE 后租约到期，COMMIT 必须再次拒绝且不得留下运动段。 */
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 5U, 0U,
+                                lease_request, sizeof(lease_request));
+    feed_packet(&lease_core, 0x61BU, 5U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 52U);
+    uint8_t lease_group_prepare[116U];
+    memset(lease_group_prepare, 0, sizeof(lease_group_prepare));
+    make_motion_group_identity(lease_group_prepare, 31U, 110000000U);
+    put_u16(lease_group_prepare + 80U, 32U);
+    memcpy(lease_group_prepare + 84U, ordinary_segment,
+           sizeof(ordinary_segment));
+    put_u32(lease_group_prepare + 84U, 2U);
+    put_u64(lease_group_prepare + 88U, 110000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0910U, 6U, 0U,
+                                lease_group_prepare,
+                                sizeof(lease_group_prepare));
+    feed_packet(&lease_core, 0x61BU, 6U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 113U);
+    assert(response[105U] == 0U &&
+           lease_core.motion_group.state == RBSP_MOTION_GROUP_PREPARED);
+    now_ms = 200U;
+    clear_sent();
+    request_size = make_request(request, 0x0911U, 7U, 0U,
+                                lease_group_prepare, 80U);
+    feed_packet(&lease_core, 0x61BU, 7U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 113U);
+    assert(response[24U] == 0U && response[105U] == 1U);
+    assert(lease_core.motion_group.state == RBSP_MOTION_GROUP_ABORTED);
+    assert(lease_core.motion.size == 0U);
+
+    /* release_session 清理租约和预备事务，也清除该会话的旧去重路由。 */
+    put_u32(lease_request + 4U, 1000U);
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 8U, 0U,
+                                lease_request, sizeof(lease_request));
+    feed_packet(&lease_core, 0x61BU, 8U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 52U);
+    const uint64_t release_session_lease_id = get_u64(response + 29U);
+    put_u64(lease_group_prepare + 4U, 9002U);
+    put_u32(lease_group_prepare + 16U, 2U);
+    put_u64(lease_group_prepare + 40U, 220000000U);
+    put_u32(lease_group_prepare + 84U, 2U);
+    put_u64(lease_group_prepare + 88U, 220000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0910U, 9U, 0U,
+                                lease_group_prepare,
+                                sizeof(lease_group_prepare));
+    feed_packet(&lease_core, 0x61BU, 9U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 113U);
+    assert(response[105U] == 0U);
+    assert(rbsp_core_release_session(&lease_core, 0x12345678U) == 1U);
+    assert(!lease_core.stepgen_leases[0].active);
+    assert(lease_core.motion_group.state == RBSP_MOTION_GROUP_ABORTED);
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 8U, 0U,
+                                lease_request, sizeof(lease_request));
+    feed_packet(&lease_core, 0x61BU, 10U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 52U);
+    const uint64_t reacquired_lease_id = get_u64(response + 29U);
+    assert(response[24U] == 0U &&
+           reacquired_lease_id != release_session_lease_id);
+    put_u32(lease_token, 0x09000000U);
+    put_u64(lease_token + 4U, reacquired_lease_id);
+    put_u32(lease_token + 12U, 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0037U, 10U, 0U,
+                                lease_token, sizeof(lease_token));
+    feed_packet(&lease_core, 0x61BU, 11U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 25U);
+    assert(response[24U] == 0U && !lease_core.stepgen_leases[0].active);
+    clear_sent();
+    feed_packet(&lease_core, 0x61BU, 12U, request, request_size);
+    assert(reassemble_sent(response, 0x59BU) == 25U);
+    assert(response[24U] == 0U);
+
+    /* 节点重新初始化不会继承租约、会话或运动队列。 */
+    assert(rbsp_core_init(&lease_core, &hal, RBSP_CAN_CLASSICAL, &info));
+    assert(!lease_core.stepgen_leases[0].active &&
+           lease_core.motion_owner_session_id == 0U &&
+           lease_core.motion.size == 0U);
+    now_ms = 0U;
 #endif
 
     clear_sent();

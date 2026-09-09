@@ -57,13 +57,16 @@ rbsp_motion_group_ready_code_t rbsp_motion_group_prepare(
     rbsp_motion_group_participant_t* participant,
     const rbsp_motion_queue_t* queue,
     const rbsp_motion_group_identity_t* identity,
-    const rbsp_motion_segment_t* segment, uint32_t session_id,
+    const rbsp_motion_segment_t* segment, uint64_t resource_mask,
+    uint32_t session_id,
     uint64_t now_ns) {
     if (participant == NULL || queue == NULL || segment == NULL ||
         session_id == 0U || !identity_valid(identity) ||
         segment->axis_count != queue->axis_count ||
         segment->axis_count == 0U ||
-        segment->axis_count > CONFIG_MOTION_MAX_AXES) {
+        segment->axis_count > CONFIG_MOTION_MAX_AXES ||
+        resource_mask == 0U ||
+        (resource_mask >> segment->axis_count) != 0U) {
         return RBSP_MOTION_GROUP_REJECTED;
     }
     if (identity->boot_epoch != participant->boot_epoch) {
@@ -84,7 +87,8 @@ rbsp_motion_group_ready_code_t rbsp_motion_group_prepare(
     if (participant->state != RBSP_MOTION_GROUP_IDLE) {
         return participant->owner_session_id == session_id &&
                        same_identity(&participant->identity, identity) &&
-                       same_segment(&participant->segment, segment)
+                       same_segment(&participant->segment, segment) &&
+                       participant->resource_mask == resource_mask
                    ? RBSP_MOTION_GROUP_READY
                    : RBSP_MOTION_GROUP_BUSY;
     }
@@ -108,6 +112,7 @@ rbsp_motion_group_ready_code_t rbsp_motion_group_prepare(
     }
     participant->identity = *identity;
     participant->segment = local;
+    participant->resource_mask = resource_mask;
     participant->owner_session_id = session_id;
     participant->state = RBSP_MOTION_GROUP_PREPARED;
     return RBSP_MOTION_GROUP_READY;
@@ -184,4 +189,19 @@ bool rbsp_motion_group_blocks_enqueue(
     return participant != NULL &&
            (participant->state == RBSP_MOTION_GROUP_PREPARED ||
             participant->state == RBSP_MOTION_GROUP_ARMED);
+}
+
+bool rbsp_motion_group_owned_by(
+    const rbsp_motion_group_participant_t* participant,
+    uint32_t session_id) {
+    return participant != NULL && session_id != 0U &&
+           participant->state != RBSP_MOTION_GROUP_IDLE &&
+           participant->owner_session_id == session_id;
+}
+
+bool rbsp_motion_group_uses_axis(
+    const rbsp_motion_group_participant_t* participant,
+    uint8_t axis) {
+    return participant != NULL && axis < RBSP_MOTION_PROTOCOL_MAX_AXES &&
+           (participant->resource_mask & (UINT64_C(1) << axis)) != 0U;
 }

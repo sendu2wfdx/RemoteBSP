@@ -47,6 +47,7 @@ typedef struct {
 typedef struct {
     rbsp_motion_group_state_t state;
     uint32_t owner_session_id;
+    uint64_t resource_mask;
     uint64_t boot_epoch;
     rbsp_motion_group_identity_t identity;
     rbsp_motion_segment_t segment;
@@ -58,7 +59,8 @@ rbsp_motion_group_ready_code_t rbsp_motion_group_prepare(
     rbsp_motion_group_participant_t* participant,
     const rbsp_motion_queue_t* queue,
     const rbsp_motion_group_identity_t* identity,
-    const rbsp_motion_segment_t* segment, uint32_t session_id,
+    const rbsp_motion_segment_t* segment, uint64_t resource_mask,
+    uint32_t session_id,
     uint64_t now_ns);
 rbsp_motion_group_commit_code_t rbsp_motion_group_commit(
     rbsp_motion_group_participant_t* participant,
@@ -77,6 +79,12 @@ void rbsp_motion_group_observe_motion(
     const rbsp_motion_queue_t* queue);
 bool rbsp_motion_group_blocks_enqueue(
     const rbsp_motion_group_participant_t* participant);
+bool rbsp_motion_group_owned_by(
+    const rbsp_motion_group_participant_t* participant,
+    uint32_t session_id);
+bool rbsp_motion_group_uses_axis(
+    const rbsp_motion_group_participant_t* participant,
+    uint8_t axis);
 
 #ifdef __cplusplus
 }
