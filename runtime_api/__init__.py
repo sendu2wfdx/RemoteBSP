@@ -2,6 +2,7 @@
 
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION, RuntimeContractError
 from .provider import FileSnapshotProvider, MockSnapshotProvider, RuntimeProvider
+from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 
 __all__ = [
     "FileSnapshotProvider",
@@ -9,4 +10,6 @@ __all__ = [
     "RUNTIME_SNAPSHOT_SCHEMA_VERSION",
     "RuntimeContractError",
     "RuntimeProvider",
+    "RemoteCliIpcClient",
+    "ToolbusdSnapshotProvider",
 ]

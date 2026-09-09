@@ -26,14 +26,18 @@ Web UI / 上层应用
 Runtime HTTP 层
         │ 只依赖 RuntimeProvider
         ▼
-文件 Provider / Mock Provider
-        │ 未来增加 toolbusd Provider
+文件 Provider / Mock Provider / Toolbusd Provider
+        │ Toolbusd Provider 只调用既有只读客户端
         ▼
-libremotebsp / toolbusd / 传输层（本轮未接入）
+remote-cli / libremotebsp / toolbusd 本地套接字
+        │ 未来可替换为原生绑定或结构化 IPC
+        ▼
+toolbusd 管理的传输层
 ```
 
-HTTP 层不能导入 SocketCAN、USB 或板卡实现。未来接入 `toolbusd` 时应新增 Provider，
-把节点枚举、资源目录和遥测转换成同一快照，而不是在请求处理器里发送总线命令。
+HTTP 层不能导入 SocketCAN、USB 或板卡实现。当前 Toolbusd Provider 通过现有
+`remote-cli → libremotebsp → toolbusd Unix Domain Socket` 边界读取信息，把节点枚举、
+资源目录和状态转换成同一快照；请求处理器本身不会发送 CAN/USB 帧。
 
 ## 启动
 
@@ -50,9 +54,25 @@ python3 -m runtime_api.server
 python3 -m runtime_api.server --snapshot /tmp/remotebsp-runtime-v1.json
 ```
 
+通过既有本地 IPC 连接已经运行的 `toolbusd`：
+
+```sh
+python3 -m runtime_api.server \
+  --toolbusd-socket /tmp/toolbusd.sock \
+  --remote-cli ./build-wsl/remote-cli \
+  --ipc-timeout-ms 2000
+```
+
 默认地址为 `http://127.0.0.1:8780/api/v1`。文件 Provider 每次请求重新读取文件，
 输入上限为 1 MiB；数据损坏、文件缺失或 schema 错误返回 HTTP 503，不回退到陈旧
 快照或演示数据，以免界面把旧状态误报为在线。
+
+Toolbusd Provider 只执行 `traffic-status`、`node-list`、`resource-list` 和
+`resource-status` 四种只读命令；命令使用参数数组启动，不经过 shell。全局 IPC
+连接失败、输出格式不兼容或基础节点目录无效时，HTTP API 返回 503。单个节点的
+资源目录暂时不可用时，其他节点仍保留，该节点标记为 `degraded` 并产生告警；单个
+资源状态读取失败时，该资源保留但标记 `available=false`、`health=unknown`。单次
+快照默认最多查询 128 项资源，超过上限显式失败，避免异常目录造成无界请求放大。
 
 ## HTTP 契约
 
@@ -142,6 +162,12 @@ python3 -m runtime_api.server --snapshot /tmp/remotebsp-runtime-v1.json
 - `captured_at_ms`、`last_seen_ms` 和 `occurred_at_ms` 使用同一上位机单调时基。它们
   不是 UTC 墙上时间，跨进程展示时应同时携带未来的时基元数据。
 
+现有 toolbusd 节点列表不提供离线节点最后一次真实可见的时间。Toolbusd Provider
+只会给本次 IPC 明确观察到在线的节点写入 `last_seen_ms=captured_at_ms`；离线节点固定
+使用 `last_seen_ms=0` 和 `runtime.last_seen_known=false`，表示未知，前端不得显示为
+“刚刚在线”。Provider 还会在任何资源查询前拒绝重复的 numeric node ID 或 UUID，
+防止同一路由被重复展开并产生互相矛盾的状态。
+
 ## 写命令与事件流的预留原则
 
 后续写 API 不应直接复用只读快照端点。建议采用 `/api/v1/commands` 或作业资源，
@@ -159,5 +185,10 @@ python3 -m runtime_api.server --snapshot /tmp/remotebsp-runtime-v1.json
 2. `runtime-snapshot-v1.schema.json` 的安装路径；
 3. Runtime 与 `toolbusd` Unix Domain Socket 的权限组；
 4. Web UI 静态文件由 Runtime、反向代理还是独立服务托管。
+
+当前适配器为保持边界清晰而复用 `remote-cli` 文本输出，每次完整快照需要一次全局
+状态、一次节点列表、每个就绪节点一次资源列表以及每项资源一次状态查询。正式长期
+运行前应给 libremotebsp 增加稳定的结构化本地接口或语言绑定，并在 Provider 层做
+有界并发与明确新鲜度的快照缓存；不能让 Web 请求数量直接放大为无界 IPC 请求。
 
 在这些部署决策完成前，Runtime API 只作为仓库内可启动、可测试的开发服务。

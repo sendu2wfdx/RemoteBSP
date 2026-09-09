@@ -18,6 +18,7 @@ from .provider import (
     RuntimeProvider,
     RuntimeProviderError,
 )
+from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 
 
 API_VERSION = "v1"
@@ -199,16 +200,33 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1",
                         help="监听地址；无认证阶段仅允许本机回环地址")
     parser.add_argument("--port", type=int, default=8780, help="监听端口")
-    parser.add_argument("--snapshot", type=Path,
-                        help="Runtime v1 快照JSON；省略时使用内置Mock")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--snapshot", type=Path,
+                        help="Runtime v1 快照JSON；省略数据源时使用内置Mock")
+    source.add_argument("--toolbusd-socket", type=Path,
+                        help="通过remote-cli连接的toolbusd本地套接字")
+    parser.add_argument("--remote-cli",
+                        help="remote-cli可执行文件，默认从PATH查找")
+    parser.add_argument("--ipc-timeout-ms", type=int, default=2000,
+                        help="每次只读IPC调用超时，默认2000毫秒")
     args = parser.parse_args()
     if args.host not in _LOOPBACK_HOSTS:
         parser.error("认证尚未实现，--host仅允许本机回环地址")
     if args.port < 0 or args.port > 65535:
         parser.error("--port必须位于0～65535")
-    provider: RuntimeProvider = (
-        FileSnapshotProvider(args.snapshot) if args.snapshot
-        else MockSnapshotProvider())
+    if args.ipc_timeout_ms < 100 or args.ipc_timeout_ms > 10000:
+        parser.error("--ipc-timeout-ms必须位于100～10000")
+    if args.remote_cli and not args.toolbusd_socket:
+        parser.error("--remote-cli必须与--toolbusd-socket一起使用")
+    if args.toolbusd_socket:
+        provider: RuntimeProvider = ToolbusdSnapshotProvider(
+            RemoteCliIpcClient(
+                args.toolbusd_socket, args.remote_cli or "remote-cli",
+                timeout_seconds=args.ipc_timeout_ms / 1000.0))
+    elif args.snapshot:
+        provider = FileSnapshotProvider(args.snapshot)
+    else:
+        provider = MockSnapshotProvider()
     server = make_server(args.host, args.port, provider)
     display_host = f"[{args.host}]" if ":" in args.host else args.host
     print(f"RemoteBSP Runtime 只读API已启动：http://{display_host}:"
