@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import RuntimeContractError, normalize_snapshot
@@ -14,12 +15,31 @@ class RuntimeProviderError(RuntimeError):
     """快照来源暂时不可用或数据损坏。"""
 
 
+@dataclass(frozen=True)
+class SnapshotRead:
+    """一次快照读取及其进程内新鲜度信息。"""
+
+    snapshot: dict
+    cache_status: str
+    age_ms: int | None
+    cache_ttl_ms: int | None
+
+
 class RuntimeProvider(ABC):
     """只读 Runtime 数据来源。"""
 
     @abstractmethod
     def get_snapshot(self) -> dict:
         """返回一份通过契约校验的独立快照。"""
+
+    def read_snapshot(self) -> SnapshotRead:
+        """返回快照及可安全声明的新鲜度；默认来源不推算跨进程年龄。"""
+        return SnapshotRead(
+            snapshot=self.get_snapshot(),
+            cache_status="disabled",
+            age_ms=None,
+            cache_ttl_ms=None,
+        )
 
 
 class MockSnapshotProvider(RuntimeProvider):

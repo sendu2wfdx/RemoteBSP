@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 from .models import normalize_snapshot
-from .provider import RuntimeProvider, RuntimeProviderError
+from .provider import RuntimeProvider, RuntimeProviderError, SnapshotRead
 
 
 _UUID = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -541,12 +544,32 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
 
     def __init__(self, client: ToolbusIpcClient,
                  *, clock_ms: Callable[[], int] | None = None,
-                 maximum_resources_per_snapshot: int = 128):
+                 maximum_resources_per_snapshot: int = 128,
+                 cache_ttl_ms: int = 250,
+                 maximum_concurrent_status_queries: int = 8,
+                 refresh_wait_timeout_ms: int = 5000):
         if maximum_resources_per_snapshot < 1:
             raise ValueError("每次快照资源查询上限必须大于0")
+        if cache_ttl_ms < 0 or cache_ttl_ms > 60_000:
+            raise ValueError("快照缓存时间必须位于0～60000毫秒")
+        if maximum_concurrent_status_queries < 1 or \
+                maximum_concurrent_status_queries > 32:
+            raise ValueError("资源状态查询并发必须位于1～32")
+        if refresh_wait_timeout_ms < 1 or refresh_wait_timeout_ms > 60_000:
+            raise ValueError("快照刷新等待时间必须位于1～60000毫秒")
         self.client = client
         self.clock_ms = clock_ms or (lambda: time.monotonic_ns() // 1_000_000)
         self.maximum_resources_per_snapshot = maximum_resources_per_snapshot
+        self.cache_ttl_ms = cache_ttl_ms
+        self.maximum_concurrent_status_queries = \
+            maximum_concurrent_status_queries
+        self.refresh_wait_timeout_ms = refresh_wait_timeout_ms
+        self._cache_condition = threading.Condition()
+        self._cached_snapshot: dict | None = None
+        self._cache_stored_at_ms: int | None = None
+        self._cached_error: str | None = None
+        self._error_stored_at_ms: int | None = None
+        self._refreshing = False
 
     @staticmethod
     def _link_kind(mode: str) -> str:
@@ -568,21 +591,123 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             "occurred_at_ms": captured_at_ms,
         }
 
-    def get_snapshot(self) -> dict:
+    def _read_resource_status(self, node_id: int,
+                              descriptor: dict) -> tuple[dict | None,
+                                                         ToolbusIpcError | None]:
         try:
-            return self._build_snapshot()
-        except RuntimeProviderError:
+            return self.client.resource_status(
+                node_id, int(descriptor["resource_id"])), None
+        except ToolbusIpcProtocolError:
+            raise
+        except ToolbusIpcError as error:
+            return None, error
+
+    def get_snapshot(self) -> dict:
+        return self.read_snapshot().snapshot
+
+    def read_snapshot(self) -> SnapshotRead:
+        """合并并发刷新，并返回缓存年龄；刷新失败不提供陈旧回退。"""
+        now_ms = self._clock_value()
+        with self._cache_condition:
+            cached = self._cached_read(now_ms)
+            if cached is not None:
+                return cached
+            self._raise_cached_failure(now_ms)
+            if self._refreshing:
+                deadline = time.monotonic() + \
+                    self.refresh_wait_timeout_ms / 1000.0
+                while self._refreshing:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeProviderError(
+                            "等待toolbusd快照刷新超时")
+                    self._cache_condition.wait(remaining)
+                now_ms = self._clock_value()
+                cached = self._cached_read(now_ms)
+                if cached is not None:
+                    return cached
+                self._raise_cached_failure(now_ms)
+            self._refreshing = True
+            self._cached_error = None
+            self._error_stored_at_ms = None
+
+        try:
+            snapshot = self._build_snapshot()
+            stored_at_ms = self._clock_value()
+        except RuntimeProviderError as error:
+            self._finish_failed_refresh(str(error), now_ms)
             raise
         except (KeyError, TypeError, ValueError,
                 ToolbusIpcError) as error:
-            raise RuntimeProviderError(
-                f"toolbusd IPC数据无法转换为Runtime快照：{error}") from error
+            converted = RuntimeProviderError(
+                f"toolbusd IPC数据无法转换为Runtime快照：{error}")
+            self._finish_failed_refresh(str(converted), now_ms)
+            raise converted from error
+
+        with self._cache_condition:
+            self._cached_snapshot = copy.deepcopy(snapshot)
+            self._cache_stored_at_ms = stored_at_ms
+            self._cached_error = None
+            self._error_stored_at_ms = None
+            self._refreshing = False
+            self._cache_condition.notify_all()
+        return SnapshotRead(
+            snapshot=copy.deepcopy(snapshot),
+            cache_status="refresh",
+            age_ms=max(0, stored_at_ms - int(snapshot["captured_at_ms"])),
+            cache_ttl_ms=self.cache_ttl_ms,
+        )
+
+    def _clock_value(self) -> int:
+        value = self.clock_ms()
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeProviderError("Runtime时钟返回值无效")
+        return value
+
+    def _cached_read(self, now_ms: int) -> SnapshotRead | None:
+        if self._cached_snapshot is None or self._cache_stored_at_ms is None:
+            return None
+        if now_ms < self._cache_stored_at_ms:
+            return None
+        age_ms = now_ms - self._cache_stored_at_ms
+        if self.cache_ttl_ms == 0 or age_ms > self.cache_ttl_ms:
+            return None
+        return SnapshotRead(
+            snapshot=copy.deepcopy(self._cached_snapshot),
+            cache_status="hit",
+            age_ms=max(0, now_ms - int(
+                self._cached_snapshot["captured_at_ms"])),
+            cache_ttl_ms=self.cache_ttl_ms,
+        )
+
+    def _raise_cached_failure(self, now_ms: int) -> None:
+        if self._cached_error is None or self._error_stored_at_ms is None:
+            return
+        if now_ms < self._error_stored_at_ms:
+            self._cached_error = None
+            self._error_stored_at_ms = None
+            return
+        age_ms = now_ms - self._error_stored_at_ms
+        if self.cache_ttl_ms != 0 and age_ms <= self.cache_ttl_ms:
+            raise RuntimeProviderError(self._cached_error)
+        self._cached_error = None
+        self._error_stored_at_ms = None
+
+    def _finish_failed_refresh(self, message: str,
+                               fallback_stored_at_ms: int) -> None:
+        try:
+            stored_at_ms = self._clock_value()
+        except RuntimeProviderError:
+            # 保留最初的 IPC 错误，同时确保等待者一定被唤醒。
+            stored_at_ms = fallback_stored_at_ms
+        with self._cache_condition:
+            self._cached_error = message
+            self._error_stored_at_ms = stored_at_ms
+            self._refreshing = False
+            self._cache_condition.notify_all()
 
     def _build_snapshot(self) -> dict:
-        captured_at_ms = self.clock_ms()
-        if isinstance(captured_at_ms, bool) or not isinstance(
-                captured_at_ms, int) or captured_at_ms < 0:
-            raise RuntimeProviderError("Runtime时钟返回值无效")
+        captured_at_ms = self._clock_value()
         try:
             traffic = self.client.traffic_status()
             source_nodes = self.client.list_nodes()
@@ -637,18 +762,26 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 if resource_query_count > self.maximum_resources_per_snapshot:
                     raise RuntimeProviderError(
                         "toolbusd资源数量超过单次快照查询上限")
-                for descriptor in descriptors:
+                try:
+                    with ThreadPoolExecutor(
+                            max_workers=self.maximum_concurrent_status_queries,
+                            thread_name_prefix="runtime-status") as executor:
+                        status_results = list(executor.map(
+                            lambda descriptor: self._read_resource_status(
+                                numeric_id, descriptor), descriptors))
+                except ToolbusIpcProtocolError as error:
+                    raise RuntimeProviderError(
+                        f"toolbusd IPC协议不兼容：{error}") from error
+                for descriptor, (status, status_error) in zip(
+                        descriptors, status_results):
                     raw_resource_id = int(descriptor["resource_id"])
                     resource_id = f"resource-{raw_resource_id:08x}"
-                    try:
-                        status = self.client.resource_status(
-                            numeric_id, raw_resource_id)
+                    if status_error is None:
+                        assert status is not None
                         health = str(status["health"])
                         available = health not in {"failed", "disabled"}
-                    except ToolbusIpcProtocolError as error:
-                        raise RuntimeProviderError(
-                            f"toolbusd IPC协议不兼容：{error}") from error
-                    except ToolbusIpcError as error:
+                    else:
+                        error = status_error
                         health = "unknown"
                         available = False
                         state = "degraded"

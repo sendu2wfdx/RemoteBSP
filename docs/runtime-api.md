@@ -63,7 +63,9 @@ python3 -m runtime_api.server --snapshot /tmp/remotebsp-runtime-v1.json
 python3 -m runtime_api.server \
   --toolbusd-socket /tmp/toolbusd.sock \
   --remote-cli ./build-wsl/remote-cli \
-  --ipc-timeout-ms 2000
+  --ipc-timeout-ms 2000 \
+  --snapshot-cache-ms 250 \
+  --status-query-workers 8
 ```
 
 默认地址为 `http://127.0.0.1:8780/api/v1`。文件 Provider 每次请求重新读取文件，
@@ -76,6 +78,18 @@ Toolbusd Provider 只执行 `traffic-status`、`node-list`、`resource-list` 和
 资源目录暂时不可用时，其他节点仍保留，该节点标记为 `degraded` 并产生告警；单个
 资源状态读取失败时，该资源保留但标记 `available=false`、`health=unknown`。单次
 快照默认最多查询 128 项资源，超过上限显式失败，避免异常目录造成无界请求放大。
+
+Toolbusd Provider 默认使用 250 ms 的线程安全短时缓存。同一时刻最多有一个完整快照
+刷新；其他 HTTP 请求共享该次结果，不会各自重复调用 `remote-cli`。成功和失败都会在
+这段短窗口内合并：刷新失败返回 HTTP 503，并在 250 ms 内复用相同失败，不回退到上次
+成功快照。等待正在进行的刷新默认最多 5000 ms，超时也返回 503。可通过
+`--snapshot-cache-ms` 和 `--snapshot-refresh-wait-ms` 调整；缓存设为 0 表示禁用。
+
+单次刷新内的 `resource-status` 默认最多 8 路并发，并继续受 128 项总查询上限约束；
+分别由 `--status-query-workers`（1～32）和 `--maximum-resource-queries`（1～4096）
+配置。HTTP 服务默认最多保留 32 个活动请求线程，满载后在监听队列施加背压，可通过
+`--http-workers`（1～256）调整。这些限制只控制 Runtime 进程内聚合，不绕过
+`remote-cli → libremotebsp → toolbusd` 边界。
 
 旧版 `remote-cli` 暂时只能输出文本时，必须显式使用
 `--toolbusd-legacy-text`。结构化输出解析失败不会静默回退到文本；否则升级不兼容可能
@@ -123,6 +137,27 @@ Runtime Provider 对 v1 使用封闭字段集合，严格检查根信封、命�
 ```json
 {"api_version":"v1","ok":true,"data":{}}
 ```
+
+凡读取快照的端点，成功信封还包含：
+
+```json
+{
+  "meta": {
+    "snapshot_freshness": {
+      "cache_status": "refresh",
+      "age_ms": 0,
+      "cache_ttl_ms": 250
+    }
+  }
+}
+```
+
+`cache_status` 为 `refresh`、`hit` 或 `disabled`。Toolbusd Provider 的 `age_ms`
+使用 Runtime 进程内单调时钟计算，因此可以可靠表示本进程缓存年龄；文件和 Mock
+Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相同信息还通过
+`X-RemoteBSP-Snapshot-Cache` 和 `X-RemoteBSP-Snapshot-Age-Ms` 响应头提供，未知年龄
+写作 `unknown`。`Cache-Control` 仍为 `no-store`，这里的短时缓存是服务端 IPC 合并，
+不是允许浏览器持有陈旧状态。
 
 失败响应使用：
 
@@ -228,9 +263,11 @@ Runtime Provider 对 v1 使用封闭字段集合，严格检查根信封、命�
 3. Runtime 与 `toolbusd` Unix Domain Socket 的权限组；
 4. Web UI 静态文件由 Runtime、反向代理还是独立服务托管。
 
-当前适配器为保持边界清晰而复用 `remote-cli` 的版本化 JSON 输出，每次完整快照需要一次全局
-状态、一次节点列表、每个就绪节点一次资源列表以及每项资源一次状态查询。正式长期
-运行前可进一步给 libremotebsp 增加原生语言绑定或单次快照 IPC，并在 Provider 层做
-有界并发与明确新鲜度的快照缓存；不能让 Web 请求数量直接放大为无界 IPC 请求。
+当前适配器为保持边界清晰而复用 `remote-cli` 的版本化 JSON 输出。短时缓存、单飞刷新
+和有界并发已经阻断“Web 请求数 × 完整快照 IPC 数”的无界放大，但一次真正刷新仍需要
+一次全局状态、一次节点列表、每个就绪节点一次资源列表以及每项资源一次状态查询，仍是
+有明确上限的 N+1 查询。正式长期运行前应给 libremotebsp/toolbusd 增加单次一致快照 IPC
+或原生语言绑定，减少进程启动开销并保证所有资源来自同一 toolbusd 修订；Runtime 不能
+为消除 N+1 而直接访问 SocketCAN、USB 或传输层。
 
 在这些部署决策完成前，Runtime API 只作为仓库内可启动、可测试的开发服务。

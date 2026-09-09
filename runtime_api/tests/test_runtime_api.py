@@ -118,6 +118,9 @@ class RuntimeHttpTest(unittest.TestCase):
         """库调用也不能绕过无认证阶段的本机监听限制。"""
         with self.assertRaisesRegex(ValueError, "回环地址"):
             make_server("0.0.0.0", 0, MockSnapshotProvider())
+        with self.assertRaisesRegex(ValueError, "HTTP工作线程数"):
+            make_server("127.0.0.1", 0, MockSnapshotProvider(),
+                        maximum_workers=0)
 
     def setUp(self):
         snapshot = mock_snapshot()
@@ -170,6 +173,20 @@ class RuntimeHttpTest(unittest.TestCase):
         with urlopen(request) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(response.read(), b"")
+
+    def test_snapshot_freshness_is_explicit_without_guessing_file_age(self):
+        with urlopen(self.base + "/api/v1/snapshot") as response:
+            payload = json.loads(response.read())
+            self.assertEqual(response.headers[
+                "X-RemoteBSP-Snapshot-Cache"], "disabled")
+            self.assertEqual(response.headers[
+                "X-RemoteBSP-Snapshot-Age-Ms"], "unknown")
+        freshness = payload["meta"]["snapshot_freshness"]
+        self.assertEqual(freshness, {
+            "cache_status": "disabled",
+            "age_ms": None,
+            "cache_ttl_ms": None,
+        })
 
     def test_illegal_paths_queries_and_writes_are_bounded(self):
         for path, status, code in (

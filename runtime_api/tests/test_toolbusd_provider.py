@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -391,6 +393,137 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
             ToolbusdSnapshotProvider(
                 FakeToolbusClient(), clock_ms=lambda: 1,
                 maximum_resources_per_snapshot=1).get_snapshot()
+
+    def test_short_cache_reports_age_and_returns_detached_snapshots(self):
+        class CountingClient(FakeToolbusClient):
+            def __init__(self):
+                self.node_calls = 0
+
+            def list_nodes(self):
+                self.node_calls += 1
+                return super().list_nodes()
+
+        now = [1000]
+        client = CountingClient()
+        provider = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: now[0], cache_ttl_ms=250)
+        first = provider.read_snapshot()
+        first.snapshot["nodes"].clear()
+        now[0] += 100
+        second = provider.read_snapshot()
+        self.assertEqual(first.cache_status, "refresh")
+        self.assertEqual(second.cache_status, "hit")
+        self.assertEqual(second.age_ms, 100)
+        self.assertEqual(second.cache_ttl_ms, 250)
+        self.assertEqual(len(second.snapshot["nodes"]), 2)
+        self.assertEqual(client.node_calls, 1)
+
+        now[0] += 151
+        third = provider.read_snapshot()
+        self.assertEqual(third.cache_status, "refresh")
+        self.assertEqual(client.node_calls, 2)
+
+    def test_concurrent_web_reads_share_one_snapshot_refresh(self):
+        class SlowClient(FakeToolbusClient):
+            def __init__(self):
+                self.node_calls = 0
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def list_nodes(self):
+                self.node_calls += 1
+                self.started.set()
+                self.release.wait(timeout=2)
+                return super().list_nodes()
+
+        client = SlowClient()
+        provider = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: 100, cache_ttl_ms=250)
+        results = []
+        errors = []
+
+        def read():
+            try:
+                results.append(provider.read_snapshot())
+            except Exception as error:  # pragma: no cover - 便于断言线程异常
+                errors.append(error)
+
+        first = threading.Thread(target=read)
+        second = threading.Thread(target=read)
+        first.start()
+        self.assertTrue(client.started.wait(timeout=1))
+        second.start()
+        time.sleep(0.02)
+        client.release.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertEqual(errors, [])
+        self.assertEqual(client.node_calls, 1)
+        self.assertEqual({item.cache_status for item in results},
+                         {"refresh", "hit"})
+
+    def test_failed_refresh_is_short_cached_without_stale_fallback(self):
+        class FailingClient(FakeToolbusClient):
+            def __init__(self):
+                self.node_calls = 0
+
+            def list_nodes(self):
+                self.node_calls += 1
+                if self.node_calls == 1:
+                    # 模拟刷新本身耗时超过缓存窗口；失败合并应从完成时起算。
+                    now[0] += 1000
+                raise ToolbusIpcError("测试不可用")
+
+        now = [1]
+        client = FailingClient()
+        provider = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: now[0], cache_ttl_ms=250)
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeProviderError, "测试不可用"):
+                provider.get_snapshot()
+        self.assertEqual(client.node_calls, 1)
+        now[0] += 251
+        with self.assertRaises(RuntimeProviderError):
+            provider.get_snapshot()
+        self.assertEqual(client.node_calls, 2)
+
+    def test_resource_status_parallelism_is_bounded(self):
+        class ManyResourcesClient(FakeToolbusClient):
+            def __init__(self):
+                self.active = 0
+                self.maximum_active = 0
+                self.lock = threading.Lock()
+
+            def list_resources(self, node_id):
+                descriptor = super().list_resources(node_id)[0]
+                return [dict(descriptor, resource_id=index + 1)
+                        for index in range(12)]
+
+            def resource_status(self, node_id, resource_id):
+                with self.lock:
+                    self.active += 1
+                    self.maximum_active = max(self.maximum_active,
+                                              self.active)
+                time.sleep(0.01)
+                with self.lock:
+                    self.active -= 1
+                return {
+                    "resource_id": resource_id,
+                    "health": "normal",
+                    "error_flags": 0,
+                    "rx_buffered": 0,
+                    "tx_buffered": 0,
+                    "rx_overruns": 0,
+                    "tx_overruns": 0,
+                }
+
+        client = ManyResourcesClient()
+        snapshot = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: 1,
+            maximum_concurrent_status_queries=3).get_snapshot()
+        self.assertEqual(len(snapshot["nodes"][0]["resources"]), 12)
+        self.assertGreater(client.maximum_active, 1)
+        self.assertLessEqual(client.maximum_active, 3)
 
 
 if __name__ == "__main__":
