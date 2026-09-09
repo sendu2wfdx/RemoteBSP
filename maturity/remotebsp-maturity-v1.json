@@ -47,7 +47,7 @@
     {
       "id": "resource_model",
       "title": "通用资源模型",
-      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 合同已部分贯通；ADC、Timer、Storage 与实体 I2C/SPI 仍缺失。",
+      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；STM32 总线公共 Core 默认关闭，H2N Stream 仍只到 Mock，ADC、Timer、Storage 与实体数据面缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -60,14 +60,16 @@
         "status": "partial",
         "evidence": [
           {"id": "resource_model_test", "kind": "host_test", "path": "tests/resource_tests.cpp", "note": "资源协议与约束测试。"},
-          {"id": "resource_bus_mock_test", "kind": "mock_test", "path": "tests/bus_resource_tests.cpp", "note": "I2C/SPI 为 Mock 事务验证，不代表实体外设验证。"}
+          {"id": "resource_bus_mock_test", "kind": "mock_test", "path": "tests/bus_resource_tests.cpp", "note": "I2C/SPI 为 Mock 事务验证，不代表实体外设验证。"},
+          {"id": "resource_bus_embedded_test", "kind": "host_test", "path": "firmware/tests/bus_core_tests.c", "note": "默认关闭的嵌入式公共总线 Core/HAL 边界测试，不代表板级 HAL 可用。"},
+          {"id": "resource_stream_session_test", "kind": "mock_test", "path": "tests/stream_session_tests.cpp", "note": "H2N 有界会话、租约、序号、背压与清理测试；Mock 不是实体实测，且未绑定真实高速链路。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
       "cross_compiled": {
         "status": "partial",
         "evidence": [
-          {"id": "resource_cross_document", "kind": "documented_cross_compile_result", "path": "docs/stm32-build-and-flash.md", "note": "GPIO、UART、PWM、位流和运动后端有交叉编译记录；I2C/SPI 实体 BSP 未实现。"}
+          {"id": "resource_cross_document", "kind": "documented_cross_compile_result", "path": "docs/bus-and-stream-resources.md", "note": "三平台默认关闭态已交叉编译并检查零总线符号；不代表 I2C/SPI 实体 BSP 已实现。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -82,13 +84,14 @@
     {
       "id": "multi_node_synchronization",
       "title": "多节点同步",
-      "summary": "TimeSync v1、主机时钟模型、有界同步调度、toolbusd 事务入口、STM32 参与者和 STEPGEN 租约已实现；实体板因可靠启动代次缺失而安全禁用跨板入口。",
+      "summary": "TimeSync v1、主机时钟模型、有界同步调度、toolbusd 事务入口、STM32 参与者、STEPGEN 租约和通用启动代次日志已实现；日志尚未绑定实体保留区，三板继续安全禁用跨板入口。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "sync_manager_source", "kind": "source", "path": "toolbusd/src/clock_sync_manager.cpp", "note": "周期同步请求与生命周期管理。"},
           {"id": "sync_group_source", "kind": "source", "path": "toolbusd/src/motion_group_service.cpp", "note": "多节点 PREPARE/COMMIT/ABORT 软件服务。"},
-          {"id": "sync_embedded_source", "kind": "source", "path": "firmware/src/motion_group.c", "note": "STM32 公共 Remote Core 的可选参与者、完成水位、防重放和安全停机实现。"}
+          {"id": "sync_embedded_source", "kind": "source", "path": "firmware/src/motion_group.c", "note": "STM32 公共 Remote Core 的可选参与者、完成水位、防重放和安全停机实现。"},
+          {"id": "sync_boot_epoch_source", "kind": "source", "path": "device_params/src/boot_epoch.c", "note": "通用双页启动代次日志；尚未绑定任何实体板 Flash 区。"}
         ],
         "blocker_ids": ["multi_node_hardware_sync"]
       },
@@ -240,14 +243,15 @@
     {
       "id": "runtime_api",
       "title": "Runtime 与 API",
-      "summary": "只读 Runtime API、单次快照、缓存、故障隔离、时钟告警、API key 身份、只读权限和有界安全审计已实现；事件流和写控制面尚未实现。",
+      "summary": "只读 Runtime API、单次快照、缓存、故障隔离、时钟告警、API key 身份、只读权限、有界安全审计和增量事件短轮询已实现；主动推送、跨重启事件和写控制面尚未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "runtime_server_source", "kind": "source", "path": "runtime_api/server.py", "note": "只读版本化 HTTP API 与有界线程服务。"},
           {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存和故障隔离。"},
           {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "非回环强制的有界 API key 身份、固定长度摘要比较和只读权限。"},
-          {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"}
+          {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"},
+          {"id": "runtime_events_source", "kind": "source", "path": "runtime_api/events.py", "note": "进程实例游标、有界保留、稳定差分和明确过期的增量事件短轮询。"}
         ],
         "blocker_ids": ["runtime_control_plane"]
       },
@@ -324,13 +328,13 @@
   ],
   "blockers": [
     {"id": "determinism_hardware_timing", "dimension_id": "determinism", "summary": "缺少三类 MCU 在持续高负载下的 STEP 抖动、ISR 最坏耗时和跨板边沿原始采样。", "requires_hardware": true, "closure_evidence": "保存示波器或逻辑分析仪原始数据、环境、固件哈希、阈值与自动判定结果。"},
-    {"id": "incomplete_resource_families", "dimension_id": "resource_model", "summary": "ADC、通用 Timer、Storage、实体 I2C/SPI BSP 与高速流会话尚未闭合。", "requires_hardware": true, "closure_evidence": "实现缺失资源并分别提供软件、交叉编译和实体事务/故障注入记录。"},
-    {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "主机、双 Mock、STM32 参与者和 STEPGEN 租约已有软件闭环，但可靠启动代次及实体同步尚未完成。", "requires_hardware": true, "closure_evidence": "先补齐并验证可靠 boot epoch，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络、租约失效和失联恢复记录。"},
+    {"id": "incomplete_resource_families", "dimension_id": "resource_model", "summary": "ADC、通用 Timer、Storage、实体 I2C/SPI BSP、N2H/双向流及真实高速数据面尚未闭合。", "requires_hardware": true, "closure_evidence": "实现缺失资源并分别提供软件、交叉编译和实体事务/故障注入记录。"},
+    {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "通用启动代次日志已有软件证据，但尚未绑定板级独立 Flash 区，实体同步也未完成。", "requires_hardware": true, "closure_evidence": "先逐板证明 boot epoch 区域、升级保留和掉电行为，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络、租约失效和失联恢复记录。"},
     {"id": "partial_failure_recovery", "dimension_id": "fault_isolation", "summary": "网络分区、部分 COMMIT、总线饱和和实体资源卡死恢复矩阵未完成。", "requires_hardware": true, "closure_evidence": "固定故障脚本、期望状态机、原始链路记录和实体安全输出证据。"},
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
     {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
-    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有只读身份、权限与进程内审计，但缺少事件流、写命令租约、细粒度角色及持久审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有只读身份、权限、进程内审计和增量事件短轮询，但缺少主动推送、跨重启事件、写命令租约、细粒度角色及持久审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
     {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限和有界审计已建立，但 TLS/密钥生命周期、审计完整性、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、持久审计完整性、攻击面测试、总线认证和部署加固验证。"},
     {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
     {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},

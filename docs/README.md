@@ -22,6 +22,7 @@
 - [运动可靠性与跨板同步验证计划](motion-reliability-plan.md)
 - [主机时钟同步模型](clock-synchronization.md)
 - [STM32 跨板运动组参与者](embedded-motion-groups.md)
+- [可靠启动代次 Flash 日志](motion-boot-epoch-journal.md)
 - [只读 Runtime API](runtime-api.md)
 - [安全威胁模型](security-threat-model.md)
 - [可审计成熟度基线](../maturity/README.md)
@@ -63,12 +64,12 @@ flowchart LR
 | 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护 |
 | GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致 |
 | PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM对象命令已实测，实体WS2812波形待验收 |
-| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入RequestManager、toolbusd、IPC/API/CLI和STM32公共Remote Core，并通过双节点Mock USB及嵌入式测试；实体板因可靠启动代次缺失而安全禁用跨板入口 |
+| 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入主机与STM32公共Core；可靠启动代次双页日志已通过故障注入，但尚未绑定实体Flash区，三板继续安全禁用跨板入口 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
 | Studio | 构建阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料和`.config`/32线程构建；批次清单可原子保存到有界本地历史，启动/读取复核、损坏隔离和四类检索已实现，自动烧录回读待实现 |
-| I2C / SPI | 协议、Mock与Studio配置竖切已实现 | 总线/设备合同、原子事务、设备级故障隔离、公开端点白名单、图形编辑及Studio到DigitalTwin黄金路径已测试；STM32 BSP待实现和实板验收 |
-| 高速 Stream | 协议骨架已实现、已测试 | 合同、打开、数据、信用和状态编解码；运行时会话及USB数据面待实现 |
-| Runtime API | 只读竖切已实现、已测试 | RuntimeSnapshot IPC v2、拓扑/资源故障隔离、受时钟陈旧阈值约束的短缓存和告警已测试；数字回环可显式无认证，非回环强制API key并统一保护端点。角色授权、TLS、写操作、事件流和审计待实现 |
+| I2C / SPI | 协议、Mock、Studio及嵌入式公共Core竖切已实现 | 默认关闭的STM32公共Core/HAL骨架已固定端点合同、设备级租约和原子事务边界；三板真实HAL与实板验收待完成 |
+| 高速 Stream | H2N Mock会话已实现、已测试 | 独占租约、连续序号、信用、背压、原子块写和旧缓冲隔离已覆盖；N2H/双向及USB/Ethernet真实数据面待实现 |
+| Runtime API | 只读竖切已实现、已测试 | RuntimeSnapshot、短缓存、时钟告警、API key/runtime.read、有界审计及带进程实例游标的增量事件短轮询已测试；TLS、写操作、主动推送和持久审计待实现 |
 | 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；对照 v1 可锁定公平性、版本、环境和阈值，但硬拒绝 executed/胜出，待实体环境确定后实现仪器原始数据重算和完整失败运行索引 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
