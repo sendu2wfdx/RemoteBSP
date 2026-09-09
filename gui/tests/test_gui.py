@@ -296,6 +296,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["build_enabled"])
                 self.assertTrue(target["project_reports_enabled"])
                 self.assertTrue(target["project_compare_enabled"])
+                self.assertTrue(target["production_record_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -359,6 +360,35 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(comparison["equal"])
                 self.assertEqual(comparison["format"],
                                  "PROJECT_COMPARISON_V1")
+                production_request = Request(
+                    base + "/api/project/generate-production-record",
+                    data=json.dumps({
+                        "project": self._default_project(board),
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                production = json.loads(urlopen(production_request).read())
+                self.assertEqual(production["format"],
+                                 "PRODUCTION_RECORD_V1")
+                self.assertEqual(production["status"], "design_only")
+                production_document = json.loads(base64.b64decode(
+                    production["record_base64"]))
+                self.assertEqual(production_document["execution_status"]
+                                 ["firmware_flash"], "not_performed")
+                linked_production_request = Request(
+                    base + "/api/project/generate-production-record",
+                    data=json.dumps({
+                        "project": self._default_project(board),
+                        "build_id": "test-board-0123456789abcdef",
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                linked_production = json.loads(urlopen(
+                    linked_production_request).read())
+                self.assertEqual(linked_production["status"],
+                                 "build_incomplete")
+                self.assertGreater(len(linked_production["record"]
+                                       ["missing_or_invalid_fields"]), 0)
                 request = Request(
                     base + "/api/project/generate",
                     data=json.dumps({
@@ -407,7 +437,9 @@ class GuiTest(unittest.TestCase):
                                b"buildFirmware", b"exportReports",
                                b"reportResult", b"compareProjects",
                                b"compareLeftFile", b"compareRightFile",
-                               b"compareResult"):
+                               b"compareResult", b"productionBuildId",
+                               b"exportProductionRecord",
+                               b"productionResult"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

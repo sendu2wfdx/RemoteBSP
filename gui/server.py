@@ -28,6 +28,11 @@ from project_config import (
 from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
 from project_artifacts import generate_project_reports
 from project_compare import compare_projects
+from production_record import (
+    MAX_BUILD_RECORD_BYTES,
+    generate_production_record,
+    production_record_response,
+)
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -144,6 +149,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "build_enabled": True,
                 "project_reports_enabled": True,
                 "project_compare_enabled": True,
+                "production_record_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
@@ -172,6 +178,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/project/generate",
                         "/api/project/generate-reports",
                         "/api/project/generate-mock-manifest",
+                        "/api/project/generate-production-record",
                         "/api/project/compare",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
@@ -186,6 +193,26 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             if path == "/api/project/compare":
                 response = compare_projects(
                     request.get("left"), request.get("right"), catalog)
+            elif path == "/api/project/generate-production-record":
+                build_record = None
+                build_record_sha256 = None
+                build_id = request.get("build_id")
+                if build_id is not None:
+                    if not isinstance(build_id, str) or not build_id:
+                        raise ProjectConfigError("构建ID必须是非空字符串")
+                    record_path = resolve_artifact(
+                        build_id, "build-record.json", self.build_output_root)
+                    if record_path.stat().st_size > MAX_BUILD_RECORD_BYTES:
+                        raise ProjectConfigError(
+                            "构建记录源文件超过128 KiB上限")
+                    record_bytes = record_path.read_bytes()
+                    build_record_sha256 = hashlib.sha256(
+                        record_bytes).hexdigest()
+                    build_record = json.loads(record_bytes.decode("utf-8"))
+                response = production_record_response(
+                    generate_production_record(
+                        project, catalog, build_record=build_record,
+                        build_record_sha256=build_record_sha256))
             elif path == "/api/project/generate-reports":
                 generated = generate_project_reports(project, catalog)
                 response = {

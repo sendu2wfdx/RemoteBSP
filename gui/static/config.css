@@ -87,6 +87,8 @@
 .artifact-links a:hover {border-color:var(--cyan)}
 .report-download {display:block;margin-top:9px;padding:7px;border:1px solid var(--cyan);border-radius:6px;color:var(--cyan);text-align:center;text-decoration:none;background:rgba(67,217,189,.07)}
 .report-download:hover {background:rgba(67,217,189,.13)}
+.production-build-id { display:grid; gap:5px; margin-top:10px; color:var(--muted); font-size:10px; }
+.production-build-id input { min-width:0; padding:8px; border:1px solid var(--line); border-radius:7px; background:#0c1620; color:var(--text); font:10px ui-monospace,monospace; }
 .inspector .wide + .wide {margin-top:8px}
 .project-compare { margin-top:18px; }
 .compare-inputs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
