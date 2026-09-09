@@ -152,3 +152,46 @@ STREAM_CONTRACT → STREAM_OPEN → STREAM_DATA / STREAM_CREDIT
 5. 待真实吞吐需求明确后，再设计 Ethernet `LinkTransport` 和多链路路由；
 6. 上层 Web 配套可借鉴 Moonraker + Fluidd 的分层，但只通过 `toolbusd` 的稳定
    服务 API 使用节点、资源、作业和遥测，不直接访问 SocketCAN。
+
+## 10. Mock 板卡描述与数字孪生
+
+板卡描述 schema v2 新增 `bus_resources`。v1 描述继续按原格式加载，但不能携带
+该字段；这样测试数据可以明确声明它依赖的新能力，而不是静默改变 v1 的语义。
+
+每个公开的 `i2c_bus`、`i2c_device`、`spi_bus`、`spi_device` 资源必须在
+`bus_resources` 中恰好存在一份同 ID、同类型的合同。总线的
+`parent_bus_resource_id` 必须为零；设备必须引用同协议类型的公开父总线。
+加载器不依赖声明顺序，但会在完成解析后检查整张资源图。
+
+Mock 专用静态字段包括：
+
+- I2C 设备：`i2c_address` 与可选 `initial_data`；
+- SPI 设备：`spi_mode`、`bits_per_word`、`spi_chip_select` 与可选
+  `deterministic_response`；
+- 总线和设备共同字段：时钟、最大事务长度、队列容量、超时区间、操作频率和
+  能力标志。
+
+初始数据和确定性响应不得超过合同的 `maximum_transfer_bytes`。加载后的
+`DigitalTwin` 自动实例化 `MockBusBsp`，并由 `make_remote_core` 注入
+`RemoteCore`，因此同一份版本化描述可以直接驱动协议级端到端测试。
+同一 I2C 总线不能重复声明设备地址，同一 SPI 总线不能重复声明片选；设备的
+时钟、事务长度、队列、超时、操作频率和能力标志均不得超出父总线合同。
+
+故障场景新增一次性的 `bus_status` 动作：
+
+```json
+{
+  "at_ms": 10,
+  "action": "bus_status",
+  "resource_id": 201326593,
+  "status": "nack"
+}
+```
+
+状态可为 `ok`、`nack`、`timeout`、`busy`、`fault` 或
+`limit_exceeded`。事件只影响指定设备的下一次事务，用于确定性验证单设备故障
+不会污染同节点的其他 I2C/SPI 设备。
+
+内部转换器占用仍通过 `reserved_resources` 表达。例如 SPI 1 被 UART 扩展器
+占用后，描述中不得再公开枚举实例 1 的旧式 `spi` 或新版 `spi_bus`。Linux 只
+能看到转换后的 `expanded` 逻辑资源。

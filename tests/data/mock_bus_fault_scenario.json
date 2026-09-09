@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "events": [
+    {"at_ms": 10, "action": "bus_status", "resource_id": 201326593,
+     "status": "nack"},
+    {"at_ms": 20, "action": "bus_status", "resource_id": 234881025,
+     "status": "timeout"}
+  ]
+}

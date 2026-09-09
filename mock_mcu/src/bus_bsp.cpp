@@ -21,6 +21,10 @@ void MockBusBsp::add_device(
     }
     // 借用协议编码器执行全部边界验证，避免 Mock 与线协议的限制漂移。
     static_cast<void>(protocol::encode_bus_resource_contract(contract));
+    if (initial_data.size() > contract.maximum_transfer_bytes) {
+        throw MockBusException(MockBusError::InvalidContract,
+                               "Mock 总线初始数据超过设备合同");
+    }
     const auto inserted = devices_.emplace(
         contract.resource_id,
         DeviceState{contract, std::move(initial_data), {},
@@ -43,8 +47,13 @@ void MockBusBsp::set_next_status(
 
 void MockBusBsp::set_spi_response(std::uint32_t resource_id,
                                   std::vector<std::uint8_t> data) {
-    require_device(resource_id, protocol::BusResourceKind::SpiDevice)
-        .spi_response = std::move(data);
+    auto& device =
+        require_device(resource_id, protocol::BusResourceKind::SpiDevice);
+    if (data.size() > device.contract.maximum_transfer_bytes) {
+        throw MockBusException(MockBusError::InvalidContract,
+                               "Mock SPI 确定性响应超过设备合同");
+    }
+    device.spi_response = std::move(data);
 }
 
 MockBusBsp::DeviceState& MockBusBsp::require_device(

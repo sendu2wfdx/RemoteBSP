@@ -23,6 +23,17 @@ target_compile_options(bus_resource_tests PRIVATE
 )
 add_test(NAME bus_resource_tests COMMAND bus_resource_tests)
 
+add_executable(bus_manifest_tests bus_manifest_tests.cpp)
+target_link_libraries(bus_manifest_tests PRIVATE remotebsp_remote_core)
+target_compile_definitions(bus_manifest_tests PRIVATE
+    TEST_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json"
+    TEST_BUS_FAULT_SCENARIO="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_fault_scenario.json"
+)
+target_compile_options(bus_manifest_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME bus_manifest_tests COMMAND bus_manifest_tests)
+
 add_executable(device_parameter_protocol_tests
     device_parameter_protocol_tests.cpp)
 target_link_libraries(device_parameter_protocol_tests PRIVATE
@@ -208,6 +219,16 @@ target_compile_options(traffic_control_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME traffic_control_tests COMMAND traffic_control_tests)
+
+add_executable(clock_model_tests clock_model_tests.cpp)
+target_link_libraries(clock_model_tests PRIVATE
+    remotebsp_request_manager
+)
+target_compile_options(clock_model_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME clock_model_tests COMMAND clock_model_tests)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE

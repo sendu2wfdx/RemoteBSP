@@ -412,6 +412,77 @@ const std::vector<JsonValue>& require_array(const Object& object,
     return value.array;
 }
 
+std::vector<std::uint8_t> optional_byte_array(const Object& object,
+                                              const char* field) {
+    const auto found = object.find(field);
+    if (found == object.end()) {
+        return {};
+    }
+    if (found->second.type != JsonValue::Type::Array) {
+        schema_error(ManifestError::InvalidSchema,
+                     std::string(field) + " 必须是字节数组");
+    }
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(found->second.array.size());
+    for (const auto& value : found->second.array) {
+        if (value.type != JsonValue::Type::Integer || value.integer > 255U) {
+            schema_error(ManifestError::InvalidValue,
+                         std::string(field) + " 元素必须位于 0～255");
+        }
+        bytes.push_back(static_cast<std::uint8_t>(value.integer));
+    }
+    return bytes;
+}
+
+protocol::BusResourceKind parse_bus_kind(const std::string& text) {
+    if (text == "i2c_bus") return protocol::BusResourceKind::I2cBus;
+    if (text == "i2c_device") return protocol::BusResourceKind::I2cDevice;
+    if (text == "spi_bus") return protocol::BusResourceKind::SpiBus;
+    if (text == "spi_device") return protocol::BusResourceKind::SpiDevice;
+    schema_error(ManifestError::InvalidValue, "未知总线资源类型 " + text);
+}
+
+std::uint8_t parse_bus_flags(const std::vector<JsonValue>& values) {
+    std::uint8_t flags = 0;
+    for (const auto& value : values) {
+        if (value.type != JsonValue::Type::String) {
+            schema_error(ManifestError::InvalidSchema,
+                         "bus_resource.flags 元素必须是字符串");
+        }
+        std::uint8_t flag = 0;
+        if (value.string == "repeated_start") {
+            flag = protocol::kBusContractRepeatedStart;
+        } else if (value.string == "recovery") {
+            flag = protocol::kBusContractRecovery;
+        } else if (value.string == "full_duplex") {
+            flag = protocol::kBusContractFullDuplex;
+        } else if (value.string == "keep_chip_select") {
+            flag = protocol::kBusContractKeepChipSelect;
+        } else {
+            schema_error(ManifestError::InvalidValue,
+                         "未知总线合同标志 " + value.string);
+        }
+        if ((flags & flag) != 0) {
+            schema_error(ManifestError::Conflict,
+                         "总线合同标志重复 " + value.string);
+        }
+        flags = static_cast<std::uint8_t>(flags | flag);
+    }
+    return flags;
+}
+
+protocol::BusTransactionStatus parse_bus_status(const std::string& text) {
+    if (text == "ok") return protocol::BusTransactionStatus::Ok;
+    if (text == "nack") return protocol::BusTransactionStatus::Nack;
+    if (text == "timeout") return protocol::BusTransactionStatus::Timeout;
+    if (text == "busy") return protocol::BusTransactionStatus::Busy;
+    if (text == "fault") return protocol::BusTransactionStatus::Fault;
+    if (text == "limit_exceeded") {
+        return protocol::BusTransactionStatus::LimitExceeded;
+    }
+    schema_error(ManifestError::InvalidValue, "未知总线故障状态 " + text);
+}
+
 protocol::ResourceType parse_resource_type(const std::string& text) {
     if (text == "gpio") {
         return protocol::ResourceType::Gpio;
@@ -602,16 +673,21 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
     reject_unknown(root,
                    {"schema_version", "name", "board_type", "uuid",
                     "firmware_version", "capabilities",
-                    "resource_groups", "reserved_resources",
+                    "resource_groups", "reserved_resources", "bus_resources",
                     "motion_axes", "motion_maximum_total_step_rate_hz",
                     "waveform_endpoints"},
                    "板卡描述根");
 
     BoardManifest manifest;
     manifest.schema_version = require_u32(root, "schema_version");
-    if (manifest.schema_version != kBoardManifestSchemaVersion) {
+    if (manifest.schema_version == 0 ||
+        manifest.schema_version > kBoardManifestSchemaVersion) {
         schema_error(ManifestError::InvalidSchema,
                      "不支持的板卡描述 schema_version");
+    }
+    if (manifest.schema_version == 1 && root.count("bus_resources") != 0) {
+        schema_error(ManifestError::InvalidSchema,
+                     "schema_version 1 不能声明 bus_resources");
     }
     manifest.name = require_string(root, "name");
     if (manifest.name.empty() || manifest.name.size() > 64) {
@@ -787,7 +863,219 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
             schema_error(ManifestError::Conflict,
                          "同一资源不能既公开又被内部占用");
         }
+        if ((entry.type == protocol::ResourceType::Spi ||
+             entry.type == protocol::ResourceType::SpiBus) &&
+            (resource_instances.count(
+                 {protocol::ResourceType::Spi, entry.instance}) != 0 ||
+             resource_instances.count(
+                 {protocol::ResourceType::SpiBus, entry.instance}) != 0)) {
+            schema_error(ManifestError::Conflict,
+                         "内部占用的 SPI 控制器不能作为外部总线枚举");
+        }
+        if ((entry.type == protocol::ResourceType::I2c ||
+             entry.type == protocol::ResourceType::I2cBus) &&
+            (resource_instances.count(
+                 {protocol::ResourceType::I2c, entry.instance}) != 0 ||
+             resource_instances.count(
+                 {protocol::ResourceType::I2cBus, entry.instance}) != 0)) {
+            schema_error(ManifestError::Conflict,
+                         "内部占用的 I2C 控制器不能作为外部总线枚举");
+        }
         manifest.reserved_resources.push_back(std::move(entry));
+    }
+
+    std::set<std::uint32_t> configured_bus_resources;
+    std::set<std::pair<std::uint32_t, std::uint16_t>> i2c_addresses;
+    std::set<std::pair<std::uint32_t, std::uint16_t>> spi_chip_selects;
+    if (manifest.schema_version >= 2) {
+        for (const auto& bus_value : require_array(root, "bus_resources")) {
+            const auto& bus = require_object(bus_value, "bus_resource");
+            reject_unknown(
+                bus,
+                {"resource_id", "kind", "flags",
+                 "parent_bus_resource_id", "maximum_clock_hz",
+                 "maximum_transfer_bytes", "queue_capacity",
+                 "minimum_timeout_us", "maximum_timeout_us",
+                 "maximum_operations_per_second", "i2c_address",
+                 "spi_mode", "bits_per_word", "spi_chip_select",
+                 "initial_data",
+                 "deterministic_response"},
+                "bus_resource");
+            BusManifestResource config;
+            config.contract.resource_id = require_u32(bus, "resource_id");
+            config.contract.kind =
+                parse_bus_kind(require_string(bus, "kind"));
+            config.contract.flags =
+                parse_bus_flags(require_array(bus, "flags"));
+            config.contract.parent_bus_resource_id =
+                require_u32(bus, "parent_bus_resource_id");
+            config.contract.maximum_clock_hz =
+                require_u32(bus, "maximum_clock_hz");
+            config.contract.maximum_transfer_bytes =
+                require_u16(bus, "maximum_transfer_bytes");
+            config.contract.queue_capacity =
+                require_u16(bus, "queue_capacity");
+            config.contract.minimum_timeout_us =
+                require_u32(bus, "minimum_timeout_us");
+            config.contract.maximum_timeout_us =
+                require_u32(bus, "maximum_timeout_us");
+            config.contract.maximum_operations_per_second =
+                require_u32(bus, "maximum_operations_per_second");
+            config.initial_data = optional_byte_array(bus, "initial_data");
+            config.deterministic_response =
+                optional_byte_array(bus, "deterministic_response");
+
+            const bool i2c_device = config.contract.kind ==
+                                    protocol::BusResourceKind::I2cDevice;
+            const bool spi_device = config.contract.kind ==
+                                    protocol::BusResourceKind::SpiDevice;
+            const bool is_device = i2c_device || spi_device;
+            if (i2c_device) {
+                config.i2c_address = require_u16(bus, "i2c_address");
+                if (*config.i2c_address == 0 || *config.i2c_address > 0x7FU ||
+                    bus.count("spi_mode") != 0 ||
+                    bus.count("bits_per_word") != 0 ||
+                    bus.count("spi_chip_select") != 0 ||
+                    !config.deterministic_response.empty()) {
+                    schema_error(ManifestError::InvalidValue,
+                                 "I2C 设备静态字段无效");
+                }
+            } else if (spi_device) {
+                const auto mode = require_u16(bus, "spi_mode");
+                const auto bits = require_u16(bus, "bits_per_word");
+                config.spi_chip_select =
+                    require_u16(bus, "spi_chip_select");
+                if (mode > 3 || bits < 4 || bits > 16 ||
+                    bus.count("i2c_address") != 0 ||
+                    !config.initial_data.empty()) {
+                    schema_error(ManifestError::InvalidValue,
+                                 "SPI 设备静态字段无效");
+                }
+                config.spi_mode = static_cast<std::uint8_t>(mode);
+                config.bits_per_word = static_cast<std::uint8_t>(bits);
+            } else if (bus.count("i2c_address") != 0 ||
+                       bus.count("spi_mode") != 0 ||
+                       bus.count("bits_per_word") != 0 ||
+                       bus.count("spi_chip_select") != 0 ||
+                       !config.initial_data.empty() ||
+                       !config.deterministic_response.empty()) {
+                schema_error(ManifestError::InvalidValue,
+                             "总线资源不能声明设备数据字段");
+            }
+            try {
+                static_cast<void>(protocol::encode_bus_resource_contract(
+                    config.contract));
+            } catch (const protocol::BusStreamPayloadException& error) {
+                schema_error(ManifestError::InvalidValue,
+                             std::string("总线合同无效: ") + error.what());
+            }
+            if ((config.initial_data.size() >
+                 config.contract.maximum_transfer_bytes) ||
+                (config.deterministic_response.size() >
+                 config.contract.maximum_transfer_bytes)) {
+                schema_error(ManifestError::InvalidValue,
+                             "Mock 总线数据超过设备合同最大事务长度");
+            }
+            if (!configured_bus_resources.insert(
+                     config.contract.resource_id).second) {
+                schema_error(ManifestError::Conflict,
+                             "bus_resources 包含重复资源 ID");
+            }
+            const auto* resource = find_resource(
+                manifest, config.contract.resource_id);
+            protocol::ResourceType expected = protocol::ResourceType::I2cBus;
+            switch (config.contract.kind) {
+                case protocol::BusResourceKind::I2cBus:
+                    expected = protocol::ResourceType::I2cBus;
+                    break;
+                case protocol::BusResourceKind::I2cDevice:
+                    expected = protocol::ResourceType::I2cDevice;
+                    break;
+                case protocol::BusResourceKind::SpiBus:
+                    expected = protocol::ResourceType::SpiBus;
+                    break;
+                case protocol::BusResourceKind::SpiDevice:
+                    expected = protocol::ResourceType::SpiDevice;
+                    break;
+            }
+            if (resource == nullptr || resource->type != expected) {
+                schema_error(ManifestError::Conflict,
+                             "总线合同引用了缺失或类型不匹配的公开资源");
+            }
+            if (is_device) {
+                const auto* parent = find_resource(
+                    manifest, config.contract.parent_bus_resource_id);
+                const auto parent_type = i2c_device
+                    ? protocol::ResourceType::I2cBus
+                    : protocol::ResourceType::SpiBus;
+                if (parent == nullptr || parent->type != parent_type) {
+                    schema_error(ManifestError::Conflict,
+                                 "总线设备父资源缺失或类型不匹配");
+                }
+                const auto endpoint = i2c_device
+                    ? *config.i2c_address
+                    : *config.spi_chip_select;
+                auto& endpoints = i2c_device
+                    ? i2c_addresses
+                    : spi_chip_selects;
+                if (!endpoints.emplace(
+                         config.contract.parent_bus_resource_id,
+                         endpoint).second) {
+                    schema_error(ManifestError::Conflict,
+                                 "同一总线上的设备地址或片选重复");
+                }
+            }
+            manifest.bus_resources.push_back(std::move(config));
+        }
+    }
+    for (const auto& resource : manifest.resources) {
+        const bool typed_bus_resource =
+            resource.type == protocol::ResourceType::I2cBus ||
+            resource.type == protocol::ResourceType::I2cDevice ||
+            resource.type == protocol::ResourceType::SpiBus ||
+            resource.type == protocol::ResourceType::SpiDevice;
+        if (typed_bus_resource &&
+            configured_bus_resources.count(resource.resource_id) == 0) {
+            schema_error(ManifestError::Conflict,
+                         "公开总线资源缺少 bus_resources 合同");
+        }
+    }
+    for (const auto& config : manifest.bus_resources) {
+        const bool is_device =
+            config.contract.kind == protocol::BusResourceKind::I2cDevice ||
+            config.contract.kind == protocol::BusResourceKind::SpiDevice;
+        if (!is_device) {
+            continue;
+        }
+        const auto parent = std::find_if(
+            manifest.bus_resources.begin(), manifest.bus_resources.end(),
+            [&config](const auto& candidate) {
+                return candidate.contract.resource_id ==
+                       config.contract.parent_bus_resource_id;
+            });
+        if (parent == manifest.bus_resources.end()) {
+            schema_error(ManifestError::Conflict,
+                         "总线设备父资源缺少总线合同");
+        }
+        const auto& child_contract = config.contract;
+        const auto& parent_contract = parent->contract;
+        if (child_contract.maximum_clock_hz >
+                parent_contract.maximum_clock_hz ||
+            child_contract.maximum_transfer_bytes >
+                parent_contract.maximum_transfer_bytes ||
+            child_contract.queue_capacity > parent_contract.queue_capacity ||
+            child_contract.minimum_timeout_us <
+                parent_contract.minimum_timeout_us ||
+            child_contract.maximum_timeout_us >
+                parent_contract.maximum_timeout_us ||
+            (parent_contract.maximum_operations_per_second != 0 &&
+             child_contract.maximum_operations_per_second >
+                 parent_contract.maximum_operations_per_second) ||
+            (child_contract.flags &
+             static_cast<std::uint8_t>(~parent_contract.flags)) != 0) {
+            schema_error(ManifestError::InvalidValue,
+                         "设备合同超出父总线能力边界");
+        }
     }
 
     const auto waveform_endpoints = root.find("waveform_endpoints");
@@ -1002,7 +1290,8 @@ FaultScenario parse_fault_scenario(std::string_view json_text) {
                          "故障事件数量超过 65535");
         }
         const auto& event = require_object(event_value, "故障事件");
-        reject_unknown(event, {"at_ms", "action", "resource_id", "value"},
+        reject_unknown(event,
+                       {"at_ms", "action", "resource_id", "value", "status"},
                        "故障事件");
         FaultEvent parsed;
         parsed.at_ms = require_integer(event, "at_ms");
@@ -1032,12 +1321,28 @@ FaultScenario parse_fault_scenario(std::string_view json_text) {
                 schema_error(ManifestError::InvalidSchema,
                              "motion_limit 事件不能包含 value");
             }
+        } else if (action == "bus_status") {
+            parsed.action = FaultAction::SetBusStatus;
+            parsed.resource_id = require_u32(event, "resource_id");
+            parsed.bus_status =
+                parse_bus_status(require_string(event, "status"));
+            if (event.count("value") != 0) {
+                schema_error(ManifestError::InvalidSchema,
+                             "bus_status 事件不能包含 value");
+            }
         } else {
             schema_error(ManifestError::InvalidValue,
                          "未知故障动作 " + action);
         }
-        if (parsed.action != FaultAction::TriggerMotionLimit) {
+        if (parsed.action == FaultAction::SetUartFailed ||
+            parsed.action == FaultAction::SetGpioInput ||
+            parsed.action == FaultAction::SetNodeOnline) {
             parsed.value = require_boolean(event, "value");
+        }
+        if (parsed.action != FaultAction::SetBusStatus &&
+            event.count("status") != 0) {
+            schema_error(ManifestError::InvalidSchema,
+                         "只有 bus_status 事件可以包含 status");
         }
         if (!first && parsed.at_ms < previous_time) {
             schema_error(ManifestError::InvalidValue,
@@ -1081,6 +1386,23 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
             manifest_.motion_queue_capacity, 1000000ULL,
             manifest_.motion_maximum_total_step_rate_hz);
     }
+    if (!manifest_.bus_resources.empty()) {
+        bus_ = std::make_shared<MockBusBsp>();
+        for (const auto& config : manifest_.bus_resources) {
+            if (config.contract.kind !=
+                    protocol::BusResourceKind::I2cDevice &&
+                config.contract.kind !=
+                    protocol::BusResourceKind::SpiDevice) {
+                continue;
+            }
+            bus_->add_device(config.contract, config.initial_data);
+            if (config.contract.kind ==
+                protocol::BusResourceKind::SpiDevice) {
+                bus_->set_spi_response(config.contract.resource_id,
+                                       config.deterministic_response);
+            }
+        }
+    }
     for (const auto& event : scenario_.events) {
         if (event.action == FaultAction::SetUartFailed) {
             require_resource(event.resource_id,
@@ -1094,6 +1416,14 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
             if (!motion_) {
                 schema_error(ManifestError::InvalidValue,
                              "运动限位事件要求板卡启用运动执行器");
+            }
+        } else if (event.action == FaultAction::SetBusStatus) {
+            const auto* resource = find_resource(manifest_, event.resource_id);
+            if (!bus_ || resource == nullptr ||
+                (resource->type != protocol::ResourceType::I2cDevice &&
+                 resource->type != protocol::ResourceType::SpiDevice)) {
+                schema_error(ManifestError::InvalidValue,
+                             "总线故障事件引用了不存在或类型错误的设备");
             }
         } else if (event.resource_id != 0) {
             schema_error(ManifestError::InvalidValue,
@@ -1120,6 +1450,10 @@ const std::shared_ptr<MotionExecutor>& DigitalTwin::motion() const noexcept {
 
 const std::shared_ptr<WaveformBsp>& DigitalTwin::waveform() const noexcept {
     return waveform_;
+}
+
+const std::shared_ptr<MockBusBsp>& DigitalTwin::bus() const noexcept {
+    return bus_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1186,6 +1520,8 @@ void DigitalTwin::apply(const FaultEvent& event) {
             event.resource_id, event.at_ms * 1000000ULL);
         pending_motion_edges_.insert(
             pending_motion_edges_.end(), edges.begin(), edges.end());
+    } else if (event.action == FaultAction::SetBusStatus) {
+        bus_->set_next_status(event.resource_id, event.bus_status);
     } else {
         online_ = event.value;
     }
@@ -1200,7 +1536,8 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
                           capability_mask(Capability::DeviceParameters),
                        twin.gpio(), twin.uart(),
                        manifest.resources, manifest.contracts,
-                       twin.motion(), twin.waveform(), device_parameters);
+                       twin.motion(), twin.waveform(), device_parameters,
+                       twin.bus());
 }
 
 }  // namespace remotebsp::mock_mcu

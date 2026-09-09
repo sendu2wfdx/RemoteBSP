@@ -16,7 +16,7 @@
 
 namespace remotebsp::mock_mcu {
 
-constexpr std::uint32_t kBoardManifestSchemaVersion = 1;
+constexpr std::uint32_t kBoardManifestSchemaVersion = 2;
 constexpr std::uint32_t kFaultScenarioSchemaVersion = 1;
 
 struct ReservedResource {
@@ -39,6 +39,16 @@ struct WaveformEndpointCapability {
     std::uint32_t maximum_bit_rate{};
 };
 
+struct BusManifestResource {
+    protocol::BusResourceContract contract;
+    std::optional<std::uint16_t> i2c_address;
+    std::optional<std::uint8_t> spi_mode;
+    std::optional<std::uint8_t> bits_per_word;
+    std::optional<std::uint16_t> spi_chip_select;
+    std::vector<std::uint8_t> initial_data;
+    std::vector<std::uint8_t> deterministic_response;
+};
+
 struct BoardManifest {
     std::uint32_t schema_version{kBoardManifestSchemaVersion};
     std::string name;
@@ -46,6 +56,7 @@ struct BoardManifest {
     std::uint64_t capabilities{};
     std::vector<protocol::ResourceDescriptor> resources;
     std::vector<protocol::ResourceContract> contracts;
+    std::vector<BusManifestResource> bus_resources;
     std::vector<ReservedResource> reserved_resources;
     std::vector<MotionAxisConfig> motion_axes;
     std::vector<WaveformEndpointCapability> waveform_endpoints;
@@ -80,6 +91,7 @@ enum class FaultAction {
     SetGpioInput,
     SetNodeOnline,
     TriggerMotionLimit,
+    SetBusStatus,
 };
 
 struct FaultEvent {
@@ -87,6 +99,8 @@ struct FaultEvent {
     FaultAction action{FaultAction::SetUartFailed};
     std::uint32_t resource_id{};
     bool value{};
+    protocol::BusTransactionStatus bus_status{
+        protocol::BusTransactionStatus::Ok};
 };
 
 struct FaultScenario {
@@ -107,6 +121,7 @@ public:
     const std::shared_ptr<MockUartBsp>& uart() const noexcept;
     const std::shared_ptr<MotionExecutor>& motion() const noexcept;
     const std::shared_ptr<WaveformBsp>& waveform() const noexcept;
+    const std::shared_ptr<MockBusBsp>& bus() const noexcept;
     bool online() const noexcept;
     std::optional<std::uint64_t> next_event_ms() const noexcept;
     std::size_t advance_to(std::uint64_t elapsed_ms);
@@ -123,6 +138,7 @@ private:
     std::shared_ptr<MockUartBsp> uart_;
     std::shared_ptr<MotionExecutor> motion_;
     std::shared_ptr<WaveformBsp> waveform_;
+    std::shared_ptr<MockBusBsp> bus_;
     std::vector<MotionEdge> pending_motion_edges_;
     std::size_t next_event_index_{};
     bool online_{true};
