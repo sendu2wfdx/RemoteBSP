@@ -62,7 +62,9 @@ mock_pid=$!
     >"$daemon_log" 2>&1 &
 daemon_pid=$!
 
-for _ in $(seq 1 100); do
+# GitHub 托管 Runner 的共享双核负载会显著拉长首次进程调度。这里采用
+# 有界 10 秒就绪窗口，并在每次等待时确认两个进程仍然存活。
+for _ in $(seq 1 500); do
     [[ -S "$socket_path" ]] && break
     kill -0 "$mock_pid"
     kill -0 "$daemon_pid"
@@ -72,7 +74,7 @@ done
 [[ "$(stat -c '%a' "$socket_path")" == "660" ]]
 
 ping_output=""
-for _ in $(seq 1 100); do
+for _ in $(seq 1 500); do
     if ping_output="$("$remote_cli_bin" --socket "$socket_path" \
         ping "端到端测试" 2>/dev/null)"; then
         break
