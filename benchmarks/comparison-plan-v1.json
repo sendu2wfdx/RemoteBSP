@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "plan_id": "remotebsp-klipper-common-workload-v1",
+  "status": "draft",
+  "scope": "比较双方共同的主机提前排程、MCU确定性执行、多节点同步和故障隔离；产品功能完整度由成熟度矩阵单独判断。",
+  "system_pins": {
+    "remotebsp": {
+      "repository": "https://github.com/sendu2wfdx/RemoteBSP.git",
+      "revision": null,
+      "host_config": null,
+      "firmware_configs": []
+    },
+    "klipper": {
+      "repository": "https://github.com/Klipper3d/klipper.git",
+      "revision": null,
+      "host_config": null,
+      "firmware_configs": []
+    }
+  },
+  "fairness": {
+    "same_host": true,
+    "same_mcu_boards": true,
+    "same_transport": true,
+    "same_electrical_load": true,
+    "same_instrument_and_probe_points": true,
+    "randomized_run_order": true,
+    "notes": "固定CPU调频、进程优先级、总线速率、线束、终端电阻、供电、环境温度和探头位置；不得为任一侧隐藏失败样本。"
+  },
+  "environment": {
+    "host_hardware": null,
+    "host_os": null,
+    "mcu_boards": [],
+    "transport": null,
+    "instruments": [],
+    "ambient_policy": "记录每次运行前后的温度和供电电压；超出预注册范围的运行作废但保留原始记录。"
+  },
+  "scenarios": [
+    {
+      "id": "single_node_step_timing",
+      "purpose": "比较单节点持续运动在正常与主机压力下的边沿时序和安全停机。",
+      "preconditions": "同一MCU、定时器、STEP/DIR/EN引脚、脉冲参数、段序列和电气负载。",
+      "workload": "持续30分钟的等价多轴速度曲线；分别执行空闲主机和预注册CPU/IO压力档。",
+      "warmup_runs": 5,
+      "measured_runs": 30,
+      "timeout_seconds": 3600,
+      "metrics": [
+        {"id": "step_interval_error_p99_ns", "unit": "ns", "direction": "lower", "statistic": "p99", "measurement": "由同一逻辑分析仪原始边沿相对理想时间线计算", "acceptance_rule": "预注册阈值后方可执行"},
+        {"id": "missed_deadline_count", "unit": "count", "direction": "lower", "statistic": "sum", "measurement": "结合原始边沿缺口和双方运行日志判定", "acceptance_rule": "必须为0"},
+        {"id": "safety_stop_latency_us", "unit": "us", "direction": "lower", "statistic": "max", "measurement": "从故障注入边沿到EN进入安全态", "acceptance_rule": "预注册阈值后方可执行"}
+      ]
+    },
+    {
+      "id": "dual_node_synchronization",
+      "purpose": "比较两个独立MCU执行共同计划时的同步误差和事务失败行为。",
+      "preconditions": "两侧使用相同两块板、同一传输和同一同步输出探针；双方都不得共享MCU定时器。",
+      "workload": "连续提交等价双节点计划，并注入预注册比例的延迟、丢包和单节点复位。",
+      "warmup_runs": 5,
+      "measured_runs": 30,
+      "timeout_seconds": 3600,
+      "metrics": [
+        {"id": "cross_node_edge_skew_p99_ns", "unit": "ns", "direction": "lower", "statistic": "p99", "measurement": "同一采样时钟下两个节点同步边沿绝对差", "acceptance_rule": "预注册阈值后方可执行"},
+        {"id": "cross_node_edge_skew_max_ns", "unit": "ns", "direction": "lower", "statistic": "max", "measurement": "包含全部有效运行且不删除离群点", "acceptance_rule": "预注册阈值后方可执行"},
+        {"id": "unsafe_partial_start_count", "unit": "count", "direction": "lower", "statistic": "sum", "measurement": "计划未获全员许可但任一节点产生STEP即计数", "acceptance_rule": "必须为0"}
+      ]
+    },
+    {
+      "id": "transport_saturation_isolation",
+      "purpose": "比较总线接近饱和时关键运动与非关键资源的隔离和恢复。",
+      "preconditions": "相同CAN/CAN-FD有效载荷预算、节点数、遥测频率和运动队列水位。",
+      "workload": "运动期间逐级增加GPIO、I2C/SPI等价事务和遥测流量，并使一个节点离线。",
+      "warmup_runs": 5,
+      "measured_runs": 30,
+      "timeout_seconds": 3600,
+      "metrics": [
+        {"id": "critical_deadline_miss_count", "unit": "count", "direction": "lower", "statistic": "sum", "measurement": "由边沿采样和关键命令截止时间联合判定", "acceptance_rule": "必须为0"},
+        {"id": "unaffected_node_error_count", "unit": "count", "direction": "lower", "statistic": "sum", "measurement": "故障节点之外的超时、错误响应和输出异常总数", "acceptance_rule": "必须为0"},
+        {"id": "recovery_time_ms", "unit": "ms", "direction": "lower", "statistic": "p99", "measurement": "从负载恢复或节点重连到健康状态和稳定吞吐", "acceptance_rule": "预注册阈值后方可执行"}
+      ]
+    },
+    {
+      "id": "restart_and_replay_safety",
+      "purpose": "比较主机或MCU重启、旧命令重放和升级中断后的安全行为。",
+      "preconditions": "相同复位点、缓存窗口、恢复脚本和输出探针。",
+      "workload": "在预注册执行点重启主机、单个MCU和协调进程，并重放旧事务标识。",
+      "warmup_runs": 5,
+      "measured_runs": 30,
+      "timeout_seconds": 3600,
+      "metrics": [
+        {"id": "uncommanded_output_count", "unit": "count", "direction": "lower", "statistic": "sum", "measurement": "重启或重放后未属于新有效计划的输出边沿数", "acceptance_rule": "必须为0"},
+        {"id": "safe_recovery_time_ms", "unit": "ms", "direction": "lower", "statistic": "p99", "measurement": "从恢复动作开始到身份、配置和安全状态重新确认", "acceptance_rule": "预注册阈值后方可执行"}
+      ]
+    }
+  ],
+  "artifacts": {
+    "configuration_paths": [],
+    "raw_data_paths": [],
+    "analysis_path": null,
+    "run_manifest_paths": []
+  },
+  "claim_gate": {
+    "minimum_independent_runs": 3,
+    "all_scenarios_required": true,
+    "raw_data_required": true,
+    "no_failed_safety_trial": true,
+    "independent_reproduction_required": true,
+    "rule": "整体结论还必须满足成熟度清单全部维度和硬件证据门槛；性能胜出或功能数量均不能单独推出整体超过Klipper。"
+  }
+}
+

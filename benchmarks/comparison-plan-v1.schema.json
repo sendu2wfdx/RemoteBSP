@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remotebsp.local/schema/comparison-plan-v1.schema.json",
+  "title": "RemoteBSP / Klipper 对照基准计划 v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "plan_id", "status", "scope", "system_pins",
+    "fairness", "environment", "scenarios", "artifacts", "claim_gate"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "plan_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+    "status": {"enum": ["draft", "preregistered"]},
+    "scope": {"$ref": "#/$defs/text"},
+    "system_pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remotebsp", "klipper"],
+      "properties": {
+        "remotebsp": {"$ref": "#/$defs/systemPin"},
+        "klipper": {"$ref": "#/$defs/systemPin"}
+      }
+    },
+    "fairness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "same_host", "same_mcu_boards", "same_transport",
+        "same_electrical_load", "same_instrument_and_probe_points",
+        "randomized_run_order", "notes"
+      ],
+      "properties": {
+        "same_host": {"const": true},
+        "same_mcu_boards": {"const": true},
+        "same_transport": {"const": true},
+        "same_electrical_load": {"const": true},
+        "same_instrument_and_probe_points": {"const": true},
+        "randomized_run_order": {"const": true},
+        "notes": {"$ref": "#/$defs/text"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_hardware", "host_os", "mcu_boards", "transport",
+        "instruments", "ambient_policy"
+      ],
+      "properties": {
+        "host_hardware": {"$ref": "#/$defs/nullableText"},
+        "host_os": {"$ref": "#/$defs/nullableText"},
+        "mcu_boards": {"$ref": "#/$defs/stringList"},
+        "transport": {"$ref": "#/$defs/nullableText"},
+        "instruments": {"$ref": "#/$defs/stringList"},
+        "ambient_policy": {"$ref": "#/$defs/text"}
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/scenario"}
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuration_paths", "raw_data_paths", "analysis_path",
+        "run_manifest_paths"
+      ],
+      "properties": {
+        "configuration_paths": {"$ref": "#/$defs/pathList"},
+        "raw_data_paths": {"$ref": "#/$defs/pathList"},
+        "analysis_path": {"$ref": "#/$defs/nullablePath"},
+        "run_manifest_paths": {"$ref": "#/$defs/pathList"}
+      }
+    },
+    "claim_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_independent_runs", "all_scenarios_required",
+        "raw_data_required", "no_failed_safety_trial",
+        "independent_reproduction_required", "rule"
+      ],
+      "properties": {
+        "minimum_independent_runs": {"type": "integer", "minimum": 3, "maximum": 100},
+        "all_scenarios_required": {"const": true},
+        "raw_data_required": {"const": true},
+        "no_failed_safety_trial": {"const": true},
+        "independent_reproduction_required": {"const": true},
+        "rule": {"$ref": "#/$defs/text"}
+      }
+    }
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "nullableText": {"type": ["string", "null"], "minLength": 1, "maxLength": 500},
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "nullablePath": {"anyOf": [{"$ref": "#/$defs/path"}, {"type": "null"}]},
+    "stringList": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 240}
+    },
+    "pathList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/path"}
+    },
+    "systemPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "host_config", "firmware_configs"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^https://.+\\.git$", "maxLength": 240},
+        "revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "host_config": {"$ref": "#/$defs/nullablePath"},
+        "firmware_configs": {
+          "type": "array", "maxItems": 16, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/path"}
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "unit", "direction", "statistic", "measurement",
+        "acceptance_rule"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "unit": {"enum": ["ns", "us", "ms", "count", "percent", "bytes_per_second"]},
+        "direction": {"enum": ["lower", "higher", "zero"]},
+        "statistic": {"enum": ["p50", "p95", "p99", "max", "sum", "failure_rate"]},
+        "measurement": {"$ref": "#/$defs/text"},
+        "acceptance_rule": {"$ref": "#/$defs/text"}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "purpose", "preconditions", "workload", "warmup_runs",
+        "measured_runs", "timeout_seconds", "metrics"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "purpose": {"$ref": "#/$defs/text"},
+        "preconditions": {"$ref": "#/$defs/text"},
+        "workload": {"$ref": "#/$defs/text"},
+        "warmup_runs": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "measured_runs": {"type": "integer", "minimum": 30, "maximum": 10000},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "metrics": {
+          "type": "array", "minItems": 1, "maxItems": 32,
+          "items": {"$ref": "#/$defs/metric"}
+        }
+      }
+    }
+  }
+}

@@ -28,3 +28,8 @@ v1 验证器仅在以下条件同时成立时允许把整体比较改为 `allowe
 
 当前清单保持 `blocked`。局部功能更丰富、Mock 通过、交叉编译成功或少量板卡实测，
 都不能单独推出“RemoteBSP 整体超过 Klipper”。
+
+`../benchmarks/comparison-plan-v1.json` 已建立公平对照草案，但 v1 验证器只接受
+`draft` 和 `preregistered`，故意拒绝 `executed`。原因是当前没有针对最终逻辑分析仪
+格式的双侧指标重算、完整失败运行索引和固件回读绑定；仅凭自报数值和文件哈希不能
+成为 `comparative_benchmark` 证据。
