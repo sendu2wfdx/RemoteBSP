@@ -144,6 +144,18 @@ std::vector<std::uint8_t> parse_hex(const std::string& text) {
     return result;
 }
 
+std::array<std::uint8_t, 16> parse_hex_id(const std::string& text,
+                                          const char* name) {
+    const auto bytes = parse_hex(text);
+    if (bytes.size() != 16U) {
+        throw std::invalid_argument(std::string(name) +
+                                    " 必须是32位十六进制");
+    }
+    std::array<std::uint8_t, 16> result{};
+    std::copy(bytes.begin(), bytes.end(), result.begin());
+    return result;
+}
+
 std::uint16_t parse_device_parameter_id(const std::string& text) {
     if (text == "serial-number" || text == "sn") {
         return RBSP_DEVICE_PARAM_SERIAL_NUMBER;
@@ -373,6 +385,12 @@ void print_usage() {
         << "  node-list\n"
         << "  traffic-status\n"
         << "  daemon-identity\n"
+        << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
+           "<调用者ID> <GPIO资源ID> <租约ms>\n"
+        << "  runtime-gpio-write <daemon实例ID> <控制租约ID> <调用者ID> "
+           "<GPIO资源ID> <幂等键> <0|1>\n"
+        << "  runtime-control-release <daemon实例ID> <控制租约ID> "
+           "<调用者ID>\n"
         << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
@@ -444,6 +462,62 @@ int run(const std::vector<std::string>& arguments,
                 identity.instance_id.begin(), identity.instance_id.end());
             print_hex(bytes);
             std::cout << '\n';
+        }
+        return 0;
+    }
+
+    if (name == "runtime-control-acquire" && arguments.size() == 6) {
+        client.runtime_control_acquire(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), arguments[3],
+            parse_u32(arguments[4], "GPIO资源ID"),
+            parse_u32(arguments[5], "租约毫秒"));
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":"
+                         "\"runtime-control-acquire\",\"data\":{}}\n";
+        } else {
+            std::cout << "ok\n";
+        }
+        return 0;
+    }
+
+    if (name == "runtime-gpio-write" && arguments.size() == 7) {
+        const auto value = parse_u32(arguments[6], "GPIO 电平");
+        if (value > 1U) {
+            throw std::invalid_argument("GPIO 电平必须是0或1");
+        }
+        const auto result = client.runtime_gpio_write(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), arguments[3],
+            parse_u32(arguments[4], "GPIO资源ID"),
+            arguments[5], value != 0U);
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":"
+                         "\"runtime-gpio-write\",\"data\":{"
+                         "\"object_id\":"
+                      << result.object_id << ",\"value\":"
+                      << (result.value ? "true" : "false")
+                      << ",\"replayed\":"
+                      << (result.replayed ? "true" : "false")
+                      << "}}\n";
+        } else {
+            std::cout << "object_id=" << result.object_id
+                      << " value=" << (result.value ? 1 : 0)
+                      << " replayed=" << (result.replayed ? "yes" : "no")
+                      << '\n';
+        }
+        return 0;
+    }
+
+    if (name == "runtime-control-release" && arguments.size() == 4) {
+        client.runtime_control_release(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), arguments[3]);
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":"
+                         "\"runtime-control-release\",\"data\":{}}\n";
+        } else {
+            std::cout << "ok\n";
         }
         return 0;
     }

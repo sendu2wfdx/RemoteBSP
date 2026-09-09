@@ -40,6 +40,12 @@ struct DaemonIdentity {
     std::array<std::uint8_t, 16> instance_id{};
 };
 
+struct RuntimeGpioWriteResult {
+    std::uint32_t object_id{};
+    bool value{};
+    bool replayed{};
+};
+
 enum class CanTrafficClass : std::uint8_t {
     Safety = 0,
     Motion = 1,
@@ -224,6 +230,20 @@ public:
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     DaemonIdentity daemon_identity() const;
+    void runtime_control_acquire(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        std::uint32_t ttl_ms) const;
+    RuntimeGpioWriteResult runtime_gpio_write(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key, bool value) const;
+    void runtime_control_release(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& owner_key_id) const;
     CanTrafficStatus traffic_status() const;
     RuntimeSnapshot runtime_snapshot(
         std::uint16_t maximum_resources = 128U,

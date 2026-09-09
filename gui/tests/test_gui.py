@@ -73,6 +73,15 @@ class GuiTest(unittest.TestCase):
                 self.assertIn(
                     f'"{result.project_sha256}"',
                     result.static_resource_header)
+                self.assertIn(
+                    "#define RBSP_STUDIO_UART_RESOURCE_COUNT",
+                    result.static_resource_header)
+                self.assertIn(
+                    "#define RBSP_STUDIO_PWM_RESOURCE_COUNT",
+                    result.static_resource_header)
+                self.assertIn(
+                    "#define RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT",
+                    result.static_resource_header)
                 self.assertRegex(result.static_resource_sha256,
                                  r"^[0-9a-f]{64}$")
                 if board["id"] == "weact-bluepill-plus-v1":
@@ -83,6 +92,10 @@ class GuiTest(unittest.TestCase):
                                   result.config)
                     self.assertIn("CONFIG_UART2_PINS_PB10_PB11=y",
                                   result.config)
+                    self.assertIn(
+                        "{0U, 10U, 9U, UINT32_C(300), "
+                        "UINT32_C(4500000)}",
+                        result.static_resource_header)
                 if board["id"] == "weact-g431-core-v10":
                     self.assertIn(
                         "CONFIG_HARDWARE_UART_RESOURCE_COUNT=3",
@@ -91,6 +104,9 @@ class GuiTest(unittest.TestCase):
                                   result.config)
                     self.assertIn("CONFIG_UART2_PINS_PB10_PB11=y",
                                   result.config)
+                    self.assertIn(
+                        "{0U, 38U, UINT32_C(10000)}",
+                        result.static_resource_header)
 
     def test_project_contract_migrates_legacy_and_hashes_canonically(self):
         """旧草案可显式迁移，键顺序和排版不改变工程身份。"""
@@ -137,6 +153,8 @@ class GuiTest(unittest.TestCase):
                 self.assertGreaterEqual(endpoint["maximum_baud_rate"],
                                         endpoint["baud_rate"])
                 self.assertEqual(endpoint["backend_status"], "implemented")
+                self.assertRegex(endpoint["kconfig_symbol"],
+                                 r"^[A-Z][A-Z0-9_]*$")
             for axis in board["motion_defaults"]:
                 selected.extend(axis[name] for name in
                                 ("step", "dir", "enable", "tmc_uart", "limit")
@@ -175,6 +193,9 @@ class GuiTest(unittest.TestCase):
                               ("implemented", "planned"))
                 if pwm["enabled"]:
                     selected.append(pwm["pin"])
+                if pwm["backend_status"] == "implemented":
+                    self.assertRegex(pwm["kconfig_symbol"],
+                                     r"^[A-Z][A-Z0-9_]*$")
             strip_endpoints = set()
             for strip in waveform["ws2812"]:
                 self.assertNotIn(strip["endpoint_id"], strip_endpoints)
@@ -189,6 +210,9 @@ class GuiTest(unittest.TestCase):
                               ("implemented", "planned"))
                 if strip["enabled"]:
                     selected.append(strip["pin"])
+                if strip["backend_status"] == "implemented":
+                    self.assertRegex(strip["kconfig_symbol"],
+                                     r"^[A-Z][A-Z0-9_]*$")
             self.assertEqual(len(selected), len(set(selected)), board["id"])
             self.assertFalse(reserved.intersection(selected), board["id"])
 
@@ -208,6 +232,16 @@ class GuiTest(unittest.TestCase):
             generate_project_config(project, catalog)
 
         project = copy.deepcopy(self._default_project(board))
+        project["uart"]["ports"][0]["port"] = 2
+        with self.assertRaisesRegex(ProjectConfigError, "端点目录不一致"):
+            generate_project_config(project, catalog)
+
+        project = copy.deepcopy(self._default_project(board))
+        project["uart"]["ports"][0]["rx_pin"] = "PB7"
+        with self.assertRaisesRegex(ProjectConfigError, "端点目录不一致"):
+            generate_project_config(project, catalog)
+
+        project = copy.deepcopy(self._default_project(board))
         project["uart"]["ports"] = project["uart"]["ports"][1:]
         with self.assertRaisesRegex(ProjectConfigError, "连续启用"):
             generate_project_config(project, catalog)
@@ -217,6 +251,39 @@ class GuiTest(unittest.TestCase):
             copy.deepcopy(project["gpio"]["resources"][0]))
         with self.assertRaisesRegex(ProjectConfigError, "重复使用"):
             generate_project_config(project, catalog)
+
+    def test_static_waveform_table_uses_catalog_endpoint_and_rejects_spoof(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        board = next(item for item in catalog["boards"]
+                     if item["id"] == "mellow-fly-d5-v1")
+        project = self._default_project(board)
+        project["motion"]["axes"] = []
+        pwm = copy.deepcopy(next(
+            item for item in board["waveform"]["pwm"]
+            if item["backend_status"] == "implemented"))
+        strip = copy.deepcopy(next(
+            item for item in board["waveform"]["ws2812"]
+            if item["backend_status"] == "implemented"))
+        project["pwm"]["channels"] = [pwm]
+        project["timed_bitstream"]["ws2812"] = [strip]
+        result = generate_project_config(project, catalog)
+        self.assertIn("#if !defined(CONFIG_PWM0_PIN_PA6)",
+                      result.static_resource_header)
+        self.assertIn("#if !defined(CONFIG_TIMED_BITSTREAM0_PIN_PA8)",
+                      result.static_resource_header)
+        self.assertIn("{0U, 6U, UINT32_C(20000)}",
+                      result.static_resource_header)
+        self.assertIn("{0U, 8U, UINT32_C(192)}",
+                      result.static_resource_header)
+
+        broken = copy.deepcopy(project)
+        broken["pwm"]["channels"][0]["pin"] = "PA7"
+        with self.assertRaisesRegex(ProjectConfigError, "端点目录不一致"):
+            generate_project_config(broken, catalog)
+        broken = copy.deepcopy(project)
+        broken["timed_bitstream"]["ws2812"][0]["channel"] = 1
+        with self.assertRaisesRegex(ProjectConfigError, "端点目录不一致"):
+            generate_project_config(broken, catalog)
 
     def test_static_gpio_table_is_deterministic_and_detects_drift(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))

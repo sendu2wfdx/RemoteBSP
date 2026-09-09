@@ -165,6 +165,37 @@ grep -Fq 'resource_id=0x2000007 type=uart instance=7 source=expanded rx_capacity
 grep -Fq 'resource_id=0x6000000 type=pwm instance=0' <<<"$resource_output"
 grep -Fq 'resource_id=0xa000000 type=timed-bitstream instance=0' <<<"$resource_output"
 
+# Runtime 专用 GPIO 控制必须先在同一 toolbusd 实例登记租约；写请求本身
+# 不能隐式创建租约。同一幂等键的重试不重复下发远端写命令。
+daemon_identity_output="$("$remote_cli_bin" --socket "$socket_path" \
+    daemon-identity)"
+daemon_instance_id="${daemon_identity_output##*instance_id=}"
+[[ "$daemon_instance_id" =~ ^[0-9a-f]{32}$ ]]
+runtime_lease_id="11223344556677889900aabbccddeeff"
+unknown_runtime_lease_id="ffeeddccbbaa00998877665544332211"
+runtime_gpio_resource="0x1000005"
+if "$remote_cli_bin" --socket "$socket_path" --node 1 \
+    runtime-gpio-write "$daemon_instance_id" "$unknown_runtime_lease_id" \
+    e2e-runtime "$runtime_gpio_resource" unknown-before-acquire 1 \
+    >/dev/null 2>&1; then
+    echo "未登记的 Runtime 控制租约不应允许 GPIO 写入" >&2
+    exit 1
+fi
+"$remote_cli_bin" --socket "$socket_path" --node 1 \
+    runtime-control-acquire "$daemon_instance_id" "$runtime_lease_id" \
+    e2e-runtime "$runtime_gpio_resource" 5000 >/dev/null
+runtime_gpio_first="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
+    runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
+    e2e-runtime "$runtime_gpio_resource" gpio-e2e-command 1)"
+grep -Fq 'value=1 replayed=no' <<<"$runtime_gpio_first"
+runtime_gpio_replay="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
+    runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
+    e2e-runtime "$runtime_gpio_resource" gpio-e2e-command 1)"
+grep -Fq 'value=1 replayed=yes' <<<"$runtime_gpio_replay"
+"$remote_cli_bin" --socket "$socket_path" --node 1 \
+    runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
+    e2e-runtime >/dev/null
+
 pwm_create_output="$("$remote_cli_bin" --socket "$socket_path" \
     pwm-create 0 20000 4200 active-high)"
 pwm_object_id="${pwm_create_output#object_id=}"

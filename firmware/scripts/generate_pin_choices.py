@@ -111,7 +111,8 @@ BOARDS = {
         },
         "waveform": {
             "pwm": [
-                {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
+                {"endpoint_id": "tim3_ch1_pa6",
+                 "kconfig_symbol": "PWM0_PIN_PA6", "enabled": False,
                  "name": "pwm_0", "channel": 0, "pin": "PA6",
                  "capable_pins": ["PA6"], "timer": "TIM3_CH1",
                  "frequency_group": "TIM3", "backend_status": "implemented",
@@ -131,7 +132,8 @@ BOARDS = {
                  "backend_status": "planned"},
             ],
             "ws2812": [
-                {"endpoint_id": "tim1_ch1_pa8_dma1_ch2", "enabled": False,
+                {"endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+                 "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8", "enabled": False,
                  "name": "strip_0", "channel": 0, "pin": "PA8",
                  "capable_pins": ["PA8"], "timer_dma": "TIM1_CH1 + DMA1_Channel2",
                  "timer_group": "TIM1", "dma_resource": "DMA1_Channel2",
@@ -183,6 +185,7 @@ BOARDS = {
             "endpoints": [
                 {
                     "endpoint_id": "usart1_pa9_pa10",
+                    "kconfig_symbol": "UART0_PINS_PA9_PA10",
                     "enabled": True,
                     "name": "uart_0",
                     "port": 0,
@@ -196,6 +199,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart1_pb6_pb7",
+                    "kconfig_symbol": "UART0_PINS_PB6_PB7",
                     "enabled": False,
                     "name": "uart_0",
                     "port": 0,
@@ -209,6 +213,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart2_pa2_pa3",
+                    "kconfig_symbol": "UART1_PINS_PA2_PA3",
                     "enabled": True,
                     "name": "uart_1",
                     "port": 1,
@@ -222,6 +227,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart3_pb10_pb11",
+                    "kconfig_symbol": "UART2_PINS_PB10_PB11",
                     "enabled": True,
                     "name": "uart_2",
                     "port": 2,
@@ -251,7 +257,8 @@ BOARDS = {
         },
         "waveform": {
             "pwm": [
-                {"endpoint_id": "tim3_ch1_pa6", "enabled": False,
+                {"endpoint_id": "tim3_ch1_pa6",
+                 "kconfig_symbol": "PWM0_PIN_PA6", "enabled": False,
                  "name": "pwm_0", "channel": 0, "pin": "PA6",
                  "capable_pins": ["PA6"], "timer": "TIM3_CH1",
                  "frequency_group": "TIM3", "backend_status": "implemented",
@@ -271,7 +278,8 @@ BOARDS = {
                  "backend_status": "planned"},
             ],
             "ws2812": [
-                {"endpoint_id": "tim1_ch1_pa8_dma1_ch2", "enabled": False,
+                {"endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+                 "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8", "enabled": False,
                  "name": "strip_0", "channel": 0, "pin": "PA8",
                  "capable_pins": ["PA8"], "timer_dma": "TIM1_CH1 + DMA1_Channel2",
                  "timer_group": "TIM1", "dma_resource": "DMA1_Channel2",
@@ -314,6 +322,7 @@ BOARDS = {
             "endpoints": [
                 {
                     "endpoint_id": "usart1_pa9_pa10",
+                    "kconfig_symbol": "UART0_PINS_PA9_PA10",
                     "enabled": True,
                     "name": "uart_0",
                     "port": 0,
@@ -327,6 +336,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart1_pb6_pb7",
+                    "kconfig_symbol": "UART0_PINS_PB6_PB7",
                     "enabled": False,
                     "name": "uart_0",
                     "port": 0,
@@ -340,6 +350,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart2_pa2_pa3",
+                    "kconfig_symbol": "UART1_PINS_PA2_PA3",
                     "enabled": True,
                     "name": "uart_1",
                     "port": 1,
@@ -353,6 +364,7 @@ BOARDS = {
                 },
                 {
                     "endpoint_id": "usart3_pb10_pb11",
+                    "kconfig_symbol": "UART2_PINS_PB10_PB11",
                     "enabled": True,
                     "name": "uart_2",
                     "port": 2,
@@ -382,7 +394,8 @@ BOARDS = {
         },
         "waveform": {
             "pwm": [
-                {"endpoint_id": "tim3_ch1_pc6", "enabled": True,
+                {"endpoint_id": "tim3_ch1_pc6",
+                 "kconfig_symbol": "PWM0_PIN_PC6", "enabled": True,
                  "name": "board_led", "channel": 0, "pin": "PC6",
                  "capable_pins": ["PC6"], "timer": "TIM3_CH1",
                  "frequency_group": "TIM3", "backend_status": "implemented",
@@ -402,7 +415,8 @@ BOARDS = {
                  "backend_status": "planned"},
             ],
             "ws2812": [
-                {"endpoint_id": "tim1_ch1_pa8_dma1_ch1", "enabled": False,
+                {"endpoint_id": "tim1_ch1_pa8_dma1_ch1",
+                 "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8", "enabled": False,
                  "name": "strip_0", "channel": 0, "pin": "PA8",
                  "capable_pins": ["PA8"],
                  "timer_dma": "TIM1_CH1 + DMA1_Channel1 / DMAMUX",
@@ -643,6 +657,10 @@ def generate_catalog() -> str:
             normalized_waveform[kind] = []
             for index, template in enumerate(templates):
                 item = {**base, **template}
+                # 端点与 Kconfig 的绑定不能从首项继承；未实现端点没有
+                # 可启用的固件符号，否则会把 planned 端点伪装成同一后端。
+                if "kconfig_symbol" not in template:
+                    item.pop("kconfig_symbol", None)
                 if "name" not in template:
                     item["name"] = f"{'pwm' if kind == 'pwm' else 'strip'}_{index}"
                 normalized_waveform[kind].append(item)

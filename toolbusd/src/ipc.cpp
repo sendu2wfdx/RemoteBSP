@@ -23,6 +23,10 @@ constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
 constexpr std::size_t kDaemonIdentitySize = 20U;
+constexpr std::size_t kRuntimeControlAcquireHeaderSize = 49U;
+constexpr std::size_t kRuntimeGpioWriteHeaderSize = 47U;
+constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
+constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -181,8 +185,8 @@ void write_ipc_node_list_request(int socket) {
 IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
-        body[0] >
-            static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)) {
+        body[0] > static_cast<std::uint8_t>(
+                      IpcRequestKind::RuntimeControlRelease)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -275,6 +279,28 @@ IpcRequest read_ipc_request(int socket) {
         }
         return request;
     }
+    if (kind == IpcRequestKind::RuntimeControlAcquire) {
+        IpcRequest request;
+        request.kind = kind;
+        request.runtime_control_acquire = decode_ipc_runtime_control_acquire(
+            {body.begin() + 1U, body.end()});
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeGpioWrite) {
+        IpcRequest request;
+        request.kind = kind;
+        request.runtime_gpio_write = decode_ipc_runtime_gpio_write(
+            {body.begin() + 1U, body.end()});
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeControlRelease) {
+        IpcRequest request;
+        request.kind = kind;
+        request.runtime_control_release =
+            decode_ipc_runtime_control_release(
+                {body.begin() + 1U, body.end()});
+        return request;
+    }
     if (body.size() < 1 + sizeof(std::uint32_t)) {
         throw IpcException("本地 IPC 请求缺少目标节点 ID");
     }
@@ -296,6 +322,30 @@ IpcRequest read_ipc_request(int socket) {
 void write_ipc_daemon_identity_request(int socket) {
     send_body(socket,
               {static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)});
+}
+
+void write_ipc_runtime_control_acquire_request(
+    int socket, const RuntimeControlAcquireRequest& request) {
+    auto body = encode_ipc_runtime_control_acquire(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeControlAcquire));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_gpio_write_request(
+    int socket, const RuntimeGpioWriteRequest& request) {
+    auto body = encode_ipc_runtime_gpio_write(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeGpioWrite));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_control_release_request(
+    int socket, const RuntimeControlReleaseRequest& request) {
+    auto body = encode_ipc_runtime_control_release(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeControlRelease));
+    send_body(socket, body);
 }
 
 void write_ipc_traffic_status_request(int socket) {
@@ -1053,6 +1103,200 @@ IpcDaemonIdentity decode_ipc_daemon_identity(
         throw IpcException("toolbusd 实例身份不能为零");
     }
     return identity;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_control_acquire(
+    const RuntimeControlAcquireRequest& request) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes) {
+        throw IpcException("Runtime 控制租约登记 IPC 字段超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeControlAcquireHeaderSize +
+                 request.owner_key_id.size());
+    append_u16(body, request.version);
+    append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(),
+                request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    append_u32(body, request.node_id);
+    append_u32(body, request.resource_id);
+    append_u32(body, request.ttl_ms);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.insert(body.end(), request.owner_key_id.begin(),
+                request.owner_key_id.end());
+    return body;
+}
+
+RuntimeControlAcquireRequest decode_ipc_runtime_control_acquire(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeControlAcquireHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion) {
+        throw IpcException("Runtime 控制租约登记 IPC 版本或长度无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[48U]);
+    if (owner_length == 0U ||
+        owner_length > kMaximumRuntimeControlIdentityBytes ||
+        body.size() != kRuntimeControlAcquireHeaderSize + owner_length) {
+        throw IpcException("Runtime 控制租约登记 IPC 身份长度无效");
+    }
+    RuntimeControlAcquireRequest request;
+    request.version = get_u16(body.data());
+    request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin() + 4U, request.daemon_instance_id.size(),
+                request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, request.lease_id.size(),
+                request.lease_id.begin());
+    request.node_id = get_u32(body.data() + 36U);
+    request.resource_id = get_u32(body.data() + 40U);
+    request.ttl_ms = get_u32(body.data() + 44U);
+    request.owner_key_id.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeControlAcquireHeaderSize),
+        body.end());
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_gpio_write(
+    const RuntimeGpioWriteRequest& request) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes ||
+        request.idempotency_key.empty() ||
+        request.idempotency_key.size() >
+            kMaximumRuntimeControlIdempotencyBytes) {
+        throw IpcException("Runtime GPIO 写 IPC 字段超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeGpioWriteHeaderSize + request.owner_key_id.size() +
+                 request.idempotency_key.size());
+    append_u16(body, request.version);
+    append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(),
+                request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    append_u32(body, request.node_id);
+    append_u32(body, request.resource_id);
+    body.push_back(request.value ? 1U : 0U);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(
+        request.idempotency_key.size()));
+    body.insert(body.end(), request.owner_key_id.begin(),
+                request.owner_key_id.end());
+    body.insert(body.end(), request.idempotency_key.begin(),
+                request.idempotency_key.end());
+    return body;
+}
+
+RuntimeGpioWriteRequest decode_ipc_runtime_gpio_write(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeGpioWriteHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion ||
+        body[44U] > 1U) {
+        throw IpcException("Runtime GPIO 写 IPC 版本、长度或布尔值无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[45U]);
+    const auto idempotency_length = static_cast<std::size_t>(body[46U]);
+    if (owner_length == 0U ||
+        owner_length > kMaximumRuntimeControlIdentityBytes ||
+        idempotency_length == 0U ||
+        idempotency_length > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != kRuntimeGpioWriteHeaderSize + owner_length +
+                           idempotency_length) {
+        throw IpcException("Runtime GPIO 写 IPC 字符串长度无效");
+    }
+    RuntimeGpioWriteRequest request;
+    request.version = get_u16(body.data());
+    request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin() + 4U, request.daemon_instance_id.size(),
+                request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, request.lease_id.size(),
+                request.lease_id.begin());
+    request.node_id = get_u32(body.data() + 36U);
+    request.resource_id = get_u32(body.data() + 40U);
+    request.value = body[44U] != 0U;
+    request.owner_key_id.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeGpioWriteHeaderSize),
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeGpioWriteHeaderSize + owner_length));
+    request.idempotency_key.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeGpioWriteHeaderSize + owner_length),
+        body.end());
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_control_release(
+    const RuntimeControlReleaseRequest& request) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes) {
+        throw IpcException("Runtime 控制租约释放 IPC 字段超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeControlReleaseHeaderSize +
+                 request.owner_key_id.size());
+    append_u16(body, request.version);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.insert(body.end(), request.daemon_instance_id.begin(),
+                request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.owner_key_id.begin(),
+                request.owner_key_id.end());
+    return body;
+}
+
+RuntimeControlReleaseRequest decode_ipc_runtime_control_release(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeControlReleaseHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion) {
+        throw IpcException("Runtime 控制租约释放 IPC 版本或长度无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[2U]);
+    if (owner_length == 0U ||
+        owner_length > kMaximumRuntimeControlIdentityBytes ||
+        body.size() != kRuntimeControlReleaseHeaderSize + owner_length) {
+        throw IpcException("Runtime 控制租约释放 IPC 身份长度无效");
+    }
+    RuntimeControlReleaseRequest request;
+    request.version = get_u16(body.data());
+    std::copy_n(body.begin() + 3U, request.daemon_instance_id.size(),
+                request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 19U, request.lease_id.size(),
+                request.lease_id.begin());
+    request.owner_key_id.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeControlReleaseHeaderSize),
+        body.end());
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_gpio_write_result(
+    const RuntimeGpioWriteResult& result) {
+    if (result.version != kRuntimeControlIpcVersion ||
+        result.object_id == 0U) {
+        throw IpcException("Runtime GPIO 写结果字段无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeGpioWriteResultSize);
+    append_u16(body, result.version);
+    append_u32(body, result.object_id);
+    body.push_back(result.value ? 1U : 0U);
+    body.push_back(result.replayed ? 1U : 0U);
+    return body;
+}
+
+RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() != kRuntimeGpioWriteResultSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion ||
+        get_u32(body.data() + 2U) == 0U || body[6U] > 1U || body[7U] > 1U) {
+        throw IpcException("Runtime GPIO 写结果版本、长度或字段无效");
+    }
+    return {get_u16(body.data()), get_u32(body.data() + 2U),
+            body[6U] != 0U, body[7U] != 0U};
 }
 
 void write_ipc_response(int socket, IpcStatus status,

@@ -16,7 +16,7 @@
 #ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
 #include "remotebsp_static_resources.h"
 _Static_assert(RBSP_STUDIO_RESOURCE_SCHEMA_VERSION ==
-                   RBSP_STARTUP_GPIO_TABLE_SCHEMA_VERSION,
+                   RBSP_STATIC_RESOURCE_TABLE_SCHEMA_VERSION,
                "Studio静态资源表schema版本不受固件支持");
 _Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
                "Studio静态资源表与固件板型不匹配");
@@ -882,6 +882,14 @@ static bool board_startup_gpio_apply(
 
 static void startup_gpio_configure(void) {
 #ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_resources_validate(
+            rbsp_studio_gpio_resources, RBSP_STUDIO_GPIO_RESOURCE_COUNT,
+            rbsp_studio_uart_resources, RBSP_STUDIO_UART_RESOURCE_COUNT,
+            rbsp_studio_pwm_resources, RBSP_STUDIO_PWM_RESOURCE_COUNT,
+            rbsp_studio_timed_bitstream_resources,
+            RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT)) {
+        fatal_error();
+    }
     if (!rbsp_startup_gpio_apply_table(
             rbsp_studio_gpio_resources, RBSP_STUDIO_GPIO_RESOURCE_COUNT,
             board_startup_gpio_apply)) {
@@ -1355,6 +1363,13 @@ static bool board_uart_configure(uint8_t port, uint32_t baud_rate,
                                  uint8_t parity) {
 #ifdef RBSP_HARDWARE_UART_ENABLED
     if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+        if (!rbsp_static_uart_allows(
+                rbsp_studio_uart_resources,
+                RBSP_STUDIO_UART_RESOURCE_COUNT, port, baud_rate)) {
+            return false;
+        }
+#endif
         return board_hardware_uart_configure(
             port, baud_rate, data_bits, stop_bits, parity);
     }

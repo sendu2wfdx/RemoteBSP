@@ -1,6 +1,9 @@
 #include "remotebsp_embedded/board_waveform.h"
 
 #include "remotebsp_config.h"
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+#include "remotebsp_static_resources.h"
+#endif
 
 #if defined(STM32F072xB)
 #include "stm32f0xx_hal.h"
@@ -44,6 +47,13 @@ static void pwm_gpio_init(void) {
 
 bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
                               uint16_t duty, bool active_low) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_pwm_resources, RBSP_STUDIO_PWM_RESOURCE_COUNT,
+            channel, frequency_hz)) {
+        return false;
+    }
+#endif
     if (channel != 0U || frequency_hz == 0U || duty > 10000U) {
         return false;
     }
@@ -88,6 +98,13 @@ bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
 }
 
 bool rbsp_board_pwm_write(uint8_t channel, uint16_t duty) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_pwm_resources, RBSP_STUDIO_PWM_RESOURCE_COUNT,
+            channel, 1U)) {
+        return false;
+    }
+#endif
     if (channel != 0U || duty > 10000U || pwm_period_ticks == 0U) {
         return false;
     }
@@ -97,6 +114,13 @@ bool rbsp_board_pwm_write(uint8_t channel, uint16_t duty) {
 }
 
 bool rbsp_board_pwm_stop(uint8_t channel) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_pwm_resources, RBSP_STUDIO_PWM_RESOURCE_COUNT,
+            channel, 1U)) {
+        return false;
+    }
+#endif
     if (channel != 0U) {
         return false;
     }
@@ -175,6 +199,13 @@ static bool timed_dma_init(void) {
 bool rbsp_board_timed_bitstream_configure(
     uint8_t channel, uint32_t bit_period_ns, uint32_t zero_high_ns,
     uint32_t one_high_ns, uint32_t reset_time_us) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_timed_bitstream_resources,
+            RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT, channel, 1U)) {
+        return false;
+    }
+#endif
     if (channel != 0U || timed_busy || bit_period_ns == 0U ||
         zero_high_ns == 0U || one_high_ns == 0U ||
         zero_high_ns >= bit_period_ns || one_high_ns >= bit_period_ns ||
@@ -237,6 +268,14 @@ bool rbsp_board_timed_bitstream_configure(
 bool rbsp_board_timed_bitstream_write(uint8_t channel,
                                       const uint8_t* data,
                                       uint16_t bit_count) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_timed_bitstream_resources,
+            RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT,
+            channel, bit_count)) {
+        return false;
+    }
+#endif
     if (channel != 0U || data == NULL || bit_count == 0U || timed_busy ||
         bit_count > CONFIG_TIMED_BITSTREAM_MAX_BITS ||
         timed_period_ticks == 0U) {
@@ -262,10 +301,24 @@ bool rbsp_board_timed_bitstream_write(uint8_t channel,
 }
 
 bool rbsp_board_timed_bitstream_busy(uint8_t channel) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_timed_bitstream_resources,
+            RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT, channel, 1U)) {
+        return false;
+    }
+#endif
     return channel == 0U && timed_busy;
 }
 
 bool rbsp_board_timed_bitstream_abort(uint8_t channel) {
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (!rbsp_static_waveform_allows(
+            rbsp_studio_timed_bitstream_resources,
+            RBSP_STUDIO_TIMED_BITSTREAM_RESOURCE_COUNT, channel, 1U)) {
+        return false;
+    }
+#endif
     if (channel != 0U) {
         return false;
     }

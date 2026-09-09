@@ -6,6 +6,7 @@
 #include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
+#include "remotebsp/toolbusd/runtime_control.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
 #include "remotebsp/transport/link_routes.hpp"
 #include "remotebsp/transport/link_transport.hpp"
@@ -745,6 +746,179 @@ private:
                       : "Runtime 快照达到总时间上限");
     }
 
+    remotebsp::protocol::Packet request_runtime_control_packet(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        remotebsp::protocol::Command command,
+        std::vector<std::uint8_t> payload, std::uint32_t object_id,
+        std::chrono::steady_clock::time_point deadline) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("Runtime GPIO 写入达到总时间上限");
+        }
+        remotebsp::protocol::Packet request;
+        request.header.message_type =
+            remotebsp::protocol::MessageType::Request;
+        request.header.command = static_cast<std::uint16_t>(command);
+        request.header.object_id = object_id;
+        request.header.session_id = session_id_;
+        request.payload = std::move(payload);
+
+        remotebsp::toolbusd::Submission submission;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                node_id > kMaximumNodeId ||
+                bus_node_generations_[node_id] != node_generation) {
+                throw std::runtime_error(
+                    "Runtime GPIO 写入前目标节点已离线或重启");
+            }
+            submission = requests_.submit(std::move(request));
+            request_routes_[request_key(session_id_, submission.request_id)] =
+                kNodeRequestBaseRoute + node_id;
+        }
+        const auto key = request_key(session_id_, submission.request_id);
+        if (!send_packet(submission.packet,
+                         kNodeRequestBaseRoute + node_id)) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            requests_.cancel(session_id_, submission.request_id);
+            request_routes_.erase(key);
+            throw std::runtime_error(
+                "Runtime GPIO 写入被带宽准入拒绝");
+        }
+
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        const bool completed = state_changed_.wait_until(lock, deadline, [&] {
+            return !running_ || responses_.find(key) != responses_.end() ||
+                   timed_out_.find(key) != timed_out_.end();
+        });
+        const auto response = responses_.find(key);
+        if (completed && response != responses_.end()) {
+            auto packet = std::move(response->second);
+            responses_.erase(response);
+            request_routes_.erase(key);
+            lock.unlock();
+            if (packet.header.message_type !=
+                    remotebsp::protocol::MessageType::Response ||
+                packet.header.command !=
+                    static_cast<std::uint16_t>(command) ||
+                packet.payload.empty() || packet.payload.front() != 0U ||
+                (packet.header.flags &
+                 remotebsp::protocol::kErrorResponseFlag) != 0U) {
+                throw std::runtime_error(
+                    "Runtime GPIO 远端写命令失败关闭");
+            }
+            return packet;
+        }
+        requests_.cancel(session_id_, submission.request_id);
+        request_routes_.erase(key);
+        timed_out_.erase(key);
+        throw std::runtime_error(
+            completed ? "Runtime GPIO 远端请求超时"
+                      : "Runtime GPIO 写入达到总时间上限");
+    }
+
+    void runtime_control_acquire(
+        const remotebsp::toolbusd::RuntimeControlAcquireRequest& request) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(1800);
+        std::uint64_t node_generation = 0U;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                request.node_id > kMaximumNodeId) {
+                throw std::runtime_error(
+                    "Runtime 控制租约目标节点尚未发现或已经离线");
+            }
+            node_generation = bus_node_generations_[request.node_id];
+        }
+        const auto descriptor = remotebsp::protocol::decode_resource_descriptor(
+            request_snapshot_resource(
+                request.node_id,
+                remotebsp::protocol::Command::ResourceDescribe,
+                remotebsp::protocol::encode_resource_id(request.resource_id),
+                deadline));
+        const auto contract = remotebsp::protocol::decode_resource_contract(
+            request_snapshot_resource(
+                request.node_id,
+                remotebsp::protocol::Command::ResourceContract,
+                remotebsp::protocol::encode_resource_id(request.resource_id),
+                deadline));
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (bus_node_generations_[request.node_id] != node_generation) {
+                throw std::runtime_error(
+                    "Runtime 控制租约登记期间节点代次变化");
+            }
+        }
+        runtime_control_.acquire(request, daemon_instance_id_,
+                                 node_generation, descriptor, contract);
+    }
+
+    remotebsp::toolbusd::RuntimeGpioWriteResult runtime_gpio_write(
+        const remotebsp::toolbusd::RuntimeGpioWriteRequest& request) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(1800);
+        std::uint64_t node_generation = 0U;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                request.node_id > kMaximumNodeId) {
+                throw std::runtime_error(
+                    "Runtime GPIO 目标节点尚未发现或已经离线");
+            }
+            node_generation = bus_node_generations_[request.node_id];
+        }
+        const auto descriptor_body = request_snapshot_resource(
+            request.node_id,
+            remotebsp::protocol::Command::ResourceDescribe,
+            remotebsp::protocol::encode_resource_id(request.resource_id),
+            deadline);
+        const auto descriptor =
+            remotebsp::protocol::decode_resource_descriptor(descriptor_body);
+        const auto contract_body = request_snapshot_resource(
+            request.node_id,
+            remotebsp::protocol::Command::ResourceContract,
+            remotebsp::protocol::encode_resource_id(request.resource_id),
+            deadline);
+        const auto contract =
+            remotebsp::protocol::decode_resource_contract(contract_body);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (bus_node_generations_[request.node_id] != node_generation) {
+                throw std::runtime_error(
+                    "Runtime GPIO 合同查询期间节点代次变化");
+            }
+        }
+        return runtime_control_.gpio_write(
+            request, daemon_instance_id_, node_generation,
+            descriptor, contract,
+            [&](std::optional<std::uint32_t> existing_object_id) {
+                if (existing_object_id.has_value()) {
+                    static_cast<void>(request_runtime_control_packet(
+                        request.node_id, node_generation,
+                        remotebsp::protocol::Command::GpioWrite,
+                        {static_cast<std::uint8_t>(request.value)},
+                        *existing_object_id, deadline));
+                    return *existing_object_id;
+                }
+                const auto response = request_runtime_control_packet(
+                    request.node_id, node_generation,
+                    remotebsp::protocol::Command::GpioCreate,
+                    {static_cast<std::uint8_t>(descriptor.instance),
+                     static_cast<std::uint8_t>(descriptor.instance >> 8U),
+                     1U,
+                     static_cast<std::uint8_t>(request.value)},
+                    0U, deadline);
+                if (response.header.object_id == 0U) {
+                    throw std::runtime_error(
+                        "Runtime GPIO_CREATE 未返回对象 ID");
+                }
+                return response.header.object_id;
+            });
+    }
+
     void invalidate_bus_node_locked(std::uint32_t node_id) {
         if (node_id == 0U || node_id > kMaximumNodeId) {
             return;
@@ -1103,6 +1277,13 @@ private:
                 return;
             }
             if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::RuntimeControlAcquire) {
+                runtime_control_acquire(ipc_request.runtime_control_acquire);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok, {});
+                return;
+            }
+            if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::TrafficStatus) {
                 remotebsp::toolbusd::TrafficSnapshot snapshot;
                 {
@@ -1123,6 +1304,26 @@ private:
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_daemon_identity(
                         identity));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite) {
+                const auto result = runtime_gpio_write(
+                    ipc_request.runtime_gpio_write);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::
+                        encode_ipc_runtime_gpio_write_result(result));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::
+                    RuntimeControlRelease) {
+                runtime_control_.release(
+                    ipc_request.runtime_control_release,
+                    daemon_instance_id_);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok, {});
                 return;
             }
             if (ipc_request.kind ==
@@ -1671,6 +1872,7 @@ private:
     std::size_t active_clients_{0};
     std::mutex send_mutex_;
     remotebsp::toolbusd::MotionGroupDispatchGate motion_dispatch_gate_;
+    remotebsp::toolbusd::RuntimeControlGate runtime_control_;
     std::timed_mutex runtime_snapshot_mutex_;
     std::mutex state_mutex_;
     std::condition_variable state_changed_;

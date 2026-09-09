@@ -5,6 +5,7 @@
 #include "remotebsp/toolbusd/traffic_control.hpp"
 #include "remotebsp/toolbusd/clock_model.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
+#include "remotebsp/toolbusd/runtime_control.hpp"
 
 #include <cstdint>
 #include <array>
@@ -31,6 +32,9 @@ enum class IpcRequestKind : std::uint8_t {
     MotionGroupStatus = 7,
     MotionGroupCancel = 8,
     DaemonIdentity = 9,
+    RuntimeControlAcquire = 10,
+    RuntimeGpioWrite = 11,
+    RuntimeControlRelease = 12,
 };
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
@@ -61,6 +65,9 @@ struct IpcRequest {
     std::uint64_t transaction_id{};
     std::uint32_t group_id{};
     std::uint32_t plan_generation{};
+    RuntimeControlAcquireRequest runtime_control_acquire;
+    RuntimeGpioWriteRequest runtime_gpio_write;
+    RuntimeControlReleaseRequest runtime_control_release;
 };
 
 struct UartStreamChunk {
@@ -149,6 +156,12 @@ void write_ipc_motion_group_cancel_request(
     int socket, std::uint64_t transaction_id, std::uint32_t group_id,
     std::uint32_t plan_generation);
 void write_ipc_daemon_identity_request(int socket);
+void write_ipc_runtime_control_acquire_request(
+    int socket, const RuntimeControlAcquireRequest& request);
+void write_ipc_runtime_gpio_write_request(
+    int socket, const RuntimeGpioWriteRequest& request);
+void write_ipc_runtime_control_release_request(
+    int socket, const RuntimeControlReleaseRequest& request);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -178,6 +191,22 @@ MotionGroupServiceSnapshot decode_ipc_motion_group_snapshot(
 std::vector<std::uint8_t> encode_ipc_daemon_identity(
     const IpcDaemonIdentity& identity);
 IpcDaemonIdentity decode_ipc_daemon_identity(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_control_acquire(
+    const RuntimeControlAcquireRequest& request);
+RuntimeControlAcquireRequest decode_ipc_runtime_control_acquire(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_gpio_write(
+    const RuntimeGpioWriteRequest& request);
+RuntimeGpioWriteRequest decode_ipc_runtime_gpio_write(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_control_release(
+    const RuntimeControlReleaseRequest& request);
+RuntimeControlReleaseRequest decode_ipc_runtime_control_release(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_gpio_write_result(
+    const RuntimeGpioWriteResult& result);
+RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
     const std::vector<std::uint8_t>& body);
 
 void write_ipc_response(int socket, IpcStatus status,

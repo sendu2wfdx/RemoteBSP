@@ -9,6 +9,7 @@ add_library(remotebsp_remote_core
     src/remote_core.cpp
     src/stream_bsp.cpp
     src/time_sync_bsp.cpp
+    src/transport_replay.cpp
     src/uart_bsp.cpp
     src/waveform_bsp.cpp
     src/visual_state.cpp

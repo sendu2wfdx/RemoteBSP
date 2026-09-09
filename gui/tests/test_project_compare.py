@@ -103,6 +103,8 @@ class ProjectCompareTest(unittest.TestCase):
         left["uart"]["ports"] = left["uart"]["ports"][:1]
         right = copy.deepcopy(left)
         right["uart"]["ports"][0]["endpoint_id"] = "usart1_pb6_pb7"
+        right["uart"]["ports"][0]["rx_pin"] = "PB7"
+        right["uart"]["ports"][0]["tx_pin"] = "PB6"
         result = compare_projects(left, right, self.catalog)
         uart = next(item for item in result["changes"]
                     if item.get("identity") == "uart/000")

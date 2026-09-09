@@ -6,10 +6,46 @@
 Mock 中得到相同的状态序列。它不是 CAN/CAN-FD 时延仿真器，也不是实体 MCU 的
 上电复位证据。
 
-当前可靠记录的输入是已有故障脚本动作：GPIO 外部输入、单路 UART 故障、节点
-在线/离线、运动限位和单个 I2C/SPI 设备的下一事务状态。链路延迟、报文丢失和真正
-的 MCU 重启尚无统一的 Mock 传输钩子，因此 v1 不伪造这些结果；后续应先把它们
-建模为明确的传输事件，再升级 schema。
+状态回放的输入是已有故障脚本动作：GPIO 外部输入、单路 UART 故障、节点在线/离线、
+运动限位和单个 I2C/SPI 设备的下一事务状态。另有独立的 `TransportReplayRecord v1`
+用于 Mock 边界的逻辑帧事件；两种记录不混用 schema，也不把逻辑帧结果伪装成物理链路
+测量。
+
+## 逻辑传输事件钩子
+
+`transport_replay.hpp` 提供确定性的纯软件模型，并提供显式的 MockNode 边界适配：
+`deliver_replayed_frame_to_mock_node` 把 H2N 逻辑交付送入现有 `handle_frame`，
+`make_mock_node_reply_replay_events` 把 MockNode 回复转换为 N2H 逻辑帧事件。适配器默认不
+挂入 `mock_mcu` 主循环，也不装饰 `LinkTransport`；测试或数字孪生调用方必须显式启用，
+所以现有 SocketCAN、USB 和 Mock USB 行为保持不变。
+输入事件按 `monotonic-relative-ms` 相对时间非递减排列，并用从 1 连续递增的
+`sequence` 消除同一毫秒内的歧义。当前动作如下：
+
+| 动作 | 作用域与语义 |
+|---|---|
+| `DelayNext` | 累加到同节点、同方向的下一帧，交付时刻为输入相对时间加延迟 |
+| `DropNext` | 丢弃同节点、同方向的下一帧 |
+| `DuplicateNext` | 为同节点、同方向的下一帧增加一个副本，可有限累计 |
+| `NodeReboot` | 清除该节点尚未交付的延迟帧和未消费故障，并推进 `session_generation` |
+| `Frame` | 携带不透明 `route` 和字节载荷；钩子不解释协议或设备业务 |
+
+每个帧和一次性故障都必须声明 `HostToNode` 或 `NodeToHost`，两个方向的故障状态互不
+消费；reboot 本身不带方向并同时清理该节点两个方向。某节点 reboot 不会清除其他节点
+的待交付帧。
+同一交付时刻继续按输入序号和副本顺序稳定排列，输出的 `delivery_sequence` 从 1 连续
+递增。记录包含事件数、`DropNext` 丢弃数、注入副本数、reboot 清除的待交付帧数、
+重启数、最终节点代次和全部逻辑交付；reboot 失效帧不会混入主动丢弃计数。
+`replay_digest` 绑定规范输入与这些输出；`verify_transport_replay` 会重新执行并比较完整
+记录，而不只相信调用方给出的摘要字符串。
+
+资源边界均在分配或入队前失败关闭：最多 4096 个事件、1024 个同时待交付帧、32768
+个总交付、单帧 4096 字节、输入总载荷 4 MiB、单节点下一帧累计延迟 60000 ms，且每帧
+最多注入 7 个额外副本。节点号限制为 1～127；相对时间加延迟溢出、非连续序号、时间
+倒退、未知动作和动作携带多余字段均被拒绝。
+
+该钩子只证明 Mock 调度、隔离和会话代次逻辑可确定重放。它不模拟 CAN 仲裁、总线负载、
+CAN-FD 位时序、USB transaction、主机调度、电气噪声或真实设备复位时长，因此不能作为
+CAN/USB 物理层可靠性或实时性能证据。
 
 ## 时间与确定性
 
@@ -80,6 +116,8 @@ verify_digital_twin_replay(manifest, scenario, 1, loaded);
 - 同一输入重复记录逐字节一致；不同节点实例和不同种子摘要隔离；
 - GPIO 预注入、UART 故障、节点掉线/恢复和 I2C/SPI 一次性故障均进入摘要；
 - 纯代码构造的乱序场景也会被拒绝，不依赖先经过 JSON 解析器。
+- 逻辑传输钩子的 delay/drop/duplicate/reboot 组合可重复得到相同交付顺序和摘要；
+  单节点 reboot 不影响其他节点的延迟帧，篡改交付内容会在验证时被拒绝。
 
 这些结论来自 Ubuntu WSL 的单元测试，没有访问 `vcan0`，也没有实体板卡、电气或
 实时性能结论。

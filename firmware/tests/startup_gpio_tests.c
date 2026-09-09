@@ -1,4 +1,5 @@
 #include "remotebsp_embedded/startup_gpio.h"
+#include "remotebsp_embedded/static_resources.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -94,5 +95,43 @@ int main(void) {
     reset_state();
     assert(!rbsp_startup_gpio_apply_table(invalid_mode, 1U, apply_pin));
     assert(apply_count == 0U);
+
+    const rbsp_static_uart_entry_t uart[] = {
+        {0U, 10U, 9U, 300U, 4500000U},
+        {1U, 20U, 21U, 300U, 2250000U},
+    };
+    const rbsp_static_waveform_entry_t pwm[] = {
+        {0U, 22U, 20000U},
+    };
+    const rbsp_static_waveform_entry_t timed[] = {
+        {0U, 8U, 768U},
+    };
+    assert(rbsp_static_resources_validate(
+        table, 2U, uart, 2U, pwm, 1U, timed, 1U));
+    assert(rbsp_static_uart_allows(uart, 2U, 0U, 300U));
+    assert(rbsp_static_uart_allows(uart, 2U, 1U, 2250000U));
+    assert(!rbsp_static_uart_allows(uart, 2U, 1U, 2250001U));
+    assert(!rbsp_static_uart_allows(uart, 2U, 2U, 115200U));
+    assert(rbsp_static_waveform_allows(pwm, 1U, 0U, 20000U));
+    assert(!rbsp_static_waveform_allows(pwm, 1U, 0U, 20001U));
+    assert(rbsp_static_waveform_allows(timed, 1U, 0U, 768U));
+    assert(!rbsp_static_waveform_allows(timed, 1U, 1U, 24U));
+
+    const rbsp_static_uart_entry_t duplicate_port[] = {
+        {0U, 10U, 9U, 300U, 4500000U},
+        {0U, 20U, 21U, 300U, 2250000U},
+    };
+    assert(!rbsp_static_resources_validate(
+        NULL, 0U, duplicate_port, 2U, NULL, 0U, NULL, 0U));
+    const rbsp_static_uart_entry_t conflicting_pin[] = {
+        {0U, 0U, 9U, 300U, 4500000U},
+    };
+    assert(!rbsp_static_resources_validate(
+        table, 2U, conflicting_pin, 1U, NULL, 0U, NULL, 0U));
+    const rbsp_static_waveform_entry_t duplicate_channel[] = {
+        {0U, 22U, 20000U}, {0U, 23U, 20000U},
+    };
+    assert(!rbsp_static_resources_validate(
+        NULL, 0U, NULL, 0U, duplicate_channel, 2U, NULL, 0U));
     return 0;
 }

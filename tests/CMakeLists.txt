@@ -372,6 +372,17 @@ target_compile_options(runtime_snapshot_ipc_tests PRIVATE
 add_test(NAME runtime_snapshot_ipc_tests
     COMMAND runtime_snapshot_ipc_tests)
 
+add_executable(runtime_control_gate_tests
+    runtime_control_gate_tests.cpp)
+target_link_libraries(runtime_control_gate_tests PRIVATE
+    remotebsp_request_manager
+)
+target_compile_options(runtime_control_gate_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME runtime_control_gate_tests
+    COMMAND runtime_control_gate_tests)
+
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE
     remotebsp_remote_core
@@ -458,6 +469,14 @@ target_compile_options(digital_twin_replay_tests PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
 )
 add_test(NAME digital_twin_replay_tests COMMAND digital_twin_replay_tests)
+
+add_executable(transport_replay_tests transport_replay_tests.cpp)
+target_link_libraries(transport_replay_tests PRIVATE remotebsp_remote_core)
+target_compile_options(transport_replay_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME transport_replay_tests COMMAND transport_replay_tests)
 
 add_executable(motion_executor_tests motion_executor_tests.cpp)
 target_link_libraries(motion_executor_tests PRIVATE remotebsp_remote_core)
@@ -591,6 +610,7 @@ add_test(NAME embedded_motion_group_tests
 add_executable(embedded_startup_gpio_tests
     ../firmware/tests/startup_gpio_tests.c
     ../firmware/src/startup_gpio.c
+    ../firmware/src/static_resources.c
 )
 target_include_directories(embedded_startup_gpio_tests PRIVATE
     ../firmware/include

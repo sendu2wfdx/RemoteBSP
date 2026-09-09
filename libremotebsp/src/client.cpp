@@ -277,6 +277,77 @@ DaemonIdentity Client::daemon_identity() const {
     return {source.version, source.instance_id};
 }
 
+void Client::runtime_control_acquire(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    std::uint32_t ttl_ms) const {
+    toolbusd::RuntimeControlAcquireRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    request.node_id = node_id_;
+    request.resource_id = resource_id;
+    request.ttl_ms = ttl_ms;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_control_acquire_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok || !response.body.empty()) {
+        throw ClientException(response.body.empty()
+                                  ? "Runtime 控制租约登记失败"
+                                  : std::string(response.body.begin(),
+                                                response.body.end()));
+    }
+}
+
+RuntimeGpioWriteResult Client::runtime_gpio_write(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key, bool value) const {
+    toolbusd::RuntimeGpioWriteRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    request.node_id = node_id_;
+    request.resource_id = resource_id;
+    request.idempotency_key = idempotency_key;
+    request.value = value;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_gpio_write_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status == toolbusd::IpcStatus::TimedOut) {
+        throw ClientException("Runtime GPIO 写入超时");
+    }
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto result =
+        toolbusd::decode_ipc_runtime_gpio_write_result(response.body);
+    return {result.object_id, result.value, result.replayed};
+}
+
+void Client::runtime_control_release(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id) const {
+    toolbusd::RuntimeControlReleaseRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_control_release_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok ||
+        !response.body.empty()) {
+        throw ClientException(
+            response.body.empty()
+                ? "Runtime 控制租约释放失败"
+                : std::string(response.body.begin(), response.body.end()));
+    }
+}
+
 CanTrafficStatus Client::traffic_status() const {
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_traffic_status_request(socket.get());

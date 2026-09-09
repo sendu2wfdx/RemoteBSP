@@ -564,7 +564,9 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 Mock/文件 Provider 仍使用 `runtime_process` 进程世代。能力字段
 `control_leases.backend_binding` 分别报告 `toolbusd_instance` 或 `runtime_process`。
 
-这个绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`，也不会发送任何设备写命令。
+这个 HTTP 绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`，当前 Runtime 路由也
+不会发送任何设备写命令。toolbusd 已有尚未接入 HTTP 的受信本地 GPIO 控制 IPC 实验竖切，
+其顺序、最终准入和本地信任边界见 [Runtime 到 toolbusd 的 GPIO 写控制边界](runtime-gpio-control.md)。
 身份检查与未来实际命令之间仍可能发生 daemon 重启；真正的写命令竖切必须把实例标识和
 租约校验带入 toolbusd 的同一原子准入点，而不能只在 HTTP 入口预检。因此能力声明保持
 `write_commands=false`、`control_leases.downstream_commands=false`，且

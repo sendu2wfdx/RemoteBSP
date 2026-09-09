@@ -93,6 +93,7 @@
         "pwm": [
           {
             "endpoint_id": "tim3_ch1_pa6",
+            "kconfig_symbol": "PWM0_PIN_PA6",
             "enabled": false,
             "name": "pwm_0",
             "channel": 0,
@@ -159,6 +160,7 @@
         "ws2812": [
           {
             "endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+            "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8",
             "enabled": false,
             "name": "strip_0",
             "channel": 0,
@@ -410,6 +412,7 @@
         "endpoints": [
           {
             "endpoint_id": "usart1_pa9_pa10",
+            "kconfig_symbol": "UART0_PINS_PA9_PA10",
             "enabled": true,
             "name": "uart_0",
             "port": 0,
@@ -423,6 +426,7 @@
           },
           {
             "endpoint_id": "usart1_pb6_pb7",
+            "kconfig_symbol": "UART0_PINS_PB6_PB7",
             "enabled": false,
             "name": "uart_0",
             "port": 0,
@@ -436,6 +440,7 @@
           },
           {
             "endpoint_id": "usart2_pa2_pa3",
+            "kconfig_symbol": "UART1_PINS_PA2_PA3",
             "enabled": true,
             "name": "uart_1",
             "port": 1,
@@ -449,6 +454,7 @@
           },
           {
             "endpoint_id": "usart3_pb10_pb11",
+            "kconfig_symbol": "UART2_PINS_PB10_PB11",
             "enabled": true,
             "name": "uart_2",
             "port": 2,
@@ -465,6 +471,7 @@
       "uart_defaults": [
         {
           "endpoint_id": "usart1_pa9_pa10",
+          "kconfig_symbol": "UART0_PINS_PA9_PA10",
           "enabled": true,
           "name": "uart_0",
           "port": 0,
@@ -478,6 +485,7 @@
         },
         {
           "endpoint_id": "usart2_pa2_pa3",
+          "kconfig_symbol": "UART1_PINS_PA2_PA3",
           "enabled": true,
           "name": "uart_1",
           "port": 1,
@@ -491,6 +499,7 @@
         },
         {
           "endpoint_id": "usart3_pb10_pb11",
+          "kconfig_symbol": "UART2_PINS_PB10_PB11",
           "enabled": true,
           "name": "uart_2",
           "port": 2,
@@ -507,6 +516,7 @@
         "pwm": [
           {
             "endpoint_id": "tim3_ch1_pa6",
+            "kconfig_symbol": "PWM0_PIN_PA6",
             "enabled": false,
             "name": "pwm_0",
             "channel": 0,
@@ -573,6 +583,7 @@
         "ws2812": [
           {
             "endpoint_id": "tim1_ch1_pa8_dma1_ch2",
+            "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8",
             "enabled": false,
             "name": "strip_0",
             "channel": 0,
@@ -865,6 +876,7 @@
         "endpoints": [
           {
             "endpoint_id": "usart1_pa9_pa10",
+            "kconfig_symbol": "UART0_PINS_PA9_PA10",
             "enabled": true,
             "name": "uart_0",
             "port": 0,
@@ -878,6 +890,7 @@
           },
           {
             "endpoint_id": "usart1_pb6_pb7",
+            "kconfig_symbol": "UART0_PINS_PB6_PB7",
             "enabled": false,
             "name": "uart_0",
             "port": 0,
@@ -891,6 +904,7 @@
           },
           {
             "endpoint_id": "usart2_pa2_pa3",
+            "kconfig_symbol": "UART1_PINS_PA2_PA3",
             "enabled": true,
             "name": "uart_1",
             "port": 1,
@@ -904,6 +918,7 @@
           },
           {
             "endpoint_id": "usart3_pb10_pb11",
+            "kconfig_symbol": "UART2_PINS_PB10_PB11",
             "enabled": true,
             "name": "uart_2",
             "port": 2,
@@ -920,6 +935,7 @@
       "uart_defaults": [
         {
           "endpoint_id": "usart1_pa9_pa10",
+          "kconfig_symbol": "UART0_PINS_PA9_PA10",
           "enabled": true,
           "name": "uart_0",
           "port": 0,
@@ -933,6 +949,7 @@
         },
         {
           "endpoint_id": "usart2_pa2_pa3",
+          "kconfig_symbol": "UART1_PINS_PA2_PA3",
           "enabled": true,
           "name": "uart_1",
           "port": 1,
@@ -946,6 +963,7 @@
         },
         {
           "endpoint_id": "usart3_pb10_pb11",
+          "kconfig_symbol": "UART2_PINS_PB10_PB11",
           "enabled": true,
           "name": "uart_2",
           "port": 2,
@@ -962,6 +980,7 @@
         "pwm": [
           {
             "endpoint_id": "tim3_ch1_pc6",
+            "kconfig_symbol": "PWM0_PIN_PC6",
             "enabled": true,
             "name": "board_led",
             "channel": 0,
@@ -1028,6 +1047,7 @@
         "ws2812": [
           {
             "endpoint_id": "tim1_ch1_pa8_dma1_ch1",
+            "kconfig_symbol": "TIMED_BITSTREAM0_PIN_PA8",
             "enabled": false,
             "name": "strip_0",
             "channel": 0,

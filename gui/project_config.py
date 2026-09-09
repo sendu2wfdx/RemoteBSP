@@ -8,6 +8,7 @@ import threading
 import argparse
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,7 +41,7 @@ class ProjectConfigResult:
     summary: dict
 
 
-STATIC_RESOURCE_SCHEMA_VERSION = 1
+STATIC_RESOURCE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,14 @@ def _items(draft: dict, group: str, key: str) -> list[dict]:
 
 def _find(items: list[dict], key: str, value: object) -> dict | None:
     return next((item for item in items if item.get(key) == value), None)
+
+
+def _endpoint_kconfig_symbol(endpoint: dict, label: str) -> str:
+    value = endpoint.get("kconfig_symbol")
+    if not isinstance(value, str) or re.fullmatch(r"[A-Z][A-Z0-9_]*", value) \
+            is None:
+        raise ProjectConfigError(f"{label}缺少合法的Kconfig端点绑定")
+    return value
 
 
 def _pin_symbol(pin: object) -> str:
@@ -370,6 +379,12 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
         endpoint = _find(uart_catalog, "endpoint_id", item.get("endpoint_id"))
         if endpoint is None or endpoint.get("backend_status") != "implemented":
             raise ProjectConfigError(f"UART {index + 1}硬件端点尚未实现")
+        if item.get("port") != endpoint.get("port") or \
+                item.get("rx_pin") != endpoint.get("rx_pin") or \
+                item.get("tx_pin") != endpoint.get("tx_pin"):
+            raise ProjectConfigError(
+                f"UART {index + 1}逻辑端口或引脚与端点目录不一致")
+        _endpoint_kconfig_symbol(endpoint, f"UART {index + 1}")
         baud = int(item.get("baud_rate", 0))
         if baud < int(endpoint.get("minimum_baud_rate", 1)) or \
                 baud > int(endpoint.get("maximum_baud_rate", 0)):
@@ -384,6 +399,11 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
         endpoint = _find(pwm_catalog, "endpoint_id", item.get("endpoint_id"))
         if endpoint is None or endpoint.get("backend_status") != "implemented":
             raise ProjectConfigError(f"PWM {index + 1}硬件端点尚未实现")
+        if item.get("channel") != endpoint.get("channel") or \
+                item.get("pin") != endpoint.get("pin"):
+            raise ProjectConfigError(
+                f"PWM {index + 1}通道或引脚与端点目录不一致")
+        _endpoint_kconfig_symbol(endpoint, f"PWM {index + 1}")
         frequency = int(item.get("frequency_hz", 0))
         if frequency < 1_000 or frequency > 2_000_000:
             raise ProjectConfigError(
@@ -395,6 +415,11 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
         endpoint = _find(strip_catalog, "endpoint_id", item.get("endpoint_id"))
         if endpoint is None or endpoint.get("backend_status") != "implemented":
             raise ProjectConfigError(f"WS2812 {index + 1}硬件端点尚未实现")
+        if item.get("channel") != endpoint.get("channel") or \
+                item.get("pin") != endpoint.get("pin"):
+            raise ProjectConfigError(
+                f"WS2812 {index + 1}通道或引脚与端点目录不一致")
+        _endpoint_kconfig_symbol(endpoint, f"WS2812 {index + 1}")
         pixels = int(item.get("pixel_count", 0))
         if pixels <= 0 or pixels > int(endpoint.get("max_pixels", 0)):
             raise ProjectConfigError(f"WS2812 {index + 1}灯珠数量超出端点范围")
@@ -445,11 +470,7 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
 
 def _generate_static_resource_header(board: dict, resources: dict,
                                      project_sha256: str) -> str:
-    """生成实体固件直接消费的只读 GPIO 表。
-
-    这里只编码已由统一板卡能力目录校验过的普通 GPIO。UART、运动、波形和
-    I2C/SPI 仍沿用现有 Kconfig 路径，避免把未验证的实体外设能力扩入本切片。
-    """
+    """生成实体固件直接消费的只读 GPIO、UART 与波形端点表。"""
     mode_names = {
         ("output", False): "RBSP_STARTUP_GPIO_OUTPUT_LOW",
         ("output", True): "RBSP_STARTUP_GPIO_OUTPUT_HIGH",
@@ -468,6 +489,46 @@ def _generate_static_resource_header(board: dict, resources: dict,
         entries.append((encoded, pin, mode_names[key]))
     entries.sort(key=lambda value: value[0])
 
+    uart_entries = []
+    for item in sorted(resources["uart"], key=lambda value: value["port"]):
+        endpoint = _find(
+            board.get("uart", {}).get("endpoints", []),
+            "endpoint_id", item["endpoint_id"])
+        if endpoint is None:
+            raise ProjectConfigError("已校验UART端点在生成期间丢失")
+        uart_entries.append((
+            int(endpoint["port"]), _pin_symbol(endpoint["rx_pin"]),
+            _pin_symbol(endpoint["tx_pin"]),
+            int(endpoint["minimum_baud_rate"]),
+            int(endpoint["maximum_baud_rate"]),
+            _endpoint_kconfig_symbol(endpoint, "UART")))
+
+    pwm_entries = []
+    for item in resources["pwm"]:
+        endpoint = _find(
+            board.get("waveform", {}).get("pwm", []),
+            "endpoint_id", item["endpoint_id"])
+        if endpoint is None:
+            raise ProjectConfigError("已校验PWM端点在生成期间丢失")
+        pwm_entries.append((
+            int(endpoint["channel"]), _pin_symbol(endpoint["pin"]),
+            int(item["frequency_hz"]),
+            _endpoint_kconfig_symbol(endpoint, "PWM")))
+    pwm_entries.sort(key=lambda value: value[0])
+
+    timed_entries = []
+    for item in resources["strips"]:
+        endpoint = _find(
+            board.get("waveform", {}).get("ws2812", []),
+            "endpoint_id", item["endpoint_id"])
+        if endpoint is None:
+            raise ProjectConfigError("已校验定时位流端点在生成期间丢失")
+        timed_entries.append((
+            int(endpoint["channel"]), _pin_symbol(endpoint["pin"]),
+            int(item["pixel_count"]) * 24,
+            _endpoint_kconfig_symbol(endpoint, "定时位流")))
+    timed_entries.sort(key=lambda value: value[0])
+
     board_type = board["board_type"]
     if isinstance(board_type, str):
         board_type = int(board_type, 0)
@@ -477,7 +538,9 @@ def _generate_static_resource_header(board: dict, resources: dict,
         "#pragma once",
         "",
         "#include <stdint.h>",
+        '#include "remotebsp_config.h"',
         '#include "remotebsp_embedded/startup_gpio.h"',
+        '#include "remotebsp_embedded/static_resources.h"',
         "",
         f"#define RBSP_STUDIO_RESOURCE_SCHEMA_VERSION {STATIC_RESOURCE_SCHEMA_VERSION}U",
         f"#define RBSP_STUDIO_RESOURCE_BOARD_TYPE UINT32_C(0x{board_type:08X})",
@@ -492,6 +555,67 @@ def _generate_static_resource_header(board: dict, resources: dict,
         lines.append(
             "    {0U, RBSP_STARTUP_GPIO_INPUT_FLOATING}, /* 空表占位，不计入数量 */")
     lines.extend(["};", ""])
+
+    def encoded_pin(pin: str) -> int:
+        return (ord(pin[1]) - ord("A")) * 16 + int(pin[2:])
+
+    lines.extend([
+        f"#define RBSP_STUDIO_UART_RESOURCE_COUNT {len(uart_entries)}U",
+        "#if CONFIG_HARDWARE_UART_RESOURCE_COUNT != RBSP_STUDIO_UART_RESOURCE_COUNT",
+        '#error "Studio UART表与Kconfig资源数不一致"',
+        "#endif",
+    ])
+    for *_, symbol in uart_entries:
+        lines.extend([f"#if !defined(CONFIG_{symbol})",
+                      '#error "Studio UART端点与Kconfig不一致"', "#endif"])
+    lines.append(
+        "static const rbsp_static_uart_entry_t "
+        f"rbsp_studio_uart_resources[{max(1, len(uart_entries))}] = {{")
+    if uart_entries:
+        for port, rx_pin, tx_pin, minimum, maximum, _ in uart_entries:
+            lines.append(
+                f"    {{{port}U, {encoded_pin(rx_pin)}U, "
+                f"{encoded_pin(tx_pin)}U, UINT32_C({minimum}), "
+                f"UINT32_C({maximum})}}, /* RX={rx_pin}, TX={tx_pin} */")
+    else:
+        lines.append("    {0U, 0U, 0U, 1U, 1U}, /* 空表占位 */")
+    lines.extend(["};", ""])
+
+    def append_waveform_table(name: str, config_name: str,
+                              values: list[tuple[int, str, int, str]]) -> None:
+        macro = f"RBSP_STUDIO_{name}_RESOURCE_COUNT"
+        lines.append(f"#define {macro} {len(values)}U")
+        if values:
+            lines.extend([
+                f"#if !defined(CONFIG_REMOTEBSP_{config_name}) || "
+                f"CONFIG_{name}_RESOURCE_COUNT != {macro}",
+                f'#error "Studio {name}表与Kconfig资源数不一致"',
+                "#endif",
+            ])
+            for *_, symbol in values:
+                lines.extend([f"#if !defined(CONFIG_{symbol})",
+                              f'#error "Studio {name}端点与Kconfig不一致"',
+                              "#endif"])
+        else:
+            lines.extend([f"#if defined(CONFIG_REMOTEBSP_{config_name})",
+                          f'#error "Kconfig启用了Studio未声明的{name}资源"',
+                          "#endif"])
+        variable = "pwm" if name == "PWM" else "timed_bitstream"
+        lines.append(
+            "static const rbsp_static_waveform_entry_t "
+            f"rbsp_studio_{variable}_resources[{max(1, len(values))}] = {{")
+        if values:
+            for channel, pin, maximum, _ in values:
+                lines.append(
+                    f"    {{{channel}U, {encoded_pin(pin)}U, "
+                    f"UINT32_C({maximum})}}, /* {pin} */")
+        else:
+            lines.append("    {0U, 0U, 1U}, /* 空表占位 */")
+        lines.extend(["};", ""])
+
+    append_waveform_table("PWM", "PWM", pwm_entries)
+    append_waveform_table(
+        "TIMED_BITSTREAM", "TIMED_BITSTREAM", timed_entries)
     return "\n".join(lines)
 
 
@@ -551,24 +675,23 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
                     "硬件UART必须从端口0开始连续启用，不能跳过中间端口")
             set_value("HARDWARE_UART_RESOURCE_COUNT", len(uart))
             for item in uart:
-                endpoint = item["endpoint_id"].upper()
-                port = int(item["port"])
-                if port == 0 and endpoint == "USART1_PA9_PA10":
-                    set_value("UART0_PINS_PA9_PA10", True)
-                elif port == 0 and endpoint == "USART1_PB6_PB7":
-                    set_value("UART0_PINS_PB6_PB7", True)
-                elif port == 1 and endpoint == "USART2_PA2_PA3":
-                    pass
-                elif port == 2 and endpoint == "USART3_PB10_PB11":
-                    pass
-                else:
-                    raise ProjectConfigError("UART端点尚未映射到固件Kconfig")
+                endpoint = _find(
+                    board.get("uart", {}).get("endpoints", []),
+                    "endpoint_id", item["endpoint_id"])
+                if endpoint is None:
+                    raise ProjectConfigError("已校验UART端点在生成期间丢失")
+                set_value(_endpoint_kconfig_symbol(endpoint, "UART"), True)
 
             pwm = resources["pwm"]
             set_value("REMOTEBSP_PWM", bool(pwm))
             if pwm:
                 set_value("PWM_RESOURCE_COUNT", 1)
-                set_value("PWM0_PIN_" + _pin_symbol(pwm[0]["pin"]), True)
+                endpoint = _find(
+                    board.get("waveform", {}).get("pwm", []),
+                    "endpoint_id", pwm[0]["endpoint_id"])
+                if endpoint is None:
+                    raise ProjectConfigError("已校验PWM端点在生成期间丢失")
+                set_value(_endpoint_kconfig_symbol(endpoint, "PWM"), True)
                 set_value("PWM_MAX_FREQUENCY_HZ",
                           max(1000, int(pwm[0]["frequency_hz"])))
 
@@ -576,8 +699,14 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
             set_value("REMOTEBSP_TIMED_BITSTREAM", bool(strips))
             if strips:
                 set_value("TIMED_BITSTREAM_RESOURCE_COUNT", 1)
-                set_value("TIMED_BITSTREAM0_PIN_" +
-                          _pin_symbol(strips[0]["pin"]), True)
+                endpoint = _find(
+                    board.get("waveform", {}).get("ws2812", []),
+                    "endpoint_id", strips[0]["endpoint_id"])
+                if endpoint is None:
+                    raise ProjectConfigError(
+                        "已校验定时位流端点在生成期间丢失")
+                set_value(
+                    _endpoint_kconfig_symbol(endpoint, "定时位流"), True)
                 set_value("TIMED_BITSTREAM_MAX_BITS",
                           int(strips[0]["pixel_count"]) * 24)
 

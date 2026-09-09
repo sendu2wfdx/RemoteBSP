@@ -179,6 +179,7 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
         "${HAL_DIR}/Src/stm32f0xx_hal_tim.c"
         "${HAL_DIR}/Src/stm32f0xx_hal_uart.c"
         src/startup_gpio.c
+        src/static_resources.c
     )
     target_compile_definitions(remotebsp-stm32f072rbt6 PRIVATE
         USE_HAL_DRIVER STM32F072xB)
@@ -210,6 +211,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
         "${HAL_DIR}/Src/stm32f1xx_hal_tim.c"
         "${HAL_DIR}/Src/stm32f1xx_hal_uart.c"
         src/startup_gpio.c
+        src/static_resources.c
     )
     target_compile_definitions(remotebsp-stm32f103cbt6 PRIVATE
         USE_HAL_DRIVER STM32F103xB)
@@ -244,6 +246,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
         "${BOARD_DIR}/main.c"
         ${RBSP_OPTIONAL_BOARD_SOURCES}
         src/startup_gpio.c
+        src/static_resources.c
         "${DEVICE_DIR}/Source/Templates/system_stm32g4xx.c"
         "${DEVICE_DIR}/Source/Templates/gcc/startup_stm32g431xx.s"
         "${HAL_DIR}/Src/stm32g4xx_hal.c"
