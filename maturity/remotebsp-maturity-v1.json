@@ -82,7 +82,7 @@
     {
       "id": "multi_node_synchronization",
       "title": "多节点同步",
-      "summary": "TimeSync v1、主机时钟模型、有界同步调度、toolbusd 事务入口和 STM32 公共参与者已实现；实体板因可靠启动代次缺失而安全禁用跨板入口。",
+      "summary": "TimeSync v1、主机时钟模型、有界同步调度、toolbusd 事务入口、STM32 参与者和 STEPGEN 租约已实现；实体板因可靠启动代次缺失而安全禁用跨板入口。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -119,7 +119,8 @@
         "status": "partial",
         "evidence": [
           {"id": "fault_request_source", "kind": "source", "path": "toolbusd/src/request_manager.cpp", "note": "有界请求、重试、取消和响应匹配。"},
-          {"id": "fault_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "资源级失败隔离、缓存失败合并和时钟质量告警。"}
+          {"id": "fault_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "资源级失败隔离、缓存失败合并和时钟质量告警。"},
+          {"id": "fault_embedded_lease_source", "kind": "source", "path": "firmware/src/core.c", "note": "STEPGEN 租约释放、过期、会话结束和复位联动安全停机。"}
         ],
         "blocker_ids": ["partial_failure_recovery"]
       },
@@ -127,7 +128,8 @@
         "status": "verified",
         "evidence": [
           {"id": "fault_request_test", "kind": "host_test", "path": "tests/request_manager_tests.cpp", "note": "请求超时、重试和匹配测试。"},
-          {"id": "fault_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "资源、节点、缓存和时钟告警隔离测试。"}
+          {"id": "fault_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "资源、节点、缓存和时钟告警隔离测试。"},
+          {"id": "fault_embedded_lease_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "租约令牌/会话隔离、过期、释放、会话结束和节点初始化清理测试。"}
         ],
         "blocker_ids": []
       },
@@ -238,13 +240,14 @@
     {
       "id": "runtime_api",
       "title": "Runtime 与 API",
-      "summary": "只读 Runtime API、单次快照、缓存、资源故障隔离、时钟告警和 API key 认证已实现；角色授权、事件流和写控制面尚未实现。",
+      "summary": "只读 Runtime API、单次快照、缓存、故障隔离、时钟告警、API key 身份、只读权限和有界安全审计已实现；事件流和写控制面尚未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "runtime_server_source", "kind": "source", "path": "runtime_api/server.py", "note": "只读版本化 HTTP API 与有界线程服务。"},
           {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存和故障隔离。"},
-          {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "非回环强制的有界 API key 配置、常量时间验证和稳定认证错误。"}
+          {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "非回环强制的有界 API key 身份、固定长度摘要比较和只读权限。"},
+          {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"}
         ],
         "blocker_ids": ["runtime_control_plane"]
       },
@@ -253,7 +256,8 @@
         "evidence": [
           {"id": "runtime_http_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "HTTP 契约、错误和缓存测试。"},
           {"id": "runtime_provider_contract_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "严格 JSON、单次快照、阈值和故障隔离测试。"},
-          {"id": "runtime_auth_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "监听边界、密钥文件上限、请求认证、最小存活探针和凭据泄漏防护测试。"}
+          {"id": "runtime_auth_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "身份、权限、固定长度密钥摘要、配置上限和攻击输入测试。"},
+          {"id": "runtime_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计脱敏、容量、慢输出非阻塞、丢弃计数、异常隔离和关闭测试。"}
         ],
         "blocker_ids": []
       },
@@ -263,12 +267,13 @@
     {
       "id": "security_boundaries",
       "title": "安全边界",
-      "summary": "API key、数字回环开发边界、只读 HTTP、Unix 套接字权限和系统级威胁模型已实现；角色授权、TLS、审计和总线消息认证仍缺失。",
+      "summary": "API key 身份与只读权限、有界脱敏审计、数字回环边界、Unix 套接字权限和威胁模型已实现；TLS、细粒度角色、持久审计和总线消息认证仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "security_runtime_source", "kind": "source", "path": "runtime_api/auth.py", "note": "数字回环开发模式和非回环 API key 边界。"},
           {"id": "security_socket_source", "kind": "source", "path": "toolbusd/src/main.cpp", "note": "本地套接字 0660 权限、所有者检查和 device/inode 安全清理。"},
+          {"id": "security_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "不记录密钥或原始目标的结构化审计与非阻塞有界输出。"},
           {"id": "security_threat_document", "kind": "document", "path": "docs/security-threat-model.md", "note": "保护目标、信任边界、攻击者、控制、剩余风险和验收口径。"}
         ],
         "blocker_ids": ["auth_and_threat_model"]
@@ -276,7 +281,8 @@
       "automated_test": {
         "status": "partial",
         "evidence": [
-          {"id": "security_http_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "认证、密钥上限、凭据位置、错误结构和公开探针测试。"},
+          {"id": "security_http_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "认证、权限、密钥上限、凭据位置、错误结构和公开探针测试。"},
+          {"id": "security_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计容量、脱敏、非阻塞输出、丢弃和异常隔离测试。"},
           {"id": "security_socket_test", "kind": "host_test", "path": "tests/e2e_vcan.sh", "note": "进程级回归校验 toolbusd 套接字权限为 0660。"},
           {"id": "security_protocol_test", "kind": "host_test", "path": "tests/protocol_tests.cpp", "note": "协议长度、版本和字段边界测试。"}
         ],
@@ -319,16 +325,16 @@
   "blockers": [
     {"id": "determinism_hardware_timing", "dimension_id": "determinism", "summary": "缺少三类 MCU 在持续高负载下的 STEP 抖动、ISR 最坏耗时和跨板边沿原始采样。", "requires_hardware": true, "closure_evidence": "保存示波器或逻辑分析仪原始数据、环境、固件哈希、阈值与自动判定结果。"},
     {"id": "incomplete_resource_families", "dimension_id": "resource_model", "summary": "ADC、通用 Timer、Storage、实体 I2C/SPI BSP 与高速流会话尚未闭合。", "requires_hardware": true, "closure_evidence": "实现缺失资源并分别提供软件、交叉编译和实体事务/故障注入记录。"},
-    {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "主机、双 Mock 和 STM32 公共参与者已有闭环，但可靠启动代次、完整固件租约及实体同步尚未完成。", "requires_hardware": true, "closure_evidence": "先补齐并验证可靠 boot epoch 与 STEPGEN 租约，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络和失联恢复记录。"},
+    {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "主机、双 Mock、STM32 参与者和 STEPGEN 租约已有软件闭环，但可靠启动代次及实体同步尚未完成。", "requires_hardware": true, "closure_evidence": "先补齐并验证可靠 boot epoch，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络、租约失效和失联恢复记录。"},
     {"id": "partial_failure_recovery", "dimension_id": "fault_isolation", "summary": "网络分区、部分 COMMIT、总线饱和和实体资源卡死恢复矩阵未完成。", "requires_hardware": true, "closure_evidence": "固定故障脚本、期望状态机、原始链路记录和实体安全输出证据。"},
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
     {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
-    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有只读 API key 认证，但缺少角色授权、事件流、写命令租约与结构化审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
-    {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型和 API key 身份校验已建立，但角色授权、TLS/密钥生命周期、结构化审计和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐权限与密钥生命周期设计、攻击面测试、审计证据和部署加固验证。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 已有只读身份、权限与进程内审计，但缺少事件流、写命令租约、细粒度角色及持久审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
+    {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限和有界审计已建立，但 TLS/密钥生命周期、审计完整性、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、持久审计完整性、攻击面测试、总线认证和部署加固验证。"},
     {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
     {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},
-    {"id": "no_comparative_benchmark", "dimension_id": null, "summary": "没有与明确 Klipper 版本、同等硬件、同等负载和共同指标对齐的比较基准。", "requires_hardware": true, "closure_evidence": "预注册比较方案，公开两侧版本、配置、硬件、工作负载、原始数据、统计方法与可重复结果。"}
+    {"id": "no_comparative_benchmark", "dimension_id": null, "summary": "已有机器可校验的公平对照草案和运行记录完整性规则，但尚未锁定双方版本与实体环境，也没有执行数据。", "requires_hardware": true, "closure_evidence": "把草案转为预注册计划，公开两侧版本、配置、硬件、工作负载、原始数据、统计方法，并完成至少三次可重复配对运行。"}
   ],
   "overall_comparison": {
     "claim": "RemoteBSP 整体超过 Klipper",

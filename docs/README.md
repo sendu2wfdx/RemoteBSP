@@ -25,6 +25,7 @@
 - [只读 Runtime API](runtime-api.md)
 - [安全威胁模型](security-threat-model.md)
 - [可审计成熟度基线](../maturity/README.md)
+- [RemoteBSP / Klipper 可复现对照基准](../benchmarks/README.md)
 
 ## 一句话说明
 
@@ -68,7 +69,7 @@ flowchart LR
 | I2C / SPI | 协议、Mock与Studio配置竖切已实现 | 总线/设备合同、原子事务、设备级故障隔离、公开端点白名单、图形编辑及Studio到DigitalTwin黄金路径已测试；STM32 BSP待实现和实板验收 |
 | 高速 Stream | 协议骨架已实现、已测试 | 合同、打开、数据、信用和状态编解码；运行时会话及USB数据面待实现 |
 | Runtime API | 只读竖切已实现、已测试 | RuntimeSnapshot IPC v2、拓扑/资源故障隔离、受时钟陈旧阈值约束的短缓存和告警已测试；数字回环可显式无认证，非回环强制API key并统一保护端点。角色授权、TLS、写操作、事件流和审计待实现 |
-| 成熟度证据 | 基线已建立、已测试 | 十个必需维度分别记录实现、自动测试、交叉编译和实体证据；当前整体比较明确 blocked，待补齐硬件矩阵与可复现 Klipper 对照基准 |
+| 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；对照 v1 可锁定公平性、版本、环境和阈值，但硬拒绝 executed/胜出，待实体环境确定后实现仪器原始数据重算和完整失败运行索引 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
 ## 正式板卡
