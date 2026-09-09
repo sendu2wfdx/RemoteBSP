@@ -256,6 +256,13 @@ public:
         const protocol::SpiTransferRequest& request) const;
     protocol::StreamContract stream_contract(
         std::uint32_t resource_id) const;
+    protocol::StreamOpenResponse stream_open(
+        const protocol::StreamOpenRequest& request) const;
+    void stream_write(const protocol::StreamDataPayload& data) const;
+    void stream_credit(const protocol::StreamCreditPayload& credit) const;
+    protocol::StreamStatusPayload stream_status(
+        std::uint32_t stream_id) const;
+    void stream_stop(std::uint32_t stream_id) const;
 
     protocol::DeviceParameterStatus device_parameter_status() const;
     std::vector<protocol::DeviceParameterDescriptor>

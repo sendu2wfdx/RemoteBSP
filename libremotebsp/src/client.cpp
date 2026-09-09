@@ -514,6 +514,36 @@ protocol::StreamContract Client::stream_contract(
         protocol::encode_resource_id(resource_id))));
 }
 
+protocol::StreamOpenResponse Client::stream_open(
+    const protocol::StreamOpenRequest& request) const {
+    return protocol::decode_stream_open_response(body(command(
+        protocol::Command::StreamOpen,
+        protocol::encode_stream_open_request(request))));
+}
+
+void Client::stream_write(const protocol::StreamDataPayload& data) const {
+    body(command(protocol::Command::StreamData,
+                 protocol::encode_stream_data(data)));
+}
+
+void Client::stream_credit(
+    const protocol::StreamCreditPayload& credit) const {
+    body(command(protocol::Command::StreamCredit,
+                 protocol::encode_stream_credit(credit)));
+}
+
+protocol::StreamStatusPayload Client::stream_status(
+    std::uint32_t stream_id) const {
+    return protocol::decode_stream_status(body(command(
+        protocol::Command::StreamStatus,
+        protocol::encode_resource_id(stream_id))));
+}
+
+void Client::stream_stop(std::uint32_t stream_id) const {
+    body(command(protocol::Command::StreamStop,
+                 protocol::encode_resource_id(stream_id)));
+}
+
 protocol::DeviceParameterStatus Client::device_parameter_status() const {
     return protocol::decode_device_parameter_status(
         body(command(protocol::Command::DeviceParameterStatus)));

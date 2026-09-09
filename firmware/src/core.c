@@ -40,6 +40,10 @@ enum {
     RBSP_COMMAND_UART_READ = 0x0201,
     RBSP_COMMAND_UART_WRITE = 0x0202,
     RBSP_COMMAND_UART_RX_EVENT = 0x0280,
+    RBSP_COMMAND_I2C_CONTRACT = 0x0300,
+    RBSP_COMMAND_I2C_TRANSFER = 0x0301,
+    RBSP_COMMAND_SPI_CONTRACT = 0x0400,
+    RBSP_COMMAND_SPI_TRANSFER = 0x0401,
     RBSP_COMMAND_PWM_CREATE = 0x0600,
     RBSP_COMMAND_PWM_WRITE = 0x0601,
     RBSP_COMMAND_PWM_STOP = 0x0602,
@@ -77,16 +81,29 @@ enum {
     RBSP_DEVICE_PARAM_STATUS_UNLOCKED = 1U << 0,
     RBSP_DEVICE_PARAM_STATUS_RESTART_REQUIRED = 1U << 1,
 #endif
-#if defined(CONFIG_REMOTEBSP_MOTION)
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
     RBSP_RESOURCE_LEASE_MINIMUM_MS = 100,
     RBSP_RESOURCE_LEASE_MAXIMUM_MS = 60000,
     RBSP_RESOURCE_LEASE_EXCLUSIVE = 2,
+    RBSP_RESOURCE_ACCESS_READABLE = 1U << 0,
     RBSP_RESOURCE_ACCESS_WRITABLE = 1U << 1,
     RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE = 1U << 3,
     RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED = 1U << 4,
     RBSP_RESOURCE_ACCESS_LEASE_REQUIRED = 1U << 5,
 #endif
 };
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+#if CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US > CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US
+#error "总线最短超时不能大于最长超时"
+#endif
+#if CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES + 30 > CONFIG_REMOTE_CACHE_RESPONSE_SIZE
+#error "总线最大读取响应必须完整放入去重缓存"
+#endif
+#if CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES + 39 > CONFIG_REMOTE_MAX_PACKET_SIZE
+#error "总线最大请求或响应超过远程协议包预算"
+#endif
+#endif
 
 static const uint8_t bootloader_confirmation[8] = {
     'R', 'B', 'S', 'P', 'B', 'O', 'O', 'T'};
@@ -170,13 +187,256 @@ static void encode_device_param_status(const rbsp_core_t* core,
 }
 #endif
 
-#if defined(CONFIG_REMOTEBSP_MOTION)
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
 static uint64_t get_u64(const uint8_t* input) {
     uint64_t value = 0U;
     for (unsigned index = 0U; index < 8U; ++index) {
         value |= (uint64_t)input[index] << (index * 8U);
     }
     return value;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+static uint16_t make_status_response(
+    rbsp_core_t* core, const rbsp_request_t* request,
+    uint8_t status, uint32_t object_id,
+    const uint8_t* data, uint16_t data_length);
+static const rbsp_bus_resource_config_t* find_bus_resource(
+    const rbsp_core_t* core, uint32_t resource_id, size_t* resource_index);
+static bool bus_has_device_kind(const rbsp_core_t* core, uint8_t kind);
+static bool bus_lease_active(rbsp_core_t* core, size_t resource_index,
+                             uint32_t session_id);
+static void encode_bus_contract(
+    uint8_t output[32U], const rbsp_bus_resource_config_t* item);
+
+static bool handle_bus_command(rbsp_core_t* core,
+                               const rbsp_request_t* request,
+                               uint16_t* encoded_response_size) {
+    uint16_t response_size = 0U;
+    uint8_t* payload = core->tx_packet + RBSP_HEADER_SIZE;
+    switch (request->command) {
+        case RBSP_COMMAND_I2C_CONTRACT:
+        case RBSP_COMMAND_SPI_CONTRACT: {
+            const uint8_t expected_kind =
+                request->command == RBSP_COMMAND_I2C_CONTRACT
+                    ? RBSP_BUS_I2C_DEVICE
+                    : RBSP_BUS_SPI_DEVICE;
+            const uint32_t resource_id = request->payload_length == 4U
+                                             ? get_u32(request->payload)
+                                             : 0U;
+            const rbsp_bus_resource_config_t* resource =
+                request->payload_length == 4U
+                    ? find_bus_resource(core, resource_id, NULL)
+                    : NULL;
+            if (request->object_id != 0U ||
+                request->payload_length != 4U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!bus_has_device_kind(core, expected_kind)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (resource == NULL || resource->kind != expected_kind) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[32U];
+                encode_bus_contract(data, resource);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_I2C_TRANSFER: {
+            const uint16_t write_length = request->payload_length >= 14U
+                                              ? get_u16(request->payload + 12U)
+                                              : 0U;
+            const uint16_t read_length = request->payload_length >= 14U
+                                             ? get_u16(request->payload + 10U)
+                                             : 0U;
+            const uint16_t flags = request->payload_length >= 14U
+                                       ? get_u16(request->payload + 8U)
+                                       : 0U;
+            const uint32_t timeout_us = request->payload_length >= 14U
+                                            ? get_u32(request->payload + 4U)
+                                            : 0U;
+            size_t resource_index = 0U;
+            const rbsp_bus_resource_config_t* resource =
+                request->payload_length >= 14U
+                    ? find_bus_resource(
+                          core, get_u32(request->payload), &resource_index)
+                    : NULL;
+            const uint32_t total = (uint32_t)write_length + read_length;
+            if (request->object_id != 0U ||
+                request->payload_length < 14U ||
+                request->payload_length != (uint16_t)(14U + write_length) ||
+                total == 0U || total > CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!bus_has_device_kind(core, RBSP_BUS_I2C_DEVICE)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (resource == NULL ||
+                       resource->kind != RBSP_BUS_I2C_DEVICE) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else if (timeout_us < resource->minimum_timeout_us ||
+                       timeout_us > resource->maximum_timeout_us ||
+                       total > resource->maximum_transfer_bytes ||
+                       (flags & (uint16_t)~(
+                           RBSP_BUS_CONTRACT_I2C_REPEATED_START |
+                           RBSP_BUS_CONTRACT_I2C_RECOVERY)) != 0U ||
+                       (flags & (uint16_t)~resource->flags) != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!bus_lease_active(
+                           core, resource_index, request->session_id)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    0U, NULL, 0U);
+            } else {
+                uint16_t transmitted = 0U;
+                uint16_t received = 0U;
+                uint8_t* result = payload + 1U;
+                /* HAL 失败时即使错误地上报 received，也不得泄露旧响应字节。 */
+                memset(result + 5U, 0, read_length);
+                const rbsp_bus_transaction_status_t status =
+                    core->hal.i2c_transfer(
+                        resource, timeout_us, flags,
+                        request->payload + 14U, write_length,
+                        result + 5U, read_length,
+                        &transmitted, &received);
+                if (status > RBSP_BUS_TRANSACTION_LIMIT_EXCEEDED ||
+                    transmitted > write_length || received > read_length ||
+                    (status == RBSP_BUS_TRANSACTION_OK &&
+                     (transmitted != write_length || received != read_length))) {
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_RESOURCE_FAILED,
+                        0U, NULL, 0U);
+                } else {
+                    result[0U] = (uint8_t)status;
+                    put_u16(result + 1U, transmitted);
+                    put_u16(result + 3U, received);
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_OK, 0U,
+                        result, (uint16_t)(5U + received));
+                }
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_SPI_TRANSFER: {
+            const uint16_t transmit_length = request->payload_length >= 15U
+                                                 ? get_u16(request->payload + 13U)
+                                                 : 0U;
+            const uint16_t receive_length = request->payload_length >= 15U
+                                                ? get_u16(request->payload + 10U)
+                                                : 0U;
+            const uint16_t flags = request->payload_length >= 15U
+                                       ? get_u16(request->payload + 8U)
+                                       : 0U;
+            const uint32_t timeout_us = request->payload_length >= 15U
+                                            ? get_u32(request->payload + 4U)
+                                            : 0U;
+            size_t resource_index = 0U;
+            const rbsp_bus_resource_config_t* resource =
+                request->payload_length >= 15U
+                    ? find_bus_resource(
+                          core, get_u32(request->payload), &resource_index)
+                    : NULL;
+            const uint16_t maximum_length = transmit_length > receive_length
+                                                ? transmit_length
+                                                : receive_length;
+            if (request->object_id != 0U ||
+                request->payload_length < 15U ||
+                request->payload_length !=
+                    (uint16_t)(15U + transmit_length) ||
+                maximum_length == 0U ||
+                maximum_length > CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!bus_has_device_kind(core, RBSP_BUS_SPI_DEVICE)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (resource == NULL ||
+                       resource->kind != RBSP_BUS_SPI_DEVICE) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else if (timeout_us < resource->minimum_timeout_us ||
+                timeout_us > resource->maximum_timeout_us ||
+                maximum_length > resource->maximum_transfer_bytes ||
+                (resource->bits_per_word == 16U &&
+                 ((transmit_length & 1U) != 0U ||
+                  (receive_length & 1U) != 0U)) ||
+                (transmit_length != 0U && receive_length != 0U &&
+                 (resource->flags &
+                  RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX) == 0U) ||
+                (flags & (uint16_t)~
+                           RBSP_BUS_SPI_TRANSFER_KEEP_CHIP_SELECT) != 0U ||
+                       ((flags &
+                         RBSP_BUS_SPI_TRANSFER_KEEP_CHIP_SELECT) != 0U &&
+                        (resource->flags &
+                         RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT) == 0U)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!bus_lease_active(
+                           core, resource_index, request->session_id)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    0U, NULL, 0U);
+            } else {
+                uint16_t transmitted = 0U;
+                uint16_t received = 0U;
+                uint8_t* result = payload + 1U;
+                /* HAL 失败时即使错误地上报 received，也不得泄露旧响应字节。 */
+                memset(result + 5U, 0, receive_length);
+                const rbsp_bus_transaction_status_t status =
+                    core->hal.spi_transfer(
+                        resource, timeout_us, flags, request->payload[12U],
+                        request->payload + 15U, transmit_length,
+                        result + 5U, receive_length,
+                        &transmitted, &received);
+                if (status > RBSP_BUS_TRANSACTION_LIMIT_EXCEEDED ||
+                    transmitted > transmit_length ||
+                    received > receive_length ||
+                    (status == RBSP_BUS_TRANSACTION_OK &&
+                     (transmitted != transmit_length ||
+                      received != receive_length)) ||
+                    (resource->bits_per_word == 16U &&
+                     ((transmitted & 1U) != 0U ||
+                      (received & 1U) != 0U))) {
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_RESOURCE_FAILED,
+                        0U, NULL, 0U);
+                } else {
+                    result[0U] = (uint8_t)status;
+                    put_u16(result + 1U, transmitted);
+                    put_u16(result + 3U, received);
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_OK, 0U,
+                        result, (uint16_t)(5U + received));
+                }
+            }
+            break;
+        }
+        default:
+            return false;
+    }
+    *encoded_response_size = response_size;
+    return true;
 }
 #endif
 
@@ -442,6 +702,345 @@ static bool configure_gpio(rbsp_core_t* core, uint16_t pin,
            core->hal.gpio_configure != NULL &&
            core->hal.gpio_configure(pin, direction, initial_value);
 }
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+static const rbsp_bus_resource_config_t* find_bus_resource(
+    const rbsp_core_t* core, uint32_t resource_id, size_t* resource_index) {
+    if (core == NULL || core->hal.bus_resources == NULL) {
+        return NULL;
+    }
+    for (size_t index = 0U; index < core->hal.bus_resource_count; ++index) {
+        if (core->hal.bus_resources[index].resource_id == resource_id) {
+            if (resource_index != NULL) {
+                *resource_index = index;
+            }
+            return &core->hal.bus_resources[index];
+        }
+    }
+    return NULL;
+}
+
+static bool bus_kind_is_device(uint8_t kind) {
+    return kind == RBSP_BUS_I2C_DEVICE || kind == RBSP_BUS_SPI_DEVICE;
+}
+
+static bool bus_resource_id_matches_kind(uint32_t resource_id,
+                                         uint8_t kind) {
+    /* v1 资源 ID 高字节固定为 ResourceType；总线种类 1..4 对应 11..14。 */
+    return kind >= RBSP_BUS_I2C_BUS && kind <= RBSP_BUS_SPI_DEVICE &&
+           (resource_id >> 24U) == (uint32_t)(kind + 10U);
+}
+
+static bool bus_configuration_valid(const rbsp_hal_t* hal) {
+    if (hal->bus_resources == NULL || hal->bus_resource_count == 0U ||
+        hal->bus_resource_count > CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT) {
+        return false;
+    }
+    bool has_i2c_device = false;
+    bool has_spi_device = false;
+    for (size_t index = 0U; index < hal->bus_resource_count; ++index) {
+        const rbsp_bus_resource_config_t* item = &hal->bus_resources[index];
+        if (item->resource_id == 0U ||
+            !bus_resource_id_matches_kind(item->resource_id, item->kind) ||
+            item->maximum_clock_hz == 0U ||
+            item->maximum_transfer_bytes == 0U ||
+            item->maximum_transfer_bytes >
+                CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES ||
+            item->queue_capacity != 1U ||
+            item->minimum_timeout_us < CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US ||
+            item->maximum_timeout_us > CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US ||
+            item->minimum_timeout_us > item->maximum_timeout_us ||
+            item->maximum_operations_per_second == 0U) {
+            return false;
+        }
+        for (size_t previous = 0U; previous < index; ++previous) {
+            if (hal->bus_resources[previous].resource_id == item->resource_id) {
+                return false;
+            }
+        }
+        if (item->kind == RBSP_BUS_I2C_BUS ||
+            item->kind == RBSP_BUS_SPI_BUS) {
+            const uint8_t allowed = item->kind == RBSP_BUS_I2C_BUS
+                                        ? (uint8_t)(
+                                              RBSP_BUS_CONTRACT_I2C_REPEATED_START |
+                                              RBSP_BUS_CONTRACT_I2C_RECOVERY)
+                                        : (uint8_t)(
+                                              RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX |
+                                              RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT);
+            if (item->parent_bus_resource_id != 0U ||
+                item->device_value != 0U || item->controller == 0U ||
+                (item->flags & (uint8_t)~allowed) != 0U) {
+                return false;
+            }
+            continue;
+        }
+        if (!bus_kind_is_device(item->kind) ||
+            item->parent_bus_resource_id == 0U) {
+            return false;
+        }
+        const rbsp_bus_resource_config_t* parent = NULL;
+        for (size_t candidate = 0U; candidate < hal->bus_resource_count;
+             ++candidate) {
+            if (hal->bus_resources[candidate].resource_id ==
+                item->parent_bus_resource_id) {
+                parent = &hal->bus_resources[candidate];
+                break;
+            }
+        }
+        if (parent == NULL || parent->controller != item->controller ||
+            item->maximum_clock_hz > parent->maximum_clock_hz ||
+            item->maximum_transfer_bytes > parent->maximum_transfer_bytes ||
+            item->minimum_timeout_us < parent->minimum_timeout_us ||
+            item->maximum_timeout_us > parent->maximum_timeout_us ||
+            item->queue_capacity > parent->queue_capacity ||
+            item->maximum_operations_per_second >
+                parent->maximum_operations_per_second) {
+            return false;
+        }
+        if (item->kind == RBSP_BUS_I2C_DEVICE) {
+            has_i2c_device = true;
+            if (parent->kind != RBSP_BUS_I2C_BUS ||
+                item->device_value == 0U || item->device_value > 0x7FU ||
+                item->spi_mode != 0U || item->bits_per_word != 0U ||
+                (item->flags & (uint8_t)~(
+                    RBSP_BUS_CONTRACT_I2C_REPEATED_START |
+                    RBSP_BUS_CONTRACT_I2C_RECOVERY)) != 0U) {
+                return false;
+            }
+        } else {
+            has_spi_device = true;
+            if (parent->kind != RBSP_BUS_SPI_BUS ||
+                item->device_value == 0U || item->spi_mode > 3U ||
+                (item->bits_per_word != 8U &&
+                 item->bits_per_word != 16U) ||
+                (item->flags & (uint8_t)~(
+                    RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX |
+                    RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT)) != 0U) {
+                return false;
+            }
+        }
+        if ((item->flags & (uint8_t)~parent->flags) != 0U) {
+            return false;
+        }
+        for (size_t previous = 0U; previous < index; ++previous) {
+            const rbsp_bus_resource_config_t* other =
+                &hal->bus_resources[previous];
+            if (other->kind == item->kind &&
+                other->parent_bus_resource_id ==
+                    item->parent_bus_resource_id &&
+                other->device_value == item->device_value) {
+                return false;
+            }
+        }
+    }
+    return (!has_i2c_device || hal->i2c_transfer != NULL) &&
+           (!has_spi_device || hal->spi_transfer != NULL) &&
+           (has_i2c_device || has_spi_device);
+}
+
+static bool bus_has_device_kind(const rbsp_core_t* core, uint8_t kind) {
+    for (size_t index = 0U; index < core->hal.bus_resource_count; ++index) {
+        if (core->hal.bus_resources[index].kind == kind) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint32_t bus_lease_remaining_ms(const rbsp_bus_lease_t* lease,
+                                       uint32_t now_ms) {
+    return lease != NULL && lease->active &&
+                   (int32_t)(lease->expires_at_ms - now_ms) > 0
+               ? lease->expires_at_ms - now_ms
+               : 0U;
+}
+
+static void encode_bus_lease_info(
+    uint8_t output[27U], uint32_t resource_id,
+    const rbsp_bus_lease_t* lease, uint32_t requester_session_id,
+    uint32_t now_ms, bool include_token) {
+    memset(output, 0, 27U);
+    put_u32(output, resource_id);
+    if (lease == NULL || !lease->active) {
+        return;
+    }
+    if (include_token && lease->owner_session_id == requester_session_id) {
+        put_u64(output + 4U, lease->lease_id);
+    }
+    put_u32(output + 12U, lease->owner_session_id);
+    put_u32(output + 16U, lease->granted_duration_ms);
+    put_u32(output + 20U, bus_lease_remaining_ms(lease, now_ms));
+    output[24U] = RBSP_RESOURCE_LEASE_EXCLUSIVE;
+    put_u16(output + 25U, 1U);
+}
+
+static size_t expire_bus_leases(rbsp_core_t* core, uint32_t now_ms) {
+    size_t expired = 0U;
+    for (size_t index = 0U; index < core->hal.bus_resource_count; ++index) {
+        rbsp_bus_lease_t* lease = &core->bus_leases[index];
+        if (lease->active &&
+            (int32_t)(now_ms - lease->expires_at_ms) >= 0) {
+            memset(lease, 0, sizeof(*lease));
+            ++expired;
+        }
+    }
+    return expired;
+}
+
+static bool bus_lease_active(rbsp_core_t* core, size_t resource_index,
+                             uint32_t session_id) {
+    (void)expire_bus_leases(core, core->hal.milliseconds());
+    return session_id != 0U &&
+           resource_index < core->hal.bus_resource_count &&
+           core->bus_leases[resource_index].active &&
+           core->bus_leases[resource_index].owner_session_id == session_id;
+}
+
+static void encode_bus_contract(uint8_t output[32U],
+                                const rbsp_bus_resource_config_t* item) {
+    memset(output, 0, 32U);
+    put_u32(output, item->resource_id);
+    put_u16(output + 4U, 1U);
+    output[6U] = item->kind;
+    output[7U] = item->flags;
+    put_u32(output + 8U, item->parent_bus_resource_id);
+    put_u32(output + 12U, item->maximum_clock_hz);
+    put_u16(output + 16U, item->maximum_transfer_bytes);
+    put_u16(output + 18U, item->queue_capacity);
+    put_u32(output + 20U, item->minimum_timeout_us);
+    put_u32(output + 24U, item->maximum_timeout_us);
+    put_u32(output + 28U, item->maximum_operations_per_second);
+}
+
+static bool handle_bus_resource_command(
+    rbsp_core_t* core, const rbsp_request_t* request,
+    uint16_t* response_size) {
+    uint16_t required_length = 0U;
+    switch (request->command) {
+        case RBSP_COMMAND_RESOURCE_CONTRACT:
+        case RBSP_COMMAND_RESOURCE_LEASE_STATUS:
+            required_length = 4U;
+            break;
+        case RBSP_COMMAND_RESOURCE_ACQUIRE:
+            required_length = 9U;
+            break;
+        case RBSP_COMMAND_RESOURCE_RENEW:
+        case RBSP_COMMAND_RESOURCE_RELEASE:
+            required_length = 16U;
+            break;
+        default:
+            return false;
+    }
+    if (request->payload_length != required_length) {
+        return false;
+    }
+    size_t resource_index = 0U;
+    const uint32_t resource_id = get_u32(request->payload);
+    const rbsp_bus_resource_config_t* resource = find_bus_resource(
+        core, resource_id, &resource_index);
+    if (resource == NULL || !bus_kind_is_device(resource->kind)) {
+        return false;
+    }
+    if (request->object_id != 0U) {
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+        return true;
+    }
+    const uint32_t now_ms = core->hal.milliseconds();
+    rbsp_bus_lease_t* lease = &core->bus_leases[resource_index];
+    if (request->command == RBSP_COMMAND_RESOURCE_CONTRACT) {
+        uint8_t data[32U];
+        memset(data, 0, sizeof(data));
+        put_u32(data, resource_id);
+        put_u16(data + 4U, 1U);
+        put_u16(data + 6U,
+                RBSP_RESOURCE_ACCESS_READABLE |
+                    RBSP_RESOURCE_ACCESS_WRITABLE |
+                    RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE |
+                    RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED |
+                    RBSP_RESOURCE_ACCESS_LEASE_REQUIRED);
+        put_u32(data + 16U, resource->maximum_operations_per_second);
+        put_u32(data + 20U, resource->queue_capacity);
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+        return true;
+    }
+    if (request->command == RBSP_COMMAND_RESOURCE_LEASE_STATUS) {
+        uint8_t data[27U];
+        encode_bus_lease_info(data, resource_id, lease,
+                              request->session_id, now_ms, false);
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+        return true;
+    }
+    if (request->session_id == 0U) {
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+        return true;
+    }
+    if (request->command == RBSP_COMMAND_RESOURCE_ACQUIRE) {
+        const uint32_t duration_ms = get_u32(request->payload + 4U);
+        if (duration_ms < RBSP_RESOURCE_LEASE_MINIMUM_MS ||
+            duration_ms > RBSP_RESOURCE_LEASE_MAXIMUM_MS ||
+            request->payload[8U] != RBSP_RESOURCE_LEASE_EXCLUSIVE) {
+            *response_size = make_status_response(
+                core, request,
+                request->payload[8U] > RBSP_RESOURCE_LEASE_EXCLUSIVE ||
+                        request->payload[8U] == 0U
+                    ? RBSP_STATUS_INVALID_PAYLOAD
+                    : RBSP_STATUS_ACCESS_DENIED,
+                0U, NULL, 0U);
+            return true;
+        }
+        if (lease->active) {
+            *response_size = make_status_response(
+                core, request, RBSP_STATUS_RESOURCE_BUSY, 0U, NULL, 0U);
+            return true;
+        }
+        lease->active = true;
+        lease->lease_id = core->next_bus_lease_id++;
+        if (core->next_bus_lease_id == 0U) {
+            core->next_bus_lease_id = 1U;
+        }
+        lease->owner_session_id = request->session_id;
+        lease->granted_duration_ms = duration_ms;
+        lease->expires_at_ms = now_ms + duration_ms;
+        uint8_t data[27U];
+        encode_bus_lease_info(data, resource_id, lease,
+                              request->session_id, now_ms, true);
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+        return true;
+    }
+    const uint64_t lease_id = get_u64(request->payload + 4U);
+    const uint32_t duration_ms = get_u32(request->payload + 12U);
+    const bool release = request->command == RBSP_COMMAND_RESOURCE_RELEASE;
+    if (lease_id == 0U ||
+        (release ? duration_ms != 0U
+                 : duration_ms < RBSP_RESOURCE_LEASE_MINIMUM_MS ||
+                       duration_ms > RBSP_RESOURCE_LEASE_MAXIMUM_MS)) {
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+    } else if (!lease->active || lease->lease_id != lease_id ||
+               lease->owner_session_id != request->session_id) {
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_ACCESS_DENIED, 0U, NULL, 0U);
+    } else if (release) {
+        memset(lease, 0, sizeof(*lease));
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+    } else {
+        lease->granted_duration_ms = duration_ms;
+        lease->expires_at_ms = now_ms + duration_ms;
+        uint8_t data[27U];
+        encode_bus_lease_info(data, resource_id, lease,
+                              request->session_id, now_ms, true);
+        *response_size = make_status_response(
+            core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+    }
+    return true;
+}
+#endif
 
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -710,6 +1309,9 @@ static bool process_request(rbsp_core_t* core,
                             const rbsp_request_t* request) {
 #if defined(CONFIG_REMOTEBSP_MOTION)
     (void)expire_stepgen_leases(core, core->hal.milliseconds());
+#endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+    (void)expire_bus_leases(core, core->hal.milliseconds());
 #endif
     rbsp_request_cache_entry_t* cached =
         find_cache(core, request);
@@ -1023,6 +1625,14 @@ static bool process_request(rbsp_core_t* core,
                 capabilities |= 1ULL << 1U;
             }
 #endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (bus_has_device_kind(core, RBSP_BUS_SPI_DEVICE)) {
+                capabilities |= 1ULL << 2U;
+            }
+            if (bus_has_device_kind(core, RBSP_BUS_I2C_DEVICE)) {
+                capabilities |= 1ULL << 3U;
+            }
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM)
             if (core->hal.pwm_configure != NULL &&
                 core->hal.pwm_write != NULL &&
@@ -1107,6 +1717,12 @@ static bool process_request(rbsp_core_t* core,
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_RESOURCE_CONTRACT: {
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (handle_bus_resource_command(
+                    core, request, &response_size)) {
+                break;
+            }
+#endif
             uint8_t axis = 0U;
             const uint32_t resource_id =
                 request->payload_length == 4U
@@ -1149,6 +1765,12 @@ static bool process_request(rbsp_core_t* core,
         }
 
         case RBSP_COMMAND_RESOURCE_ACQUIRE: {
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (handle_bus_resource_command(
+                    core, request, &response_size)) {
+                break;
+            }
+#endif
             uint8_t axis = 0U;
             const uint32_t resource_id =
                 request->payload_length == 9U
@@ -1210,6 +1832,12 @@ static bool process_request(rbsp_core_t* core,
 
         case RBSP_COMMAND_RESOURCE_RENEW:
         case RBSP_COMMAND_RESOURCE_RELEASE: {
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (handle_bus_resource_command(
+                    core, request, &response_size)) {
+                break;
+            }
+#endif
             uint8_t axis = 0U;
             const uint32_t resource_id =
                 request->payload_length == 16U
@@ -1275,6 +1903,12 @@ static bool process_request(rbsp_core_t* core,
         }
 
         case RBSP_COMMAND_RESOURCE_LEASE_STATUS: {
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (handle_bus_resource_command(
+                    core, request, &response_size)) {
+                break;
+            }
+#endif
             uint8_t axis = 0U;
             const uint32_t resource_id =
                 request->payload_length == 4U
@@ -1304,6 +1938,32 @@ static bool process_request(rbsp_core_t* core,
             }
             break;
         }
+#endif
+
+#if defined(CONFIG_REMOTEBSP_BUS) && !defined(CONFIG_REMOTEBSP_MOTION)
+        case RBSP_COMMAND_RESOURCE_CONTRACT:
+        case RBSP_COMMAND_RESOURCE_ACQUIRE:
+        case RBSP_COMMAND_RESOURCE_RENEW:
+        case RBSP_COMMAND_RESOURCE_RELEASE:
+        case RBSP_COMMAND_RESOURCE_LEASE_STATUS:
+            if (!handle_bus_resource_command(
+                    core, request, &response_size)) {
+                uint16_t expected_length = 4U;
+                if (request->command == RBSP_COMMAND_RESOURCE_ACQUIRE) {
+                    expected_length = 9U;
+                } else if (request->command == RBSP_COMMAND_RESOURCE_RENEW ||
+                           request->command == RBSP_COMMAND_RESOURCE_RELEASE) {
+                    expected_length = 16U;
+                }
+                response_size = make_status_response(
+                    core, request,
+                    request->object_id != 0U ||
+                            request->payload_length != expected_length
+                        ? RBSP_STATUS_INVALID_PAYLOAD
+                        : RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            }
+            break;
 #endif
 
         case RBSP_COMMAND_BOOTLOADER_ENTER:
@@ -1614,6 +2274,15 @@ static bool process_request(rbsp_core_t* core,
             }
             break;
         }
+#endif
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+        case RBSP_COMMAND_I2C_CONTRACT:
+        case RBSP_COMMAND_I2C_TRANSFER:
+        case RBSP_COMMAND_SPI_CONTRACT:
+        case RBSP_COMMAND_SPI_TRANSFER:
+            (void)handle_bus_command(core, request, &response_size);
+            break;
 #endif
 
 #if defined(CONFIG_REMOTEBSP_PWM)
@@ -2471,6 +3140,12 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
     core->link_mode = mode;
     core->info = *info;
     core->next_object_id = 1U;
+#if defined(CONFIG_REMOTEBSP_BUS)
+    if (!bus_configuration_valid(hal)) {
+        return false;
+    }
+    core->next_bus_lease_id = 1U;
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     if (hal->nanoseconds == NULL ||
         hal->motion_set_enable == NULL ||
@@ -2528,6 +3203,9 @@ void rbsp_core_poll(rbsp_core_t* core) {
     const uint32_t now = core->hal.milliseconds();
 #if defined(CONFIG_REMOTEBSP_MOTION)
     (void)expire_stepgen_leases(core, now);
+#endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+    (void)expire_bus_leases(core, now);
 #endif
     if (core->bootloader_request_pending &&
         (uint32_t)(now - core->bootloader_request_ms) >=
@@ -2661,12 +3339,16 @@ bool rbsp_core_motion_service(rbsp_core_t* core) {
 bool rbsp_core_motion_tick(rbsp_core_t* core) {
     return rbsp_core_motion_service(core);
 }
+#endif
 
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
 size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
-    if (core == NULL || session_id == 0U || !motion_available(core)) {
+    if (core == NULL || session_id == 0U) {
         return 0U;
     }
     size_t released = 0U;
+#if defined(CONFIG_REMOTEBSP_MOTION)
+    if (motion_available(core)) {
     const uint32_t critical_state = core->hal.motion_enter_critical();
     if ((core->motion_group.state == RBSP_MOTION_GROUP_PREPARED ||
          core->motion_group.state == RBSP_MOTION_GROUP_ARMED) &&
@@ -2696,6 +3378,17 @@ size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
         core->hal.motion_exit_critical(stop_critical_state);
         (void)rbsp_core_motion_service(core);
     }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+    for (size_t index = 0U; index < core->hal.bus_resource_count; ++index) {
+        rbsp_bus_lease_t* lease = &core->bus_leases[index];
+        if (lease->active && lease->owner_session_id == session_id) {
+            memset(lease, 0, sizeof(*lease));
+            ++released;
+        }
+    }
+#endif
     for (size_t index = 0U;
          index < CONFIG_REMOTE_REQUEST_CACHE_ENTRIES; ++index) {
         if (core->cache[index].valid &&

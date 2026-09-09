@@ -538,10 +538,12 @@ StreamStatusPayload decode_stream_status(
         throw BusStreamPayloadException(BusStreamPayloadError::InvalidStatus,
                                         "流状态值无效");
     }
-    return {read_u32(payload.data()),
-            static_cast<StreamState>(payload[4]),
-            read_u32(payload.data() + 5), read_u32(payload.data() + 9),
-            read_u32(payload.data() + 13), read_u32(payload.data() + 17)};
+    StreamStatusPayload status{
+        read_u32(payload.data()), static_cast<StreamState>(payload[4]),
+        read_u32(payload.data() + 5), read_u32(payload.data() + 9),
+        read_u32(payload.data() + 13), read_u32(payload.data() + 17)};
+    static_cast<void>(encode_stream_status(status));
+    return status;
 }
 
 }  // namespace remotebsp::protocol

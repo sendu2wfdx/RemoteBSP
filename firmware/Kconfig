@@ -519,6 +519,45 @@ config SOFT_HALF_DUPLEX_UART_PORT_COUNT
     default TMC2209_UART_PORT_CAPACITY
     depends on REMOTEBSP_SOFT_HALF_DUPLEX_UART
 
+config REMOTEBSP_BUS
+    bool "编译 I2C/SPI 原子事务公共核心"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      只启用协议校验、静态合同、会话租约和 Core 到 HAL 的原子事务边界。
+      板级代码还必须提供经审核的只读端点表和同步超时后端，否则 Core 初始化
+      会失败且不会公布能力。当前正式板卡预设均保持关闭。
+
+config REMOTEBSP_BUS_RESOURCE_COUNT
+    int "I2C/SPI 总线和设备合同总数"
+    range 1 16
+    default 1
+    depends on REMOTEBSP_BUS
+    help
+      这是编译期租约表容量。实际端点必须由 Studio 生成配置或板级只读表提供，
+      数量不得超过本值；运行时不能添加端点或改变引脚复用。
+
+config REMOTEBSP_BUS_MAX_TRANSFER_BYTES
+    int "单次 I2C/SPI 原子事务最大字节数"
+    range 1 128
+    default 128
+    depends on REMOTEBSP_BUS
+    help
+      I2C 按写入与读取字节数之和计，SPI 按发送与接收长度的较大者计。
+      Core 还会按每个静态设备合同收紧。该值必须让完整响应进入请求去重缓存。
+
+config REMOTEBSP_BUS_MIN_TIMEOUT_US
+    int "总线事务最短超时（微秒）"
+    range 100 100000
+    default 100
+    depends on REMOTEBSP_BUS
+
+config REMOTEBSP_BUS_MAX_TIMEOUT_US
+    int "总线事务最长超时（微秒）"
+    range 100 100000
+    default 100000
+    depends on REMOTEBSP_BUS
+
 endmenu
 
 menu "PWM 与定时位流（可选）"

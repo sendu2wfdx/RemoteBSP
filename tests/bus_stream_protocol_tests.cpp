@@ -99,6 +99,13 @@ int main() {
                                      13};
     assert(decode_stream_status(encode_stream_status(status)).dropped_bytes ==
            3);
+    expect_payload_error(
+        [] {
+            std::vector<std::uint8_t> invalid(21U, 0U);
+            invalid[4] = static_cast<std::uint8_t>(StreamState::Open);
+            static_cast<void>(decode_stream_status(invalid));
+        },
+        BusStreamPayloadError::InvalidStatus);
 
     // 旧 v1 扁平资源数值保持不变，新增类型只追加在枚举尾部。
     static_assert(static_cast<std::uint8_t>(ResourceType::Spi) == 3);

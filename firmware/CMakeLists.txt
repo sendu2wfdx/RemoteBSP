@@ -39,7 +39,10 @@ endif()
 file(STRINGS "${RBSP_CONFIG}" RBSP_WAVEFORM_LINES
      REGEX "^CONFIG_REMOTEBSP_(PWM|TIMED_BITSTREAM)=y$")
 if(RBSP_MOTION_LINES)
-    list(APPEND RBSP_OPTIONAL_CORE_SOURCES src/motion.c src/motion_group.c)
+    list(APPEND RBSP_OPTIONAL_CORE_SOURCES
+         src/motion.c
+         src/motion_group.c
+         "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/boot_epoch.c")
 endif()
 if(RBSP_TMC_UART_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES src/soft_half_duplex_uart.c)

@@ -1,4 +1,5 @@
 add_library(remotebsp_device_params
+    src/boot_epoch.c
     src/schema.c
     src/store.c
 )

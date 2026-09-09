@@ -5,6 +5,7 @@
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/motion_group_participant.hpp"
+#include "remotebsp/mock_mcu/stream_bsp.hpp"
 #include "remotebsp/mock_mcu/time_sync_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
@@ -100,7 +101,8 @@ public:
                std::shared_ptr<DeviceParameterStore>
                    device_parameters = nullptr,
                std::shared_ptr<BusBsp> bus_bsp = nullptr,
-               std::shared_ptr<TimeSyncBsp> time_sync_bsp = nullptr);
+               std::shared_ptr<TimeSyncBsp> time_sync_bsp = nullptr,
+               std::shared_ptr<StreamBsp> stream_bsp = nullptr);
 
     protocol::Packet handle(
         const protocol::Packet& request,
@@ -168,6 +170,18 @@ private:
         const protocol::Packet& request) const;
     protocol::Packet handle_spi_transfer(
         const protocol::Packet& request);
+    protocol::Packet handle_stream_contract(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_stream_open(
+        const protocol::Packet& request);
+    protocol::Packet handle_stream_data(
+        const protocol::Packet& request);
+    protocol::Packet handle_stream_credit(
+        const protocol::Packet& request);
+    protocol::Packet handle_stream_status(
+        const protocol::Packet& request) const;
+    protocol::Packet handle_stream_stop(
+        const protocol::Packet& request);
     protocol::Packet handle_pwm_create(const protocol::Packet& request);
     protocol::Packet handle_pwm_write(const protocol::Packet& request);
     protocol::Packet handle_pwm_stop(const protocol::Packet& request);
@@ -224,6 +238,16 @@ private:
         std::uint32_t owner_session_id{};
     };
 
+    struct StreamSession {
+        std::uint32_t resource_id{};
+        std::uint32_t owner_session_id{};
+        std::uint16_t negotiated_chunk_bytes{};
+        std::uint16_t negotiated_flags{};
+        protocol::StreamState state{protocol::StreamState::Open};
+        std::uint32_t dropped_bytes{};
+        std::uint32_t next_sequence{};
+    };
+
     struct Lease {
         std::uint64_t lease_id{};
         std::uint32_t owner_session_id{};
@@ -259,6 +283,7 @@ private:
     std::shared_ptr<DeviceParameterStore> device_parameters_;
     std::shared_ptr<BusBsp> bus_bsp_;
     std::shared_ptr<TimeSyncBsp> time_sync_bsp_;
+    std::shared_ptr<StreamBsp> stream_bsp_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;
@@ -267,7 +292,9 @@ private:
     std::unordered_map<std::uint32_t, PwmObject> pwm_objects_;
     std::unordered_map<std::uint32_t, TimedBitstreamObject>
         timed_bitstream_objects_;
+    std::unordered_map<std::uint32_t, StreamSession> stream_sessions_;
     std::uint32_t next_object_id_{1};
+    std::uint32_t next_stream_id_{1};
     std::uint64_t next_lease_id_{1};
     bool bootloader_requested_{};
     std::uint32_t parameter_unlock_session_{};

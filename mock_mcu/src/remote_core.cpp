@@ -9,6 +9,23 @@ namespace {
 
 constexpr std::uint32_t kMinimumLeaseDurationMs = 100;
 constexpr std::uint32_t kMaximumLeaseDurationMs = 60000;
+constexpr std::size_t kMaximumStreamSessions = 16;
+
+bool stream_capacity(const StreamBsp& bsp,
+                     const protocol::StreamContract& contract,
+                     std::uint32_t resource_id,
+                     std::uint32_t& buffered,
+                     std::uint32_t& available) noexcept {
+    const auto count = bsp.buffered_bytes(resource_id);
+    if (count > contract.buffer_capacity_bytes) {
+        buffered = 0U;
+        available = 0U;
+        return false;
+    }
+    buffered = static_cast<std::uint32_t>(count);
+    available = contract.buffer_capacity_bytes - buffered;
+    return true;
+}
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -53,7 +70,8 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                        std::shared_ptr<DeviceParameterStore>
                            device_parameters,
                        std::shared_ptr<BusBsp> bus_bsp,
-                       std::shared_ptr<TimeSyncBsp> time_sync_bsp)
+                       std::shared_ptr<TimeSyncBsp> time_sync_bsp,
+                       std::shared_ptr<StreamBsp> stream_bsp)
     : node_info_(node_info),
       capabilities_(capabilities),
       gpio_bsp_(std::move(gpio_bsp)),
@@ -65,6 +83,7 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
       time_sync_bsp_(time_sync_bsp != nullptr
                          ? std::move(time_sync_bsp)
                          : std::make_shared<MockTimeSyncBsp>()),
+      stream_bsp_(std::move(stream_bsp)),
       resources_(std::move(resources)),
       contracts_(std::move(contracts)) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
@@ -179,6 +198,18 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_spi_contract(request);
         case protocol::Command::SpiTransfer:
             return handle_spi_transfer(request);
+        case protocol::Command::StreamContract:
+            return handle_stream_contract(request);
+        case protocol::Command::StreamOpen:
+            return handle_stream_open(request);
+        case protocol::Command::StreamData:
+            return handle_stream_data(request);
+        case protocol::Command::StreamCredit:
+            return handle_stream_credit(request);
+        case protocol::Command::StreamStatus:
+            return handle_stream_status(request);
+        case protocol::Command::StreamStop:
+            return handle_stream_stop(request);
         case protocol::Command::PwmCreate:
             return handle_pwm_create(request);
         case protocol::Command::PwmWrite:
@@ -274,6 +305,13 @@ bool RemoteCore::resource_has_objects(
                timed_bitstream_objects_.end(),
                [resource_id](const auto& entry) {
                    return entry.second.resource_id == resource_id;
+               }) ||
+           std::any_of(
+               stream_sessions_.begin(), stream_sessions_.end(),
+               [resource_id](const auto& entry) {
+                   return entry.second.resource_id == resource_id &&
+                          entry.second.state !=
+                              protocol::StreamState::Stopped;
                });
 }
 
@@ -404,6 +442,18 @@ void RemoteCore::release_resource_objects(
         }
         iterator = timed_bitstream_objects_.erase(iterator);
     }
+
+    for (auto& entry : stream_sessions_) {
+        auto& stream = entry.second;
+        if (stream.resource_id == resource_id &&
+            stream.owner_session_id == owner_session_id &&
+            stream.state != protocol::StreamState::Stopped) {
+            stream.state = protocol::StreamState::Stopped;
+            if (stream_bsp_) {
+                stream_bsp_->reset(resource_id);
+            }
+        }
+    }
 }
 
 std::size_t RemoteCore::expire_leases(TimePoint now) {
@@ -459,6 +509,17 @@ std::size_t RemoteCore::release_session(std::uint32_t session_id) {
         parameter_unlock_session_ = 0U;
         parameter_unlock_token_ = 0U;
         parameter_unlock_expires_ = TimePoint{};
+    }
+    for (auto& entry : stream_sessions_) {
+        auto& stream = entry.second;
+        if (stream.owner_session_id == session_id &&
+            stream.state != protocol::StreamState::Stopped) {
+            stream.state = protocol::StreamState::Stopped;
+            if (stream_bsp_) {
+                stream_bsp_->reset(stream.resource_id);
+            }
+            ++released;
+        }
     }
     return released;
 }
@@ -706,6 +767,18 @@ protocol::Packet RemoteCore::handle_resource_status(
                    motion_status.state == MotionState::Running) {
             status.health = protocol::ResourceHealth::Busy;
         }
+    } else if (found->type == protocol::ResourceType::Stream &&
+               stream_bsp_) {
+        const auto buffered = stream_bsp_->buffered_bytes(resource_id);
+        status.rx_buffered = static_cast<std::uint32_t>(
+            std::min<std::size_t>(buffered,
+                                  std::numeric_limits<std::uint32_t>::max()));
+        if (found->rx_capacity != 0U &&
+            static_cast<std::uint64_t>(buffered) * 4U >=
+                static_cast<std::uint64_t>(found->rx_capacity) * 3U) {
+            status.error_flags |= protocol::kResourceErrorRxHighWater;
+            status.health = protocol::ResourceHealth::Busy;
+        }
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
     const auto encoded = protocol::encode_resource_status(status);
@@ -770,6 +843,15 @@ protocol::Packet RemoteCore::handle_resource_reset(
         }
         release_resource_objects(resource_id, request.header.session_id);
         release_resource_objects(resource_id, 0U);
+        return make_response(request, StatusCode::Ok);
+    }
+    if (found->type == protocol::ResourceType::Stream && stream_bsp_) {
+        stream_bsp_->reset(resource_id);
+        for (auto& entry : stream_sessions_) {
+            if (entry.second.resource_id == resource_id) {
+                entry.second.state = protocol::StreamState::Stopped;
+            }
+        }
         return make_response(request, StatusCode::Ok);
     }
     if (found->type != protocol::ResourceType::Uart || !uart_bsp_ ||
@@ -1637,6 +1719,285 @@ protocol::Packet RemoteCore::handle_spi_transfer(
     response.payload.insert(response.payload.end(), encoded.begin(),
                             encoded.end());
     return response;
+}
+
+protocol::Packet RemoteCore::handle_stream_contract(
+    const protocol::Packet& request) const {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U || request.payload.size() != 4U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    const auto* resource = find_resource(resource_id);
+    if (resource == nullptr || resource->type != protocol::ResourceType::Stream) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto* contract = stream_bsp_->contract(resource_id);
+    if (contract == nullptr) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_stream_contract(*contract);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_stream_open(
+    const protocol::Packet& request) {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U || request.header.session_id == 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::StreamOpenRequest open;
+    try {
+        open = protocol::decode_stream_open_request(request.payload);
+    } catch (const protocol::BusStreamPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto* resource = find_resource(open.resource_id);
+    const auto* contract = stream_bsp_->contract(open.resource_id);
+    if (resource == nullptr || resource->type != protocol::ResourceType::Stream ||
+        contract == nullptr) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    // 首个可执行切片只实现 H2N。N2H/双向需要事件数据面，不能静默降级。
+    if (contract->direction != protocol::StreamDirection::HostToNode ||
+        (contract->flags & protocol::kStreamFlagTimestamped) != 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (open.initial_credit_bytes != 0U ||
+        open.requested_chunk_bytes > contract->maximum_chunk_bytes ||
+        open.requested_flags != contract->flags) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (!resource_access_allowed(open.resource_id,
+                                 request.header.session_id)) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    const auto* resource_contract = find_contract(open.resource_id);
+    constexpr std::uint16_t required_access =
+        protocol::kResourceAccessWritable |
+        protocol::kResourceAccessExclusiveWrite |
+        protocol::kResourceAccessLeaseSupported |
+        protocol::kResourceAccessLeaseRequired;
+    if (resource_contract == nullptr ||
+        (resource_contract->access_flags & required_access) !=
+            required_access ||
+        !session_has_exclusive_lease(open.resource_id,
+                                     request.header.session_id)) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    const bool active = std::any_of(
+        stream_sessions_.begin(), stream_sessions_.end(),
+        [&](const auto& entry) {
+            return entry.second.resource_id == open.resource_id &&
+                   entry.second.state != protocol::StreamState::Stopped;
+        });
+    if (active) {
+        return make_response(request, StatusCode::ResourceBusy);
+    }
+    if (stream_sessions_.size() >= kMaximumStreamSessions) {
+        const auto stopped = std::find_if(
+            stream_sessions_.begin(), stream_sessions_.end(),
+            [](const auto& entry) {
+                return entry.second.state == protocol::StreamState::Stopped;
+            });
+        if (stopped == stream_sessions_.end()) {
+            return make_response(request, StatusCode::ResourceExhausted);
+        }
+        stream_sessions_.erase(stopped);
+    }
+    if (next_stream_id_ == 0U) {
+        return make_response(request, StatusCode::ResourceExhausted);
+    }
+    const auto stream_id = next_stream_id_++;
+    stream_sessions_.emplace(
+        stream_id,
+        StreamSession{open.resource_id, request.header.session_id,
+                      open.requested_chunk_bytes, open.requested_flags,
+                      protocol::StreamState::Open, 0U, 0U});
+    std::uint32_t buffered = 0U;
+    std::uint32_t available = 0U;
+    if (!stream_capacity(*stream_bsp_, *contract, open.resource_id,
+                         buffered, available)) {
+        stream_sessions_.erase(stream_id);
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_stream_open_response(
+        {stream_id, open.requested_chunk_bytes, open.requested_flags,
+         available});
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_stream_data(
+    const protocol::Packet& request) {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::StreamDataPayload data;
+    try {
+        data = protocol::decode_stream_data(request.payload);
+    } catch (const protocol::BusStreamPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto found = stream_sessions_.find(data.stream_id);
+    if (found == stream_sessions_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    auto& stream = found->second;
+    if (stream.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (stream.state == protocol::StreamState::Stopped ||
+        data.sequence != stream.next_sequence ||
+        data.data.size() > stream.negotiated_chunk_bytes ||
+        data.flags != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto* contract = stream_bsp_->contract(stream.resource_id);
+    if (contract == nullptr) {
+        stream.state = protocol::StreamState::Failed;
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    if (stream.next_sequence == std::numeric_limits<std::uint32_t>::max()) {
+        stream.state = protocol::StreamState::Failed;
+        return make_response(request, StatusCode::ResourceExhausted);
+    }
+    std::uint32_t buffered = 0U;
+    std::uint32_t available = 0U;
+    if (!stream_capacity(*stream_bsp_, *contract, stream.resource_id,
+                         buffered, available)) {
+        stream.state = protocol::StreamState::Failed;
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    const auto push_status = data.data.size() > available
+                                 ? StreamPushStatus::Backpressured
+                                 : stream_bsp_->push(stream.resource_id,
+                                                     data.data);
+    if (push_status == StreamPushStatus::Failed) {
+        stream.state = protocol::StreamState::Failed;
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    if (push_status == StreamPushStatus::Backpressured) {
+        if ((stream.negotiated_flags & protocol::kStreamFlagLossless) != 0U) {
+            stream.state = protocol::StreamState::Backpressured;
+            return make_response(request, StatusCode::ResourceBusy);
+        }
+        stream.dropped_bytes = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(
+                static_cast<std::uint64_t>(stream.dropped_bytes) +
+                    data.data.size(),
+                std::numeric_limits<std::uint32_t>::max()));
+    } else {
+        stream.state = protocol::StreamState::Running;
+    }
+    ++stream.next_sequence;
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_stream_credit(
+    const protocol::Packet& request) {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U || request.header.session_id == 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::StreamCreditPayload credit;
+    try {
+        credit = protocol::decode_stream_credit(request.payload);
+    } catch (const protocol::BusStreamPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto found = stream_sessions_.find(credit.stream_id);
+    if (found == stream_sessions_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    // H2N 中主机是发送方，无权给自身增发信用。N2H 数据面尚未实现。
+    return make_response(request, StatusCode::UnsupportedCapability);
+}
+
+protocol::Packet RemoteCore::handle_stream_status(
+    const protocol::Packet& request) const {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U || request.header.session_id == 0U ||
+        request.payload.size() != 4U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto stream_id = protocol::decode_resource_id(request.payload);
+    const auto found = stream_sessions_.find(stream_id);
+    if (found == stream_sessions_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto& stream = found->second;
+    if (stream.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    const auto* contract = stream_bsp_->contract(stream.resource_id);
+    if (contract == nullptr) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    std::uint32_t buffered = 0U;
+    std::uint32_t available = 0U;
+    if (!stream_capacity(*stream_bsp_, *contract, stream.resource_id,
+                         buffered, available)) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    auto state = stream.state;
+    if (state == protocol::StreamState::Backpressured && available != 0U) {
+        state = protocol::StreamState::Running;
+    }
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_stream_status(
+        {stream_id, state, buffered,
+         available, stream.dropped_bytes, stream.next_sequence});
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_stream_stop(
+    const protocol::Packet& request) {
+    if (!stream_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Stream)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U || request.header.session_id == 0U ||
+        request.payload.size() != 4U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto stream_id = protocol::decode_resource_id(request.payload);
+    const auto found = stream_sessions_.find(stream_id);
+    if (found == stream_sessions_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    if (found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    found->second.state = protocol::StreamState::Stopped;
+    stream_bsp_->reset(found->second.resource_id);
+    return make_response(request, StatusCode::Ok);
 }
 
 protocol::Packet RemoteCore::handle_pwm_create(

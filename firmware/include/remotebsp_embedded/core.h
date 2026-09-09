@@ -72,6 +72,62 @@ typedef enum {
     RBSP_GPIO_PULL_DOWN = 2,
 } rbsp_gpio_pull_t;
 
+#if defined(CONFIG_REMOTEBSP_BUS)
+typedef enum {
+    RBSP_BUS_I2C_BUS = 1,
+    RBSP_BUS_I2C_DEVICE = 2,
+    RBSP_BUS_SPI_BUS = 3,
+    RBSP_BUS_SPI_DEVICE = 4,
+} rbsp_bus_resource_kind_t;
+
+typedef enum {
+    RBSP_BUS_TRANSACTION_OK = 0,
+    RBSP_BUS_TRANSACTION_NACK = 1,
+    RBSP_BUS_TRANSACTION_TIMEOUT = 2,
+    RBSP_BUS_TRANSACTION_BUSY = 3,
+    RBSP_BUS_TRANSACTION_FAULT = 4,
+    RBSP_BUS_TRANSACTION_LIMIT_EXCEEDED = 5,
+} rbsp_bus_transaction_status_t;
+
+enum {
+    RBSP_BUS_CONTRACT_I2C_REPEATED_START = 1U << 0,
+    RBSP_BUS_CONTRACT_I2C_RECOVERY = 1U << 1,
+    RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX = 1U << 2,
+    RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT = 1U << 3,
+    /* SPI 事务标志与合同能力位使用不同的线协议位值。 */
+    RBSP_BUS_SPI_TRANSFER_KEEP_CHIP_SELECT = 1U << 0,
+};
+
+/*
+ * 此表必须由生成配置或经过板级审核的只读板卡代码提供。device_value 对 I2C
+ * 是 7-bit 地址，对 SPI 是板级片选符号；Remote Core 不解释 GPIO/AF。
+ */
+typedef struct {
+    uint32_t resource_id;
+    uint32_t parent_bus_resource_id;
+    uint32_t maximum_clock_hz;
+    uint32_t minimum_timeout_us;
+    uint32_t maximum_timeout_us;
+    uint32_t maximum_operations_per_second;
+    uint16_t maximum_transfer_bytes;
+    uint16_t queue_capacity;
+    uint16_t device_value;
+    uint8_t controller;
+    uint8_t kind;
+    uint8_t flags;
+    uint8_t spi_mode;
+    uint8_t bits_per_word;
+} rbsp_bus_resource_config_t;
+
+typedef struct {
+    bool active;
+    uint64_t lease_id;
+    uint32_t owner_session_id;
+    uint32_t granted_duration_ms;
+    uint32_t expires_at_ms;
+} rbsp_bus_lease_t;
+#endif
+
 typedef enum {
     RBSP_BOOTLOADER_CAN = 0,
     RBSP_BOOTLOADER_USB = 1,
@@ -172,6 +228,22 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+#if defined(CONFIG_REMOTEBSP_BUS)
+    const rbsp_bus_resource_config_t* bus_resources;
+    uint8_t bus_resource_count;
+    rbsp_bus_transaction_status_t (*i2c_transfer)(
+        const rbsp_bus_resource_config_t* device,
+        uint32_t timeout_us, uint16_t flags,
+        const uint8_t* write_data, uint16_t write_length,
+        uint8_t* read_data, uint16_t read_length,
+        uint16_t* transmitted, uint16_t* received);
+    rbsp_bus_transaction_status_t (*spi_transfer)(
+        const rbsp_bus_resource_config_t* device,
+        uint32_t timeout_us, uint16_t flags, uint8_t dummy_byte,
+        const uint8_t* transmit_data, uint16_t transmit_length,
+        uint8_t* receive_data, uint16_t receive_length,
+        uint16_t* transmitted, uint16_t* received);
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM)
     bool (*pwm_configure)(uint8_t channel, uint32_t frequency_hz,
                           uint16_t duty, bool active_low);
@@ -284,6 +356,10 @@ typedef struct {
 #if CONFIG_UART_RESOURCE_COUNT > 0
     rbsp_uart_object_t uart_objects[CONFIG_UART_RESOURCE_COUNT];
 #endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+    rbsp_bus_lease_t bus_leases[CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT];
+    uint64_t next_bus_lease_id;
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM)
     rbsp_pwm_object_t pwm_objects[CONFIG_PWM_RESOURCE_COUNT];
 #endif
@@ -323,11 +399,13 @@ void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
 void rbsp_core_accept_link(rbsp_core_t* core,
                            const rbsp_link_frame_t* frame);
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+/* 传输层确认会话结束时调用；返回被释放的资源租约数。 */
+size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id);
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
 bool rbsp_core_motion_service(rbsp_core_t* core);
 bool rbsp_core_motion_tick(rbsp_core_t* core);
-/* 传输层确认会话结束时调用；返回被释放的 STEPGEN 租约数。 */
-size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id);
 #endif
 
 #ifdef __cplusplus

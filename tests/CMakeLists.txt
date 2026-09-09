@@ -24,6 +24,14 @@ target_compile_options(bus_stream_protocol_tests PRIVATE
 )
 add_test(NAME bus_stream_protocol_tests COMMAND bus_stream_protocol_tests)
 
+add_executable(stream_session_tests stream_session_tests.cpp)
+target_link_libraries(stream_session_tests PRIVATE remotebsp_remote_core)
+target_compile_options(stream_session_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME stream_session_tests COMMAND stream_session_tests)
+
 add_executable(bus_resource_tests bus_resource_tests.cpp)
 target_link_libraries(bus_resource_tests PRIVATE remotebsp_remote_core)
 target_compile_options(bus_resource_tests PRIVATE
@@ -60,6 +68,15 @@ target_compile_options(device_parameter_store_tests PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
 add_test(NAME device_parameter_store_tests
     COMMAND device_parameter_store_tests)
+
+add_executable(boot_epoch_journal_tests
+    boot_epoch_journal_tests.c)
+target_link_libraries(boot_epoch_journal_tests PRIVATE
+    remotebsp_device_params)
+target_compile_options(boot_epoch_journal_tests PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME boot_epoch_journal_tests
+    COMMAND boot_epoch_journal_tests)
 
 add_executable(device_parameter_remote_tests
     device_parameter_remote_tests.cpp)
@@ -447,6 +464,43 @@ target_compile_options(embedded_core_tests PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME embedded_core_tests COMMAND embedded_core_tests)
+
+add_executable(embedded_bus_core_tests
+    ../firmware/tests/bus_core_tests.c
+    ../firmware/src/core.c
+)
+target_include_directories(embedded_bus_core_tests PRIVATE
+    ../firmware/include
+    ../firmware/tests/config_bus
+)
+target_compile_options(embedded_bus_core_tests PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME embedded_bus_core_tests COMMAND embedded_bus_core_tests)
+
+# 同时开启总线与运动，防止共享通用资源命令和会话释放路径发生编译回归。
+add_executable(embedded_bus_motion_core_compile_tests
+    ../firmware/tests/motion_core_compile_tests.c
+    ../firmware/src/core.c
+    ../firmware/src/motion.c
+    ../firmware/src/motion_group.c
+)
+target_include_directories(embedded_bus_motion_core_compile_tests PRIVATE
+    ../firmware/include
+    ../firmware/tests/config_motion
+)
+target_compile_definitions(embedded_bus_motion_core_compile_tests PRIVATE
+    CONFIG_REMOTEBSP_BUS=1
+    CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT=1
+    CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES=128
+    CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US=100
+    CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US=100000
+)
+target_compile_options(embedded_bus_motion_core_compile_tests PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME embedded_bus_motion_core_compile_tests
+    COMMAND embedded_bus_motion_core_compile_tests)
 
 add_executable(embedded_usb_link_tests
     ../firmware/tests/usb_link_tests.c

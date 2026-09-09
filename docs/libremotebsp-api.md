@@ -140,6 +140,12 @@ UART 接收有两种互斥模式：
   `UART_CREATE` 载荷，适合Modbus等主机发起的短事务。
 - `Streaming` 模式由MCU将RX环形缓冲按批次主动上报，应用使用
   `uart_stream_read()` 从toolbusd按“节点+UART对象”隔离的64 KiB缓冲读取。
+
+通用高速流使用 `stream_contract()`、`stream_open()`、`stream_write()`、
+`stream_status()`、`stream_credit()` 和 `stream_stop()`。当前远端 Mock Core 只实现
+`HostToNode` 有界接收闭环；`NodeToHost`/双向数据面与 USB Bulk 路由尚未完成，
+相应调用会明确失败，不能依赖自动回退到 CAN。当前打开可写流前还必须通过通用
+资源 API 取得同一资源的独占租约；停止、租约失效或会话释放会清空未消费 Mock 字节。
   流式对象禁止再调用`uart_read()`，避免两个消费者争抢字节。
 
 每个流事件使用请求ID携带单调序号。toolbusd过滤重复/旧事件，统计
