@@ -124,8 +124,12 @@ toolbusd 模型、不替代运动准入门限，也不会向节点发送命令�
 
 ```json
 {
-  "schema_version": 1,
-  "api_keys": ["REPLACE_WITH_RANDOM_ASCII_KEY_AT_LEAST_32_BYTES"]
+  "schema_version": 2,
+  "keys": [{
+    "key_id": "studio-readonly",
+    "api_key": "REPLACE_WITH_RANDOM_ASCII_KEY_AT_LEAST_32_BYTES",
+    "permissions": ["runtime.read"]
+  }]
 }
 ```
 
@@ -136,8 +140,10 @@ python3 -m runtime_api.server \
   --api-key-file /etc/remotebsp/runtime-auth.json
 ```
 
-认证配置最多 16 KiB、16 个密钥；每个密钥为 32～128 字节的非空白可打印 ASCII，
-重复密钥、未知字段、未知版本、空数组和格式错误都会使启动失败。密钥只从文件读取，
+认证配置 v2 最多 16 KiB、16 个密钥；`key_id` 是 1～64 字节的稳定 ASCII 审计身份，
+只允许字母、数字、点、下划线和连字符，且不能重复。每个密钥为 32～128 字节的非空白
+可打印 ASCII。重复密钥、重复 JSON 字段、未知字段、未知版本、空密钥数组和格式错误
+都会使启动失败。v1 字符串密钥配置不会被静默解释成 v2 身份。密钥只从文件读取，
 不提供容易进入进程列表和终端历史的明文命令行参数。生产密钥应由密码学安全随机源生成，
 并通过同时保留新旧两个密钥完成有限时间轮换；修改文件后需重启服务加载。
 
@@ -158,7 +164,16 @@ Authorization: Bearer <api-key>
 X-API-Key: <api-key>
 ```
 
-服务对全部已配置密钥使用常量时间比较原语且不在首个匹配处提前返回。缺少密钥和错误
+每个身份的 `permissions` 是有界、无重复的权限数组。当前唯一受支持权限为
+`runtime.read`；空数组表示身份可以通过认证但不能读取受保护资源，未知权限（包括任何
+写权限）会使启动失败。读取路径必须显式拥有 `runtime.read`，否则返回 HTTP 403、
+`permission_denied`。权限模型不提供通配符或隐式默认值，拥有读取权限的密钥也不能让
+POST、PUT、PATCH 或 DELETE 绕过只读边界。
+
+认证器只长期保存每个配置密钥的 SHA-256 固定长度摘要，不保留明文密钥；候选值也先
+计算同长度摘要，再对全部配置项使用常量时间比较原语，且不在首个匹配处提前返回。
+这减少了比较阶段泄露密钥长度类别和进程内长期保留明文的风险，但不替代高熵密钥要求。
+缺少密钥和错误
 密钥统一返回 HTTP 401、`authentication_required`；重复认证头、同时提供两种认证方式
 或 Bearer 格式错误返回 HTTP 400、`invalid_auth_header`。任何名为 `api_key`、
 `api-key`、`apikey`、`x-api-key`、`access_token` 或 `token` 的查询参数均以 HTTP 400、
@@ -169,6 +184,44 @@ X-API-Key: <api-key>
 `status=ok,scope=liveness`，不读取 Provider，也不暴露快照、节点或能力；携带有效密钥
 时返回完整健康信息。携带错误密钥不会降级成公开探针，而是返回 401。
 `OPTIONS /api/v1...` 无需密钥并只返回方法边界，不启用 CORS、也不允许凭据跨域。
+
+## 安全审计
+
+每个由 Runtime 处理的 REST 请求最多生成一条 `SecurityAuditRecord v1`。服务端使用
+密码学随机源生成 32 位十六进制 `request_id`，并通过 `X-Request-ID` 响应头返回同一值，
+便于把客户端故障与审计事件关联。记录的封闭结构为：
+
+```json
+{
+  "schema_version": 1,
+  "occurred_at_ms": 1789000000000,
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "key_id": "studio-readonly",
+  "method_category": "read",
+  "path_category": "snapshot",
+  "result": "allowed"
+}
+```
+
+`method_category` 只会是 `read`、`write`、`options` 或 `other`；`path_category` 只会是
+`root`、`health`、`snapshot`、`nodes`、`resources`、`alerts` 或 `unknown`。未认证请求的
+`key_id` 为 `null`。`result` 使用稳定 API 错误码，成功读取为 `allowed`，公开存活探针为
+`public_probe`，预检为 `options`。记录不会保存 API 密钥、Authorization、X-API-Key、
+原始路径、节点 ID、查询参数、请求体或响应体；即使攻击者把秘密放入 URL，也只会留下
+`path_category` 和 `credential_in_query`。
+`occurred_at_ms` 是 Runtime 主机的 Unix 毫秒墙上时间，只用于日志排序，不是设备时间、
+时钟同步精度或防篡改时间证据。
+
+默认 `BoundedAuditSink` 是线程安全的 256 条进程内环形缓冲，满时覆盖最旧记录并增加
+`overwritten_count`，不会无界增长。嵌入服务可通过
+`make_server(..., audit_output=..., audit_capacity=...)` 注入接收结构化字典的输出端。
+输出端由独立守护线程消费同容量的有界队列，请求线程只执行非阻塞入队；队列满时增加
+`dropped_output_count` 并丢弃该次外部转发，但进程内环形记录仍按自身覆盖规则保留。
+输出异常被隔离并增加 `output_failure_count`，不改变 HTTP 结果。
+
+HTTP 服务关闭时会通知输出线程停止，并最多等待 1 秒排空；输出端永久阻塞时关闭仍有界，
+守护线程不会阻止进程退出。输出回调不应执行递归审计，也必须自行负责可靠落盘、文件轮换
+和完整性保护。默认环形缓冲不是持久审计存储；跨进程可靠交付和集中采集仍是后续部署边界。
 
 ## remote-cli 结构化只读契约
 
@@ -392,6 +445,6 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。
 
-这一认证竖切只解决“谁可以读取 API”的最低部署边界；TLS、反向代理信任边界、细粒度
-授权、密钥热加载/撤销、速率限制与安全审计仍是后续部署门槛，不能把本轮的软件测试当作
-公网暴露或硬件环境的安全实测证据。
+这一认证授权竖切只解决“哪个密钥身份可以读取 API”的最低部署边界；TLS、反向代理
+信任边界、更细粒度的角色、密钥热加载/撤销、速率限制，以及审计异步持久化与完整性
+保护仍是后续部署门槛，不能把本轮的软件测试当作公网暴露或硬件环境的安全实测证据。

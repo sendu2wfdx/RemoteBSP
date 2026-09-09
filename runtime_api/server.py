@@ -6,19 +6,28 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import secrets
 import socket
 import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 
 from .auth import (
     MAXIMUM_API_KEY_BYTES,
+    RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
+    AuthenticatedPrincipal,
     AuthConfigurationError,
     load_api_key_authenticator,
+)
+from .audit import (
+    BoundedAuditSink,
+    DEFAULT_AUDIT_CAPACITY,
+    new_audit_record,
 )
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION
 from .provider import (
@@ -61,6 +70,15 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         finally:
             self._worker_slots.release()
 
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            audit_sink = getattr(self, "audit_sink", None)
+            close = getattr(audit_sink, "close", None)
+            if callable(close):
+                close()
+
 
 class IPv6ThreadingHTTPServer(BoundedThreadingHTTPServer):
     address_family = socket.AF_INET6
@@ -77,14 +95,66 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def authenticator(self) -> ApiKeyAuthenticator | None:
         return self.server.authenticator  # type: ignore[attr-defined]
 
+    @property
+    def audit_sink(self) -> BoundedAuditSink:
+        return self.server.audit_sink  # type: ignore[attr-defined]
+
+    def _begin_request_audit(self) -> None:
+        self._audit_request_id = secrets.token_hex(16)
+        self._audit_key_id: str | None = None
+        self._audit_path_category = self._classify_path(self.path)
+        self._audit_emitted = False
+
+    @staticmethod
+    def _classify_path(target: str) -> str:
+        try:
+            path = urlparse(target).path
+            parts = [
+                unquote(part, encoding="utf-8", errors="strict")
+                for part in path.strip("/").split("/") if part
+            ]
+        except (UnicodeDecodeError, ValueError):
+            return "unknown"
+        if parts == ["api", API_VERSION]:
+            return "root"
+        if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
+                parts[2] in {"health", "snapshot", "nodes", "resources",
+                             "alerts"}:
+            return parts[2]
+        return "unknown"
+
+    def _emit_audit(self, result: str) -> None:
+        if getattr(self, "_audit_emitted", False):
+            return
+        self._audit_emitted = True
+        method_category = {
+            "GET": "read", "HEAD": "read", "POST": "write",
+            "PUT": "write", "PATCH": "write", "DELETE": "write",
+            "OPTIONS": "options",
+        }.get(self.command, "other")
+        record = new_audit_record(
+            request_id=self._audit_request_id,
+            key_id=self._audit_key_id,
+            method_category=method_category,
+            path_category=self._audit_path_category,
+            result=result)
+        try:
+            self.audit_sink.emit(record)
+        except Exception:
+            # 外部审计输出端故障不能改变 API 响应或阻塞后续请求。
+            pass
+
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK,
-                   *, headers: dict[str, str] | None = None) -> None:
+                   *, headers: dict[str, str] | None = None,
+                   audit_result: str = "allowed") -> None:
         encoded = json.dumps(value, ensure_ascii=False,
                              separators=(",", ":")).encode("utf-8")
+        self._emit_audit(audit_result)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Request-ID", self._audit_request_id)
         for key, header_value in (headers or {}).items():
             self.send_header(key, header_value)
         self.end_headers()
@@ -97,10 +167,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "ok": False,
             "error": {"code": code, "message": message},
-        }, status, headers=headers)
+        }, status, headers=headers, audit_result=code)
 
     def _success(self, data: object, status: HTTPStatus = HTTPStatus.OK,
-                 *, read: SnapshotRead | None = None) -> None:
+                 *, read: SnapshotRead | None = None,
+                 audit_result: str = "allowed") -> None:
         payload = {
             "api_version": API_VERSION,
             "ok": True,
@@ -119,13 +190,17 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 "X-RemoteBSP-Snapshot-Age-Ms": (
                     "unknown" if read.age_ms is None else str(read.age_ms)),
             }
-        self._send_json(payload, status, headers=headers)
+        self._send_json(payload, status, headers=headers,
+                        audit_result=audit_result)
 
     def _send_empty(self, status: HTTPStatus, *,
-                    headers: dict[str, str] | None = None) -> None:
+                    headers: dict[str, str] | None = None,
+                    audit_result: str = "allowed") -> None:
+        self._emit_audit(audit_result)
         self.send_response(status)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Request-ID", self._audit_request_id)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -164,7 +239,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "路径编码无效")
             return None
 
-    def _authorize(self, path: str, *, public_health: bool) -> str | None:
+    def _authorize(self, path: str, *, public_health: bool,
+                   required_permission: str | None
+                   ) -> AuthenticatedPrincipal | str | None:
         if self.authenticator is None:
             return "disabled_loopback"
 
@@ -199,15 +276,22 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_auth_header",
                             "X-API-Key格式无效")
                 return None
-        if len(candidate) > MAXIMUM_API_KEY_BYTES or \
-                not self.authenticator.verify(candidate):
+        principal = None if len(candidate) > MAXIMUM_API_KEY_BYTES else \
+            self.authenticator.authenticate(candidate)
+        if principal is None:
             self._error(
                 HTTPStatus.UNAUTHORIZED, "authentication_required",
                 "需要有效的API密钥",
                 headers={"WWW-Authenticate":
                          'Bearer realm="RemoteBSP Runtime"'})
             return None
-        return "authenticated"
+        self._audit_key_id = principal.key_id
+        if required_permission is not None and \
+                required_permission not in principal.permissions:
+            self._error(HTTPStatus.FORBIDDEN, "permission_denied",
+                        "当前API密钥没有所需只读权限")
+            return None
+        return principal
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
@@ -244,11 +328,13 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         api_path = len(parts) >= 2 and parts[:2] == ["api", API_VERSION]
         if api_path:
             auth_context = self._authorize(
-                parsed.path, public_health=self.command in ("GET", "HEAD"))
+                parsed.path, public_health=self.command in ("GET", "HEAD"),
+                required_permission=RUNTIME_READ_PERMISSION)
             if auth_context is None:
                 return
             if auth_context == "public_health":
-                self._success({"status": "ok", "scope": "liveness"})
+                self._success({"status": "ok", "scope": "liveness"},
+                              audit_result="public_probe")
                 return
 
         if parts == ["api", API_VERSION]:
@@ -325,12 +411,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         self._error(HTTPStatus.NOT_FOUND, "not_found", "API路径不存在")
 
     def do_GET(self) -> None:  # noqa: N802
+        self._begin_request_audit()
         self._handle_read()
 
     def do_HEAD(self) -> None:  # noqa: N802
+        self._begin_request_audit()
         self._handle_read()
 
     def do_POST(self) -> None:  # noqa: N802
+        self._begin_request_audit()
         parsed = self._parse_request_target()
         if parsed is None:
             return
@@ -338,7 +427,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if parts is None:
             return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
-            if self._authorize(parsed.path, public_health=False) is None:
+            if self._authorize(parsed.path, public_health=False,
+                               required_permission=None) is None:
                 return
         self._error(HTTPStatus.METHOD_NOT_ALLOWED, "read_only",
                     "本轮Runtime API只允许读取",
@@ -349,6 +439,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     do_DELETE = do_POST  # type: ignore[assignment]
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        self._begin_request_audit()
         parsed = self._parse_request_target()
         if parsed is None:
             return
@@ -357,7 +448,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
             self._send_empty(HTTPStatus.NO_CONTENT,
-                             headers={"Allow": "GET, HEAD, OPTIONS"})
+                             headers={"Allow": "GET, HEAD, OPTIONS"},
+                             audit_result="options")
             return
         self._error(HTTPStatus.NOT_FOUND, "not_found", "API路径不存在")
 
@@ -370,7 +462,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
 def make_server(host: str, port: int,
                 provider: RuntimeProvider, *,
                 maximum_workers: int = 32,
-                authenticator: ApiKeyAuthenticator | None = None
+                authenticator: ApiKeyAuthenticator | None = None,
+                audit_capacity: int = DEFAULT_AUDIT_CAPACITY,
+                audit_output: Callable[[dict], None] | None = None
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -384,6 +478,8 @@ def make_server(host: str, port: int,
                          maximum_workers=maximum_workers)
     server.provider = provider  # type: ignore[attr-defined]
     server.authenticator = authenticator  # type: ignore[attr-defined]
+    server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
+        capacity=audit_capacity, output=audit_output)
     return server
 
 

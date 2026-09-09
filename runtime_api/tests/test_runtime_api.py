@@ -10,7 +10,11 @@ from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from runtime_api import server as runtime_server
-from runtime_api.auth import ApiKeyAuthenticator
+from runtime_api.auth import (
+    RUNTIME_READ_PERMISSION,
+    ApiKeyAuthenticator,
+    ApiKeyCredential,
+)
 from runtime_api.models import RuntimeContractError, normalize_snapshot
 from runtime_api.provider import (
     FileSnapshotProvider,
@@ -22,6 +26,15 @@ from runtime_api.server import make_server
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def make_authenticator(key_id: str, api_key: str, *, can_read: bool = True
+                       ) -> ApiKeyAuthenticator:
+    permissions = frozenset({RUNTIME_READ_PERMISSION}) if can_read \
+        else frozenset()
+    return ApiKeyAuthenticator([
+        ApiKeyCredential(key_id, api_key, permissions),
+    ])
 
 
 class RuntimeModelTest(unittest.TestCase):
@@ -123,7 +136,7 @@ class RuntimeHttpTest(unittest.TestCase):
             make_server("0.0.0.0", 0, MockSnapshotProvider())
         with self.assertRaisesRegex(ValueError, "不能使用主机名"):
             make_server("localhost", 0, MockSnapshotProvider())
-        authenticator = ApiKeyAuthenticator(["a" * 32])
+        authenticator = make_authenticator("factory-reader", "a" * 32)
         with patch.object(runtime_server, "BoundedThreadingHTTPServer") \
                 as server_type:
             server = make_server("0.0.0.0", 8780, MockSnapshotProvider(),
@@ -267,7 +280,9 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
     def setUp(self):
         self.server = make_server(
             "127.0.0.1", 0, MockSnapshotProvider(),
-            authenticator=ApiKeyAuthenticator([self.API_KEY]))
+            authenticator=make_authenticator("test-reader", self.API_KEY),
+            audit_capacity=64)
+        self.audit_sink = self.server.audit_sink  # type: ignore[attr-defined]
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -294,6 +309,14 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
                                  "authentication_required")
                 self.assertEqual(error.headers["WWW-Authenticate"],
                                  'Bearer realm="RemoteBSP Runtime"')
+                self.assertEqual(
+                    error.headers["X-Request-ID"],
+                    self.audit_sink.snapshot()[-1].request_id)
+
+        records = self.audit_sink.snapshot()
+        self.assertEqual([record.result for record in records],
+                         ["authentication_required"] * 3)
+        self.assertTrue(all(record.key_id is None for record in records))
 
     def test_bearer_and_api_key_headers_are_accepted(self):
         for headers in (
@@ -303,6 +326,9 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
                 payload = json.loads(urlopen(Request(
                     self.base + "/api/v1/snapshot", headers=headers)).read())
                 self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [record.key_id for record in self.audit_sink.snapshot()],
+            ["test-reader", "test-reader"])
 
         root = json.loads(urlopen(Request(
             self.base + "/api/v1",
@@ -320,10 +346,21 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_auth_header")
 
     def test_query_string_credentials_are_rejected(self):
+        secret = self.API_KEY
         error, payload = self._error(
-            self.base + "/api/v1/snapshot?api_key=" + self.API_KEY)
+            self.base + "/api/v1/snapshot?api_key=" + secret)
         self.assertEqual(error.code, 400)
         self.assertEqual(payload["error"]["code"], "credential_in_query")
+        record = self.audit_sink.snapshot()[-1]
+        self.assertEqual(record.path_category, "snapshot")
+        self.assertEqual(record.result, "credential_in_query")
+        self.assertNotIn(secret, json.dumps(record.to_dict()))
+
+        query = "&".join(f"field{index}=1" for index in range(65))
+        error, payload = self._error(
+            self.base + "/api/v1/snapshot?" + query)
+        self.assertEqual(error.code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_query")
 
     def test_health_probe_and_options_have_minimum_public_surface(self):
         class ProbeMustNotReadProvider:
@@ -341,6 +378,10 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
             "status": "ok", "scope": "liveness",
         })
         self.assertNotIn("meta", health)
+        public_record = self.audit_sink.snapshot()[-1]
+        self.assertEqual(public_record.path_category, "health")
+        self.assertEqual(public_record.result, "public_probe")
+        self.assertIsNone(public_record.key_id)
         self.server.provider = provider  # type: ignore[attr-defined]
 
         error, payload = self._error(Request(
@@ -355,6 +396,7 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.API_KEY}"})).read())
         self.assertEqual(authenticated_health["data"]["snapshot_id"],
                          "mock-1")
+        self.assertEqual(self.audit_sink.snapshot()[-1].key_id, "test-reader")
 
         with urlopen(Request(self.base + "/api/v1/snapshot",
                              method="OPTIONS")) as response:
@@ -362,6 +404,9 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
             self.assertEqual(response.headers["Allow"],
                              "GET, HEAD, OPTIONS")
             self.assertIsNone(response.headers["Access-Control-Allow-Origin"])
+            self.assertEqual(
+                response.headers["X-Request-ID"],
+                self.audit_sink.snapshot()[-1].request_id)
 
         with urlopen(Request(self.base + "/api/v1/health",
                              method="HEAD")) as response:
@@ -382,6 +427,22 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
         error, payload = self._error(authenticated)
         self.assertEqual(error.code, 405)
         self.assertEqual(payload["error"]["code"], "read_only")
+        record = self.audit_sink.snapshot()[-1]
+        self.assertEqual(record.method_category, "write")
+        self.assertEqual(record.key_id, "test-reader")
+        self.assertEqual(record.result, "read_only")
+
+    def test_authenticated_identity_without_read_permission_is_forbidden(self):
+        self.server.authenticator = make_authenticator(  # type: ignore[attr-defined]
+            "audit-only", self.API_KEY, can_read=False)
+        error, payload = self._error(Request(
+            self.base + "/api/v1/nodes",
+            headers={"X-API-Key": self.API_KEY}))
+        self.assertEqual(error.code, 403)
+        self.assertEqual(payload["error"]["code"], "permission_denied")
+        record = self.audit_sink.snapshot()[-1]
+        self.assertEqual(record.key_id, "audit-only")
+        self.assertEqual(record.result, "permission_denied")
 
 
 class RuntimeServerCliTest(unittest.TestCase):
@@ -403,8 +464,12 @@ class RuntimeServerCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "auth.json"
             path.write_text(json.dumps({
-                "schema_version": 1,
-                "api_keys": ["c" * 32],
+                "schema_version": 2,
+                "keys": [{
+                    "key_id": "cli-reader",
+                    "api_key": "c" * 32,
+                    "permissions": [RUNTIME_READ_PERMISSION],
+                }],
             }), encoding="utf-8")
             with patch.object(runtime_server, "make_server",
                               return_value=DummyServer()) as factory, patch(
