@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RemoteBSP 最小只读 Runtime HTTP API。"""
+"""RemoteBSP 状态读取与短时控制租约 HTTP API。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,12 +18,30 @@ from typing import Callable
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 
 from .auth import (
+    CONTROL_LEASE_ACQUIRE_PERMISSION,
+    CONTROL_LEASE_RELEASE_PERMISSION,
+    CONTROL_LEASE_REVOKE_PERMISSION,
     MAXIMUM_API_KEY_BYTES,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
     AuthenticatedPrincipal,
     AuthConfigurationError,
     load_api_key_authenticator,
+)
+from .control_leases import (
+    CONTROL_LEASE_SCHEMA_VERSION,
+    DEFAULT_CONTROL_LEASE_CAPACITY,
+    MAXIMUM_CONTROL_LEASE_CAPACITY,
+    ControlLeaseCapacityExceeded,
+    ControlLeaseConflict,
+    ControlLeaseError,
+    ControlLeaseManager,
+    ControlLeaseNotFound,
+    ControlLeaseOwnershipError,
+    validate_control_id,
+    validate_lease_id,
+    validate_ttl_ms,
+    validate_idempotency_key,
 )
 from .audit import (
     BoundedAuditSink,
@@ -53,22 +72,50 @@ from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 
 
 API_VERSION = "v1"
+MAXIMUM_CONTROL_REQUEST_BYTES = 4096
+DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
+MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
+MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS = 30.0
 _QUERY_CREDENTIAL_NAMES = {
     "api_key", "api-key", "apikey", "x-api-key", "access_token", "token",
 }
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"请求体包含重复字段：{key}")
+        value[key] = item
+    return value
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """限制活动请求线程数；满载时由监听队列自然施加背压。"""
 
     def __init__(self, server_address, request_handler_class, *,
-                 maximum_workers: int = 32):
+                 maximum_workers: int = 32,
+                 request_io_timeout_seconds: float =
+                 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS):
         if maximum_workers < 1 or maximum_workers > 256:
             raise ValueError("HTTP工作线程数必须位于1～256")
+        if isinstance(request_io_timeout_seconds, bool) or not isinstance(
+                request_io_timeout_seconds, (int, float)) or not \
+                MINIMUM_REQUEST_IO_TIMEOUT_SECONDS <= \
+                request_io_timeout_seconds <= \
+                MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS:
+            raise ValueError("HTTP请求I/O超时必须位于0.1～30秒")
         self._worker_slots = threading.BoundedSemaphore(maximum_workers)
+        self.request_io_timeout_seconds = float(request_io_timeout_seconds)
         super().__init__(server_address, request_handler_class)
 
     def process_request(self, request, client_address) -> None:
+        # 在占用工作线程前设置有界等待，避免无期限的残缺头部或请求体占槽。
+        try:
+            request.settimeout(self.request_io_timeout_seconds)
+        except OSError:
+            self.shutdown_request(request)
+            return
         self._worker_slots.acquire()
         try:
             super().process_request(request, client_address)
@@ -99,6 +146,33 @@ class IPv6ThreadingHTTPServer(BoundedThreadingHTTPServer):
 class RuntimeRequestHandler(BaseHTTPRequestHandler):
     server_version = "RemoteBSP-Runtime/0.1"
 
+    def handle(self) -> None:
+        # socket timeout 只限制相邻两次 I/O 的空闲时间。单独的总期限可阻止
+        # 攻击者持续滴入请求行或头部字节来无限占用有限工作线程。
+        header_complete = threading.Event()
+
+        def close_stalled_header() -> None:
+            if header_complete.wait(
+                    self.server.request_io_timeout_seconds):  # type: ignore[attr-defined]
+                return
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        self._header_complete = header_complete
+        watchdog = threading.Thread(target=close_stalled_header, daemon=True)
+        watchdog.start()
+        try:
+            try:
+                super().handle()
+            except (BrokenPipeError, ConnectionResetError):
+                # 头部总期限或对端主动断开后，响应写入可能失败。这是单连接
+                # 的预期终止，不能升级成服务端线程 traceback 或影响其他请求。
+                pass
+        finally:
+            header_complete.set()
+
     @property
     def provider(self) -> RuntimeProvider:
         return self.server.provider  # type: ignore[attr-defined]
@@ -115,7 +189,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def event_log(self) -> RuntimeEventLog:
         return self.server.event_log  # type: ignore[attr-defined]
 
+    @property
+    def control_leases(self) -> ControlLeaseManager:
+        return self.server.control_leases  # type: ignore[attr-defined]
+
+    @property
+    def control_leases_available(self) -> bool:
+        return self.server.control_leases_available  # type: ignore[attr-defined]
+
     def _begin_request_audit(self) -> None:
+        # BaseHTTPRequestHandler 只有在请求行和全部头部解析完成后才分派到
+        # do_*；此时停止头部总期限，后续请求体由自身总期限负责。
+        self._header_complete.set()
         self._audit_request_id = secrets.token_hex(16)
         self._audit_key_id: str | None = None
         self._audit_path_category = self._classify_path(self.path)
@@ -135,8 +220,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return "root"
         if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
                 parts[2] in {"health", "snapshot", "nodes", "resources",
-                             "alerts", "events"}:
-            return parts[2]
+                             "alerts", "events", "control-leases"}:
+            return "control_leases" if parts[2] == "control-leases" \
+                else parts[2]
         return "unknown"
 
     def _emit_audit(self, result: str) -> None:
@@ -251,11 +337,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return parsed
             else:
                 self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
-                            "当前只读API不接受查询参数")
+                            "当前端点不接受查询参数")
             return None
         if parsed.fragment:
             self._error(HTTPStatus.BAD_REQUEST, "query_not_supported",
-                        "当前只读API不接受查询参数")
+                        "当前端点不接受查询参数")
             return None
         return parsed
 
@@ -357,9 +443,160 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if required_permission is not None and \
                 required_permission not in principal.permissions:
             self._error(HTTPStatus.FORBIDDEN, "permission_denied",
-                        "当前API密钥没有所需只读权限")
+                        "当前API密钥没有所需权限")
             return None
         return principal
+
+    def _read_control_json(self) -> dict | None:
+        if self.headers.get_all("Transfer-Encoding", []):
+            self._error(HTTPStatus.BAD_REQUEST, "transfer_encoding_unsupported",
+                        "控制请求不接受Transfer-Encoding")
+            return None
+        content_types = self.headers.get_all("Content-Type", [])
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(content_types) != 1 or \
+                content_types[0].split(";", 1)[0].strip().lower() != \
+                "application/json":
+            self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                        "content_type_invalid", "控制请求必须使用application/json")
+            return None
+        if len(lengths) != 1 or not lengths[0].isascii() or \
+                not lengths[0].isdigit() or \
+                (len(lengths[0]) > 1 and lengths[0].startswith("0")):
+            self._error(HTTPStatus.BAD_REQUEST, "content_length_invalid",
+                        "控制请求必须携带一个规范Content-Length")
+            return None
+        length = int(lengths[0])
+        if length < 2 or length > MAXIMUM_CONTROL_REQUEST_BYTES:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        "request_body_too_large",
+                        f"控制请求体必须位于2～{MAXIMUM_CONTROL_REQUEST_BYTES}字节")
+            return None
+        try:
+            deadline = time.monotonic() + \
+                self.server.request_io_timeout_seconds  # type: ignore[attr-defined]
+            chunks: list[bytes] = []
+            received = 0
+            while received < length:
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(remaining_seconds)
+                maximum = min(length - received, MAXIMUM_CONTROL_REQUEST_BYTES)
+                read1 = getattr(self.rfile, "read1", None)
+                chunk = read1(maximum) if callable(read1) \
+                    else self.rfile.read(maximum)
+                if not chunk:
+                    raise ValueError("请求体提前结束")
+                chunks.append(chunk)
+                received += len(chunk)
+            raw = b"".join(chunks)
+            value = json.loads(raw.decode("utf-8"),
+                               object_pairs_hook=_strict_json_object)
+        except (TimeoutError, socket.timeout):
+            try:
+                self.connection.settimeout(
+                    self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
+            except OSError:
+                pass
+            self._error(HTTPStatus.REQUEST_TIMEOUT, "request_body_timeout",
+                        "读取控制请求体超时")
+            return None
+        except OSError:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "无法完整读取控制请求体")
+            return None
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError,
+                RecursionError):
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "控制请求体不是合法UTF-8 JSON")
+            return None
+        finally:
+            try:
+                self.connection.settimeout(
+                    self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
+            except OSError:
+                pass
+        if not isinstance(value, dict):
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "控制请求体根值必须是对象")
+            return None
+        return value
+
+    def _handle_control_lease_acquire(self, principal: AuthenticatedPrincipal
+                                      ) -> None:
+        value = self._read_control_json()
+        if value is None:
+            return
+        expected = {"node_id", "resource_id", "command_group", "ttl_ms",
+                    "idempotency_key"}
+        if set(value) != expected:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "控制租约字段必须且只能包含node_id、resource_id、"
+                        "command_group、ttl_ms和idempotency_key")
+            return
+        try:
+            node_id = validate_control_id(value["node_id"], "node_id")
+            resource_id = validate_control_id(
+                value["resource_id"], "resource_id")
+            command_group = validate_control_id(
+                value["command_group"], "command_group")
+            ttl_ms = validate_ttl_ms(value["ttl_ms"])
+            idempotency_key = validate_idempotency_key(
+                value["idempotency_key"])
+            lease, replayed = self.control_leases.acquire(
+                owner_key_id=principal.key_id, node_id=node_id,
+                resource_id=resource_id, command_group=command_group,
+                ttl_ms=ttl_ms, idempotency_key=idempotency_key)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        str(error))
+            return
+        except ControlLeaseConflict as error:
+            self._error(HTTPStatus.CONFLICT, "control_lease_conflict",
+                        str(error))
+            return
+        except ControlLeaseCapacityExceeded as error:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_lease_capacity_exceeded", str(error))
+            return
+        except ControlLeaseError as error:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_lease_unavailable", str(error))
+            return
+        self._success({"lease": lease.to_dict(), "replayed": replayed},
+                      HTTPStatus.OK if replayed else HTTPStatus.CREATED,
+                      audit_result="control_lease_replayed" if replayed
+                      else "control_lease_acquired")
+
+    def _handle_control_lease_release(self, principal: AuthenticatedPrincipal,
+                                      lease_id: str) -> None:
+        try:
+            lease_id = validate_lease_id(lease_id)
+            allow_foreign = CONTROL_LEASE_REVOKE_PERMISSION in \
+                principal.permissions
+            if CONTROL_LEASE_RELEASE_PERMISSION not in \
+                    principal.permissions and not allow_foreign:
+                self._error(HTTPStatus.FORBIDDEN, "permission_denied",
+                            "当前API密钥没有释放控制租约的权限")
+                return
+            self.control_leases.release(
+                lease_id, requester_key_id=principal.key_id,
+                allow_foreign=allow_foreign)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "control_lease_id_invalid",
+                        str(error))
+            return
+        except ControlLeaseNotFound as error:
+            self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found",
+                        str(error))
+            return
+        except ControlLeaseOwnershipError as error:
+            self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
+                        str(error))
+            return
+        self._send_empty(HTTPStatus.NO_CONTENT,
+                         audit_result="control_lease_released")
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
@@ -411,8 +648,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._success({
                 "snapshot_schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 "capabilities": {
-                    "read_only": True,
+                    "read_only": not self.control_leases_available,
                     "write_commands": False,
+                    "control_leases": {
+                        "available": self.control_leases_available,
+                        "schema_version": CONTROL_LEASE_SCHEMA_VERSION,
+                        "maximum_active": self.control_leases.capacity,
+                        "downstream_commands": False,
+                        "loopback_only": True,
+                    },
                     "authentication": self.authenticator is not None,
                     "authentication_mode": (
                         "api_key" if self.authenticator is not None
@@ -428,7 +672,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     **self._runtime_capabilities(),
                 },
                 "endpoints": ["health", "snapshot", "nodes", "resources",
-                              "alerts", "events"],
+                              "alerts", "events", "control-leases"],
             })
             return
         if parts == ["api", API_VERSION, "health"]:
@@ -542,17 +786,69 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         parts = self._path_parts(parsed.path)
         if parts is None:
             return
+        if self.command == "POST" and \
+                parts == ["api", API_VERSION, "control-leases"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "控制租约要求启用API密钥认证")
+                return
+            if not self.control_leases_available:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_transport_insecure",
+                            "控制租约只允许在回环监听上使用")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=CONTROL_LEASE_ACQUIRE_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_control_lease_acquire(principal)
+            return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
             if self._authorize(parsed.path, public_health=False,
                                required_permission=None) is None:
                 return
         self._error(HTTPStatus.METHOD_NOT_ALLOWED, "read_only",
-                    "本轮Runtime API只允许读取",
+                    "该路径不接受写请求",
                     headers={"Allow": "GET, HEAD, OPTIONS"})
 
     do_PUT = do_POST  # type: ignore[assignment]
     do_PATCH = do_POST  # type: ignore[assignment]
-    do_DELETE = do_POST  # type: ignore[assignment]
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._begin_request_audit()
+        parsed = self._parse_request_target()
+        if parsed is None:
+            return
+        parts = self._path_parts(parsed.path)
+        if parts is None:
+            return
+        if len(parts) == 4 and parts[:3] == [
+                "api", API_VERSION, "control-leases"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "控制租约要求启用API密钥认证")
+                return
+            if not self.control_leases_available:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_transport_insecure",
+                            "控制租约只允许在回环监听上使用")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False, required_permission=None)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_control_lease_release(principal, parts[3])
+            return
+        if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
+            if self._authorize(parsed.path, public_health=False,
+                               required_permission=None) is None:
+                return
+        self._error(HTTPStatus.METHOD_NOT_ALLOWED, "read_only",
+                    "该路径不接受写请求",
+                    headers={"Allow": "GET, HEAD, OPTIONS"})
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._begin_request_audit()
@@ -563,6 +859,17 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if parts is None:
             return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
+            if parts == ["api", API_VERSION, "control-leases"]:
+                self._send_empty(HTTPStatus.NO_CONTENT,
+                                 headers={"Allow": "POST, OPTIONS"},
+                                 audit_result="options")
+                return
+            if len(parts) == 4 and parts[:3] == [
+                    "api", API_VERSION, "control-leases"]:
+                self._send_empty(HTTPStatus.NO_CONTENT,
+                                 headers={"Allow": "DELETE, OPTIONS"},
+                                 audit_result="options")
+                return
             self._send_empty(HTTPStatus.NO_CONTENT,
                              headers={"Allow": "GET, HEAD, OPTIONS"},
                              audit_result="options")
@@ -582,7 +889,11 @@ def make_server(host: str, port: int,
                 audit_capacity: int = DEFAULT_AUDIT_CAPACITY,
                 audit_output: Callable[[dict], None] | None = None,
                 event_capacity: int = DEFAULT_EVENT_CAPACITY,
-                event_incarnation: str | None = None
+                event_incarnation: str | None = None,
+                control_lease_capacity: int = DEFAULT_CONTROL_LEASE_CAPACITY,
+                control_lease_manager: ControlLeaseManager | None = None,
+                request_io_timeout_seconds: float =
+                DEFAULT_REQUEST_IO_TIMEOUT_SECONDS,
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -590,17 +901,27 @@ def make_server(host: str, port: int,
         raise ValueError("--host必须是数字IP地址；不能使用主机名") from error
     if not loopback and authenticator is None:
         raise ValueError("非回环监听必须配置API密钥认证")
+    if control_lease_manager is not None and \
+            control_lease_capacity != DEFAULT_CONTROL_LEASE_CAPACITY:
+        raise ValueError("不能同时注入控制租约管理器和非默认容量")
+    resolved_control_leases = control_lease_manager or \
+        ControlLeaseManager(control_lease_capacity)
     event_log = RuntimeEventLog(
         event_capacity, incarnation=event_incarnation)
     server_type = IPv6ThreadingHTTPServer if ":" in host \
         else BoundedThreadingHTTPServer
     server = server_type((host, port), RuntimeRequestHandler,
-                         maximum_workers=maximum_workers)
+                         maximum_workers=maximum_workers,
+                         request_io_timeout_seconds=
+                         request_io_timeout_seconds)
     server.provider = provider  # type: ignore[attr-defined]
     server.authenticator = authenticator  # type: ignore[attr-defined]
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
         capacity=audit_capacity, output=audit_output)
     server.event_log = event_log  # type: ignore[attr-defined]
+    server.control_leases = resolved_control_leases  # type: ignore[attr-defined]
+    server.control_leases_available = (  # type: ignore[attr-defined]
+        loopback and authenticator is not None)
     return server
 
 
@@ -630,9 +951,14 @@ def main() -> int:
                         help="资源状态IPC并发上限，默认8路")
     parser.add_argument("--http-workers", type=int, default=32,
                         help="活动HTTP请求线程上限，默认32个")
+    parser.add_argument("--http-request-timeout-ms", type=int, default=5000,
+                        help="单连接HTTP I/O等待上限，默认5000毫秒")
     parser.add_argument("--event-capacity", type=int,
                         default=DEFAULT_EVENT_CAPACITY,
                         help="进程内增量事件保留条数，默认1024条")
+    parser.add_argument("--control-lease-capacity", type=int,
+                        default=DEFAULT_CONTROL_LEASE_CAPACITY,
+                        help="进程内活动控制租约上限，默认256条")
     parser.add_argument(
         "--clock-error-warning-ns", type=int, default=250_000,
         help="主机时钟模型估计误差上界告警阈值，默认250000纳秒")
@@ -659,8 +985,16 @@ def main() -> int:
         parser.error("--status-query-workers必须位于1～32")
     if args.http_workers < 1 or args.http_workers > 256:
         parser.error("--http-workers必须位于1～256")
+    if args.http_request_timeout_ms < 100 or \
+            args.http_request_timeout_ms > 30000:
+        parser.error("--http-request-timeout-ms必须位于100～30000")
     if args.event_capacity < 1 or args.event_capacity > MAXIMUM_EVENT_CAPACITY:
         parser.error(f"--event-capacity必须位于1～{MAXIMUM_EVENT_CAPACITY}")
+    if args.control_lease_capacity < 1 or \
+            args.control_lease_capacity > MAXIMUM_CONTROL_LEASE_CAPACITY:
+        parser.error(
+            f"--control-lease-capacity必须位于1～"
+            f"{MAXIMUM_CONTROL_LEASE_CAPACITY}")
     if args.clock_error_warning_ns < 1 or \
             args.clock_error_warning_ns > 1_000_000_000:
         parser.error("--clock-error-warning-ns必须位于1～1000000000")
@@ -706,10 +1040,13 @@ def main() -> int:
     server = make_server(args.host, args.port, provider,
                          maximum_workers=args.http_workers,
                          authenticator=authenticator,
-                         event_capacity=args.event_capacity)
+                         event_capacity=args.event_capacity,
+                         control_lease_capacity=args.control_lease_capacity,
+                         request_io_timeout_seconds=
+                         args.http_request_timeout_ms / 1000.0)
     display_host = f"[{args.host}]" if ":" in args.host else args.host
     auth_mode = "API密钥认证" if authenticator is not None else "回环开发模式"
-    print(f"RemoteBSP Runtime 只读API已启动：http://{display_host}:"
+    print(f"RemoteBSP Runtime API已启动：http://{display_host}:"
           f"{server.server_port}/api/{API_VERSION}（{auth_mode}）")
     try:
         server.serve_forever()

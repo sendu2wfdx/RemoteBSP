@@ -1,4 +1,4 @@
-"""RemoteBSP 上位机只读 Runtime API。"""
+"""RemoteBSP 上位机 Runtime API。"""
 
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION, RuntimeContractError
 from .provider import FileSnapshotProvider, MockSnapshotProvider, RuntimeProvider

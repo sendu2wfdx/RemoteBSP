@@ -17,7 +17,7 @@ MAXIMUM_AUDIT_CAPACITY = 4096
 _METHOD_CATEGORIES = frozenset({"read", "write", "options", "other"})
 _PATH_CATEGORIES = frozenset({
     "root", "health", "snapshot", "nodes", "resources", "alerts", "events",
-    "unknown",
+    "control_leases", "unknown",
 })
 _REQUEST_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 _KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

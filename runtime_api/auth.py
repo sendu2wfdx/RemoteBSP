@@ -19,7 +19,15 @@ MAXIMUM_API_KEY_BYTES = 128
 MAXIMUM_KEY_ID_BYTES = 64
 MAXIMUM_PERMISSIONS_PER_KEY = 8
 RUNTIME_READ_PERMISSION = "runtime.read"
-_KNOWN_PERMISSIONS = frozenset({RUNTIME_READ_PERMISSION})
+CONTROL_LEASE_ACQUIRE_PERMISSION = "runtime.control.lease.acquire"
+CONTROL_LEASE_RELEASE_PERMISSION = "runtime.control.lease.release"
+CONTROL_LEASE_REVOKE_PERMISSION = "runtime.control.lease.revoke"
+_KNOWN_PERMISSIONS = frozenset({
+    RUNTIME_READ_PERMISSION,
+    CONTROL_LEASE_ACQUIRE_PERMISSION,
+    CONTROL_LEASE_RELEASE_PERMISSION,
+    CONTROL_LEASE_REVOKE_PERMISSION,
+})
 _KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
@@ -29,7 +37,7 @@ class AuthConfigurationError(ValueError):
 
 @dataclass(frozen=True)
 class ApiKeyCredential:
-    """一条经校验的密钥身份与只读权限。"""
+    """一条经校验的密钥身份与显式权限。"""
 
     key_id: str
     api_key: str

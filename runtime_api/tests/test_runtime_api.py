@@ -146,6 +146,22 @@ class RuntimeHttpTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HTTP工作线程数"):
             make_server("127.0.0.1", 0, MockSnapshotProvider(),
                         maximum_workers=0)
+        with self.assertRaisesRegex(ValueError, "控制租约容量"):
+            make_server("127.0.0.1", 0, MockSnapshotProvider(),
+                        control_lease_capacity=0)
+        for timeout in (0.09, 30.01, True):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(
+                    ValueError, "HTTP请求I/O超时"):
+                make_server(
+                    "127.0.0.1", 0, MockSnapshotProvider(),
+                    request_io_timeout_seconds=timeout)
+        timeout_server = make_server(
+            "127.0.0.1", 0, MockSnapshotProvider(),
+            request_io_timeout_seconds=0.25)
+        try:
+            self.assertEqual(timeout_server.request_io_timeout_seconds, 0.25)
+        finally:
+            timeout_server.server_close()
 
     def setUp(self):
         snapshot = mock_snapshot()
@@ -482,11 +498,17 @@ class RuntimeServerCliTest(unittest.TestCase):
                         "runtime-api", "--host", "0.0.0.0",
                         "--api-key-file", str(path),
                         "--event-capacity", "64",
+                        "--control-lease-capacity", "32",
+                        "--http-request-timeout-ms", "2500",
                     ]):
                 self.assertEqual(runtime_server.main(), 0)
         authenticator = factory.call_args.kwargs["authenticator"]
         self.assertTrue(authenticator.verify("c" * 32))
         self.assertEqual(factory.call_args.kwargs["event_capacity"], 64)
+        self.assertEqual(factory.call_args.kwargs[
+            "control_lease_capacity"], 32)
+        self.assertEqual(factory.call_args.kwargs[
+            "request_io_timeout_seconds"], 2.5)
 
         with tempfile.TemporaryDirectory() as directory:
             invalid = Path(directory) / "invalid.json"
@@ -501,6 +523,20 @@ class RuntimeServerCliTest(unittest.TestCase):
             with self.subTest(event_capacity=value), patch(
                     "sys.argv", ["runtime-api", "--event-capacity", value]), \
                     patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+
+        for value in ("99", "30001"):
+            with self.subTest(http_request_timeout_ms=value), patch(
+                    "sys.argv", ["runtime-api", "--http-request-timeout-ms",
+                                 value]), patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+
+        for value in ("0", "4097"):
+            with self.subTest(control_lease_capacity=value), patch(
+                    "sys.argv", ["runtime-api", "--control-lease-capacity",
+                                 value]), patch("sys.stderr"):
                 with self.assertRaises(SystemExit):
                     runtime_server.main()
 

@@ -3,14 +3,15 @@
 ## 目标与边界
 
 Runtime API 是位于 `toolbusd` 和浏览器/上层应用之间的长期运行服务边界，作用类似
-Moonraker，但面向通用 RemoteBSP 节点和资源。本轮只实现可替换 Provider 之上的
-只读 HTTP 骨架，用于稳定数据模型和前端集成，不访问 SocketCAN、USB 或实体板。
+Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现可替换 Provider 之上的只读
+状态面，以及进程内短时控制租约；控制租约只协调上位机写意图，不访问 SocketCAN、
+USB 或实体板，也不表示设备命令已经执行。
 
 当前明确不提供：
 
 - GPIO、UART、运动等写命令；
 - 固件生成、构建和烧录；
-- 用户/角色授权、多租户与会话管理；
+- 用户目录、多租户与通用会话管理；
 - WebSocket、SSE 或遥测历史库；
 - 设备协议、运动学和具体设备业务。
 
@@ -25,7 +26,7 @@ Moonraker，但面向通用 RemoteBSP 节点和资源。本轮只实现可替换
 
 ```text
 Web UI / 上层应用
-        │ HTTP /api/v1，只读
+        │ HTTP /api/v1，状态读取 + 短时控制租约
         ▼
 Runtime HTTP 层
         │ 只依赖 RuntimeProvider
@@ -165,11 +166,17 @@ Authorization: Bearer <api-key>
 X-API-Key: <api-key>
 ```
 
-每个身份的 `permissions` 是有界、无重复的权限数组。当前唯一受支持权限为
-`runtime.read`；空数组表示身份可以通过认证但不能读取受保护资源，未知权限（包括任何
-写权限）会使启动失败。读取路径必须显式拥有 `runtime.read`，否则返回 HTTP 403、
-`permission_denied`。权限模型不提供通配符或隐式默认值，拥有读取权限的密钥也不能让
-POST、PUT、PATCH 或 DELETE 绕过只读边界。
+每个身份的 `permissions` 是有界、无重复的权限数组。支持的权限为：
+
+- `runtime.read`：读取状态、健康和事件；
+- `runtime.control.lease.acquire`：申请本人名下的短时控制租约；
+- `runtime.control.lease.release`：释放本人名下的租约；
+- `runtime.control.lease.revoke`：监督者撤销任意身份的租约。
+
+空数组表示身份可以通过认证但不能执行上述操作，未知权限会使启动失败。权限模型不提供
+通配符或隐式默认值。部署配置可把前三项赋给“操作者”，只把读取和撤销赋给“监督者”；
+这是显式权限组合，不是尚未实现的用户目录或动态角色继承。读取权限不能申请租约，申请
+权限也不能读取设备状态；未经授权的路径返回 HTTP 403、`permission_denied`。
 
 认证器只长期保存每个配置密钥的 SHA-256 固定长度摘要，不保留明文密钥；候选值也先
 计算同长度摘要，再对全部配置项使用常量时间比较原语，且不在首个匹配处提前返回。
@@ -180,8 +187,8 @@ POST、PUT、PATCH 或 DELETE 绕过只读边界。
 `api-key`、`apikey`、`x-api-key`、`access_token` 或 `token` 的查询参数均以 HTTP 400、
 `credential_in_query` 拒绝，避免密钥进入访问日志、浏览器历史和代理缓存。
 
-认证启用时，`/api/v1` 下除下述边界外均受同一中间件保护，包括尚未实现的写方法；
-写请求通过认证后仍返回只读错误。`GET/HEAD /api/v1/health` 在未携带认证头时只返回
+认证启用时，`/api/v1` 下除下述边界外均受同一中间件保护，包括控制租约方法；其他写
+请求通过认证后仍返回 `read_only`。`GET/HEAD /api/v1/health` 在未携带认证头时只返回
 `status=ok,scope=liveness`，不读取 Provider，也不暴露快照、节点或能力；携带有效密钥
 时返回完整健康信息。携带错误密钥不会降级成公开探针，而是返回 401。
 `OPTIONS /api/v1...` 无需密钥并只返回方法边界，不启用 CORS、也不允许凭据跨域。
@@ -205,7 +212,8 @@ POST、PUT、PATCH 或 DELETE 绕过只读边界。
 ```
 
 `method_category` 只会是 `read`、`write`、`options` 或 `other`；`path_category` 只会是
-`root`、`health`、`snapshot`、`nodes`、`resources`、`alerts`、`events` 或 `unknown`。
+`root`、`health`、`snapshot`、`nodes`、`resources`、`alerts`、`events`、
+`control_leases` 或 `unknown`。
 未认证请求的
 `key_id` 为 `null`。`result` 使用稳定 API 错误码，成功读取为 `allowed`，公开存活探针为
 `public_probe`，预检为 `options`。记录不会保存 API 密钥、Authorization、X-API-Key、
@@ -494,6 +502,72 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 同一节点可同时出现状态告警和阈值告警，以保留原因；能力未知时只产生
 `clock_sync_observability_unavailable`，不会猜测 `unregistered`、`unsynced` 或硬件失败。
 
+## 短时控制租约
+
+`POST /api/v1/control-leases` 是当前唯一写入口，要求 Runtime 自身绑定数字回环地址、
+启用 API 密钥认证并拥有 `runtime.control.lease.acquire`。非回环监听即使配置密钥也以
+`control_transport_insecure` 失败关闭；远程客户端必须先由同机 TLS 反向代理终止 HTTPS，
+再转发到 `127.0.0.1` 或 `::1` 上的 Runtime。请求体必须是最多 4096 字节、字段封闭且无
+重复字段的 `application/json`：
+
+```json
+{
+  "node_id": "mock-node-1",
+  "resource_id": "gpio-0",
+  "command_group": "write",
+  "ttl_ms": 5000,
+  "idempotency_key": "studio-request-0001"
+}
+```
+
+`ttl_ms` 只允许 100～30000。节点、资源、命令组和幂等键均为长度有界的规范 ASCII
+标识；它们建立协调命名空间，不证明对应节点或资源存在。相同身份以相同幂等键和完全
+相同参数重试，会返回原租约且不延长截止时间；把同一幂等键用于不同参数会被拒绝。同一
+节点和资源在同一时刻只有一个租约，命令组名称不能建立第二个排他域来绕过冲突。租约被
+主动释放、监督撤销或自然过期后，其“身份 + 幂等键”终态继续保留 30 秒；这段时间内即使
+参数完全相同也只返回 HTTP 409、`control_lease_conflict`，不会把已结束的操作复活为新
+租约，调用者必须改用新的幂等键。30 秒从释放或检测到过期的单调时钟时刻开始计算。
+并发竞争由进程内互斥锁线性化，失败方同样收到 HTTP 409。
+
+新租约返回 HTTP 201，幂等重放返回 HTTP 200。响应含 32 位随机十六进制 `lease_id`、
+审计身份、作用域以及墙上时间表示的取得和预计过期时间。实际过期判定使用单调时钟，
+不会因系统墙钟回拨延长租约。默认最多 256 个活动租约，可由
+`--control-lease-capacity` 在 1～4096 范围内调整；过期项在下一次操作或计数时转入上述
+终态历史。终态历史同样有界：活动项与终态项合计上限为活动容量的 4 倍且最多 4096 条，
+不会为了接受新申请提前淘汰仍处于 30 秒保护期的终态。活动表或合计历史达到上限时，申请
+以 HTTP 503、`control_lease_capacity_exceeded` 失败关闭；待租约或终态保护期届满并在
+下一次操作中回收后才恢复容量。
+
+`DELETE /api/v1/control-leases/{lease_id}` 不接受请求体。所有者需要
+`runtime.control.lease.release`；持有 `runtime.control.lease.revoke` 的监督者可撤销
+其他身份的租约。所有申请、幂等重放、冲突、权限拒绝、释放和撤销均进入现有脱敏审计，
+审计只记录身份和 `control_leases` 路径类别，不记录作用域、幂等键或请求体。
+
+服务在连接交给有限工作线程之前设置单次 I/O 空闲超时，并另外执行两个不会被持续滴入
+字节重置的总期限：请求处理开始至完整 HTTP 头部解析完成为“头部总期限”，控制请求体
+开始读取至完整收齐为“请求体总期限”。三者默认均为 5 秒，并统一由
+`--http-request-timeout-ms` 在 100～30000 ms 范围内调整，避免慢速请求行、慢速头部或
+慢速请求体无限占用线程。也就是说，攻击者即使在每次 socket 空闲超时前持续发送少量
+字节，仍会分别触发头部或请求体的绝对总期限。控制请求明确拒绝任何
+`Transfer-Encoding`，包括同时携带
+`Content-Length` 的请求，只接受单一且规范的十进制 `Content-Length`。这是一层应用
+防线；生产部署仍应在反向代理设置独立的头部、请求体和总请求期限以及连接数限制。
+
+这不是分布式锁，也不是安全执行令牌。租约只存在于单个 Runtime 进程，重启后全部丢失；
+当前没有续租、列表或跨实例一致性。它尚未绑定 `toolbusd` 的远端 session，不能阻止同机
+其他进程绕过 Runtime 连接 `toolbusd`，也不会发送任何设备写命令。因此能力声明保持
+`write_commands=false`、`control_leases.downstream_commands=false`，且
+`control_leases.loopback_only=true`。未来写命令入口
+必须在同一原子决策中校验身份、租约所有权和命令范围，并由 toolbusd 重新执行最终准入；
+不能仅凭客户端持有一个字符串 `lease_id` 就认为已获准执行。
+
+只有在“回环监听且认证已启用”使控制租约可用时，能力字段才报告 `read_only=false`；
+默认无认证回环开发模式和非回环监听仍报告 `read_only=true`。即使为 `false` 也只表示
+API 已有本地租约状态写入口，不能据此推断设备可写；是否存在设备命令必须检查
+`write_commands`。其他路径不支持的写方法仍返回历史兼容错误码
+`read_only`，该错误码在这里表示“目标路径不可写”，不是整个 Runtime 没有任何本地写
+状态。
+
 ## 写命令与事件流的预留原则
 
 后续写 API 不应直接复用只读快照端点。建议采用 `/api/v1/commands` 或作业资源，
@@ -518,6 +592,7 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。
 
-这一认证授权竖切只解决“哪个密钥身份可以读取 API”的最低部署边界；TLS、反向代理
-信任边界、更细粒度的角色、密钥热加载/撤销、速率限制，以及审计异步持久化与完整性
-保护仍是后续部署门槛，不能把本轮的软件测试当作公网暴露或硬件环境的安全实测证据。
+当前认证授权和短租约竖切解决的是“哪个密钥身份可以读、申请、本人释放或监督撤销”以及
+单进程内并发写意图互斥。TLS、反向代理信任边界、用户目录和动态角色、密钥热加载/撤销、
+速率限制、租约与 toolbusd session 的原子绑定，以及审计异步持久化与完整性保护仍是后续
+部署门槛，不能把本轮的软件测试当作公网暴露、真实设备控制或硬件环境的安全实测证据。

@@ -5,6 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime_api.auth import (
+    CONTROL_LEASE_ACQUIRE_PERMISSION,
+    CONTROL_LEASE_RELEASE_PERMISSION,
+    CONTROL_LEASE_REVOKE_PERMISSION,
     MAXIMUM_AUTH_CONFIG_BYTES,
     MAXIMUM_API_KEYS,
     RUNTIME_READ_PERMISSION,
@@ -50,6 +53,20 @@ class ApiKeyAuthenticatorTest(unittest.TestCase):
         self.assertEqual(authenticator.authenticate(self.KEY_B).key_id,
                          "reader-b")
         self.assertFalse(authenticator.verify("x" * 32))
+
+    def test_control_permissions_are_explicit_and_loadable(self):
+        permissions = [
+            CONTROL_LEASE_ACQUIRE_PERMISSION,
+            CONTROL_LEASE_RELEASE_PERMISSION,
+            CONTROL_LEASE_REVOKE_PERMISSION,
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            authenticator = load_api_key_authenticator(self._write(
+                directory, {"schema_version": 2, "keys": [
+                    self._entry("controller", self.KEY_A, permissions),
+                ]}))
+        self.assertEqual(authenticator.authenticate(self.KEY_A).permissions,
+                         frozenset(permissions))
 
     def test_verification_does_not_stop_at_first_match(self):
         authenticator = ApiKeyAuthenticator([
