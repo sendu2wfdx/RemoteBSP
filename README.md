@@ -155,7 +155,8 @@ ctest --test-dir build-wsl --output-on-failure
 CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链路，以及发现、
 心跳、多节点、超时与去重、GPIO、UART、I2C/SPI资源合同与Mock故障隔离、资源租约、
 数字孪生、主机时钟模型、运动欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、
-流量准入、Kconfig生成、GUI API和只读Runtime API。
+流量准入、Kconfig生成、Studio总线工程到Mock清单的黄金路径、GUI API和只读
+Runtime API。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 

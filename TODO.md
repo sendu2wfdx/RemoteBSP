@@ -53,8 +53,8 @@
 
 - 对 compare 调度器做 F072/F103/G431 实板步频上限、抖动和 ISR 最坏耗时测试；
 - 用示波器/逻辑分析仪验证 STEP 高低宽度、DIR 建立时间、共享 EN 和同步边沿；
-- 主机四时间戳、低RTT筛选、稳健拟合、漂移和老化模型已完成纯软件测试；下一步接入
-  `toolbusd` 的持续采样、重连复位和节点同步状态；
+- 主机四时间戳模型已接入`NodeRegistry`的节点ID、启动代次、离线清理和安全换算门；
+  下一步定义可靠`boot_epoch`与同步线协议，并接入`toolbusd`真实采样源；
 - 实现跨板运动组的准备、提交、取消和超时，任何节点不就绪时保持安全停止；
 - 完善分段轨迹、队列水位、欠载预警、迟到段拒绝与平滑停车；
 - 限位和 TMC DIAG 使用本地中断/定时滤波，形成有界安全事件；
@@ -108,11 +108,12 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 
 ## P2：上位机 Runtime API 与 Web 控制台
 
-已建立只读 Runtime API 骨架，提供版本化节点、资源、告警和快照接口，并以Mock或
-文件Provider完成纯软件测试。后续继续采用类似 Moonraker 与 Fluidd 的分层，但不复制
-打印机业务：
+已建立只读 Runtime API 竖切，提供版本化节点、资源、告警和快照接口，并可通过
+`remote-cli`/`libremotebsp`读取`toolbusd`本地IPC；Mock、文件和假IPC路径均已完成
+纯软件测试。后续继续采用类似 Moonraker 与 Fluidd 的分层，但不复制打印机业务：
 
-- Runtime API 通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
+- 用结构化进程内绑定替换当前`remote-cli`文本适配，增加快照缓存与有界并发；
+- Runtime API 只通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
 - 提供版本化 REST/WebSocket API、节点/资源对象、事件订阅和遥测流；
 - 明确多客户端租约、身份、权限、审计和命令冲突处理；
 - Web 控制台展示拓扑、实时状态、运动队列、告警、日志和升级流程；
@@ -122,7 +123,8 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 ## P3：I2C、SPI、协议转换与高速流
 
 - 已完成 `I2C_BUS`/`I2C_DEVICE`、`SPI_BUS`/`SPI_DEVICE` 线协议、主机 API、严格
-  编解码和 Mock 原子事务竖切；下一步接入 Studio、固件静态表和 STM32 BSP；
+  编解码、Mock原子事务，以及Studio schema v2端点/合同校验和总线专用Mock清单；
+  下一步生成固件静态表并实现STM32 BSP；
 - SPI 转 UART/GPIO/I2C 等板级适配器暴露转换后的统一资源，隐藏内部 SPI；
 - 事务必须有最大长度、超时、队列、错误状态和资源级恢复，不得导致节点全局停机；
 - 高速 Stream 合同、打开、数据、信用和状态编解码已完成；下一步实现有界会话、
