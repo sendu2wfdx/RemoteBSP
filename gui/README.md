@@ -221,6 +221,53 @@ SHA-256、比较结果 SHA-256 和确定性差异资料包 SHA-256。导入资�
 字段选择、前缀/片段检索和清单下载。隔离只影响本地批次索引，不声称自动修复、构建、
 烧录或完成硬件验收。
 
+## 非交互生产资料 CLI
+
+`gui/studio_cli.py` 为 CI、批产准备和离线归档提供单行 JSON 输入/输出约定。它直接
+调用 Studio 已有工程校验、固件构建、批次生成/校验和本地历史后端，不维护第二套
+板卡、资源、哈希或历史规则。可用子命令：
+
+```sh
+# 全资源静态校验；不会生成配置、构建或写文件。
+python3 gui/studio_cli.py project-validate --project project.json
+
+# dry-run 只执行同一工程静态校验，不运行 Kconfig 或编译器，不创建构建目录。
+python3 gui/studio_cli.py build --project project.json --dry-run
+
+# 只有显式 build 才调用现有固件构建后端；仍然不烧录、不访问板卡。
+python3 gui/studio_cli.py build --project project.json --jobs 32
+
+# 从已有生产记录生成确定性批次；不指定输出文件时只在 stdout 返回JSON结果。
+python3 gui/studio_cli.py batch-create --batch-id pilot-001 --name 首批归档 \
+  --production-record board-production-v1.json \
+  --archive-output pilot-001.zip
+
+python3 gui/studio_cli.py batch-validate --manifest pilot-001-manifest.json
+
+# dry-run 只校验 Manifest，不创建历史目录；去掉 dry-run 后才原子保存。
+python3 gui/studio_cli.py history-save --manifest pilot-001-manifest.json \
+  --history-root ./local-history --dry-run
+python3 gui/studio_cli.py history-search --history-root ./local-history \
+  --field project_sha256 --query 0123456789abcdef
+```
+
+成功只向 stdout 写一行按键名排序的紧凑 UTF-8 JSON；错误只向 stderr 写同样格式的
+`STUDIO_CLI_ERROR_V1`。退出码为：
+
+- `0`：操作成功，含成功的 dry-run；
+- `2`：命令、选项、类型或枚举用法错误；
+- `3`：输入文件、schema、资源、哈希、容量或安全边界不合法；
+- `4`：显式构建、原子输出或本地文件操作失败。
+
+CLI 单路径最长 512 个字符，工程和差异输入最多 128 KiB，生产记录最多 64 KiB，
+板卡目录最多 2 MiB；JSON 重复字段和非标准数值会被拒绝；批次仍限制 32 份生产记录
+和 64 份差异资料。输出归档使用同目录临时文件，默认以原子无覆盖方式发布，只有显式
+`--force` 才允许原子替换用户指定的文件。
+`history-search` 只打开已有带标记历史库，不会因查询创建目录。
+
+所有响应都带有“未烧录、未访问硬件”的执行状态。未来烧录器必须是独立、显式授权
+的命令和适配器，不能暗中附加到 `build`、`batch-create` 或 `history-save`。
+
 命令行和CI可以调用同一后端：
 
 ```sh

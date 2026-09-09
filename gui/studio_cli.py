@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""RemoteBSP Studio 非交互生产资料命令行；默认从不烧录或访问硬件。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Sequence, TextIO
+
+from firmware_builder import (
+    DEFAULT_BUILD_ROOT,
+    DEFAULT_OUTPUT_ROOT,
+    FirmwareBuildError,
+    build_firmware_project,
+)
+from production_batch import (
+    MAX_BATCH_COMPARISONS,
+    MAX_BATCH_MANIFEST_BYTES,
+    MAX_BATCH_RECORDS,
+    MAX_PRODUCTION_RECORD_BYTES,
+    export_production_batch,
+    validate_production_batch_manifest,
+)
+from production_history import (
+    DEFAULT_HISTORY_ROOT,
+    MAX_HISTORY_QUERY_CHARS,
+    MAX_HISTORY_RESULTS,
+    ProductionHistoryStore,
+)
+from project_compare import MAX_PROJECT_BYTES
+from project_config import ProjectConfigError, validate_project
+
+
+GUI_ROOT = Path(__file__).resolve().parent
+DEFAULT_CATALOG_PATH = GUI_ROOT / "data" / "pin_catalog.json"
+MAX_CATALOG_BYTES = 2 * 1024 * 1024
+MAX_COMPARISON_INPUT_BYTES = 128 * 1024
+MAX_CLI_PATH_CHARS = 512
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_INPUT = 3
+EXIT_OPERATION = 4
+
+
+class CliUsageError(ValueError):
+    pass
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ProjectConfigError(f"JSON包含重复字段：{key}")
+        value[key] = item
+    return value
+
+
+class StrictParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CliUsageError(message)
+
+
+def _encode(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False,
+                      sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _emit(stream: TextIO, value: object) -> None:
+    stream.write(_encode(value))
+
+
+def _bounded_path(value: object, label: str) -> Path:
+    if not isinstance(value, (str, Path)):
+        raise ProjectConfigError(f"{label}路径类型无效")
+    text = str(value)
+    if not text or len(text) > MAX_CLI_PATH_CHARS or "\0" in text:
+        raise ProjectConfigError(
+            f"{label}路径必须为1至{MAX_CLI_PATH_CHARS}个字符且不能包含NUL")
+    path = Path(os.path.abspath(text))
+    if len(str(path)) > MAX_CLI_PATH_CHARS:
+        raise ProjectConfigError(
+            f"{label}解析后的路径超过{MAX_CLI_PATH_CHARS}个字符")
+    return path
+
+
+def _read_json(path_value: object, label: str, maximum: int) -> object:
+    path = _bounded_path(path_value, label)
+    if path.is_symlink() or not path.is_file():
+        raise ProjectConfigError(f"{label}必须是普通JSON文件：{path}")
+    with path.open("rb") as stream:
+        content = stream.read(maximum + 1)
+    if len(content) > maximum:
+        raise ProjectConfigError(
+            f"{label}超过{maximum // 1024} KiB输入上限")
+    try:
+        return json.loads(
+            content.decode("utf-8"), object_pairs_hook=_strict_object,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ProjectConfigError(f"JSON包含非标准数值：{value}")))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProjectConfigError(f"{label}不是有效UTF-8 JSON：{error}") from error
+
+
+def _catalog(path: object) -> dict:
+    value = _read_json(path, "板卡目录", MAX_CATALOG_BYTES)
+    if not isinstance(value, dict):
+        raise ProjectConfigError("板卡目录必须是JSON对象")
+    return value
+
+
+def _project(path: object) -> dict:
+    value = _read_json(path, "Studio工程", MAX_PROJECT_BYTES)
+    if not isinstance(value, dict):
+        raise ProjectConfigError("Studio工程必须是JSON对象")
+    return value
+
+
+def _execution_status(*, software_build: str) -> dict:
+    return {
+        "software_build": software_build,
+        "firmware_flash": "not_performed",
+        "hardware_access": False,
+        "future_flasher_boundary": (
+            "未来烧录器必须使用独立显式命令和适配器；本CLI没有烧录入口。"),
+    }
+
+
+def _validation_payload(result, *, dry_run: bool = False) -> dict:
+    return {
+        "ok": True,
+        "format": "STUDIO_CLI_PROJECT_VALIDATION_V1",
+        "dry_run": dry_run,
+        "board_id": result.board_id,
+        "resource_count": result.resource_count,
+        "project_sha256": result.project_sha256,
+        "project_schema_version": result.project_schema_version,
+        "project_original_schema_version": result.original_schema_version,
+        "project_migrations": list(result.migrations),
+        "summary": result.summary,
+        "execution_status": _execution_status(software_build="not_performed"),
+    }
+
+
+def _prepare_output(path_value: object, *, force: bool) -> Path:
+    path = _bounded_path(path_value, "输出文件")
+    parent = path.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise ProjectConfigError("输出目录必须是已存在的普通目录")
+    if (path.exists() or path.is_symlink()) and not force:
+        raise ProjectConfigError("输出文件已存在；如需替换请显式使用--force")
+    return path
+
+
+def _atomic_output(path_value: object, content: bytes, *, force: bool) -> Path:
+    path = _prepare_output(path_value, force=force)
+    parent = path.parent
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if force:
+            os.replace(temporary, path)
+        else:
+            # 硬链接在同目录内原子地声明最终名称；若另一个进程抢先创建，
+            # FileExistsError 会使本次操作失败，不能覆盖竞态中出现的文件。
+            os.link(temporary, path)
+            temporary.unlink()
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def _run_validate(args) -> dict:
+    result = validate_project(
+        _project(args.project), _catalog(args.catalog))
+    return _validation_payload(result)
+
+
+def _run_build(args) -> dict:
+    project = _project(args.project)
+    catalog = _catalog(args.catalog)
+    build_root = _bounded_path(args.build_root, "构建目录")
+    output_root = _bounded_path(args.output_root, "构建产物目录")
+    if args.dry_run:
+        result = validate_project(project, catalog)
+        response = _validation_payload(result, dry_run=True)
+        response.update({
+            "format": "STUDIO_CLI_BUILD_V1",
+            "planned_jobs": args.jobs,
+            "build_output_written": False,
+            "note": "dry-run只执行共用工程校验；未运行Kconfig或编译器。",
+        })
+        return response
+    result = build_firmware_project(
+        project, catalog, jobs=args.jobs, build_root=build_root,
+        output_root=output_root)
+    return {
+        "ok": True, "format": "STUDIO_CLI_BUILD_V1", "dry_run": False,
+        "build_id": result.build_id,
+        "board_id": result.board_id,
+        "firmware_target": result.firmware_target,
+        "config_sha256": result.config_sha256,
+        "project_sha256": result.record.get("project_sha256"),
+        "output_dir": str(result.output_dir),
+        "artifacts": [{
+            "filename": item.filename, "size": item.size,
+            "sha256": item.sha256,
+        } for item in result.artifacts],
+        "memory": result.record.get("memory", {}),
+        "execution_status": _execution_status(software_build="performed"),
+    }
+
+
+def _run_batch_create(args) -> dict:
+    record_paths = args.production_record or []
+    comparison_paths = args.comparison or []
+    if not 1 <= len(record_paths) <= MAX_BATCH_RECORDS:
+        raise ProjectConfigError(
+            f"生产记录文件数必须位于1至{MAX_BATCH_RECORDS}")
+    if len(comparison_paths) > MAX_BATCH_COMPARISONS:
+        raise ProjectConfigError(
+            f"工程差异文件不能超过{MAX_BATCH_COMPARISONS}份")
+    if args.force and not args.archive_output:
+        raise ProjectConfigError("--force只能与--archive-output一起使用")
+    planned_output = _prepare_output(
+        args.archive_output, force=args.force) if args.archive_output else None
+    records = [_read_json(path, f"生产记录[{index}]",
+                          MAX_PRODUCTION_RECORD_BYTES)
+               for index, path in enumerate(record_paths)]
+    comparisons = [_read_json(path, f"工程差异[{index}]",
+                              MAX_COMPARISON_INPUT_BYTES)
+                   for index, path in enumerate(comparison_paths)]
+    result = export_production_batch(
+        batch_id=args.batch_id, name=args.name, note=args.note,
+        production_records=records, comparison_exports=comparisons)
+    output_path = None
+    if planned_output is not None and not args.dry_run:
+        output_path = _atomic_output(
+            planned_output, result.archive, force=args.force)
+    return {
+        "ok": True, "format": "STUDIO_CLI_BATCH_CREATE_V1",
+        "dry_run": args.dry_run,
+        "manifest_sha256": result.manifest["manifest_sha256"],
+        "manifest": result.manifest,
+        "archive_filename": result.archive_filename,
+        "archive_sha256": result.archive_sha256,
+        "archive_byte_count": len(result.archive),
+        "archive_written": output_path is not None,
+        "archive_output": str(output_path or planned_output)
+            if output_path or planned_output else None,
+        "execution_status": _execution_status(software_build="not_performed"),
+    }
+
+
+def _run_batch_validate(args) -> dict:
+    manifest = _read_json(
+        args.manifest, "生产批次清单", MAX_BATCH_MANIFEST_BYTES)
+    validation = validate_production_batch_manifest(manifest)
+    if not validation["valid"]:
+        raise ProjectConfigError(validation["status_text"])
+    return {
+        "ok": True, "format": "STUDIO_CLI_BATCH_VALIDATION_V1",
+        "validation": validation,
+        "execution_status": _execution_status(software_build="not_performed"),
+    }
+
+
+def _run_history_save(args) -> dict:
+    manifest = _read_json(
+        args.manifest, "生产批次清单", MAX_BATCH_MANIFEST_BYTES)
+    validation = validate_production_batch_manifest(manifest)
+    if not validation["valid"]:
+        raise ProjectConfigError(validation["status_text"])
+    root = _bounded_path(args.history_root, "本地历史目录")
+    if args.dry_run:
+        return {
+            "ok": True, "format": "STUDIO_CLI_HISTORY_SAVE_V1",
+            "dry_run": True, "stored": False,
+            "manifest_sha256": validation["manifest_sha256"],
+            "history_directory_created": False,
+            "execution_status": _execution_status(
+                software_build="not_performed"),
+        }
+    saved = ProductionHistoryStore(root).save(manifest)
+    return {
+        "ok": True, "format": "STUDIO_CLI_HISTORY_SAVE_V1",
+        "dry_run": False, **saved,
+        "execution_status": _execution_status(software_build="not_performed"),
+    }
+
+
+def _run_history_search(args) -> dict:
+    if len(args.query) > MAX_HISTORY_QUERY_CHARS:
+        raise ProjectConfigError(
+            f"历史搜索词不能超过{MAX_HISTORY_QUERY_CHARS}个字符")
+    root = _bounded_path(args.history_root, "本地历史目录")
+    marker = root / ".remotebsp-production-history-v1"
+    if not root.is_dir() or not marker.exists():
+        raise ProjectConfigError(
+            "本地历史尚不存在；请先用history-save显式保存批次")
+    return ProductionHistoryStore(root).search(
+        args.query, args.field, args.limit)
+
+
+def _parser() -> StrictParser:
+    parser = StrictParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=StrictParser)
+
+    validate = sub.add_parser("project-validate", help="校验Studio工程")
+    validate.add_argument("--project", required=True)
+    validate.add_argument("--catalog", default=str(DEFAULT_CATALOG_PATH))
+    validate.set_defaults(handler=_run_validate)
+
+    build = sub.add_parser("build", help="显式执行软件固件构建")
+    build.add_argument("--project", required=True)
+    build.add_argument("--catalog", default=str(DEFAULT_CATALOG_PATH))
+    build.add_argument("--jobs", type=int, choices=range(1, 65), default=32)
+    build.add_argument("--build-root", default=str(DEFAULT_BUILD_ROOT))
+    build.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    build.add_argument("--dry-run", action="store_true")
+    build.set_defaults(handler=_run_build)
+
+    create = sub.add_parser("batch-create", help="生成确定性生产批次")
+    create.add_argument("--batch-id", required=True)
+    create.add_argument("--name", required=True)
+    create.add_argument("--note", default="")
+    create.add_argument("--production-record", action="append", required=True)
+    create.add_argument("--comparison", action="append")
+    create.add_argument("--archive-output")
+    create.add_argument("--force", action="store_true")
+    create.add_argument("--dry-run", action="store_true")
+    create.set_defaults(handler=_run_batch_create)
+
+    batch_validate = sub.add_parser("batch-validate", help="校验现有生产批次")
+    batch_validate.add_argument("--manifest", required=True)
+    batch_validate.set_defaults(handler=_run_batch_validate)
+
+    save = sub.add_parser("history-save", help="保存已校验批次到本地历史")
+    save.add_argument("--manifest", required=True)
+    save.add_argument("--history-root", default=str(DEFAULT_HISTORY_ROOT))
+    save.add_argument("--dry-run", action="store_true")
+    save.set_defaults(handler=_run_history_save)
+
+    search = sub.add_parser("history-search", help="检索本地生产批次历史")
+    search.add_argument("--history-root", default=str(DEFAULT_HISTORY_ROOT))
+    search.add_argument("--query", default="")
+    search.add_argument("--field", choices=(
+        "all", "project_sha256", "build_id", "board_id", "record_sha256"),
+        default="all")
+    search.add_argument("--limit", type=int, choices=range(
+        1, MAX_HISTORY_RESULTS + 1), default=MAX_HISTORY_RESULTS)
+    search.set_defaults(handler=_run_history_search)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout,
+         stderr: TextIO = sys.stderr) -> int:
+    try:
+        args = _parser().parse_args(argv)
+        response = args.handler(args)
+        _emit(stdout, response)
+        return EXIT_OK
+    except CliUsageError as error:
+        _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
+                       "exit_code": EXIT_USAGE, "error": str(error)})
+        return EXIT_USAGE
+    except (ProjectConfigError, json.JSONDecodeError,
+            UnicodeDecodeError) as error:
+        _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
+                       "exit_code": EXIT_INPUT, "error": str(error)})
+        return EXIT_INPUT
+    except (FirmwareBuildError, OSError) as error:
+        _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
+                       "exit_code": EXIT_OPERATION, "error": str(error)})
+        return EXIT_OPERATION
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
