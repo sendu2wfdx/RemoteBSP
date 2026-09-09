@@ -46,7 +46,7 @@ jobs:
       - name: 配置
         run: >-
           cmake -S . -B build-ci -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_BUILD_TYPE=Debug
           -DREMOTEBSP_VCAN_INTERFACE=vcan0
 
       - name: 构建
@@ -57,6 +57,14 @@ jobs:
           ctest --test-dir build-ci
           --output-on-failure
           --output-junit software-test-results.xml
+
+      - name: 编译发布态主机程序
+        run: |
+          cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DREMOTEBSP_VCAN_INTERFACE=vcan0
+          cmake --build build-release --parallel 32 \
+            --target toolbusd remote-cli mock_mcu
 
       - name: 单独校验成熟度与公平对照门禁
         run: |
