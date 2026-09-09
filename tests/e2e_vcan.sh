@@ -69,6 +69,7 @@ for _ in $(seq 1 100); do
     sleep 0.02
 done
 [[ -S "$socket_path" ]]
+[[ "$(stat -c '%a' "$socket_path")" == "660" ]]
 
 ping_output=""
 for _ in $(seq 1 100); do

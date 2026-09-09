@@ -91,6 +91,7 @@ rm -f -- "$node1_output" "$node2_output"
 grep -Fq 'board_type=0x4d4f434b' <<<"$node1_info"
 grep -Fq 'board_type=0x4d4f434b' <<<"$node2_info"
 [[ "$node1_info" != "$node2_info" ]]
+[[ "$(stat -c '%a' "$socket_path")" == "660" ]]
 node_list="$("$remote_cli_bin" --socket "$socket_path" node-list)"
 [[ "$(grep -c 'online=1' <<<"$node_list")" -eq 2 ]]
 

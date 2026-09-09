@@ -1224,6 +1224,10 @@ private:
                 throw std::runtime_error(
                     "本地套接字路径已存在且不是套接字");
             }
+            if (existing.st_uid != ::geteuid()) {
+                throw std::runtime_error(
+                    "本地套接字路径属于其他用户，拒绝删除");
+            }
             if (::unlink(socket_path_.c_str()) < 0) {
                 throw std::system_error(errno, std::generic_category(),
                                         "清理旧本地套接字失败");
@@ -1243,12 +1247,39 @@ private:
         std::memcpy(address.sun_path, socket_path_.c_str(),
                     socket_path_.size() + 1U);
         if (::bind(server_socket_, reinterpret_cast<sockaddr*>(&address),
-                   sizeof(address)) < 0 ||
-            ::listen(server_socket_, 8) < 0) {
+                   sizeof(address)) < 0) {
             const int saved_errno = errno;
             close_server();
             throw std::system_error(saved_errno, std::generic_category(),
                                     "绑定本地 IPC 套接字失败");
+        }
+        struct stat created {};
+        const int created_stat = ::lstat(socket_path_.c_str(), &created);
+        if (created_stat < 0 ||
+            !S_ISSOCK(created.st_mode) ||
+            created.st_uid != ::geteuid()) {
+            const int saved_errno = created_stat < 0 ? errno : EINVAL;
+            close_server();
+            throw std::system_error(saved_errno, std::generic_category(),
+                                    "确认本地 IPC 套接字身份失败");
+        }
+        socket_device_ = created.st_dev;
+        socket_inode_ = created.st_ino;
+        socket_identity_known_ = true;
+        // 不依赖服务进程的 umask。套接字在开始监听前固定为 0660，
+        // 由部署时的所有者/组决定哪些本地进程能够发出硬件命令。
+        if (::chmod(socket_path_.c_str(),
+                    S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0) {
+            const int saved_errno = errno;
+            close_server();
+            throw std::system_error(saved_errno, std::generic_category(),
+                                    "设置本地 IPC 套接字权限失败");
+        }
+        if (::listen(server_socket_, 8) < 0) {
+            const int saved_errno = errno;
+            close_server();
+            throw std::system_error(saved_errno, std::generic_category(),
+                                    "监听本地 IPC 套接字失败");
         }
     }
 
@@ -1272,10 +1303,15 @@ private:
         if (!socket_path_.empty()) {
             struct stat existing {};
             if (::lstat(socket_path_.c_str(), &existing) == 0 &&
-                S_ISSOCK(existing.st_mode)) {
+                S_ISSOCK(existing.st_mode) && socket_identity_known_ &&
+                existing.st_dev == socket_device_ &&
+                existing.st_ino == socket_inode_) {
                 ::unlink(socket_path_.c_str());
             }
         }
+        socket_identity_known_ = false;
+        socket_device_ = 0;
+        socket_inode_ = 0;
     }
 
     std::unique_ptr<remotebsp::transport::LinkTransport> transport_;
@@ -1288,6 +1324,9 @@ private:
     remotebsp::toolbusd::NodeRegistry nodes_;
     std::string socket_path_;
     int server_socket_{-1};
+    dev_t socket_device_{};
+    ino_t socket_inode_{};
+    bool socket_identity_known_{};
     std::atomic<bool> running_{false};
     std::thread worker_;
     std::mutex client_mutex_;
