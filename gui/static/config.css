@@ -113,6 +113,15 @@
 .batch-import { display:flex; align-items:end; justify-content:space-between; gap:12px; margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:9px; background:#0d1720; }
 .batch-import label { flex:1; }
 .batch-import input { color:var(--muted); font-size:10px; }
+.history-panel { margin-top:18px; padding-top:18px; border-top:1px solid var(--line); }
+.history-panel .card-head { margin-bottom:10px; }
+.history-panel h3 { margin:0 0 5px; color:var(--text); font-size:14px; }
+.history-search { display:grid; grid-template-columns:180px minmax(0,1fr) auto; gap:8px; }
+.history-search input { min-width:0; padding:9px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:#0c1620; }
+.history-results { display:grid; gap:8px; margin-top:10px; }
+.history-record { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center; padding:11px; border:1px solid var(--line); border-radius:9px; background:#0d1720; }
+.history-record b,.history-record small { display:block; }
+.history-record small { margin-top:4px; color:var(--muted); word-break:break-all; }
 
 .endpoint-field { grid-column:span 2; }
 .endpoint-status { margin-left:auto; margin-right:12px; padding:4px 7px; border-radius:999px; font-size:9px; }
@@ -146,4 +155,6 @@
   .compare-inputs { grid-template-columns:1fr; }
   .batch-meta { grid-template-columns:1fr; }
   .batch-import { align-items:stretch; flex-direction:column; }
+  .history-search { grid-template-columns:1fr; }
+  .history-record { grid-template-columns:1fr; }
 }

@@ -8,6 +8,7 @@ import threading
 import unittest
 import zipfile
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
@@ -280,7 +281,8 @@ class GuiTest(unittest.TestCase):
             }), encoding="utf-8")
             server = make_server(
                 "127.0.0.1", 0, state_path,
-                build_output_root=artifact_root)
+                build_output_root=artifact_root,
+                history_root=Path(directory) / "history")
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -299,6 +301,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["project_comparison_export_enabled"])
                 self.assertTrue(target["production_record_enabled"])
                 self.assertTrue(target["production_batch_enabled"])
+                self.assertTrue(target["production_history_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -428,6 +431,34 @@ class GuiTest(unittest.TestCase):
                 batch_validation = json.loads(urlopen(
                     batch_validation_request).read())
                 self.assertTrue(batch_validation["valid"])
+                history_save_request = Request(
+                    base + "/api/production-history/save",
+                    data=json.dumps({"manifest": batch["manifest"]}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                history_saved = json.loads(urlopen(
+                    history_save_request).read())
+                self.assertTrue(history_saved["stored"])
+                history_status = json.loads(urlopen(
+                    base + "/api/production-history/status").read())
+                self.assertEqual(history_status["valid_record_count"], 1)
+                history_search = json.loads(urlopen(
+                    base + "/api/production-history/search?field=board_id&"
+                    "query=" + board["id"]).read())
+                self.assertEqual(history_search["total_matches"], 1)
+                for invalid_query in (
+                        "query=a&query=b", "field=all&unknown=value",
+                        "limit=1&limit=2"):
+                    with self.subTest(invalid_query=invalid_query):
+                        with self.assertRaises(HTTPError) as caught:
+                            urlopen(base + "/api/production-history/search?" +
+                                    invalid_query)
+                        self.assertEqual(caught.exception.code, 400)
+                history_record = json.loads(urlopen(
+                    base + "/api/production-history/record/" +
+                    batch["manifest_sha256"]).read())
+                self.assertEqual(history_record["manifest"],
+                                 batch["manifest"])
                 linked_production_request = Request(
                     base + "/api/project/generate-production-record",
                     data=json.dumps({
@@ -497,6 +528,11 @@ class GuiTest(unittest.TestCase):
                 for marker in (b"exportProductionBatch",
                                b"validateProductionBatch",
                                b"batchManifestFile", b"batchResult"):
+                    self.assertIn(marker, page)
+                for marker in (b"saveProductionHistory",
+                               b"searchProductionHistory",
+                               b"historyField", b"historyStatus",
+                               b"historyResults"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

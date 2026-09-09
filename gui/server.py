@@ -11,7 +11,7 @@ import mimetypes
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse
 
 from firmware_builder import (
     DEFAULT_OUTPUT_ROOT,
@@ -41,6 +41,11 @@ from production_batch import (
     export_production_batch,
     production_batch_response,
     validate_production_batch_manifest,
+)
+from production_history import (
+    DEFAULT_HISTORY_ROOT,
+    MAX_HISTORY_RESULTS,
+    ProductionHistoryStore,
 )
 
 
@@ -105,6 +110,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def build_output_root(self) -> Path:
         return getattr(self.server, "build_output_root", DEFAULT_OUTPUT_ROOT)
 
+    @property
+    def production_history(self) -> ProductionHistoryStore:
+        return getattr(self.server, "production_history")
+
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -161,10 +170,60 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "project_comparison_export_enabled": True,
                 "production_record_enabled": True,
                 "production_batch_enabled": True,
+                "production_history_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
             })
+            return
+        if path == "/api/production-history/status":
+            self._send_json(self.production_history.status())
+            return
+        if path == "/api/production-history/search":
+            try:
+                pairs = parse_qsl(urlparse(self.path).query,
+                                  keep_blank_values=True, max_num_fields=8)
+                allowed = {"query", "field", "limit"}
+                names = [name for name, _ in pairs]
+                unknown = sorted(set(names) - allowed)
+                repeated = sorted(name for name in allowed
+                                  if names.count(name) > 1)
+                if unknown:
+                    raise ProjectConfigError(
+                        f"历史搜索包含未知参数：{','.join(unknown)}")
+                if repeated:
+                    raise ProjectConfigError(
+                        f"历史搜索参数不能重复：{','.join(repeated)}")
+                query = dict(pairs)
+                limit = int(query.get("limit", str(MAX_HISTORY_RESULTS)))
+                response = self.production_history.search(
+                    query.get("query", ""), query.get("field", "all"), limit)
+                self._send_json(response)
+            except (TypeError, ValueError, ProjectConfigError) as error:
+                self._send_json({"ok": False, "error": str(error)},
+                                HTTPStatus.BAD_REQUEST)
+            return
+        if path.startswith("/api/production-history/record/"):
+            parts = path.strip("/").split("/")
+            if len(parts) != 4:
+                self._send_json({"ok": False, "error": "历史记录地址无效"},
+                                HTTPStatus.NOT_FOUND)
+                return
+            try:
+                stored = self.production_history.get(unquote(parts[3]))
+                self._send_json({
+                    "ok": True, "format": "PRODUCTION_HISTORY_RECORD_V1",
+                    "manifest_sha256": stored.manifest["manifest_sha256"],
+                    "byte_count": stored.byte_count,
+                    "filename": (stored.manifest["batch"]["batch_id"] +
+                                 "-生产批次清单-v1.json"),
+                    "manifest": stored.manifest,
+                    "validation": validate_production_batch_manifest(
+                        stored.manifest),
+                })
+            except (OSError, ProjectConfigError) as error:
+                self._send_json({"ok": False, "error": str(error)},
+                                HTTPStatus.NOT_FOUND)
             return
         if path.startswith("/api/project/artifacts/"):
             parts = path.strip("/").split("/")
@@ -194,6 +253,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/project/export-comparison",
                         "/api/production-batch/export",
                         "/api/production-batch/validate",
+                        "/api/production-history/save",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -202,10 +262,19 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             if length <= 0 or length > 262144:
                 raise ProjectConfigError("请求长度无效或超过256 KiB")
             request = json.loads(self.rfile.read(length).decode("utf-8"))
-            catalog = None if path.startswith("/api/production-batch/") else \
+            catalog = None if path.startswith((
+                "/api/production-batch/", "/api/production-history/")) else \
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/production-batch/validate":
+            if path == "/api/production-history/save":
+                saved = self.production_history.save(request.get("manifest"))
+                response = {
+                    "ok": True, "format": "PRODUCTION_HISTORY_SAVE_V1",
+                    **saved,
+                    "declaration": (
+                        "只保存已校验的软件批次清单；未执行构建、烧录或硬件访问。"),
+                }
+            elif path == "/api/production-batch/validate":
                 response = validate_production_batch_manifest(
                     request.get("manifest"))
             elif path == "/api/production-batch/export":
@@ -381,12 +450,15 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
 
 def make_server(host: str, port: int,
                 state_path: Path | None, *, build_jobs: int = 32,
-                build_output_root: Path = DEFAULT_OUTPUT_ROOT
+                build_output_root: Path = DEFAULT_OUTPUT_ROOT,
+                history_root: Path = DEFAULT_HISTORY_ROOT
                 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
     server.build_jobs = build_jobs  # type: ignore[attr-defined]
     server.build_output_root = build_output_root  # type: ignore[attr-defined]
+    server.production_history = ProductionHistoryStore(  # type: ignore[attr-defined]
+        history_root)
     return server
 
 
@@ -397,15 +469,20 @@ def main() -> int:
     parser.add_argument("--state", type=Path, help="mock_mcu --visual-state 输出的 JSON 文件")
     parser.add_argument("--build-jobs", type=int, default=32,
                         help="固件构建并行任务数，默认32")
+    parser.add_argument("--history-root", type=Path,
+                        default=DEFAULT_HISTORY_ROOT,
+                        help="本地生产批次历史目录")
     args = parser.parse_args()
     if args.build_jobs < 1 or args.build_jobs > 64:
         parser.error("--build-jobs必须位于1～64")
     mimetypes.add_type("text/javascript", ".js")
     server = make_server(
-        args.host, args.port, args.state, build_jobs=args.build_jobs)
+        args.host, args.port, args.state, build_jobs=args.build_jobs,
+        history_root=args.history_root)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
     print(f"固件构建使用{args.build_jobs}个并行任务。")
+    print(server.production_history.status()["status_text"])  # type: ignore[attr-defined]
     try:
         server.serve_forever()
     except KeyboardInterrupt:
