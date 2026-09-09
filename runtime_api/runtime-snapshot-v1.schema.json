@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remotebsp.local/schemas/runtime-snapshot-v1.schema.json",
+  "title": "RemoteBSP Runtime Snapshot v1",
+  "type": "object",
+  "required": ["schema_version", "snapshot_id", "captured_at_ms", "nodes", "alerts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "snapshot_id": {"$ref": "#/$defs/identifier"},
+    "captured_at_ms": {"type": "integer", "minimum": 0},
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "alerts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/alert"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$"
+    },
+    "slug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 48,
+      "pattern": "^[a-z][a-z0-9_-]{0,47}$"
+    },
+    "link": {
+      "type": "object",
+      "required": ["kind", "state"],
+      "properties": {
+        "kind": {"$ref": "#/$defs/slug"},
+        "state": {"enum": ["online", "offline", "degraded"]}
+      }
+    },
+    "resource": {
+      "type": "object",
+      "required": ["resource_id", "kind", "name", "available", "state"],
+      "properties": {
+        "resource_id": {"$ref": "#/$defs/identifier"},
+        "kind": {"$ref": "#/$defs/slug"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 160},
+        "available": {"type": "boolean"},
+        "state": {"type": "object"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "node_id", "board_type", "display_name", "state", "last_seen_ms",
+        "links", "resources", "runtime"
+      ],
+      "properties": {
+        "node_id": {"$ref": "#/$defs/identifier"},
+        "board_type": {"$ref": "#/$defs/identifier"},
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 160},
+        "state": {"enum": ["online", "offline", "degraded"]},
+        "last_seen_ms": {"type": "integer", "minimum": 0},
+        "links": {"type": "array", "items": {"$ref": "#/$defs/link"}},
+        "resources": {"type": "array", "items": {"$ref": "#/$defs/resource"}},
+        "runtime": {"type": "object"}
+      }
+    },
+    "alert": {
+      "type": "object",
+      "required": [
+        "alert_id", "node_id", "resource_id", "severity", "code",
+        "message", "active", "occurred_at_ms"
+      ],
+      "properties": {
+        "alert_id": {"$ref": "#/$defs/identifier"},
+        "node_id": {"$ref": "#/$defs/identifier"},
+        "resource_id": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "severity": {"enum": ["info", "warning", "error", "critical"]},
+        "code": {"$ref": "#/$defs/slug"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 500},
+        "active": {"type": "boolean"},
+        "occurred_at_ms": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
