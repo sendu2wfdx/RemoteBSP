@@ -59,14 +59,14 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
-| 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和普通 GPIO 只读静态表；三板在编译期校验 schema/板型，并用同一表完成启动安全配置和运行时白名单，不提供在线改线 |
+| 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
 | 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理。实体 I2C/SPI BSP、双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本可生成带时间基、输入身份和状态摘要的确定性回放记录 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与普通 GPIO 只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；回环认证模式的短时控制租约通过强随机 daemon identity 绑定本次 `toolbusd` 启动，重启/不可达时失败关闭，但仍不下发设备命令。TLS、主动推送、跨重启事件和审计持久化/完整性仍待实现 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及显式 H2N/N2H 逻辑传输钩子可确定性回放 delay/drop/duplicate/reboot，且不冒充真实 CAN/USB 物理层 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与 GPIO/UART/PWM/定时位流只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；HTTP 短时控制租约通过强随机 daemon identity 绑定 `toolbusd` 启动，但仍不下发设备命令。`toolbusd` 另有受信本机 GPIO 租约/写入 IPC 竖切，已在 USB Mock、vcan Classical CAN 与 CAN-FD 验证，尚未接入 HTTP、TLS 或持久审计 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -198,6 +198,10 @@ Runtime 的认证授权已包含 API key 身份、`runtime.read` 及控制租约
 非回环部署仍必须由受控 TLS 反向代理、密钥文件权限和限速补齐。
 `toolbusd` 本地控制套接字固定为 `0660`，拒绝删除其他用户的同名对象，并在退出时按
 device/inode 核对后清理。
+
+GitHub 的“软件基线验证”工作流会在主分支、`codex/**` 分支和合并请求上重复执行
+Ubuntu 主机/Mock/vcan 全量测试、成熟度门禁与三类 STM32 正式配置交叉编译，并保留
+JUnit 与固件产物 30 天。该结果属于自动测试和交叉编译证据，不能替代实体板验证。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 
