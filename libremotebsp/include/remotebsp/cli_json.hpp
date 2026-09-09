@@ -60,6 +60,15 @@ inline const char* traffic_class(std::size_t index) {
     return index < names.size() ? names[index] : "unknown";
 }
 
+inline const char* runtime_clock_state(RuntimeClockState state) {
+    switch (state) {
+        case RuntimeClockState::Unsynced: return "unsynced";
+        case RuntimeClockState::Synced: return "synced";
+        case RuntimeClockState::Degraded: return "degraded";
+    }
+    return "unknown";
+}
+
 inline void write_uuid(std::ostream& output,
                        const std::array<std::uint8_t, 16>& uuid) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -260,6 +269,48 @@ inline void write_runtime_snapshot(std::ostream& output,
                << ",\"code\":"
                << static_cast<unsigned>(snapshot.node_issues[index].code)
                << '}';
+    }
+    output << "],\"clocks\":[";
+    for (std::size_t index = 0U; index < snapshot.clocks.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& clock = snapshot.clocks[index];
+        output << "{\"node_id\":" << clock.node_id
+               << ",\"registered\":"
+               << (clock.registered ? "true" : "false")
+               << ",\"estimate_valid\":"
+               << (clock.estimate_valid ? "true" : "false")
+               << ",\"state\":\""
+               << (clock.registered
+                       ? runtime_clock_state(clock.state)
+                       : "unregistered") << '"'
+               << ",\"boot_epoch\":";
+        if (clock.registered) output << clock.boot_epoch;
+        else output << "null";
+        output << ",\"model_generation\":";
+        if (clock.registered) output << clock.model_generation;
+        else output << "null";
+        output << ",\"sample_count\":" << clock.sample_count
+               << ",\"selected_sample_count\":"
+               << clock.selected_sample_count
+               << ",\"rate_deviation_ppb\":";
+        if (clock.estimate_valid) output << clock.rate_deviation_ppb;
+        else output << "null";
+        output << ",\"drift_uncertainty_ppm\":";
+        if (clock.estimate_valid) output << clock.drift_uncertainty_ppm;
+        else output << "null";
+        output << ",\"minimum_network_rtt_ns\":";
+        if (clock.estimate_valid) output << clock.minimum_network_rtt_ns;
+        else output << "null";
+        output << ",\"error_bound_ns\":";
+        if (clock.estimate_valid) output << clock.error_bound_ns;
+        else output << "null";
+        output << ",\"sample_age_ns\":";
+        if (clock.estimate_valid) output << clock.sample_age_ns;
+        else output << "null";
+        output << ",\"last_sample_host_time_ns\":";
+        if (clock.estimate_valid) output << clock.last_sample_host_time_ns;
+        else output << "null";
+        output << '}';
     }
     output << "]}}\n";
 }

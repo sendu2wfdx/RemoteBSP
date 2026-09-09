@@ -81,7 +81,7 @@ class RemoteCliIpcClientTest(unittest.TestCase):
             "schema_version": 1,
             "command": "runtime-snapshot",
             "data": {
-                "snapshot_version": 1,
+                "snapshot_version": 2,
                 "snapshot_sequence": 7,
                 "traffic": {
                     "mode": "fd", "arbitration_bitrate": 1000000,
@@ -117,6 +117,22 @@ class RemoteCliIpcClientTest(unittest.TestCase):
                     },
                 }],
                 "node_issues": [],
+                "clocks": [{
+                    "node_id": 1,
+                    "registered": True,
+                    "estimate_valid": True,
+                    "state": "synced",
+                    "boot_epoch": 9,
+                    "model_generation": 12,
+                    "sample_count": 8,
+                    "selected_sample_count": 6,
+                    "rate_deviation_ppb": -80,
+                    "drift_uncertainty_ppm": 25,
+                    "minimum_network_rtt_ns": 100000,
+                    "error_bound_ns": 60000,
+                    "sample_age_ns": 500000,
+                    "last_sample_host_time_ns": 123456,
+                }],
             },
         })
 
@@ -132,8 +148,47 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         snapshot = client.runtime_snapshot(64)
         self.assertEqual(snapshot["sequence"], 7)
         self.assertFalse(snapshot["resources"][0]["status_valid"])
+        self.assertEqual(snapshot["version"], 2)
+        self.assertEqual(snapshot["clocks"][0]["state"], "synced")
+        self.assertEqual(snapshot["clocks"][0]["rate_deviation_ppb"], -80)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-3:], ["runtime-snapshot", "64", "1400"])
+
+    def test_runtime_snapshot_v2_rejects_v1_and_bad_clock_quality(self):
+        def document():
+            return json.loads(self._runtime_snapshot_document())
+
+        invalid_cases = []
+        old_version = document()
+        old_version["data"]["snapshot_version"] = 1
+        invalid_cases.append((old_version, "版本不受支持"))
+
+        missing_clocks = document()
+        del missing_clocks["data"]["clocks"]
+        invalid_cases.append((missing_clocks, "字段不匹配"))
+
+        unknown_node = document()
+        unknown_node["data"]["clocks"][0]["node_id"] = 2
+        invalid_cases.append((unknown_node, "引用未知节点"))
+
+        invalid_unknown = document()
+        clock = invalid_unknown["data"]["clocks"][0]
+        clock["estimate_valid"] = False
+        clock["state"] = "unsynced"
+        invalid_cases.append((invalid_unknown, "未知时钟估计字段不一致"))
+
+        invalid_unregistered = document()
+        clock = invalid_unregistered["data"]["clocks"][0]
+        clock["registered"] = False
+        clock["state"] = "unregistered"
+        invalid_cases.append((invalid_unregistered, "未注册时钟字段不一致"))
+
+        for payload, message in invalid_cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                        ToolbusIpcProtocolError, message):
+                    RemoteCliIpcClient._json_runtime_snapshot(
+                        json.dumps(payload))
 
     def test_explicit_legacy_mode_parses_existing_text_without_shell(self):
         """旧文本兼容必须显式启用，且仍只组合参数数组。"""
@@ -392,6 +447,10 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
             client, clock_ms=lambda: 5).get_snapshot()
         self.assertEqual(client.snapshot_calls, 0)
         self.assertEqual(snapshot["snapshot_id"], "toolbusd-5")
+        clock = snapshot["nodes"][0]["runtime"]["clock_sync"]
+        self.assertFalse(clock["source_available"])
+        self.assertIsNone(clock["registered"])
+        self.assertEqual(clock["state"], "unknown")
 
     def test_single_snapshot_path_preserves_resource_failure_isolation(self):
         parsed = RemoteCliIpcClient._json_runtime_snapshot(
@@ -418,6 +477,12 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         self.assertEqual(client.maximum_resources, 128)
         self.assertEqual(snapshot["snapshot_id"], "toolbusd-7")
+        clock = snapshot["nodes"][0]["runtime"]["clock_sync"]
+        self.assertTrue(clock["source_available"])
+        self.assertTrue(clock["estimate_valid"])
+        self.assertEqual(clock["boot_epoch"], 9)
+        self.assertEqual(clock["model_generation"], 12)
+        self.assertEqual(clock["error_bound_ns"], 60000)
         resource = snapshot["nodes"][0]["resources"][0]
         self.assertEqual(resource["state"]["health"], "unknown")
         self.assertFalse(resource["available"])

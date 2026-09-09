@@ -129,9 +129,9 @@ remote-cli --json --socket /tmp/toolbusd.sock runtime-snapshot 128 1900
 - `resource-list`：目标 `node_id` 和 `resources` 数组；
 - `resource-status`：目标 `node_id` 和单个 `resource` 状态对象。
 - `runtime-snapshot`：快照 IPC 版本和守护进程序号、流量、节点、带状态有效位的资源，
-  以及封闭的节点级错误项。
+  封闭的节点级错误项，以及与节点一一对应的时钟同步质量项。
 
-`RuntimeSnapshot IPC v1` 是 `IpcRequestKind::RuntimeSnapshot`。请求必须携带版本 1、
+`RuntimeSnapshot IPC v2` 是 `IpcRequestKind::RuntimeSnapshot`。请求必须携带版本 2、
 1～128 的最大资源数和 1～5000 ms 的总时间上限；响应仍受本地 IPC 64 KiB 硬上限。
 守护进程一次只执行一个快照，防止昂贵刷新互相放大，但普通控制请求不获取这个互斥锁，
 慢快照不会在主机侧阻塞控制路径。快照开始时固定节点身份/路由/在线状态，结束时再次
@@ -144,10 +144,15 @@ remote-cli --json --socket /tmp/toolbusd.sock runtime-snapshot 128 1900
 `health=unknown` 和告警。节点资源目录不可用使用封闭错误码 1，映射成节点降级告警。
 结构损坏、未知版本/错误码、重复或悬空 ID、资源超限和拓扑变化不会返回部分可信快照。
 
-Runtime Provider 对 v1 使用封闭字段集合，严格检查根信封、命令名、字段类型、数值
+v2 在 v1 快照内容之后增加与节点一一对应的固定长度时钟质量记录，并把响应头原保留
+字段定义为时钟记录数。因为这会改变 v1 的线格式，IPC 请求、响应和 CLI 的
+`data.snapshot_version` 同步提升为 2；v1 客户端或服务端会显式报告版本不支持，不会
+猜测或静默误读扩展字段。JSON 根信封的通用 `schema_version` 仍为 1。
+
+Runtime Provider 对 v2 使用封闭字段集合，严格检查根信封、命令名、字段类型、数值
 范围、固定枚举、流量类别顺序，以及响应中的节点/资源 ID 是否与请求相符。未知版本、
 缺失或多余字段、非 UTF-8、超过 1 MiB、超时或非零退出均显式失败。版本升级应新增
-解析器并经过明确协商，不能让 v1 解析器猜测新字段语义。
+解析器并经过明确协商，不能让旧版解析器猜测新字段语义。
 
 ## HTTP 契约
 
@@ -264,6 +269,16 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 “刚刚在线”。Provider 还会在任何资源查询前拒绝重复的 numeric node ID 或 UUID，
 防止同一路由被重复展开并产生互相矛盾的状态。
 
+Toolbusd Provider 把 v2 时钟记录放入每个节点的 `runtime.clock_sync`。字段包括
+`boot_epoch`、`model_generation`、`state`、总样本数、入选拟合样本数、频率偏差
+`rate_deviation_ppb`、漂移不确定度、最小网络 RTT、当前误差上界、样本年龄和最后样本
+主机单调时间。`source_available=false,state="unknown"` 表示显式旧文本路径没有该观测
+能力；v2 中尚未注册模型使用 `registered=false,state="unregistered"`；已注册但尚无有效
+拟合使用 `estimate_valid=false,state="unsynced"`，所有估计量为 `null`。`unsynced` 也可
+表示一个曾有效但已经过期的估计，此时 `estimate_valid=true` 且保留可审计数值，但不能
+据此准入跨板运动。这些数值来自主机模型及软件时间戳，只是估计和保守上界，不代表
+硬件时间戳精度、MCU 晶振规格或实体 CAN/CAN-FD 链路的实测精度。
+
 ## 写命令与事件流的预留原则
 
 后续写 API 不应直接复用只读快照端点。建议采用 `/api/v1/commands` 或作业资源，
@@ -283,7 +298,7 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 4. Web UI 静态文件由 Runtime、反向代理还是独立服务托管。
 
 当前适配器为保持边界清晰而复用 `remote-cli` 的版本化 JSON 输出。短时缓存、单飞刷新
-和 `RuntimeSnapshot IPC v1` 已把一次真正刷新收敛为一个 `remote-cli` 进程和一次本地
+和 `RuntimeSnapshot IPC v2` 已把一次真正刷新收敛为一个 `remote-cli` 进程和一次本地
 套接字请求。toolbusd 内部的远端资源读取仍是受总资源数和总时间限制的逐项请求；未来可
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。

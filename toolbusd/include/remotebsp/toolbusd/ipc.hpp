@@ -3,6 +3,7 @@
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
+#include "remotebsp/toolbusd/clock_model.hpp"
 
 #include <cstdint>
 #include <array>
@@ -27,7 +28,7 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeSnapshot = 5,
 };
 
-constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 1U;
+constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 2U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
 
@@ -79,6 +80,23 @@ struct IpcRuntimeNodeIssue {
     IpcRuntimeNodeError error{IpcRuntimeNodeError::ResourceInventoryUnavailable};
 };
 
+struct IpcRuntimeClockQuality {
+    std::uint32_t node_id{};
+    bool registered{};
+    bool estimate_valid{};
+    ClockSyncState state{ClockSyncState::Unsynced};
+    std::uint64_t boot_epoch{};
+    std::uint64_t model_generation{};
+    std::uint16_t sample_count{};
+    std::uint16_t selected_sample_count{};
+    std::uint32_t drift_uncertainty_ppm{};
+    std::int32_t rate_deviation_ppb{};
+    std::uint64_t minimum_network_rtt_ns{};
+    std::uint64_t error_bound_ns{};
+    std::uint64_t sample_age_ns{};
+    std::uint64_t last_sample_host_time_ns{};
+};
+
 struct IpcRuntimeSnapshot {
     std::uint16_t version{kRuntimeSnapshotIpcVersion};
     std::uint64_t sequence{};
@@ -86,6 +104,7 @@ struct IpcRuntimeSnapshot {
     TrafficSnapshot traffic;
     std::vector<IpcRuntimeResource> resources;
     std::vector<IpcRuntimeNodeIssue> node_issues;
+    std::vector<IpcRuntimeClockQuality> clocks;
 };
 
 class IpcException : public std::runtime_error {

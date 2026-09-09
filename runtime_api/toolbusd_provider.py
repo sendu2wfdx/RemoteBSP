@@ -128,6 +128,13 @@ def _json_integer(value: object, name: str, *, minimum: int = 0,
     return value
 
 
+def _json_nullable_integer(value: object, name: str, *, minimum: int = 0,
+                           maximum: int = 0xFFFFFFFF) -> int | None:
+    if value is None:
+        return None
+    return _json_integer(value, name, minimum=minimum, maximum=maximum)
+
+
 def _json_string(value: object, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ToolbusIpcProtocolError(f"{name}必须是非空JSON字符串")
@@ -416,12 +423,12 @@ class RemoteCliIpcClient:
         data = RemoteCliIpcClient._document(output, "runtime-snapshot")
         _exact_fields(data, {
             "snapshot_version", "snapshot_sequence", "traffic", "nodes",
-            "resources", "node_issues",
+            "resources", "node_issues", "clocks",
         }, "runtime-snapshot.data")
         version = _json_integer(
             data["snapshot_version"], "runtime-snapshot.snapshot_version",
             minimum=1, maximum=0xFFFF)
-        if version != 1:
+        if version != 2:
             raise ToolbusIpcProtocolError(
                 f"runtime-snapshot版本不受支持：{version}")
         sequence = _json_integer(
@@ -498,9 +505,117 @@ class RemoteCliIpcClient:
                     "runtime-snapshot节点错误项重复或引用未知节点")
             issue_nodes.add(node_id)
             issues.append({"node_id": node_id, "code": code})
+
+        raw_clocks = _json_array(
+            data["clocks"], "runtime-snapshot.clocks")
+        if len(raw_clocks) != len(nodes):
+            raise ToolbusIpcProtocolError(
+                "runtime-snapshot时钟质量项必须与节点一一对应")
+        clocks = []
+        clock_nodes: set[int] = set()
+        nullable_unsigned = (
+            "minimum_network_rtt_ns", "error_bound_ns", "sample_age_ns",
+            "last_sample_host_time_ns")
+        for index, raw in enumerate(raw_clocks):
+            field_name = f"runtime-snapshot.clocks[{index}]"
+            item = _json_object(raw, field_name)
+            _exact_fields(item, {
+                "node_id", "registered", "estimate_valid", "state",
+                "boot_epoch", "model_generation", "sample_count",
+                "selected_sample_count", "rate_deviation_ppb",
+                "drift_uncertainty_ppm", "minimum_network_rtt_ns",
+                "error_bound_ns", "sample_age_ns",
+                "last_sample_host_time_ns",
+            }, field_name)
+            node_id = _json_integer(
+                item["node_id"], field_name + ".node_id",
+                minimum=1, maximum=127)
+            if node_id not in node_ids or node_id in clock_nodes:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot时钟质量项重复或引用未知节点")
+            clock_nodes.add(node_id)
+            registered = _json_boolean(
+                item["registered"], field_name + ".registered")
+            estimate_valid = _json_boolean(
+                item["estimate_valid"], field_name + ".estimate_valid")
+            state = _json_string(item["state"], field_name + ".state")
+            if state not in {"unregistered", "unsynced", "synced",
+                             "degraded"}:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot时钟同步状态未知")
+            boot_epoch = _json_nullable_integer(
+                item["boot_epoch"], field_name + ".boot_epoch",
+                minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+            model_generation = _json_nullable_integer(
+                item["model_generation"], field_name + ".model_generation",
+                minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+            sample_count = _json_integer(
+                item["sample_count"], field_name + ".sample_count",
+                maximum=0xFFFF)
+            selected_sample_count = _json_integer(
+                item["selected_sample_count"],
+                field_name + ".selected_sample_count", maximum=0xFFFF)
+            if selected_sample_count > sample_count:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot时钟入选样本数超过总样本数")
+            rate_deviation_ppb = _json_nullable_integer(
+                item["rate_deviation_ppb"],
+                field_name + ".rate_deviation_ppb",
+                minimum=-0x80000000, maximum=0x7FFFFFFF)
+            drift_uncertainty_ppm = _json_nullable_integer(
+                item["drift_uncertainty_ppm"],
+                field_name + ".drift_uncertainty_ppm",
+                maximum=0xFFFFFFFF)
+            nullable_values = {
+                name: _json_nullable_integer(
+                    item[name], field_name + "." + name,
+                    maximum=0xFFFFFFFFFFFFFFFF)
+                for name in nullable_unsigned
+            }
+            quantitative_values = [
+                rate_deviation_ppb, drift_uncertainty_ppm,
+                *nullable_values.values()]
+            if not registered:
+                if state != "unregistered" or estimate_valid or \
+                        boot_epoch is not None or \
+                        model_generation is not None or sample_count != 0 or \
+                        selected_sample_count != 0 or \
+                        any(value is not None for value in quantitative_values):
+                    raise ToolbusIpcProtocolError(
+                        "runtime-snapshot未注册时钟字段不一致")
+            else:
+                if state == "unregistered" or boot_epoch is None or \
+                        model_generation is None:
+                    raise ToolbusIpcProtocolError(
+                        "runtime-snapshot已注册时钟字段不完整")
+                if not estimate_valid and (
+                        state != "unsynced" or
+                        any(value is not None
+                            for value in quantitative_values)):
+                    raise ToolbusIpcProtocolError(
+                        "runtime-snapshot未知时钟估计字段不一致")
+                if estimate_valid and any(
+                        value is None for value in quantitative_values):
+                    raise ToolbusIpcProtocolError(
+                        "runtime-snapshot有效时钟估计字段不完整")
+                if state in {"synced", "degraded"} and not estimate_valid:
+                    raise ToolbusIpcProtocolError(
+                        "runtime-snapshot时钟同步状态与估计有效性不一致")
+            clocks.append({
+                "node_id": node_id, "registered": registered,
+                "estimate_valid": estimate_valid, "state": state,
+                "boot_epoch": boot_epoch,
+                "model_generation": model_generation,
+                "sample_count": sample_count,
+                "selected_sample_count": selected_sample_count,
+                "rate_deviation_ppb": rate_deviation_ppb,
+                "drift_uncertainty_ppm": drift_uncertainty_ppm,
+                **nullable_values,
+            })
         return {
             "version": version, "sequence": sequence, "traffic": traffic,
             "nodes": nodes, "resources": resources, "node_issues": issues,
+            "clocks": clocks,
         }
 
     def traffic_status(self) -> dict:
@@ -857,6 +972,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         captured_at_ms = self._clock_value()
         source_client: ToolbusIpcClient = self.client
         source_sequence: int | None = None
+        source_clocks: dict[int, dict] = {}
         snapshot_reader = getattr(self.client, "runtime_snapshot", None)
         structured_output = getattr(self.client, "structured_output", True)
         if callable(snapshot_reader) and structured_output:
@@ -871,6 +987,10 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     f"toolbusd IPC不可用：{error}") from error
             source_client = _RuntimeSnapshotView(source)
             source_sequence = int(source["sequence"])
+            source_clocks = {
+                int(clock["node_id"]): copy.deepcopy(clock)
+                for clock in source["clocks"]
+            }
             captured_at_ms = self._clock_value()
         try:
             traffic = source_client.traffic_status()
@@ -997,6 +1117,28 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                             captured_at_ms, resource_id=resource_id,
                             severity=severity))
             firmware = tuple(source_node["firmware"])
+            clock_quality = source_clocks.get(numeric_id)
+            if clock_quality is None:
+                clock_runtime = {
+                    "source_available": False,
+                    "registered": None,
+                    "estimate_valid": False,
+                    "state": "unknown",
+                    "boot_epoch": None,
+                    "model_generation": None,
+                    "sample_count": 0,
+                    "selected_sample_count": 0,
+                    "rate_deviation_ppb": None,
+                    "drift_uncertainty_ppm": None,
+                    "minimum_network_rtt_ns": None,
+                    "error_bound_ns": None,
+                    "sample_age_ns": None,
+                    "last_sample_host_time_ns": None,
+                }
+            else:
+                clock_runtime = copy.deepcopy(clock_quality)
+                clock_runtime.pop("node_id", None)
+                clock_runtime["source_available"] = True
             nodes.append({
                 "node_id": node_id,
                 "board_type": f"board-0x{int(source_node['board_type']):08x}",
@@ -1017,6 +1159,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                                                  for part in firmware),
                     "protocol_version": int(source_node["protocol_version"]),
                     "resource_inventory_error": runtime_error,
+                    "clock_sync": clock_runtime,
                     "traffic": traffic,
                 },
             })

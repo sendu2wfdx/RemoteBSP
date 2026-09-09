@@ -57,6 +57,12 @@ struct HostToNodeTimeResult {
     std::optional<std::uint64_t> model_generation;
 };
 
+struct NodeClockQuality {
+    std::uint64_t boot_epoch{};
+    std::uint64_t model_generation{};
+    ClockEstimate estimate;
+};
+
 struct NodeRecord {
     protocol::NodeIdentity identity;
     std::uint32_t node_id{};
@@ -110,6 +116,8 @@ public:
         std::uint32_t node_id) const noexcept;
     std::optional<std::uint64_t> clock_model_generation(
         std::uint32_t node_id) const noexcept;
+    std::optional<NodeClockQuality> clock_quality(
+        std::uint32_t node_id, std::uint64_t host_now_ns) const;
     std::size_t clock_model_count() const noexcept;
 
     const NodeRecord* find(const protocol::NodeUuid& uuid) const noexcept;

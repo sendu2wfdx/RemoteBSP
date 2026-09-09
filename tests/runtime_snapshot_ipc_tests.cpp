@@ -39,6 +39,9 @@ toolbusd::IpcRuntimeSnapshot make_snapshot() {
     });
     snapshot.node_issues.push_back(
         {3U, toolbusd::IpcRuntimeNodeError::ResourceInventoryUnavailable});
+    snapshot.clocks.push_back({
+        3U, true, true, toolbusd::ClockSyncState::Synced,
+        11U, 7U, 8U, 6U, 25U, -80, 100U, 200U, 300U, 400U});
     return snapshot;
 }
 
@@ -67,6 +70,14 @@ void test_snapshot_round_trip_and_strict_flags() {
     assert(decoded.resources[0].descriptor.resource_id == 0x02000001U);
     assert(decoded.resources[0].status.rx_overruns == 4U);
     assert(decoded.node_issues.size() == 1U);
+    assert(decoded.clocks.size() == 1U);
+    assert(decoded.clocks[0].registered);
+    assert(decoded.clocks[0].estimate_valid);
+    assert(decoded.clocks[0].state == toolbusd::ClockSyncState::Synced);
+    assert(decoded.clocks[0].boot_epoch == 11U);
+    assert(decoded.clocks[0].model_generation == 7U);
+    assert(decoded.clocks[0].rate_deviation_ppb == -80);
+    assert(decoded.clocks[0].error_bound_ns == 200U);
 
     auto invalid = encoded;
     constexpr std::size_t header_size = 28U;
@@ -75,6 +86,27 @@ void test_snapshot_round_trip_and_strict_flags() {
     invalid[header_size + node_body_size + traffic_body_size + 4U] = 2U;
     try {
         static_cast<void>(toolbusd::decode_ipc_runtime_snapshot(invalid));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+
+    constexpr std::size_t resources_size = 2U * 50U;
+    constexpr std::size_t issue_size = 8U;
+    constexpr std::size_t clock_offset = header_size + node_body_size +
+        traffic_body_size + resources_size + issue_size;
+    auto invalid_clock = encoded;
+    invalid_clock[clock_offset + 4U] = 0x80U;
+    try {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_snapshot(invalid_clock));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+
+    auto old_version = encoded;
+    old_version[0] = 1U;
+    try {
+        static_cast<void>(toolbusd::decode_ipc_runtime_snapshot(old_version));
         assert(false);
     } catch (const toolbusd::IpcException&) {
     }
@@ -91,6 +123,20 @@ void test_invalid_limits_and_duplicates() {
     try {
         auto snapshot = make_snapshot();
         snapshot.resources.push_back(snapshot.resources.front());
+        static_cast<void>(toolbusd::encode_ipc_runtime_snapshot(snapshot));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    try {
+        auto snapshot = make_snapshot();
+        snapshot.clocks.clear();
+        static_cast<void>(toolbusd::encode_ipc_runtime_snapshot(snapshot));
+        assert(false);
+    } catch (const toolbusd::IpcException&) {
+    }
+    try {
+        auto snapshot = make_snapshot();
+        snapshot.clocks[0].estimate_valid = false;
         static_cast<void>(toolbusd::encode_ipc_runtime_snapshot(snapshot));
         assert(false);
     } catch (const toolbusd::IpcException&) {

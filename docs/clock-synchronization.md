@@ -192,6 +192,32 @@ current_error_bound = base_error_bound
 - 运行停止阈值可稍宽，但一旦越界只能在共同安全边界停止或立即进入组安全状态，
   不能在运行中突跳已提交段的本地 tick。
 
+## 只读质量观测
+
+`RuntimeSnapshot IPC v2` 会在单次本地快照中为每个已发现节点返回一条有界、固定长度
+的时钟质量记录，`remote-cli --json runtime-snapshot` 原样转成封闭 JSON 字段，Runtime
+API 再放入节点的 `runtime.clock_sync`。记录与同一快照的节点 ID 一一对应，重复、缺失、
+悬空引用、未知枚举、非法空值组合或样本数关系错误都会使整份快照显式失败。
+
+可观测字段包括：
+
+- `boot_epoch` 与 `model_generation`，分别标识节点启动代次和主机模型代次；
+- `state`、`sample_count` 与 `selected_sample_count`；
+- 有效估计的 `rate_deviation_ppb`、`drift_uncertainty_ppm`、
+  `minimum_network_rtt_ns`、`error_bound_ns`、`sample_age_ns` 和
+  `last_sample_host_time_ns`。
+
+模型尚未注册时明确报告 `registered=false,state=unregistered`，epoch、代次与估计量为
+`null`；已注册但样本不足或拟合无效时报告 `estimate_valid=false,state=unsynced`，只保留
+样本计数，所有估计量为 `null`。已经建立但因年龄过期的模型仍是有效的历史估计，报告
+`estimate_valid=true,state=unsynced` 并保留数值，调用者仍不得用它做运动准入。显式旧文本
+CLI 不调用 v2 快照，Runtime 使用 `source_available=false,state=unknown` 表示能力未知，
+不会把“未观测”伪装成“未注册”。
+
+频率偏差在线格式中以有符号 ppb 整数表达，避免跨语言浮点歧义；它由主机拟合结果四舍
+五入得出。误差、漂移和 RTT 都是当前软件模型基于主机单调时钟与协议收发边界计算的估计
+或保守上界，不是硬件时间戳精度，也不是实体板卡、晶振或总线的实测规格。
+
 ## 确定性与限制
 
 - 相同配置和相同样本顺序得到相同的选择、拟合和状态结果；
@@ -235,8 +261,8 @@ current_error_bound = base_error_bound
 时钟算法、同步协议、Mock BSP、`toolbusd` 周期闭环和节点生命周期已经接入 CMake
 测试体系。后续仍需要：
 
-1. 为周期、容量、采样质量和拒绝原因增加正式配置与只读运行时观测；当前使用主机侧
-   固定安全默认值，同步结果尚未暴露到 IPC 或监控指标；
+1. 为周期、容量和拒绝原因增加正式配置与更细监控指标；当前质量快照已经只读暴露，
+   但调度参数仍使用主机侧固定安全默认值；
 2. 实体固件提供稳定自由运行计数器的 BSP 锁存点和可靠 `boot_epoch`，并通过统一硬件
    环境验证 CAN/CAN-FD 排队、不对称延迟、晶振和计数器回绕；
 3. 独立运动组协调器已经只接受 `host_to_node_time()` 的成功结果，并冻结所有成员的

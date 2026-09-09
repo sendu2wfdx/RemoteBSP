@@ -128,6 +128,14 @@ void test_registration_sampling_and_gate() {
           toolbusd::NodeClockRegistrationResult::AlreadyRegistered);
     CHECK(registry.clock_model_count() == 1U);
     CHECK(registry.clock_boot_epoch(21U) == 9U);
+    const auto initial_quality = registry.clock_quality(21U, 1000000000ULL);
+    CHECK(initial_quality.has_value());
+    CHECK(initial_quality->boot_epoch == 9U);
+    CHECK(initial_quality->model_generation != 0U);
+    CHECK(!initial_quality->estimate.valid);
+    CHECK(initial_quality->estimate.state ==
+          toolbusd::ClockSyncState::Unsynced);
+    CHECK(initial_quality->estimate.sample_count == 0U);
 
     const auto before_training = registry.host_to_node_time(
         21U, 9U, 1000000000ULL, 1000000000ULL, 200000ULL);
@@ -142,6 +150,14 @@ void test_registration_sampling_and_gate() {
     CHECK(duplicate.sample_result ==
           toolbusd::ClockSampleResult::HostTimeWentBackwards);
     constexpr std::uint64_t last_receive_ns = 1010220000ULL;
+    const auto quality = registry.clock_quality(
+        21U, last_receive_ns + 1000000ULL);
+    CHECK(quality.has_value());
+    CHECK(quality->boot_epoch == 9U);
+    CHECK(quality->model_generation != initial_quality->model_generation);
+    CHECK(quality->estimate.valid);
+    CHECK(quality->estimate.sample_count == 6U);
+    CHECK(quality->estimate.selected_sample_count == 4U);
     const auto estimate =
         registry.clock_estimate(21U, 9U, last_receive_ns + 1000000ULL);
     CHECK(estimate.has_value());
@@ -205,6 +221,7 @@ void test_epoch_isolation_and_lifecycle_reset() {
           1U);
     CHECK(registry.clock_model_count() == 0U);
     CHECK(!registry.clock_estimate(7U, 102U, 1011000000ULL).has_value());
+    CHECK(!registry.clock_quality(7U, 1011000000ULL).has_value());
 }
 
 void test_bounded_capacity_and_node_id_ownership() {

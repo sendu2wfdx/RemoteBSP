@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -657,6 +658,16 @@ private:
         std::vector<remotebsp::toolbusd::IpcNodeInfo> final_nodes;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto host_now_count =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            if (host_now_count < 0) {
+                throw std::runtime_error(
+                    "主机单调时钟不能转换为 Runtime 快照时间");
+            }
+            const auto host_now_ns =
+                static_cast<std::uint64_t>(host_now_count);
             for (const auto& node : nodes_.records()) {
                 final_nodes.push_back(
                     {node.identity.uuid, node.node_id, node.online,
@@ -665,6 +676,54 @@ private:
                      node.identity.firmware_patch,
                      node.identity.board_type,
                      node.identity.protocol_version});
+                remotebsp::toolbusd::IpcRuntimeClockQuality clock;
+                clock.node_id = node.node_id;
+                const auto quality =
+                    nodes_.clock_quality(node.node_id, host_now_ns);
+                if (quality.has_value()) {
+                    if (quality->estimate.sample_count >
+                            std::numeric_limits<std::uint16_t>::max() ||
+                        quality->estimate.selected_sample_count >
+                            std::numeric_limits<std::uint16_t>::max()) {
+                        throw std::runtime_error(
+                            "Runtime 快照时钟样本数量超过 IPC 上限");
+                    }
+                    clock.registered = true;
+                    clock.estimate_valid = quality->estimate.valid;
+                    clock.state = quality->estimate.state;
+                    clock.boot_epoch = quality->boot_epoch;
+                    clock.model_generation = quality->model_generation;
+                    clock.sample_count = static_cast<std::uint16_t>(
+                        quality->estimate.sample_count);
+                    clock.selected_sample_count =
+                        static_cast<std::uint16_t>(
+                            quality->estimate.selected_sample_count);
+                    if (quality->estimate.valid) {
+                        const auto rate_ppb = std::round(
+                            quality->estimate.rate_deviation_ppm * 1000.0L);
+                        if (!std::isfinite(rate_ppb) ||
+                            rate_ppb < static_cast<long double>(
+                                std::numeric_limits<std::int32_t>::min()) ||
+                            rate_ppb > static_cast<long double>(
+                                std::numeric_limits<std::int32_t>::max())) {
+                            throw std::runtime_error(
+                                "Runtime 快照时钟漂移超过 IPC 上限");
+                        }
+                        clock.rate_deviation_ppb =
+                            static_cast<std::int32_t>(rate_ppb);
+                        clock.drift_uncertainty_ppm =
+                            quality->estimate.drift_uncertainty_ppm;
+                        clock.minimum_network_rtt_ns =
+                            quality->estimate.minimum_network_rtt_ns;
+                        clock.error_bound_ns =
+                            quality->estimate.error_bound_ns;
+                        clock.sample_age_ns =
+                            quality->estimate.sample_age_ns;
+                        clock.last_sample_host_time_ns =
+                            quality->estimate.last_sample_host_time_ns;
+                    }
+                }
+                snapshot.clocks.push_back(clock);
             }
         }
         const auto same_node = [](const auto& left, const auto& right) {

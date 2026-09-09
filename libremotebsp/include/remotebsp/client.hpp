@@ -86,6 +86,29 @@ struct RuntimeNodeIssue {
     std::uint8_t code{};
 };
 
+enum class RuntimeClockState : std::uint8_t {
+    Unsynced = 0U,
+    Synced = 1U,
+    Degraded = 2U,
+};
+
+struct RuntimeClockQuality {
+    std::uint32_t node_id{};
+    bool registered{};
+    bool estimate_valid{};
+    RuntimeClockState state{RuntimeClockState::Unsynced};
+    std::uint64_t boot_epoch{};
+    std::uint64_t model_generation{};
+    std::uint16_t sample_count{};
+    std::uint16_t selected_sample_count{};
+    std::uint32_t drift_uncertainty_ppm{};
+    std::int32_t rate_deviation_ppb{};
+    std::uint64_t minimum_network_rtt_ns{};
+    std::uint64_t error_bound_ns{};
+    std::uint64_t sample_age_ns{};
+    std::uint64_t last_sample_host_time_ns{};
+};
+
 struct RuntimeSnapshot {
     std::uint16_t version{};
     std::uint64_t sequence{};
@@ -93,6 +116,7 @@ struct RuntimeSnapshot {
     CanTrafficStatus traffic;
     std::vector<RuntimeResourceSnapshot> resources;
     std::vector<RuntimeNodeIssue> node_issues;
+    std::vector<RuntimeClockQuality> clocks;
 };
 
 enum class GpioDirection : std::uint8_t {

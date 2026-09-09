@@ -90,11 +90,25 @@ value = json.load(sys.stdin)
 assert value["schema_version"] == 1
 assert value["command"] == "runtime-snapshot"
 data = value["data"]
-assert data["snapshot_version"] == 1
+assert data["snapshot_version"] == 2
 assert data["snapshot_sequence"] > 0
 assert len(data["nodes"]) == 1
 assert len(data["resources"]) == 30
 assert all(item["status_valid"] for item in data["resources"])
+assert len(data["clocks"]) == 1
+clock = data["clocks"][0]
+assert clock["node_id"] == data["nodes"][0]["node_id"]
+assert clock["state"] in {"unregistered", "unsynced", "synced", "degraded"}
+if clock["registered"]:
+    assert clock["boot_epoch"] > 0
+    assert clock["model_generation"] > 0
+else:
+    assert clock["state"] == "unregistered"
+    assert clock["boot_epoch"] is None
+    assert clock["model_generation"] is None
+if not clock["estimate_valid"]:
+    assert clock["rate_deviation_ppb"] is None
+    assert clock["error_bound_ns"] is None
 ' <<<"$runtime_snapshot_output"
 
 # 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。

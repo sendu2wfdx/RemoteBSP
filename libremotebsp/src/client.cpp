@@ -350,6 +350,17 @@ RuntimeSnapshot Client::runtime_snapshot(
         result.node_issues.push_back(
             {issue.node_id, static_cast<std::uint8_t>(issue.error)});
     }
+    result.clocks.reserve(source.clocks.size());
+    for (const auto& clock : source.clocks) {
+        result.clocks.push_back({
+            clock.node_id, clock.registered, clock.estimate_valid,
+            static_cast<RuntimeClockState>(clock.state), clock.boot_epoch,
+            clock.model_generation, clock.sample_count,
+            clock.selected_sample_count, clock.drift_uncertainty_ppm,
+            clock.rate_deviation_ppb, clock.minimum_network_rtt_ns,
+            clock.error_bound_ns, clock.sample_age_ns,
+            clock.last_sample_host_time_ns});
+    }
     return result;
 }
 

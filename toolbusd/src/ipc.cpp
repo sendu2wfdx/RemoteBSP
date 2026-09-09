@@ -18,6 +18,7 @@ constexpr std::size_t kTrafficClassCounterSize = 32;
 constexpr std::size_t kRuntimeSnapshotHeaderSize = 28U;
 constexpr std::size_t kRuntimeResourceSize = 50U;
 constexpr std::size_t kRuntimeNodeIssueSize = 8U;
+constexpr std::size_t kRuntimeClockQualitySize = 68U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -36,6 +37,10 @@ void append_u64(std::vector<std::uint8_t>& output, std::uint64_t value) {
         output.push_back(
             static_cast<std::uint8_t>(value >> (index * 8U)));
     }
+}
+
+void append_i32(std::vector<std::uint8_t>& output, std::int32_t value) {
+    append_u32(output, static_cast<std::uint32_t>(value));
 }
 
 void put_u32(std::uint8_t* output, std::uint32_t value) {
@@ -65,6 +70,16 @@ std::uint64_t get_u64(const std::uint8_t* input) {
                  << (index * 8U);
     }
     return value;
+}
+
+std::int32_t get_i32(const std::uint8_t* input) {
+    const auto value = get_u32(input);
+    if (value <= static_cast<std::uint32_t>(
+                     std::numeric_limits<std::int32_t>::max())) {
+        return static_cast<std::int32_t>(value);
+    }
+    return static_cast<std::int32_t>(
+        static_cast<std::int64_t>(value) - (1LL << 32U));
 }
 
 void send_all(int socket, const std::uint8_t* data, std::size_t size) {
@@ -460,7 +475,8 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
     if (snapshot.version != kRuntimeSnapshotIpcVersion ||
         snapshot.sequence == 0U || snapshot.nodes.size() > 127U ||
         snapshot.resources.size() > kMaximumRuntimeSnapshotResources ||
-        snapshot.node_issues.size() > 127U) {
+        snapshot.node_issues.size() > 127U ||
+        snapshot.clocks.size() != snapshot.nodes.size()) {
         throw IpcException("Runtime 快照版本、序号或条目数量无效");
     }
     const auto node_body = encode_ipc_node_list(snapshot.nodes);
@@ -479,18 +495,20 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         node_body.size() + traffic_body.size() +
         snapshot.resources.size() * kRuntimeResourceSize +
         snapshot.node_issues.size() * kRuntimeNodeIssueSize;
-    if (expected_size > kMaximumIpcBodySize) {
+    const auto total_size = expected_size +
+        snapshot.clocks.size() * kRuntimeClockQualitySize;
+    if (total_size > kMaximumIpcBodySize) {
         throw IpcException("Runtime 快照超过本地 IPC 字节上限");
     }
     std::vector<std::uint8_t> body;
-    body.reserve(expected_size);
+    body.reserve(total_size);
     append_u16(body, snapshot.version);
     append_u16(body, 0U);
     append_u64(body, snapshot.sequence);
     append_u16(body, static_cast<std::uint16_t>(snapshot.nodes.size()));
     append_u16(body, static_cast<std::uint16_t>(snapshot.resources.size()));
     append_u16(body, static_cast<std::uint16_t>(snapshot.node_issues.size()));
-    append_u16(body, 0U);
+    append_u16(body, static_cast<std::uint16_t>(snapshot.clocks.size()));
     append_u32(body, static_cast<std::uint32_t>(node_body.size()));
     append_u32(body, static_cast<std::uint32_t>(traffic_body.size()));
     body.insert(body.end(), node_body.begin(), node_body.end());
@@ -538,6 +556,58 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         body.push_back(0U);
         append_u16(body, 0U);
     }
+    std::vector<std::uint32_t> clock_nodes;
+    clock_nodes.reserve(snapshot.clocks.size());
+    for (const auto& clock : snapshot.clocks) {
+        const auto state = static_cast<std::uint8_t>(clock.state);
+        const bool node_known =
+            std::find(node_ids.begin(), node_ids.end(), clock.node_id) !=
+            node_ids.end();
+        const bool duplicate =
+            std::find(clock_nodes.begin(), clock_nodes.end(), clock.node_id) !=
+            clock_nodes.end();
+        const bool invalid_unregistered = !clock.registered &&
+            (clock.estimate_valid || clock.state != ClockSyncState::Unsynced ||
+             clock.boot_epoch != 0U || clock.model_generation != 0U ||
+             clock.sample_count != 0U || clock.selected_sample_count != 0U ||
+             clock.drift_uncertainty_ppm != 0U ||
+             clock.rate_deviation_ppb != 0 ||
+             clock.minimum_network_rtt_ns != 0U ||
+             clock.error_bound_ns != 0U || clock.sample_age_ns != 0U ||
+             clock.last_sample_host_time_ns != 0U);
+        const bool invalid_unknown_estimate = !clock.estimate_valid &&
+            (clock.drift_uncertainty_ppm != 0U ||
+             clock.rate_deviation_ppb != 0 ||
+             clock.minimum_network_rtt_ns != 0U ||
+             clock.error_bound_ns != 0U || clock.sample_age_ns != 0U ||
+             clock.last_sample_host_time_ns != 0U);
+        if (!node_known || duplicate || state >
+                static_cast<std::uint8_t>(ClockSyncState::Degraded) ||
+            (clock.registered &&
+             (clock.boot_epoch == 0U || clock.model_generation == 0U)) ||
+            clock.selected_sample_count > clock.sample_count ||
+            (!clock.estimate_valid && clock.state != ClockSyncState::Unsynced) ||
+            invalid_unknown_estimate || invalid_unregistered) {
+            throw IpcException("Runtime 快照时钟质量字段无效");
+        }
+        clock_nodes.push_back(clock.node_id);
+        append_u32(body, clock.node_id);
+        body.push_back(static_cast<std::uint8_t>(
+            (clock.registered ? 1U : 0U) |
+            (clock.estimate_valid ? 2U : 0U)));
+        body.push_back(state);
+        append_u16(body, 0U);
+        append_u64(body, clock.boot_epoch);
+        append_u64(body, clock.model_generation);
+        append_u16(body, clock.sample_count);
+        append_u16(body, clock.selected_sample_count);
+        append_u32(body, clock.drift_uncertainty_ppm);
+        append_i32(body, clock.rate_deviation_ppb);
+        append_u64(body, clock.minimum_network_rtt_ns);
+        append_u64(body, clock.error_bound_ns);
+        append_u64(body, clock.sample_age_ns);
+        append_u64(body, clock.last_sample_host_time_ns);
+    }
     return body;
 }
 
@@ -554,19 +624,19 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
     const auto node_count = get_u16(body.data() + 12U);
     const auto resource_count = get_u16(body.data() + 14U);
     const auto node_issue_count = get_u16(body.data() + 16U);
-    if (get_u16(body.data() + 18U) != 0U) {
-        throw IpcException("Runtime 快照响应保留字段非零");
-    }
+    const auto clock_count = get_u16(body.data() + 18U);
     const std::size_t node_size = get_u32(body.data() + 20U);
     const std::size_t traffic_size = get_u32(body.data() + 24U);
     const auto expected_size = kRuntimeSnapshotHeaderSize + node_size +
         traffic_size + static_cast<std::size_t>(resource_count) *
                            kRuntimeResourceSize +
         static_cast<std::size_t>(node_issue_count) * kRuntimeNodeIssueSize;
+    const auto total_size = expected_size +
+        static_cast<std::size_t>(clock_count) * kRuntimeClockQualitySize;
     if (snapshot.sequence == 0U || node_count > 127U ||
         resource_count > kMaximumRuntimeSnapshotResources ||
-        node_issue_count > 127U ||
-        expected_size != body.size()) {
+        node_issue_count > 127U || clock_count != node_count ||
+        total_size != body.size()) {
         throw IpcException("Runtime 快照响应长度或条目数量无效");
     }
     auto cursor = body.begin() +
@@ -646,6 +716,64 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
         snapshot.node_issues.push_back({node_id, error});
         issue_nodes.push_back(node_id);
         cursor += static_cast<std::ptrdiff_t>(kRuntimeNodeIssueSize);
+    }
+    snapshot.clocks.reserve(clock_count);
+    std::vector<std::uint32_t> clock_nodes;
+    for (std::size_t index = 0U; index < clock_count; ++index) {
+        IpcRuntimeClockQuality clock;
+        clock.node_id = get_u32(&*cursor);
+        const auto flags = cursor[4];
+        const auto state = cursor[5];
+        if ((flags & 0xFCU) != 0U || state >
+                static_cast<std::uint8_t>(ClockSyncState::Degraded) ||
+            get_u16(&cursor[6]) != 0U) {
+            throw IpcException("Runtime 快照时钟质量标志无效");
+        }
+        clock.registered = (flags & 1U) != 0U;
+        clock.estimate_valid = (flags & 2U) != 0U;
+        clock.state = static_cast<ClockSyncState>(state);
+        clock.boot_epoch = get_u64(&cursor[8]);
+        clock.model_generation = get_u64(&cursor[16]);
+        clock.sample_count = get_u16(&cursor[24]);
+        clock.selected_sample_count = get_u16(&cursor[26]);
+        clock.drift_uncertainty_ppm = get_u32(&cursor[28]);
+        clock.rate_deviation_ppb = get_i32(&cursor[32]);
+        clock.minimum_network_rtt_ns = get_u64(&cursor[36]);
+        clock.error_bound_ns = get_u64(&cursor[44]);
+        clock.sample_age_ns = get_u64(&cursor[52]);
+        clock.last_sample_host_time_ns = get_u64(&cursor[60]);
+        const bool node_known =
+            std::find(node_ids.begin(), node_ids.end(), clock.node_id) !=
+            node_ids.end();
+        const bool duplicate = std::find(
+            clock_nodes.begin(), clock_nodes.end(), clock.node_id) !=
+            clock_nodes.end();
+        const bool invalid_unregistered = !clock.registered &&
+            (clock.estimate_valid || clock.state != ClockSyncState::Unsynced ||
+             clock.boot_epoch != 0U || clock.model_generation != 0U ||
+             clock.sample_count != 0U || clock.selected_sample_count != 0U ||
+             clock.drift_uncertainty_ppm != 0U ||
+             clock.rate_deviation_ppb != 0 ||
+             clock.minimum_network_rtt_ns != 0U ||
+             clock.error_bound_ns != 0U || clock.sample_age_ns != 0U ||
+             clock.last_sample_host_time_ns != 0U);
+        const bool invalid_unknown_estimate = !clock.estimate_valid &&
+            (clock.drift_uncertainty_ppm != 0U ||
+             clock.rate_deviation_ppb != 0 ||
+             clock.minimum_network_rtt_ns != 0U ||
+             clock.error_bound_ns != 0U || clock.sample_age_ns != 0U ||
+             clock.last_sample_host_time_ns != 0U);
+        if (!node_known || duplicate ||
+            (clock.registered &&
+             (clock.boot_epoch == 0U || clock.model_generation == 0U)) ||
+            clock.selected_sample_count > clock.sample_count ||
+            (!clock.estimate_valid && clock.state != ClockSyncState::Unsynced) ||
+            invalid_unknown_estimate || invalid_unregistered) {
+            throw IpcException("Runtime 快照时钟质量字段无效");
+        }
+        clock_nodes.push_back(clock.node_id);
+        snapshot.clocks.push_back(clock);
+        cursor += static_cast<std::ptrdiff_t>(kRuntimeClockQualitySize);
     }
     return snapshot;
 }

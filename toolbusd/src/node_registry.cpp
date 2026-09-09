@@ -318,6 +318,17 @@ std::optional<std::uint64_t> NodeRegistry::clock_model_generation(
     return found->second.generation;
 }
 
+std::optional<NodeClockQuality> NodeRegistry::clock_quality(
+    std::uint32_t node_id, std::uint64_t host_now_ns) const {
+    const auto found = clock_models_.find(node_id);
+    if (found == clock_models_.end()) {
+        return std::nullopt;
+    }
+    return NodeClockQuality{
+        found->second.boot_epoch, found->second.generation,
+        found->second.model.estimate(host_now_ns)};
+}
+
 std::size_t NodeRegistry::clock_model_count() const noexcept {
     return clock_models_.size();
 }
