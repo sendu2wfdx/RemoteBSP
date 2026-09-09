@@ -10,6 +10,7 @@
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
 #include "remotebsp_embedded/motion.h"
+#include "remotebsp_embedded/motion_group.h"
 #endif
 
 #ifdef __cplusplus
@@ -181,6 +182,8 @@ typedef struct {
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     uint64_t (*nanoseconds)(void);
+    /* 必须在每次 MCU 重启后产生不同的非零值；0 表示不支持跨板同步。 */
+    uint64_t (*motion_boot_epoch)(void);
     uint8_t motion_axis_count;
     bool (*motion_set_enable)(uint8_t axis, bool enabled);
     bool (*motion_set_direction)(uint8_t axis, bool positive);
@@ -280,6 +283,7 @@ typedef struct {
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;
+    rbsp_motion_group_participant_t motion_group;
     uint8_t default_motion_axis_count;
 #endif
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)

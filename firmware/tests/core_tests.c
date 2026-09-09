@@ -21,6 +21,9 @@ static uint8_t timed_bit_data[96];
 static bool timed_bit_busy;
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
+#if defined(CONFIG_REMOTEBSP_MOTION)
+static bool motion_schedule_allowed = true;
+#endif
 #if defined(CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART)
 static rbsp_runtime_tmc_uart_config_t applied_tmc_uart[
     CONFIG_SOFT_HALF_DUPLEX_UART_PORT_COUNT];
@@ -40,6 +43,12 @@ static void put_u32(uint8_t* output, uint32_t value) {
     output[3] = (uint8_t)(value >> 24U);
 }
 
+static void put_u64(uint8_t* output, uint64_t value) {
+    for (unsigned index = 0U; index < 8U; ++index) {
+        output[index] = (uint8_t)(value >> (index * 8U));
+    }
+}
+
 
 static uint32_t get_u32(const uint8_t* input) {
     return (uint32_t)input[0] |
@@ -47,6 +56,30 @@ static uint32_t get_u32(const uint8_t* input) {
            ((uint32_t)input[2] << 16U) |
            ((uint32_t)input[3] << 24U);
 }
+
+static uint64_t get_u64(const uint8_t* input) {
+    uint64_t value = 0U;
+    for (unsigned index = 0U; index < 8U; ++index) {
+        value |= (uint64_t)input[index] << (index * 8U);
+    }
+    return value;
+}
+
+#if defined(CONFIG_REMOTEBSP_MOTION)
+static void make_motion_group_identity(uint8_t output[80U],
+                                       uint64_t boot_epoch,
+                                       uint64_t node_start_tick) {
+    memset(output, 0, 80U);
+    put_u16(output, 1U);
+    put_u64(output + 4U, 9001U);
+    put_u32(output + 12U, 77U);
+    put_u32(output + 16U, 1U);
+    put_u64(output + 24U, boot_epoch);
+    put_u64(output + 32U, 9U);
+    put_u64(output + 40U, node_start_tick);
+    output[48U] = 1U;
+}
+#endif
 
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t* data,
@@ -144,6 +177,10 @@ static uint64_t fake_nanoseconds(void) {
     return (uint64_t)now_ms * 1000000ULL;
 }
 
+static uint64_t fake_motion_boot_epoch(void) {
+    return 31U;
+}
+
 static bool fake_motion_set_enable(uint8_t axis, bool enabled) {
     (void)enabled;
     return axis < CONFIG_MOTION_MAX_AXES;
@@ -168,7 +205,8 @@ static bool fake_motion_limit_active(uint8_t axis, bool* active) {
 }
 
 static bool fake_motion_schedule_compare(uint64_t deadline_ns) {
-    return deadline_ns != RBSP_MOTION_NO_DEADLINE;
+    return motion_schedule_allowed &&
+           deadline_ns != RBSP_MOTION_NO_DEADLINE;
 }
 
 static void fake_motion_cancel_compare(void) {
@@ -400,6 +438,7 @@ int main(void) {
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
         .nanoseconds = fake_nanoseconds,
+        .motion_boot_epoch = fake_motion_boot_epoch,
         .motion_axis_count = 2U,
         .motion_set_enable = fake_motion_set_enable,
         .motion_set_direction = fake_motion_set_direction,
@@ -419,6 +458,36 @@ int main(void) {
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     uint8_t request[1024];
     uint8_t response[1024];
+#if defined(CONFIG_REMOTEBSP_MOTION)
+    rbsp_core_t no_epoch_core;
+    rbsp_hal_t no_epoch_hal = hal;
+    no_epoch_hal.motion_boot_epoch = NULL;
+    assert(rbsp_core_init(
+        &no_epoch_core, &no_epoch_hal, RBSP_CAN_CLASSICAL, &info));
+    assert(no_epoch_core.motion_group.boot_epoch == 0U);
+    no_epoch_core.node_id = 26U;
+    const uint8_t unsupported_time_sync[] = {1U, 0U, 0U, 0U};
+    uint16_t no_epoch_request_size = make_request(
+        request, 0x0020U, 99U, 0U, unsupported_time_sync,
+        sizeof(unsupported_time_sync));
+    clear_sent();
+    feed_packet(&no_epoch_core, 0x61AU, 99U, request,
+                no_epoch_request_size);
+    assert(reassemble_sent(response, 0x59AU) == 25U);
+    assert(response[24U] == 6U);
+    rbsp_motion_segment_t local_segment;
+    memset(&local_segment, 0, sizeof(local_segment));
+    local_segment.sequence = 1U;
+    local_segment.start_time_ns = 10000000U;
+    local_segment.duration_ns = 2000000U;
+    local_segment.final_segment = true;
+    local_segment.axis_count = 2U;
+    local_segment.steps[0] = 1;
+    assert(rbsp_motion_enqueue(
+               &no_epoch_core.motion, &local_segment, 0U, NULL) ==
+           RBSP_MOTION_ENQUEUE_OK);
+    clear_sent();
+#endif
     const uint8_t discovery[] = {1U, 1U};
     uint16_t request_size =
         make_request(request, 0x0001U, 1U, 0U,
@@ -438,6 +507,140 @@ int main(void) {
     assert(core.node_id == 25U);
     assert(reassemble_sent(response, 0x599U) == 25U);
     assert(response[24] == 0U);
+
+#if defined(CONFIG_REMOTEBSP_MOTION)
+    /* TIME_SYNC 暴露本次启动代次和与运动执行器一致的 1 GHz 节点时钟。 */
+    clear_sent();
+    const uint8_t time_sync[] = {1U, 0U, 0U, 0U};
+    request_size = make_request(request, 0x0020U, 100U, 0U,
+                                time_sync, sizeof(time_sync));
+    feed_packet(&core, 0x619U, 100U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 61U);
+    assert(response[24U] == 0U && response[25U] == 1U &&
+           response[26U] == 64U);
+    const uint64_t boot_epoch = get_u64(response + 29U);
+    assert(boot_epoch != 0U);
+    assert(get_u64(response + 37U) == 1000000000ULL);
+
+    /* PREPARE 只冻结本地时刻和段，不修改队列，也不会输出 STEP。 */
+    clear_sent();
+    uint8_t group_prepare[116U];
+    memset(group_prepare, 0, sizeof(group_prepare));
+    make_motion_group_identity(group_prepare, boot_epoch, 10000000U);
+    put_u16(group_prepare + 80U, 32U);
+    put_u32(group_prepare + 84U, 1U);
+    put_u64(group_prepare + 88U, 123456789U);
+    put_u64(group_prepare + 96U, 2000000U);
+    group_prepare[104U] = 1U;
+    group_prepare[105U] = 1U;
+    put_u32(group_prepare + 108U, 0x09000000U);
+    put_u32(group_prepare + 112U, 4U);
+    request_size = make_request(request, 0x0910U, 101U, 0U,
+                                group_prepare, sizeof(group_prepare));
+    feed_packet(&core, 0x619U, 101U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[24U] == 0U && response[105U] == 0U);
+    assert(core.motion_group.state == RBSP_MOTION_GROUP_PREPARED);
+    assert(core.motion.size == 0U && core.motion.emitted_edges == 0U);
+
+    /* 已 PREPARE 时，普通入队不能越过冻结事务插入运动段。 */
+    clear_sent();
+    request_size = make_request(request, 0x0900U, 105U, 0U,
+                                group_prepare + 84U, 32U);
+    feed_packet(&core, 0x619U, 105U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 8U && core.motion.size == 0U);
+
+    /* COMMIT 才把冻结段交给执行器；重复 COMMIT 不会重复入队。 */
+    clear_sent();
+    request_size = make_request(request, 0x0911U, 102U, 0U,
+                                group_prepare, 80U);
+    feed_packet(&core, 0x619U, 102U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[24U] == 0U && response[105U] == 0U);
+    assert(core.motion_group.state == RBSP_MOTION_GROUP_ARMED);
+    assert(core.motion.size == 1U && core.motion.accepted_segments == 1U);
+    clear_sent();
+    request_size = make_request(request, 0x0911U, 103U, 0U,
+                                group_prepare, 80U);
+    feed_packet(&core, 0x619U, 103U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[105U] == 0U && core.motion.size == 1U &&
+           core.motion.accepted_segments == 1U);
+
+    /* 已武装事务的 ABORT 复用普通运动安全停机并锁存 Aborted。 */
+    clear_sent();
+    uint8_t group_abort[88U];
+    memset(group_abort, 0, sizeof(group_abort));
+    memcpy(group_abort, group_prepare, 80U);
+    group_abort[80U] = 1U;
+    request_size = make_request(request, 0x0912U, 104U, 0U,
+                                group_abort, sizeof(group_abort));
+    feed_packet(&core, 0x619U, 104U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U);
+    assert(core.motion_group.state == RBSP_MOTION_GROUP_ABORTED);
+    assert(core.motion.size == 0U &&
+           core.motion.fault == RBSP_MOTION_FAULT_ABORTED);
+    assert(core.motion.safety_stops == 1U);
+
+    /* 首次 compare 调度失败必须清空刚提交的段并立即锁存故障。 */
+    clear_sent();
+    request_size = make_request(request, 0x0903U, 106U, 0U,
+                                NULL, 0U);
+    feed_packet(&core, 0x619U, 106U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U);
+    put_u64(group_prepare + 4U, 9002U);
+    put_u32(group_prepare + 16U, 2U);
+    put_u64(group_prepare + 40U, 20000000U);
+    put_u32(group_prepare + 84U, 2U);
+    request_size = make_request(request, 0x0910U, 107U, 0U,
+                                group_prepare, sizeof(group_prepare));
+    clear_sent();
+    feed_packet(&core, 0x619U, 107U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[105U] == 0U &&
+           core.motion_group.state == RBSP_MOTION_GROUP_PREPARED);
+    motion_schedule_allowed = false;
+    request_size = make_request(request, 0x0911U, 108U, 0U,
+                                group_prepare, 80U);
+    clear_sent();
+    feed_packet(&core, 0x619U, 108U, request, request_size);
+    motion_schedule_allowed = true;
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[24U] == 0U && response[105U] == 1U);
+    assert(core.motion_group.state == RBSP_MOTION_GROUP_ABORTED);
+    assert(core.motion.size == 0U &&
+           core.motion.fault != RBSP_MOTION_FAULT_NONE);
+
+    /* 普通 MotionAbort 同样必须使尚未提交的事务不可再 COMMIT。 */
+    request_size = make_request(request, 0x0903U, 109U, 0U,
+                                NULL, 0U);
+    clear_sent();
+    feed_packet(&core, 0x619U, 109U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U);
+    put_u64(group_prepare + 4U, 9003U);
+    put_u32(group_prepare + 16U, 3U);
+    put_u64(group_prepare + 40U, 30000000U);
+    put_u32(group_prepare + 84U, 3U);
+    request_size = make_request(request, 0x0910U, 110U, 0U,
+                                group_prepare, sizeof(group_prepare));
+    clear_sent();
+    feed_packet(&core, 0x619U, 110U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 113U);
+    assert(response[105U] == 0U &&
+           core.motion_group.state == RBSP_MOTION_GROUP_PREPARED);
+    request_size = make_request(request, 0x0902U, 111U, 0U,
+                                NULL, 0U);
+    clear_sent();
+    feed_packet(&core, 0x619U, 111U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U &&
+           core.motion_group.state == RBSP_MOTION_GROUP_ABORTED &&
+           core.motion.fault == RBSP_MOTION_FAULT_ABORTED);
+#endif
 
     clear_sent();
     const uint8_t create[] = {7U, 0U, 1U, 0U};

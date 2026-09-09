@@ -436,6 +436,7 @@ add_executable(embedded_core_tests
     ../firmware/tests/core_tests.c
     ../firmware/src/core.c
     ../firmware/src/motion.c
+    ../firmware/src/motion_group.c
     ../firmware/src/byte_ring.c
 )
 target_include_directories(embedded_core_tests PRIVATE
@@ -477,6 +478,7 @@ add_executable(embedded_motion_core_compile_tests
     ../firmware/tests/motion_core_compile_tests.c
     ../firmware/src/core.c
     ../firmware/src/motion.c
+    ../firmware/src/motion_group.c
 )
 target_include_directories(embedded_motion_core_compile_tests PRIVATE
     ../firmware/include
@@ -487,6 +489,21 @@ target_compile_options(embedded_motion_core_compile_tests PRIVATE
 )
 add_test(NAME embedded_motion_core_compile_tests
          COMMAND embedded_motion_core_compile_tests)
+
+add_executable(embedded_motion_group_tests
+    ../firmware/tests/motion_group_tests.c
+    ../firmware/src/motion.c
+    ../firmware/src/motion_group.c
+)
+target_include_directories(embedded_motion_group_tests PRIVATE
+    ../firmware/include
+    ../firmware/tests/config_motion
+)
+target_compile_options(embedded_motion_group_tests PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME embedded_motion_group_tests
+         COMMAND embedded_motion_group_tests)
 
 add_executable(embedded_startup_gpio_tests
     ../firmware/tests/startup_gpio_tests.c

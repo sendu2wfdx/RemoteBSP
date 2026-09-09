@@ -15,6 +15,7 @@ enum {
     RBSP_COMMAND_PING = 0x0012,
     RBSP_COMMAND_BOOTLOADER_ENTER = 0x0013,
     RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
+    RBSP_COMMAND_TIME_SYNC = 0x0020,
     RBSP_COMMAND_RUNTIME_CONFIG_STATUS = 0x0040,
     RBSP_COMMAND_RUNTIME_CONFIG_READ = 0x0041,
     RBSP_COMMAND_RUNTIME_CONFIG_VALIDATE = 0x0042,
@@ -45,6 +46,9 @@ enum {
     RBSP_COMMAND_MOTION_ABORT = 0x0902,
     RBSP_COMMAND_MOTION_CLEAR_FAULT = 0x0903,
     RBSP_COMMAND_MOTION_CONTRACT = 0x0904,
+    RBSP_COMMAND_MOTION_GROUP_PREPARE = 0x0910,
+    RBSP_COMMAND_MOTION_GROUP_COMMIT = 0x0911,
+    RBSP_COMMAND_MOTION_GROUP_ABORT = 0x0912,
     RBSP_STATUS_OK = 0,
     RBSP_STATUS_UNKNOWN_COMMAND = 1,
     RBSP_STATUS_INVALID_PAYLOAD = 2,
@@ -445,6 +449,99 @@ static uint32_t motion_resource_id(const rbsp_core_t* core,
     (void)core;
     return 0x09000000UL + axis;
 }
+
+enum {
+    RBSP_MOTION_GROUP_IDENTITY_SIZE = 80,
+    RBSP_MOTION_GROUP_RESULT_SIZE = 88,
+};
+
+static bool decode_motion_group_identity(
+    const uint8_t* input, rbsp_motion_group_identity_t* identity) {
+    if (get_u16(input) != 1U || get_u16(input + 2U) != 0U ||
+        get_u32(input + 20U) != 0U) {
+        return false;
+    }
+    memset(identity, 0, sizeof(*identity));
+    identity->transaction_id = get_u64(input + 4U);
+    identity->group_id = get_u32(input + 12U);
+    identity->plan_generation = get_u32(input + 16U);
+    identity->boot_epoch = get_u64(input + 24U);
+    identity->clock_model_generation = get_u64(input + 32U);
+    identity->node_start_tick = get_u64(input + 40U);
+    memcpy(identity->content_digest, input + 48U,
+           RBSP_MOTION_GROUP_DIGEST_SIZE);
+    uint8_t digest = 0U;
+    for (uint8_t index = 0U; index < RBSP_MOTION_GROUP_DIGEST_SIZE;
+         ++index) {
+        digest |= identity->content_digest[index];
+    }
+    return identity->transaction_id != 0U && identity->group_id != 0U &&
+           identity->plan_generation != 0U && identity->boot_epoch != 0U &&
+           identity->clock_model_generation != 0U &&
+           identity->node_start_tick != 0U && digest != 0U;
+}
+
+static void encode_motion_group_identity(
+    uint8_t* output, const rbsp_motion_group_identity_t* identity) {
+    memset(output, 0, RBSP_MOTION_GROUP_IDENTITY_SIZE);
+    put_u16(output, 1U);
+    put_u64(output + 4U, identity->transaction_id);
+    put_u32(output + 12U, identity->group_id);
+    put_u32(output + 16U, identity->plan_generation);
+    put_u64(output + 24U, identity->boot_epoch);
+    put_u64(output + 32U, identity->clock_model_generation);
+    put_u64(output + 40U, identity->node_start_tick);
+    memcpy(output + 48U, identity->content_digest,
+           RBSP_MOTION_GROUP_DIGEST_SIZE);
+}
+
+static void encode_motion_group_result(
+    uint8_t output[RBSP_MOTION_GROUP_RESULT_SIZE],
+    const rbsp_motion_group_identity_t* identity, uint8_t code) {
+    memset(output, 0, RBSP_MOTION_GROUP_RESULT_SIZE);
+    encode_motion_group_identity(output, identity);
+    output[RBSP_MOTION_GROUP_IDENTITY_SIZE] = code;
+}
+
+static bool decode_motion_group_segment(
+    const rbsp_core_t* core, const uint8_t* input, uint16_t length,
+    uint64_t node_start_tick, rbsp_motion_segment_t* segment) {
+    if (length < 24U) {
+        return false;
+    }
+    const uint8_t axis_count = input[21U];
+    if (axis_count == 0U || axis_count > core->motion.axis_count ||
+        length != (uint16_t)(24U + (uint16_t)axis_count * 8U) ||
+        input[20U] > 1U || get_u16(input + 22U) != 0U) {
+        return false;
+    }
+    memset(segment, 0, sizeof(*segment));
+    segment->sequence = get_u32(input);
+    segment->start_time_ns = node_start_tick;
+    segment->duration_ns = get_u64(input + 12U);
+    segment->final_segment = input[20U] != 0U;
+    segment->axis_count = core->motion.axis_count;
+    bool seen[CONFIG_MOTION_MAX_AXES];
+    memset(seen, 0, sizeof(seen));
+    for (uint8_t index = 0U; index < axis_count; ++index) {
+        const uint8_t* entry = input + 24U + (uint16_t)index * 8U;
+        const uint32_t resource_id = get_u32(entry);
+        uint8_t axis = UINT8_MAX;
+        for (uint8_t candidate = 0U;
+             candidate < core->motion.axis_count; ++candidate) {
+            if (motion_resource_id(core, candidate) == resource_id) {
+                axis = candidate;
+                break;
+            }
+        }
+        if (axis == UINT8_MAX || seen[axis]) {
+            return false;
+        }
+        seen[axis] = true;
+        segment->steps[axis] = (int32_t)get_u32(entry + 4U);
+    }
+    return segment->sequence != 0U && segment->duration_ns != 0U;
+}
 #endif
 
 #if CONFIG_UART_RESOURCE_COUNT > 0
@@ -833,6 +930,41 @@ static bool process_request(rbsp_core_t* core,
                     request->payload, request->payload_length);
             }
             break;
+
+#if defined(CONFIG_REMOTEBSP_MOTION)
+        case RBSP_COMMAND_TIME_SYNC: {
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (core->motion_group.boot_epoch == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+            } else if (request->object_id != 0U ||
+                       request->payload_length != 4U ||
+                       request->payload[0] != 1U ||
+                       request->payload[1] != 0U ||
+                       get_u16(request->payload + 2U) != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[36U];
+                memset(data, 0, sizeof(data));
+                data[0] = 1U;
+                data[1] = 64U;
+                put_u64(data + 4U, core->motion_group.boot_epoch);
+                put_u64(data + 12U, UINT64_C(1000000000));
+                put_u64(data + 20U, core->hal.nanoseconds());
+                put_u64(data + 28U, core->hal.nanoseconds());
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+#endif
 
         case RBSP_COMMAND_BOOTLOADER_ENTER:
         case RBSP_COMMAND_BOOTLOADER_ENTER_USB:
@@ -1394,6 +1526,19 @@ static bool process_request(rbsp_core_t* core,
                     0U, NULL, 0U);
                 break;
             }
+            const uint32_t group_critical_state =
+                core->hal.motion_enter_critical();
+            rbsp_motion_group_observe_motion(
+                &core->motion_group, &core->motion);
+            const bool group_blocks = rbsp_motion_group_blocks_enqueue(
+                &core->motion_group);
+            core->hal.motion_exit_critical(group_critical_state);
+            if (group_blocks) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_BUSY,
+                    0U, NULL, 0U);
+                break;
+            }
             const uint8_t axis_count =
                 request->payload_length >= 24U
                     ? request->payload[21]
@@ -1628,6 +1773,170 @@ static bool process_request(rbsp_core_t* core,
             break;
         }
 
+        case RBSP_COMMAND_MOTION_GROUP_PREPARE: {
+            rbsp_motion_group_identity_t identity;
+            rbsp_motion_segment_t segment;
+            const uint16_t segment_length =
+                request->payload_length >=
+                        RBSP_MOTION_GROUP_IDENTITY_SIZE + 4U
+                    ? get_u16(request->payload +
+                              RBSP_MOTION_GROUP_IDENTITY_SIZE)
+                    : 0U;
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (core->motion_group.boot_epoch == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (request->object_id != 0U ||
+                request->payload_length <
+                    RBSP_MOTION_GROUP_IDENTITY_SIZE + 4U ||
+                get_u16(request->payload +
+                        RBSP_MOTION_GROUP_IDENTITY_SIZE + 2U) != 0U ||
+                (uint32_t)request->payload_length !=
+                    (uint32_t)RBSP_MOTION_GROUP_IDENTITY_SIZE + 4U +
+                        segment_length ||
+                !decode_motion_group_identity(request->payload, &identity)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (!decode_motion_group_segment(
+                    core,
+                    request->payload + RBSP_MOTION_GROUP_IDENTITY_SIZE + 4U,
+                    segment_length, identity.node_start_tick, &segment)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+                break;
+            }
+            const uint32_t critical_state =
+                core->hal.motion_enter_critical();
+            const rbsp_motion_group_ready_code_t code =
+                rbsp_motion_group_prepare(
+                    &core->motion_group, &core->motion, &identity, &segment,
+                    request->session_id, core->hal.nanoseconds());
+            core->hal.motion_exit_critical(critical_state);
+            uint8_t data[RBSP_MOTION_GROUP_RESULT_SIZE];
+            encode_motion_group_result(data, &identity, (uint8_t)code);
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            break;
+        }
+
+        case RBSP_COMMAND_MOTION_GROUP_COMMIT: {
+            rbsp_motion_group_identity_t identity;
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (core->motion_group.boot_epoch == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (request->object_id != 0U ||
+                request->payload_length != RBSP_MOTION_GROUP_IDENTITY_SIZE ||
+                !decode_motion_group_identity(request->payload, &identity)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            const uint32_t critical_state =
+                core->hal.motion_enter_critical();
+            rbsp_motion_group_commit_code_t code = rbsp_motion_group_commit(
+                &core->motion_group, &core->motion, &identity,
+                request->session_id, core->hal.nanoseconds(), NULL);
+            core->hal.motion_exit_critical(critical_state);
+            if (code == RBSP_MOTION_GROUP_COMMIT_ARMED &&
+                !rbsp_core_motion_service(core)) {
+                const uint32_t abort_critical_state =
+                    core->hal.motion_enter_critical();
+                (void)rbsp_motion_group_emergency_abort(
+                    &core->motion_group);
+                if (core->motion.size != 0U ||
+                    core->motion.fault == RBSP_MOTION_FAULT_NONE) {
+                    rbsp_motion_abort(
+                        &core->motion, RBSP_MOTION_FAULT_TIMING);
+                }
+                core->hal.motion_exit_critical(abort_critical_state);
+                /* 确保 EN/STEP 即使在首次调度失败时也立即落入安全状态。 */
+                (void)rbsp_core_motion_service(core);
+                code = RBSP_MOTION_GROUP_COMMIT_REJECTED;
+            }
+            uint8_t data[RBSP_MOTION_GROUP_RESULT_SIZE];
+            encode_motion_group_result(data, &identity, (uint8_t)code);
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            break;
+        }
+
+        case RBSP_COMMAND_MOTION_GROUP_ABORT: {
+            rbsp_motion_group_identity_t identity;
+            const uint8_t reason =
+                request->payload_length == RBSP_MOTION_GROUP_RESULT_SIZE
+                    ? request->payload[RBSP_MOTION_GROUP_IDENTITY_SIZE]
+                    : 0U;
+            bool reserved_valid = true;
+            if (request->payload_length == RBSP_MOTION_GROUP_RESULT_SIZE) {
+                for (uint8_t index = 81U;
+                     index < RBSP_MOTION_GROUP_RESULT_SIZE; ++index) {
+                    reserved_valid &= request->payload[index] == 0U;
+                }
+            }
+            if (!motion_available(core)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (core->motion_group.boot_epoch == 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            if (request->object_id != 0U ||
+                request->payload_length != RBSP_MOTION_GROUP_RESULT_SIZE ||
+                reason == 0U || reason > 7U || !reserved_valid ||
+                !decode_motion_group_identity(request->payload, &identity)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            const bool armed =
+                core->motion_group.state == RBSP_MOTION_GROUP_ARMED;
+            const uint32_t critical_state =
+                core->hal.motion_enter_critical();
+            const bool accepted = rbsp_motion_group_abort(
+                &core->motion_group, &identity, request->session_id);
+            if (accepted && armed) {
+                rbsp_motion_abort(&core->motion,
+                                  RBSP_MOTION_FAULT_ABORTED);
+            }
+            core->hal.motion_exit_critical(critical_state);
+            if (accepted && armed) {
+                (void)rbsp_core_motion_service(core);
+            }
+            response_size = make_status_response(
+                core, request,
+                accepted ? RBSP_STATUS_OK : RBSP_STATUS_ACCESS_DENIED,
+                0U, NULL, 0U);
+            break;
+        }
+
         case RBSP_COMMAND_MOTION_ABORT:
             if (!motion_available(core)) {
                 response_size = make_status_response(
@@ -1641,6 +1950,8 @@ static bool process_request(rbsp_core_t* core,
             } else {
                 const uint32_t critical_state =
                     core->hal.motion_enter_critical();
+                (void)rbsp_motion_group_emergency_abort(
+                    &core->motion_group);
                 rbsp_motion_abort(
                     &core->motion, RBSP_MOTION_FAULT_ABORTED);
                 core->hal.motion_exit_critical(critical_state);
@@ -1751,6 +2062,12 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
         hal->motion_enter_critical == NULL ||
         hal->motion_exit_critical == NULL ||
         !rbsp_motion_init(&core->motion, hal->motion_axis_count)) {
+        return false;
+    }
+    const uint64_t boot_epoch = hal->motion_boot_epoch != NULL
+                                    ? hal->motion_boot_epoch()
+                                    : 0U;
+    if (!rbsp_motion_group_init(&core->motion_group, boot_epoch)) {
         return false;
     }
     core->default_motion_axis_count = hal->motion_axis_count;
@@ -1886,6 +2203,8 @@ bool rbsp_core_motion_service(rbsp_core_t* core) {
     const bool result = rbsp_motion_service(
         &core->motion, &io, core->hal.nanoseconds(),
         &deadline_ns);
+    rbsp_motion_group_observe_motion(
+        &core->motion_group, &core->motion);
     if (!result || deadline_ns == RBSP_MOTION_NO_DEADLINE) {
         core->hal.motion_cancel_compare();
         return result;
