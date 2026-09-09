@@ -121,6 +121,29 @@ std::vector<std::uint8_t> body(const protocol::Packet& response,
     return {response.payload.begin() + 1, response.payload.end()};
 }
 
+MotionGroupTransactionStatus motion_group_status_from_ipc(
+    const toolbusd::IpcResponse& response) {
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto snapshot =
+        toolbusd::decode_ipc_motion_group_snapshot(response.body);
+    MotionGroupTransactionStatus result;
+    result.transaction_id = snapshot.transaction_id;
+    result.group_id = snapshot.group_id;
+    result.plan_generation = snapshot.plan_generation;
+    result.state = static_cast<MotionGroupTransactionState>(snapshot.state);
+    result.abort_reason = snapshot.abort_reason;
+    result.member_count = snapshot.member_count;
+    result.ready_count = snapshot.ready_count;
+    result.committed_count = snapshot.committed_count;
+    result.pending_request_count = snapshot.pending_request_count;
+    result.commit_dispatched = snapshot.commit_dispatched;
+    result.abort_is_best_effort = snapshot.abort_is_best_effort;
+    return result;
+}
+
 }
 
 RemoteException::RemoteException(std::uint8_t status,
@@ -818,6 +841,44 @@ void Client::motion_abort() const {
 
 void Client::motion_clear_fault() const {
     body(command(protocol::Command::MotionClearFault));
+}
+
+MotionGroupTransactionStatus Client::motion_group_submit(
+    const MotionGroupPlan& plan) const {
+    toolbusd::MotionGroupPlan ipc_plan;
+    ipc_plan.transaction_id = plan.transaction_id;
+    ipc_plan.group_id = plan.group_id;
+    ipc_plan.plan_generation = plan.plan_generation;
+    ipc_plan.host_start_time_ns = plan.host_start_time_ns;
+    ipc_plan.content_digest = plan.content_digest;
+    ipc_plan.members.reserve(plan.members.size());
+    for (const auto& member : plan.members) {
+        ipc_plan.members.push_back({member.node_id, member.segment});
+    }
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_motion_group_submit_request(socket.get(), ipc_plan);
+    return motion_group_status_from_ipc(
+        toolbusd::read_ipc_response(socket.get()));
+}
+
+MotionGroupTransactionStatus Client::motion_group_status(
+    std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation) const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_motion_group_status_request(
+        socket.get(), transaction_id, group_id, plan_generation);
+    return motion_group_status_from_ipc(
+        toolbusd::read_ipc_response(socket.get()));
+}
+
+MotionGroupTransactionStatus Client::motion_group_cancel(
+    std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation) const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_motion_group_cancel_request(
+        socket.get(), transaction_id, group_id, plan_generation);
+    return motion_group_status_from_ipc(
+        toolbusd::read_ipc_response(socket.get()));
 }
 
 const std::string& Client::socket_path() const noexcept {

@@ -1,4 +1,5 @@
 #include "remotebsp/transport/mock_usb_transport.hpp"
+#include "remotebsp/transport/link_routes.hpp"
 
 #include <poll.h>
 #include <sys/socket.h>
@@ -7,6 +8,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -77,12 +79,8 @@ MockUsbTransport::MockUsbTransport(std::string socket_path, MockUsbRole role)
                 ::listen(listener_, 1) < 0) {
                 throw_system_error("启动 Mock USB 监听失败");
             }
-            socket_ = ::accept(listener_, nullptr, nullptr);
-            if (socket_ < 0) {
-                throw_system_error("接受 Mock USB 设备连接失败");
-            }
-            ::close(listener_);
-            listener_ = -1;
+            // Host 保持监听，同一测试链路允许多个 Mock MCU 接入。
+            // 每个设备仍是独立字节流，节点寻址由逻辑路由学习。
         } else {
             socket_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             if (socket_ < 0) {
@@ -113,6 +111,32 @@ MockUsbTransport::MockUsbTransport(std::string socket_path, MockUsbRole role)
 MockUsbTransport::~MockUsbTransport() { close_all(); }
 
 void MockUsbTransport::send(const LinkFrame& frame) {
+    if (role_ == MockUsbRole::Host) {
+        const bool addressed =
+            frame.route > kNodeRequestBaseRoute &&
+            frame.route <= kNodeRequestBaseRoute + kMaximumNodeId;
+        const auto target_node = addressed
+                                     ? frame.route - kNodeRequestBaseRoute
+                                     : 0U;
+        const auto encoded = encode_usb_frame(frame);
+        if (addressed) {
+            const auto target = std::find_if(
+                host_peers_.begin(), host_peers_.end(),
+                [target_node](const HostPeer& peer) {
+                    return peer.node_id == target_node;
+                });
+            if (target != host_peers_.end()) {
+                write_all(target->socket, encoded);
+                return;
+            }
+        }
+        for (auto& peer : host_peers_) {
+            write_all(peer.socket, encoded);
+        }
+        // 尚未从心跳学习映射时向所有设备发送；设备端仍严格检查
+        // kNodeRequestBaseRoute + 自身 node_id，不会误执行。
+        return;
+    }
     write_all(socket_, encode_usb_frame(frame));
 }
 
@@ -121,6 +145,75 @@ std::optional<LinkFrame> MockUsbTransport::receive(
     if (timeout < std::chrono::milliseconds::zero() ||
         timeout.count() > std::numeric_limits<int>::max()) {
         throw std::invalid_argument("Mock USB 接收超时参数无效");
+    }
+    if (role_ == MockUsbRole::Host) {
+        if (const auto ready = pop_host_frame(); ready.has_value()) {
+            return ready;
+        }
+        std::vector<pollfd> descriptors;
+        descriptors.reserve(host_peers_.size() + 1U);
+        descriptors.push_back({listener_, POLLIN, 0});
+        for (const auto& peer : host_peers_) {
+            descriptors.push_back({peer.socket, POLLIN, 0});
+        }
+        int result = 0;
+        do {
+            result = ::poll(descriptors.data(), descriptors.size(),
+                            static_cast<int>(timeout.count()));
+        } while (result < 0 && errno == EINTR);
+        if (result < 0) {
+            throw_system_error("等待 Mock USB 多节点数据失败");
+        }
+        if (result == 0) {
+            return std::nullopt;
+        }
+        if ((descriptors[0].revents & POLLIN) != 0) {
+            const int accepted = ::accept(listener_, nullptr, nullptr);
+            if (accepted < 0) {
+                throw_system_error("接受 Mock USB 设备连接失败");
+            }
+            host_peers_.push_back({accepted, 0U, {}});
+        }
+        std::array<std::uint8_t, 4096> chunk{};
+        for (std::size_t index = 0U; index < host_peers_.size();) {
+            // 本轮刚 accept 的 peer 不在 descriptors 中，下轮再读取。
+            if (index + 1U >= descriptors.size()) {
+                ++index;
+                continue;
+            }
+            const auto events = descriptors[index + 1U].revents;
+            if ((events & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                ::close(host_peers_[index].socket);
+                host_peers_.erase(host_peers_.begin() +
+                                  static_cast<std::ptrdiff_t>(index));
+                return std::nullopt;
+            }
+            if ((events & POLLIN) == 0) {
+                ++index;
+                continue;
+            }
+            const ssize_t received = ::recv(host_peers_[index].socket,
+                                            chunk.data(), chunk.size(), 0);
+            if (received < 0 && errno == EINTR) {
+                ++index;
+                continue;
+            }
+            if (received <= 0) {
+                ::close(host_peers_[index].socket);
+                host_peers_.erase(host_peers_.begin() +
+                                  static_cast<std::ptrdiff_t>(index));
+                return std::nullopt;
+            }
+            host_peers_[index].decoder.append(
+                chunk.data(), static_cast<std::size_t>(received));
+            if (auto ready = host_peers_[index].decoder.pop();
+                ready.has_value()) {
+                learn_host_peer(host_peers_[index], *ready);
+                return ready;
+            }
+            ++index;
+        }
+        return pop_host_frame();
     }
     if (const auto ready = decoder_.pop(); ready.has_value()) {
         return ready;
@@ -151,12 +244,39 @@ std::optional<LinkFrame> MockUsbTransport::receive(
     return decoder_.pop();
 }
 
+std::optional<LinkFrame> MockUsbTransport::pop_host_frame() {
+    for (auto& peer : host_peers_) {
+        if (auto frame = peer.decoder.pop(); frame.has_value()) {
+            learn_host_peer(peer, *frame);
+            return frame;
+        }
+    }
+    return std::nullopt;
+}
+
+void MockUsbTransport::learn_host_peer(
+    HostPeer& peer, const LinkFrame& frame) noexcept {
+    if (frame.route > kNodeResponseBaseRoute &&
+        frame.route <= kNodeResponseBaseRoute + kMaximumNodeId) {
+        peer.node_id = frame.route - kNodeResponseBaseRoute;
+    } else if (frame.route > kNodeEventBaseRoute &&
+               frame.route <= kNodeEventBaseRoute + kMaximumNodeId) {
+        peer.node_id = frame.route - kNodeEventBaseRoute;
+    }
+}
+
 LinkCapabilities MockUsbTransport::capabilities() const noexcept {
     return {LinkKind::MockUsb, kUsbLogicalMtu, true, true, false,
             12000000U};
 }
 
 void MockUsbTransport::close_all() noexcept {
+    for (auto& peer : host_peers_) {
+        if (peer.socket >= 0) {
+            ::close(peer.socket);
+        }
+    }
+    host_peers_.clear();
     if (socket_ >= 0) {
         ::close(socket_);
         socket_ = -1;

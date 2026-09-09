@@ -111,6 +111,17 @@ target_compile_options(motion_group_service_tests PRIVATE
 add_test(NAME motion_group_service_tests
     COMMAND motion_group_service_tests)
 
+add_executable(motion_group_ipc_tests
+    motion_group_ipc_tests.cpp)
+target_link_libraries(motion_group_ipc_tests PRIVATE
+    remotebsp_request_manager)
+target_compile_options(motion_group_ipc_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME motion_group_ipc_tests
+    COMMAND motion_group_ipc_tests)
+
 add_executable(waveform_protocol_tests waveform_protocol_tests.cpp)
 target_link_libraries(waveform_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(waveform_protocol_tests PRIVATE
@@ -156,6 +167,17 @@ add_test(
             usb-mock
 )
 set_tests_properties(e2e_usb_mock_tests PROPERTIES RUN_SERIAL TRUE)
+
+add_test(
+    NAME multi_node_usb_mock_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/multi_node_e2e.sh
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli>
+            unused
+            usb-mock
+)
+set_tests_properties(multi_node_usb_mock_tests PROPERTIES RUN_SERIAL TRUE)
 
 add_executable(socketcan_tests socketcan_tests.cpp)
 target_link_libraries(socketcan_tests PRIVATE remotebsp_transport)

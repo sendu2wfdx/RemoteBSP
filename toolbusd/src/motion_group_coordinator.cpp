@@ -325,6 +325,18 @@ MotionGroupState MotionGroupCoordinator::state() const noexcept {
     return state_;
 }
 
+std::uint64_t MotionGroupCoordinator::transaction_id() const noexcept {
+    return transaction_id_;
+}
+
+std::uint32_t MotionGroupCoordinator::group_id() const noexcept {
+    return group_id_;
+}
+
+std::uint32_t MotionGroupCoordinator::plan_generation() const noexcept {
+    return plan_generation_;
+}
+
 std::optional<protocol::MotionGroupAbortReason>
 MotionGroupCoordinator::abort_reason() const noexcept {
     return abort_reason_;

@@ -62,6 +62,21 @@ struct MotionGroupServiceOutcome {
     std::vector<RequestEvent> unhandled_events;
 };
 
+struct MotionGroupServiceSnapshot {
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+    MotionGroupState state{MotionGroupState::Idle};
+    std::optional<protocol::MotionGroupAbortReason> abort_reason;
+    std::uint16_t member_count{};
+    std::uint16_t ready_count{};
+    std::uint16_t committed_count{};
+    std::uint16_t pending_request_count{};
+    bool commit_dispatched{};
+    // COMMIT 发出后，ABORT 只能尽力停止已武装节点，不能物理回滚。
+    bool abort_is_best_effort{};
+};
+
 class MotionGroupService {
 public:
     using Clock = RequestManager::Clock;
@@ -91,6 +106,7 @@ public:
         noexcept;
     std::size_t pending_route_count() const noexcept;
     std::uint32_t session_id() const noexcept;
+    MotionGroupServiceSnapshot snapshot() const noexcept;
 
 private:
     struct Route {
@@ -131,6 +147,7 @@ private:
     std::unordered_map<std::uint64_t, Route> routes_;
     std::unordered_map<std::uint64_t, Route> completed_routes_;
     std::deque<std::uint64_t> completed_order_;
+    bool commit_dispatched_{};
 };
 
 }

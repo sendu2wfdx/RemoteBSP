@@ -137,6 +137,9 @@ public:
     void reset();
 
     MotionGroupState state() const noexcept;
+    std::uint64_t transaction_id() const noexcept;
+    std::uint32_t group_id() const noexcept;
+    std::uint32_t plan_generation() const noexcept;
     std::optional<protocol::MotionGroupAbortReason> abort_reason() const noexcept;
     const std::vector<FrozenMotionGroupMember>& frozen_members() const noexcept;
 

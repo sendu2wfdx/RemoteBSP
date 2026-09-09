@@ -3,6 +3,8 @@
 #include "remotebsp/tmc2209.hpp"
 
 #include <cstdint>
+#include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -55,6 +57,63 @@ remotebsp::protocol::MotionAxisMovePayload parse_motion_move(
     return {
         parse_u32(text.substr(0, delimiter), "运动轴资源 ID"),
         parse_i32(text.substr(delimiter + 1U), "运动轴步数")};
+}
+
+remotebsp::MotionGroupMemberPlan parse_motion_group_member(
+    const std::string& text, std::uint64_t start_time_ns) {
+    std::array<std::size_t, 4U> delimiters{};
+    std::size_t search_from = 0U;
+    for (auto& delimiter : delimiters) {
+        delimiter = text.find('/', search_from);
+        if (delimiter == std::string::npos || delimiter == search_from) {
+            throw std::invalid_argument(
+                "运动组成员必须使用 节点/序号/持续ns/final|more/轴:步数,...");
+        }
+        search_from = delimiter + 1U;
+    }
+    if (search_from >= text.size() ||
+        text.find('/', search_from) != std::string::npos) {
+        throw std::invalid_argument("运动组成员字段数量无效");
+    }
+    remotebsp::MotionGroupMemberPlan member;
+    member.node_id = parse_u32(text.substr(0U, delimiters[0U]),
+                               "运动组节点 ID");
+    member.segment.sequence = parse_u32(
+        text.substr(delimiters[0U] + 1U,
+                    delimiters[1U] - delimiters[0U] - 1U),
+        "运动组运动段序号");
+    member.segment.start_time_ns = start_time_ns;
+    member.segment.duration_ns = parse_u64(
+        text.substr(delimiters[1U] + 1U,
+                    delimiters[2U] - delimiters[1U] - 1U),
+        "运动组运动段持续时间");
+    const auto final = text.substr(
+        delimiters[2U] + 1U,
+        delimiters[3U] - delimiters[2U] - 1U);
+    if (final == "final") {
+        member.segment.final_segment = true;
+    } else if (final == "more") {
+        member.segment.final_segment = false;
+    } else {
+        throw std::invalid_argument(
+            "运动组运动段结束标志必须是 final 或 more");
+    }
+    const auto axes = text.substr(delimiters[3U] + 1U);
+    std::size_t offset = 0U;
+    while (offset < axes.size()) {
+        const auto comma = axes.find(',', offset);
+        const auto end = comma == std::string::npos ? axes.size() : comma;
+        if (end == offset) {
+            throw std::invalid_argument("运动组轴列表包含空项");
+        }
+        member.segment.axes.push_back(
+            parse_motion_move(axes.substr(offset, end - offset)));
+        if (comma == std::string::npos) {
+            break;
+        }
+        offset = comma + 1U;
+    }
+    return member;
 }
 
 std::uint8_t parse_hex_digit(char value) {
@@ -255,6 +314,44 @@ const char* motion_fault_name(
     return "unknown";
 }
 
+const char* motion_group_state_name(
+    remotebsp::MotionGroupTransactionState state) {
+    using State = remotebsp::MotionGroupTransactionState;
+    switch (state) {
+        case State::Idle: return "idle";
+        case State::Preparing: return "preparing";
+        case State::Ready: return "ready";
+        case State::Committing: return "committing";
+        case State::Committed: return "committed";
+        case State::Aborting: return "aborting";
+        case State::Aborted: return "aborted";
+    }
+    return "unknown";
+}
+
+void print_motion_group_status(
+    const remotebsp::MotionGroupTransactionStatus& status) {
+    std::cout << "transaction_id=" << status.transaction_id
+              << " group_id=" << status.group_id
+              << " plan_generation=" << status.plan_generation
+              << " state=" << motion_group_state_name(status.state)
+              << " abort_reason="
+              << (status.abort_reason.has_value()
+                      ? static_cast<unsigned>(*status.abort_reason)
+                      : 0U)
+              << " members=" << status.member_count
+              << " ready=" << status.ready_count
+              << " committed=" << status.committed_count
+              << " pending_requests=" << status.pending_request_count
+              << " commit_dispatched="
+              << (status.commit_dispatched ? 1 : 0)
+              << " abort_scope="
+              << (status.abort_is_best_effort
+                      ? "best-effort-after-commit"
+                      : "pre-commit")
+              << '\n';
+}
+
 void print_lease(
     const remotebsp::protocol::ResourceLeaseInfo& lease) {
     std::cout << "resource_id=0x" << std::hex << lease.resource_id
@@ -316,7 +413,12 @@ void print_usage() {
         << "  motion-status\n"
         << "  motion-contract\n"
         << "  motion-abort\n"
-        << "  motion-clear-fault\n";
+        << "  motion-clear-fault\n"
+        << "  motion-group-submit <事务ID> <组ID> <计划代数> "
+           "<开始ns|auto> <64位十六进制摘要> "
+           "<节点/序号/持续ns/final|more/资源ID:步数,...>...\n"
+        << "  motion-group-status <事务ID> <组ID> <计划代数>\n"
+        << "  motion-group-cancel <事务ID> <组ID> <计划代数>\n";
 }
 
 int run(const std::vector<std::string>& arguments,
@@ -918,6 +1020,48 @@ int run(const std::vector<std::string>& arguments,
                 ? parse_u32(arguments[3], "UART 写入超时")
                 : 3000U);
         std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "motion-group-submit" && arguments.size() >= 7U) {
+        remotebsp::MotionGroupPlan plan;
+        plan.transaction_id = parse_u64(arguments[1], "运动组事务 ID");
+        plan.group_id = parse_u32(arguments[2], "运动组 ID");
+        plan.plan_generation = parse_u32(arguments[3], "运动组计划代数");
+        plan.host_start_time_ns =
+            arguments[4] == "auto"
+                ? static_cast<std::uint64_t>(
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now()
+                              .time_since_epoch()).count()) +
+                      500000000ULL
+                : parse_u64(arguments[4], "运动组开始时间");
+        const auto digest = parse_hex(arguments[5]);
+        if (digest.size() != plan.content_digest.size()) {
+            throw std::invalid_argument(
+                "运动组内容摘要必须正好是 32 字节十六进制");
+        }
+        std::copy(digest.begin(), digest.end(),
+                  plan.content_digest.begin());
+        plan.members.reserve(arguments.size() - 6U);
+        for (std::size_t index = 6U; index < arguments.size(); ++index) {
+            plan.members.push_back(parse_motion_group_member(
+                arguments[index], plan.host_start_time_ns));
+        }
+        print_motion_group_status(client.motion_group_submit(plan));
+        return 0;
+    }
+    if (name == "motion-group-status" && arguments.size() == 4U) {
+        print_motion_group_status(client.motion_group_status(
+            parse_u64(arguments[1], "运动组事务 ID"),
+            parse_u32(arguments[2], "运动组 ID"),
+            parse_u32(arguments[3], "运动组计划代数")));
+        return 0;
+    }
+    if (name == "motion-group-cancel" && arguments.size() == 4U) {
+        print_motion_group_status(client.motion_group_cancel(
+            parse_u64(arguments[1], "运动组事务 ID"),
+            parse_u32(arguments[2], "运动组 ID"),
+            parse_u32(arguments[3], "运动组计划代数")));
         return 0;
     }
     if (name == "motion-enqueue" && arguments.size() >= 6) {

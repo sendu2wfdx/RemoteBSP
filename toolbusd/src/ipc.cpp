@@ -19,6 +19,9 @@ constexpr std::size_t kRuntimeSnapshotHeaderSize = 28U;
 constexpr std::size_t kRuntimeResourceSize = 50U;
 constexpr std::size_t kRuntimeNodeIssueSize = 8U;
 constexpr std::size_t kRuntimeClockQualitySize = 68U;
+constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
+constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
+constexpr std::size_t kMotionGroupSnapshotSize = 32U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -178,7 +181,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] >
-            static_cast<std::uint8_t>(IpcRequestKind::RuntimeSnapshot)) {
+            static_cast<std::uint8_t>(IpcRequestKind::MotionGroupCancel)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -187,7 +190,9 @@ IpcRequest read_ipc_request(int socket) {
         if (body.size() != 1) {
             throw IpcException("本地状态请求载荷无效");
         }
-        return {kind, 0, {}};
+        IpcRequest request;
+        request.kind = kind;
+        return request;
     }
     if (kind == IpcRequestKind::NextEvent) {
         if (body.size() != 5) {
@@ -197,7 +202,10 @@ IpcRequest read_ipc_request(int socket) {
         if (node_id == 0 || node_id > 127) {
             throw IpcException("事件目标节点 ID 必须位于 1～127");
         }
-        return {kind, node_id, {}};
+        IpcRequest request;
+        request.kind = kind;
+        request.node_id = node_id;
+        return request;
     }
     if (kind == IpcRequestKind::UartStreamRead) {
         if (body.size() != 17) {
@@ -240,6 +248,31 @@ IpcRequest read_ipc_request(int socket) {
         request.timeout_ms = timeout_ms;
         return request;
     }
+    if (kind == IpcRequestKind::MotionGroupSubmit) {
+        IpcRequest request;
+        request.kind = kind;
+        request.motion_group_plan = decode_ipc_motion_group_plan(
+            {body.begin() + 1, body.end()});
+        return request;
+    }
+    if (kind == IpcRequestKind::MotionGroupStatus ||
+        kind == IpcRequestKind::MotionGroupCancel) {
+        if (body.size() != 21U ||
+            get_u16(body.data() + 1U) != kMotionGroupIpcVersion ||
+            get_u16(body.data() + 3U) != 0U) {
+            throw IpcException("运动组状态请求版本或长度无效");
+        }
+        IpcRequest request;
+        request.kind = kind;
+        request.transaction_id = get_u64(body.data() + 5U);
+        request.group_id = get_u32(body.data() + 13U);
+        request.plan_generation = get_u32(body.data() + 17U);
+        if (request.transaction_id == 0U || request.group_id == 0U ||
+            request.plan_generation == 0U) {
+            throw IpcException("运动组事务身份不能包含零值");
+        }
+        return request;
+    }
     if (body.size() < 1 + sizeof(std::uint32_t)) {
         throw IpcException("本地 IPC 请求缺少目标节点 ID");
     }
@@ -251,7 +284,11 @@ IpcRequest read_ipc_request(int socket) {
         body.begin() + static_cast<std::ptrdiff_t>(
                            1 + sizeof(std::uint32_t)),
         body.end());
-    return {kind, node_id, protocol::decode(packet)};
+    IpcRequest request;
+    request.kind = kind;
+    request.node_id = node_id;
+    request.packet = protocol::decode(packet);
+    return request;
 }
 
 void write_ipc_traffic_status_request(int socket) {
@@ -306,6 +343,205 @@ void write_ipc_runtime_snapshot_request(
     append_u16(body, maximum_resources);
     append_u32(body, timeout_ms);
     send_body(socket, body);
+}
+
+void write_ipc_motion_group_submit_request(
+    int socket, const MotionGroupPlan& plan) {
+    const auto encoded = encode_ipc_motion_group_plan(plan);
+    std::vector<std::uint8_t> body;
+    body.reserve(1U + encoded.size());
+    body.push_back(static_cast<std::uint8_t>(
+        IpcRequestKind::MotionGroupSubmit));
+    body.insert(body.end(), encoded.begin(), encoded.end());
+    send_body(socket, body);
+}
+
+void write_motion_group_identity_request(
+    int socket, IpcRequestKind kind, std::uint64_t transaction_id,
+    std::uint32_t group_id, std::uint32_t plan_generation) {
+    if ((kind != IpcRequestKind::MotionGroupStatus &&
+         kind != IpcRequestKind::MotionGroupCancel) ||
+        transaction_id == 0U || group_id == 0U ||
+        plan_generation == 0U) {
+        throw IpcException("运动组状态请求身份无效");
+    }
+    std::vector<std::uint8_t> body{
+        static_cast<std::uint8_t>(kind)};
+    append_u16(body, kMotionGroupIpcVersion);
+    append_u16(body, 0U);
+    append_u64(body, transaction_id);
+    append_u32(body, group_id);
+    append_u32(body, plan_generation);
+    send_body(socket, body);
+}
+
+void write_ipc_motion_group_status_request(
+    int socket, std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation) {
+    write_motion_group_identity_request(
+        socket, IpcRequestKind::MotionGroupStatus, transaction_id,
+        group_id, plan_generation);
+}
+
+void write_ipc_motion_group_cancel_request(
+    int socket, std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation) {
+    write_motion_group_identity_request(
+        socket, IpcRequestKind::MotionGroupCancel, transaction_id,
+        group_id, plan_generation);
+}
+
+std::vector<std::uint8_t> encode_ipc_motion_group_plan(
+    const MotionGroupPlan& plan) {
+    if (plan.members.empty() ||
+        plan.members.size() > kMaximumIpcMotionGroupMembers) {
+        throw IpcException("运动组 IPC 成员数量超出范围");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kMotionGroupPlanHeaderSize);
+    append_u16(body, kMotionGroupIpcVersion);
+    append_u16(body, 0U);
+    append_u64(body, plan.transaction_id);
+    append_u32(body, plan.group_id);
+    append_u32(body, plan.plan_generation);
+    append_u64(body, plan.host_start_time_ns);
+    body.insert(body.end(), plan.content_digest.begin(),
+                plan.content_digest.end());
+    append_u16(body, static_cast<std::uint16_t>(plan.members.size()));
+    append_u16(body, 0U);
+    for (const auto& member : plan.members) {
+        const auto segment = protocol::encode_motion_segment(member.segment);
+        if (member.node_id == 0U || member.node_id > 127U ||
+            segment.empty() ||
+            segment.size() > std::numeric_limits<std::uint16_t>::max()) {
+            throw IpcException("运动组 IPC 成员节点或运动段无效");
+        }
+        append_u32(body, member.node_id);
+        append_u16(body, static_cast<std::uint16_t>(segment.size()));
+        append_u16(body, 0U);
+        body.insert(body.end(), segment.begin(), segment.end());
+        if (body.size() > kMaximumIpcBodySize - 1U) {
+            throw IpcException("运动组计划超过本地 IPC 上限");
+        }
+    }
+    return body;
+}
+
+MotionGroupPlan decode_ipc_motion_group_plan(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kMotionGroupPlanHeaderSize ||
+        get_u16(body.data()) != kMotionGroupIpcVersion ||
+        get_u16(body.data() + 2U) != 0U ||
+        get_u16(body.data() + 62U) != 0U) {
+        throw IpcException("运动组计划版本、长度或保留字段无效");
+    }
+    MotionGroupPlan plan;
+    plan.transaction_id = get_u64(body.data() + 4U);
+    plan.group_id = get_u32(body.data() + 12U);
+    plan.plan_generation = get_u32(body.data() + 16U);
+    plan.host_start_time_ns = get_u64(body.data() + 20U);
+    std::copy_n(body.data() + 28U, plan.content_digest.size(),
+                plan.content_digest.begin());
+    const auto member_count = get_u16(body.data() + 60U);
+    if (member_count == 0U ||
+        member_count > kMaximumIpcMotionGroupMembers) {
+        throw IpcException("运动组 IPC 成员数量超出范围");
+    }
+    std::size_t offset = kMotionGroupPlanHeaderSize;
+    plan.members.reserve(member_count);
+    for (std::uint16_t index = 0U; index < member_count; ++index) {
+        if (body.size() - offset < kMotionGroupMemberHeaderSize) {
+            throw IpcException("运动组 IPC 成员头被截断");
+        }
+        const auto node_id = get_u32(body.data() + offset);
+        const auto segment_size = get_u16(body.data() + offset + 4U);
+        const auto reserved = get_u16(body.data() + offset + 6U);
+        offset += kMotionGroupMemberHeaderSize;
+        if (node_id == 0U || node_id > 127U || segment_size == 0U ||
+            reserved != 0U || body.size() - offset < segment_size) {
+            throw IpcException("运动组 IPC 成员节点或长度无效");
+        }
+        const std::vector<std::uint8_t> segment(
+            body.begin() + static_cast<std::ptrdiff_t>(offset),
+            body.begin() + static_cast<std::ptrdiff_t>(offset + segment_size));
+        plan.members.push_back(
+            {node_id, protocol::decode_motion_segment(segment)});
+        offset += segment_size;
+    }
+    if (offset != body.size()) {
+        throw IpcException("运动组 IPC 计划包含尾随数据");
+    }
+    return plan;
+}
+
+std::vector<std::uint8_t> encode_ipc_motion_group_snapshot(
+    const MotionGroupServiceSnapshot& snapshot) {
+    if (snapshot.member_count > kMaximumIpcMotionGroupMembers ||
+        snapshot.ready_count > snapshot.member_count ||
+        snapshot.committed_count > snapshot.member_count ||
+        snapshot.pending_request_count > kMaximumIpcMotionGroupMembers ||
+        (snapshot.abort_is_best_effort && !snapshot.commit_dispatched)) {
+        throw IpcException("运动组状态快照字段无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kMotionGroupSnapshotSize);
+    append_u16(body, kMotionGroupIpcVersion);
+    body.push_back(static_cast<std::uint8_t>(snapshot.state));
+    body.push_back(snapshot.abort_reason.has_value()
+                       ? static_cast<std::uint8_t>(*snapshot.abort_reason)
+                       : 0U);
+    append_u64(body, snapshot.transaction_id);
+    append_u32(body, snapshot.group_id);
+    append_u32(body, snapshot.plan_generation);
+    append_u16(body, snapshot.member_count);
+    append_u16(body, snapshot.ready_count);
+    append_u16(body, snapshot.committed_count);
+    append_u16(body, snapshot.pending_request_count);
+    append_u16(body,
+               static_cast<std::uint16_t>(snapshot.commit_dispatched) |
+                   static_cast<std::uint16_t>(
+                       snapshot.abort_is_best_effort
+                           ? 2U
+                           : 0U));
+    append_u16(body, 0U);
+    return body;
+}
+
+MotionGroupServiceSnapshot decode_ipc_motion_group_snapshot(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() != kMotionGroupSnapshotSize ||
+        get_u16(body.data()) != kMotionGroupIpcVersion ||
+        body[2U] > static_cast<std::uint8_t>(MotionGroupState::Aborted) ||
+        body[3U] > static_cast<std::uint8_t>(
+                       protocol::MotionGroupAbortReason::StartDeadlineMissed) ||
+        (get_u16(body.data() + 28U) & ~3U) != 0U ||
+        get_u16(body.data() + 30U) != 0U) {
+        throw IpcException("运动组状态快照格式无效");
+    }
+    MotionGroupServiceSnapshot snapshot;
+    snapshot.state = static_cast<MotionGroupState>(body[2U]);
+    if (body[3U] != 0U) {
+        snapshot.abort_reason =
+            static_cast<protocol::MotionGroupAbortReason>(body[3U]);
+    }
+    snapshot.transaction_id = get_u64(body.data() + 4U);
+    snapshot.group_id = get_u32(body.data() + 12U);
+    snapshot.plan_generation = get_u32(body.data() + 16U);
+    snapshot.member_count = get_u16(body.data() + 20U);
+    snapshot.ready_count = get_u16(body.data() + 22U);
+    snapshot.committed_count = get_u16(body.data() + 24U);
+    snapshot.pending_request_count = get_u16(body.data() + 26U);
+    const auto flags = get_u16(body.data() + 28U);
+    snapshot.commit_dispatched = (flags & 1U) != 0U;
+    snapshot.abort_is_best_effort = (flags & 2U) != 0U;
+    if (snapshot.member_count > kMaximumIpcMotionGroupMembers ||
+        snapshot.ready_count > snapshot.member_count ||
+        snapshot.committed_count > snapshot.member_count ||
+        snapshot.pending_request_count > kMaximumIpcMotionGroupMembers ||
+        (snapshot.abort_is_best_effort && !snapshot.commit_dispatched)) {
+        throw IpcException("运动组状态快照计数或标志无效");
+    }
+    return snapshot;
 }
 
 std::vector<std::uint8_t> encode_ipc_uart_stream_chunk(

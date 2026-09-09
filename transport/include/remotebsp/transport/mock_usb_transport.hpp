@@ -4,6 +4,8 @@
 #include "remotebsp/transport/usb_frame_codec.hpp"
 
 #include <string>
+#include <cstdint>
+#include <vector>
 
 namespace remotebsp::transport {
 
@@ -30,6 +32,14 @@ public:
     LinkCapabilities capabilities() const noexcept override;
 
 private:
+    struct HostPeer {
+        int socket{-1};
+        std::uint32_t node_id{};
+        UsbFrameDecoder decoder;
+    };
+
+    std::optional<LinkFrame> pop_host_frame();
+    void learn_host_peer(HostPeer& peer, const LinkFrame& frame) noexcept;
     void close_all() noexcept;
 
     std::string socket_path_;
@@ -37,6 +47,7 @@ private:
     int socket_{-1};
     int listener_{-1};
     UsbFrameDecoder decoder_;
+    std::vector<HostPeer> host_peers_;
 };
 
 }

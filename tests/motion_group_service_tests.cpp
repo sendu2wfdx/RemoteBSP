@@ -5,15 +5,19 @@
 #include "remotebsp/protocol/fragmentation.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
+#include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <condition_variable>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
+#include <thread>
 
 using namespace remotebsp;
 
@@ -254,6 +258,7 @@ void test_two_remote_cores_complete_prepare_and_commit() {
     CHECK(started.status == toolbusd::MotionGroupServiceStatus::Started);
     CHECK(started.dispatches.size() == 2U);
     CHECK(fixture.requests.pending_count() == 2U);
+    CHECK(!fixture.service.snapshot().commit_dispatched);
 
     const auto first_ready = fixture.exchange(
         dispatch_for(started.dispatches, 1U), kHostNowNs + 1000000ULL);
@@ -263,6 +268,7 @@ void test_two_remote_cores_complete_prepare_and_commit() {
     CHECK(first.status == toolbusd::MotionGroupServiceStatus::Accepted);
     CHECK(first.dispatches.empty());
     CHECK(fixture.first_motion->status().queue_depth == 0U);
+    CHECK(!fixture.service.snapshot().commit_dispatched);
 
     const auto second_ready = fixture.exchange(
         dispatch_for(started.dispatches, 2U), kHostNowNs + 2000000ULL);
@@ -271,6 +277,7 @@ void test_two_remote_cores_complete_prepare_and_commit() {
         kHostNowNs + 2000000ULL, time_zero + std::chrono::milliseconds(2));
     CHECK(all_ready.status == toolbusd::MotionGroupServiceStatus::AllReady);
     CHECK(all_ready.dispatches.size() == 2U);
+    CHECK(fixture.service.snapshot().commit_dispatched);
     for (const auto& dispatch : all_ready.dispatches) {
         CHECK(dispatch.phase == toolbusd::MotionGroupActionPhase::Commit);
         CHECK(dispatch.submission.packet.header.command ==
@@ -302,6 +309,50 @@ void test_two_remote_cores_complete_prepare_and_commit() {
         fixture.requests, fixture.registry, 1U, first_ready,
         kHostNowNs + 5000000ULL, time_zero + std::chrono::milliseconds(5));
     CHECK(late.status == toolbusd::MotionGroupServiceStatus::Duplicate);
+}
+
+void test_commit_failure_reports_best_effort_abort_boundary() {
+    Fixture fixture;
+    const auto time_zero = toolbusd::RequestManager::TimePoint{};
+    const auto started = fixture.service.start(
+        fixture.requests, plan(), fixture.registry, kSessionId,
+        kHostNowNs, time_zero);
+    for (std::uint32_t node_id = 1U; node_id <= 2U; ++node_id) {
+        const auto response = fixture.exchange(
+            dispatch_for(started.dispatches, node_id),
+            kHostNowNs + node_id * 1000000ULL);
+        const auto ready = fixture.service.accept_response(
+            fixture.requests, fixture.registry, node_id, response,
+            kHostNowNs + node_id * 1000000ULL,
+            time_zero + std::chrono::milliseconds(node_id));
+        if (node_id == 2U) {
+            CHECK(ready.dispatches.size() == 2U);
+            const auto first_ack = fixture.exchange(
+                dispatch_for(ready.dispatches, 1U),
+                kHostNowNs + 3000000ULL);
+            static_cast<void>(fixture.service.accept_response(
+                fixture.requests, fixture.registry, 1U, first_ack,
+                kHostNowNs + 3000000ULL,
+                time_zero + std::chrono::milliseconds(3)));
+            auto second_ack = fixture.exchange(
+                dispatch_for(ready.dispatches, 2U),
+                kHostNowNs + 4000000ULL);
+            second_ack.header.flags |= protocol::kErrorResponseFlag;
+            second_ack.payload = {
+                static_cast<std::uint8_t>(
+                    mock_mcu::StatusCode::ResourceFailed)};
+            const auto failed = fixture.service.accept_response(
+                fixture.requests, fixture.registry, 2U, second_ack,
+                kHostNowNs + 4000000ULL,
+                time_zero + std::chrono::milliseconds(4));
+            CHECK(failed.status ==
+                  toolbusd::MotionGroupServiceStatus::Aborting);
+            const auto snapshot = fixture.service.snapshot();
+            CHECK(snapshot.commit_dispatched);
+            CHECK(snapshot.abort_is_best_effort);
+            CHECK(snapshot.committed_count == 1U);
+        }
+    }
 }
 
 void test_one_prepare_failure_never_dispatches_commit() {
@@ -518,15 +569,67 @@ void test_node_restart_and_active_cancel_clear_old_routes() {
     }
 }
 
+void test_dispatch_gate_orders_cancel_after_existing_prepare_batch() {
+    toolbusd::MotionGroupDispatchGate gate;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool submit_entered = false;
+    bool cancel_attempted = false;
+    bool finish_submit = false;
+    std::vector<toolbusd::MotionGroupActionPhase> order;
+
+    std::thread submit([&] {
+        auto guard = gate.lock();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            order.push_back(toolbusd::MotionGroupActionPhase::Prepare);
+            submit_entered = true;
+        }
+        changed.notify_all();
+        std::unique_lock<std::mutex> lock(mutex);
+        changed.wait(lock, [&] { return finish_submit; });
+        order.push_back(toolbusd::MotionGroupActionPhase::Prepare);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        changed.wait(lock, [&] { return submit_entered; });
+    }
+    std::thread cancel([&] {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            cancel_attempted = true;
+        }
+        changed.notify_all();
+        auto guard = gate.lock();
+        std::lock_guard<std::mutex> lock(mutex);
+        order.push_back(toolbusd::MotionGroupActionPhase::Abort);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        changed.wait(lock, [&] { return cancel_attempted; });
+        CHECK(order.size() == 1U);
+        finish_submit = true;
+    }
+    changed.notify_all();
+    submit.join();
+    cancel.join();
+    CHECK(order.size() == 3U);
+    CHECK(order[0U] == toolbusd::MotionGroupActionPhase::Prepare);
+    CHECK(order[1U] == toolbusd::MotionGroupActionPhase::Prepare);
+    CHECK(order[2U] == toolbusd::MotionGroupActionPhase::Abort);
+}
+
 }
 
 int main() {
     test_two_remote_cores_complete_prepare_and_commit();
+    test_commit_failure_reports_best_effort_abort_boundary();
     test_one_prepare_failure_never_dispatches_commit();
     test_request_timeout_preserves_unrelated_events_and_aborts_group();
     test_request_retry_reuses_exact_request_identity();
     test_remote_error_and_response_mismatch_abort_and_ignore_late_reply();
     test_node_restart_and_active_cancel_clear_old_routes();
+    test_dispatch_gate_orders_cancel_after_existing_prepare_batch();
     if (failures != 0) {
         std::cerr << failures << " 项运动组服务测试失败\n";
         return 1;

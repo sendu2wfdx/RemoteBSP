@@ -4,6 +4,7 @@
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
+#include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/protocol/waveform.hpp"
 
@@ -150,6 +151,47 @@ struct UartStreamChunk {
     std::uint64_t lost_events{};
 };
 
+enum class MotionGroupTransactionState : std::uint8_t {
+    Idle = 0,
+    Preparing,
+    Ready,
+    Committing,
+    Committed,
+    Aborting,
+    Aborted,
+};
+
+struct MotionGroupMemberPlan {
+    std::uint32_t node_id{};
+    protocol::MotionSegmentPayload segment;
+};
+
+struct MotionGroupPlan {
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+    // 与 Linux CLOCK_MONOTONIC/steady_clock 同源的绝对纳秒时间。
+    std::uint64_t host_start_time_ns{};
+    protocol::MotionGroupDigest content_digest{};
+    std::vector<MotionGroupMemberPlan> members;
+};
+
+struct MotionGroupTransactionStatus {
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+    MotionGroupTransactionState state{MotionGroupTransactionState::Idle};
+    std::optional<protocol::MotionGroupAbortReason> abort_reason;
+    std::uint16_t member_count{};
+    std::uint16_t ready_count{};
+    std::uint16_t committed_count{};
+    std::uint16_t pending_request_count{};
+    bool commit_dispatched{};
+    // true 表示 COMMIT 批次已经释放给链路；后续 ABORT 只能尽力停止，
+    // 不能保证物理回滚已经武装或开始执行的节点。
+    bool abort_is_best_effort{};
+};
+
 class ClientException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -261,6 +303,15 @@ public:
     protocol::MotionStatusPayload motion_status() const;
     void motion_abort() const;
     void motion_clear_fault() const;
+
+    MotionGroupTransactionStatus motion_group_submit(
+        const MotionGroupPlan& plan) const;
+    MotionGroupTransactionStatus motion_group_status(
+        std::uint64_t transaction_id, std::uint32_t group_id,
+        std::uint32_t plan_generation) const;
+    MotionGroupTransactionStatus motion_group_cancel(
+        std::uint64_t transaction_id, std::uint32_t group_id,
+        std::uint32_t plan_generation) const;
 
     protocol::Packet transact(protocol::Packet request) const;
     const std::string& socket_path() const noexcept;

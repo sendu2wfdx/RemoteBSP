@@ -1,6 +1,8 @@
 #include "remotebsp/protocol/fragmentation.hpp"
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
+#include "remotebsp/toolbusd/motion_group_service.hpp"
+#include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
@@ -82,6 +84,14 @@ std::uint64_t uart_stream_key(std::uint32_t node_id,
     return (static_cast<std::uint64_t>(node_id) << 32U) | object_id;
 }
 
+std::uint64_t steady_time_ns(
+    std::chrono::steady_clock::time_point now =
+        std::chrono::steady_clock::now()) noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count());
+}
+
 struct UartStreamBuffer {
     std::deque<std::uint8_t> bytes;
     std::uint64_t dropped_bytes{};
@@ -122,11 +132,17 @@ public:
     ToolbusDaemon(
                   std::unique_ptr<remotebsp::transport::LinkTransport> transport,
                   std::string socket_path,
-                  remotebsp::toolbusd::TrafficConfig traffic_config)
+                  remotebsp::toolbusd::TrafficConfig traffic_config,
+                  remotebsp::toolbusd::ClockSyncManagerConfig
+                      clock_sync_config,
+                  remotebsp::toolbusd::MotionGroupServiceConfig
+                      motion_group_config)
         : transport_(std::move(transport)),
           fragmenter_(transport_->mtu()),
           reassembler_(transport_->mtu(), std::chrono::milliseconds(500)),
           traffic_(std::move(traffic_config)),
+          clock_sync_(std::move(clock_sync_config)),
+          motion_group_(std::move(motion_group_config)),
           socket_path_(std::move(socket_path)) {}
 
     ~ToolbusDaemon() {
@@ -186,6 +202,69 @@ public:
     }
 
 private:
+    bool send_motion_dispatches(
+        const std::vector<remotebsp::toolbusd::MotionGroupDispatch>&
+            dispatches) {
+        bool non_abort_failed = false;
+        for (const auto& dispatch : dispatches) {
+            bool sent = false;
+            try {
+                sent = send_packet(
+                    dispatch.submission.packet,
+                    kNodeRequestBaseRoute + dispatch.node_id,
+                    dispatch.phase == remotebsp::toolbusd::
+                                          MotionGroupActionPhase::Abort
+                        ? remotebsp::toolbusd::AdmissionPolicy::Guaranteed
+                        : remotebsp::toolbusd::AdmissionPolicy::Enforce);
+            } catch (const std::exception& error) {
+                std::cerr << "运动组动作发送失败: " << error.what()
+                          << '\n';
+            }
+            if (!sent &&
+                dispatch.phase != remotebsp::toolbusd::
+                                      MotionGroupActionPhase::Abort) {
+                non_abort_failed = true;
+            }
+        }
+        if (!non_abort_failed) {
+            return true;
+        }
+
+        std::vector<remotebsp::toolbusd::MotionGroupDispatch> aborts;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto state = motion_group_.state();
+            if (state == remotebsp::toolbusd::MotionGroupState::Preparing ||
+                state == remotebsp::toolbusd::MotionGroupState::Ready ||
+                state == remotebsp::toolbusd::MotionGroupState::Committing) {
+                aborts = motion_group_.cancel(requests_).dispatches;
+                state_changed_.notify_all();
+            }
+        }
+        // ABORT 使用安全业务保证通道。首次发送异常时请求仍留在
+        // RequestManager 中，由主循环有界重试，不能阻塞接收线程。
+        for (const auto& abort : aborts) {
+            try {
+                static_cast<void>(send_packet(
+                    abort.submission.packet,
+                    kNodeRequestBaseRoute + abort.node_id,
+                    remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
+            } catch (const std::exception& error) {
+                std::cerr << "运动组 ABORT 首次发送失败，将等待重试: "
+                          << error.what() << '\n';
+            }
+        }
+        return false;
+    }
+
+    static bool motion_group_identity_matches(
+        const remotebsp::toolbusd::IpcRequest& request,
+        const remotebsp::toolbusd::MotionGroupServiceSnapshot& snapshot) {
+        return request.transaction_id == snapshot.transaction_id &&
+               request.group_id == snapshot.group_id &&
+               request.plan_generation == snapshot.plan_generation;
+    }
+
     bool send_packet(
         const remotebsp::protocol::Packet& packet, std::uint32_t route,
         remotebsp::toolbusd::AdmissionPolicy policy =
@@ -283,8 +362,25 @@ private:
         const auto response_complete_at =
             remotebsp::toolbusd::ClockSyncManager::Clock::now();
         const auto packet = remotebsp::protocol::decode(*result.packet);
+        const auto command =
+            static_cast<remotebsp::protocol::Command>(packet.header.command);
+        // 错误 command 也可能携带运动组 request_id，并会触发全组
+        // fail_active。因此除发现/时钟同步外的所有普通响应均经过运动门，
+        // 不能只按响应 command 判断。
+        const bool needs_motion_dispatch_gate =
+            packet.header.message_type ==
+                remotebsp::protocol::MessageType::Response &&
+            command != remotebsp::protocol::Command::DiscoveryResponse &&
+            command != remotebsp::protocol::Command::TimeSync;
+        std::optional<remotebsp::toolbusd::MotionGroupDispatchGate::Guard>
+            motion_guard;
+        if (needs_motion_dispatch_gate) {
+            motion_guard.emplace(motion_dispatch_gate_.lock());
+        }
 
         std::optional<remotebsp::protocol::Packet> assignment;
+        std::vector<remotebsp::toolbusd::MotionGroupDispatch>
+            motion_dispatches;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             if (packet.header.command == static_cast<std::uint16_t>(
@@ -392,7 +488,6 @@ private:
                 }
                 const auto key = request_key(
                     packet.header.session_id, packet.header.request_id);
-                const auto target = request_routes_.find(key);
                 const auto response_node_id =
                     message.route - kNodeResponseBaseRoute;
                 if (packet.header.command == static_cast<std::uint16_t>(
@@ -402,18 +497,28 @@ private:
                         response_complete_at));
                     return;
                 }
-                if (target == request_routes_.end() ||
-                    target->second !=
-                        kNodeRequestBaseRoute + response_node_id) {
-                    return;
-                }
-                const auto response =
-                    requests_.accept_response(packet);
-                if (response.status ==
-                        remotebsp::toolbusd::ResponseStatus::Matched &&
-                    response.response.has_value()) {
-                    responses_[key] = *response.response;
+                const auto group = motion_group_.accept_response(
+                    requests_, nodes_, response_node_id, packet,
+                    steady_time_ns(response_complete_at),
+                    response_complete_at);
+                if (group.status != remotebsp::toolbusd::
+                                        MotionGroupServiceStatus::Unrelated) {
+                    motion_dispatches = group.dispatches;
                     state_changed_.notify_all();
+                } else {
+                    const auto target = request_routes_.find(key);
+                    if (target == request_routes_.end() ||
+                        target->second !=
+                            kNodeRequestBaseRoute + response_node_id) {
+                        return;
+                    }
+                    const auto response = requests_.accept_response(packet);
+                    if (response.status ==
+                            remotebsp::toolbusd::ResponseStatus::Matched &&
+                        response.response.has_value()) {
+                        responses_[key] = *response.response;
+                        state_changed_.notify_all();
+                    }
                 }
             }
         }
@@ -422,17 +527,36 @@ private:
                 *assignment, kBroadcastRequestRoute,
                 remotebsp::toolbusd::AdmissionPolicy::Guaranteed));
         }
+        if (!motion_dispatches.empty()) {
+            static_cast<void>(send_motion_dispatches(motion_dispatches));
+        }
     }
 
     void process_request_timers() {
+        auto motion_guard = motion_dispatch_gate_.lock();
         struct Retry {
             remotebsp::protocol::Packet packet;
             std::uint32_t route{};
         };
         std::vector<Retry> retries;
+        std::vector<remotebsp::toolbusd::MotionGroupDispatch>
+            motion_dispatches;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            for (const auto& event : requests_.poll()) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto request_events = requests_.poll(now);
+            const auto offline = nodes_.expire(now);
+            for (const auto& uuid : offline) {
+                const auto* node = nodes_.find(uuid);
+                if (node != nullptr && node->node_id != 0U) {
+                    static_cast<void>(clock_sync_.cancel_node(
+                        requests_, node->node_id));
+                }
+            }
+            const auto group = motion_group_.poll(
+                requests_, nodes_, request_events, steady_time_ns(now), now);
+            motion_dispatches = group.dispatches;
+            for (const auto& event : group.unhandled_events) {
                 if (event.type ==
                         remotebsp::toolbusd::RequestEventType::Retry &&
                     event.packet.has_value()) {
@@ -462,18 +586,16 @@ private:
                     }
                 }
             }
-            const auto offline = nodes_.expire();
-            for (const auto& uuid : offline) {
-                const auto* node = nodes_.find(uuid);
-                if (node != nullptr && node->node_id != 0U) {
-                    static_cast<void>(clock_sync_.cancel_node(
-                        requests_, node->node_id));
-                }
-            }
-            if (!offline.empty()) {
+            if (!offline.empty() ||
+                group.status != remotebsp::toolbusd::
+                                    MotionGroupServiceStatus::Accepted) {
                 state_changed_.notify_all();
             }
         }
+        if (!motion_dispatches.empty()) {
+            static_cast<void>(send_motion_dispatches(motion_dispatches));
+        }
+        motion_guard.unlock();
         for (const auto& retry : retries) {
             const bool is_clock_sync =
                 retry.packet.header.command ==
@@ -823,6 +945,91 @@ private:
                         snapshot));
                 return;
             }
+            if (ipc_request.kind == remotebsp::toolbusd::
+                                        IpcRequestKind::MotionGroupSubmit) {
+                auto motion_guard = motion_dispatch_gate_.lock();
+                std::vector<remotebsp::toolbusd::MotionGroupDispatch>
+                    dispatches;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    const auto state = motion_group_.state();
+                    if (state ==
+                            remotebsp::toolbusd::MotionGroupState::Committed ||
+                        state ==
+                            remotebsp::toolbusd::MotionGroupState::Aborted) {
+                        motion_group_.reset();
+                    } else if (state !=
+                               remotebsp::toolbusd::MotionGroupState::Idle) {
+                        throw std::runtime_error(
+                            "已有运动组事务正在执行；全局一次只允许一个事务");
+                    }
+                    dispatches = motion_group_.start(
+                        requests_, ipc_request.motion_group_plan, nodes_,
+                        session_id_, steady_time_ns()).dispatches;
+                }
+                static_cast<void>(send_motion_dispatches(dispatches));
+                motion_guard.unlock();
+                remotebsp::toolbusd::MotionGroupServiceSnapshot snapshot;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    snapshot = motion_group_.snapshot();
+                }
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_motion_group_snapshot(
+                        snapshot));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::
+                                        IpcRequestKind::MotionGroupStatus ||
+                ipc_request.kind == remotebsp::toolbusd::
+                                        IpcRequestKind::MotionGroupCancel) {
+                std::vector<remotebsp::toolbusd::MotionGroupDispatch>
+                    dispatches;
+                remotebsp::toolbusd::MotionGroupServiceSnapshot snapshot;
+                std::optional<
+                    remotebsp::toolbusd::MotionGroupDispatchGate::Guard>
+                    motion_guard;
+                if (ipc_request.kind == remotebsp::toolbusd::
+                                            IpcRequestKind::
+                                                MotionGroupCancel) {
+                    motion_guard.emplace(motion_dispatch_gate_.lock());
+                }
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+                    snapshot = motion_group_.snapshot();
+                    if (!motion_group_identity_matches(
+                            ipc_request, snapshot)) {
+                        throw std::runtime_error(
+                            "运动组事务身份与当前记录不匹配");
+                    }
+                    const auto state = motion_group_.state();
+                    if (ipc_request.kind == remotebsp::toolbusd::
+                                                IpcRequestKind::
+                                                    MotionGroupCancel &&
+                        (state == remotebsp::toolbusd::
+                                      MotionGroupState::Preparing ||
+                         state == remotebsp::toolbusd::
+                                      MotionGroupState::Ready ||
+                         state == remotebsp::toolbusd::
+                                      MotionGroupState::Committing)) {
+                        dispatches = motion_group_.cancel(requests_)
+                                         .dispatches;
+                        snapshot = motion_group_.snapshot();
+                    }
+                }
+                if (!dispatches.empty()) {
+                    static_cast<void>(send_motion_dispatches(dispatches));
+                }
+                if (motion_guard.has_value()) {
+                    motion_guard->unlock();
+                }
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_motion_group_snapshot(
+                        snapshot));
+                return;
+            }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::NextEvent) {
                 std::unique_lock<std::mutex> lock(state_mutex_);
@@ -918,6 +1125,17 @@ private:
             if (request.header.message_type !=
                 remotebsp::protocol::MessageType::Request) {
                 throw std::invalid_argument("本地客户端只能提交请求消息");
+            }
+            const auto command = static_cast<remotebsp::protocol::Command>(
+                request.header.command);
+            if (command ==
+                    remotebsp::protocol::Command::MotionGroupPrepare ||
+                command ==
+                    remotebsp::protocol::Command::MotionGroupCommit ||
+                command ==
+                    remotebsp::protocol::Command::MotionGroupAbort) {
+                throw std::invalid_argument(
+                    "跨板运动组命令必须通过事务 IPC 提交，不能直通节点");
             }
             // 会话由守护进程拥有，避免客户端伪造会话，也避免 toolbusd
             // 重启后请求 ID 从头计数时与 MCU 中的旧去重缓存冲突。
@@ -1066,6 +1284,7 @@ private:
     remotebsp::toolbusd::TrafficController traffic_;
     remotebsp::toolbusd::RequestManager requests_;
     remotebsp::toolbusd::ClockSyncManager clock_sync_;
+    remotebsp::toolbusd::MotionGroupService motion_group_;
     remotebsp::toolbusd::NodeRegistry nodes_;
     std::string socket_path_;
     int server_socket_{-1};
@@ -1075,6 +1294,7 @@ private:
     std::condition_variable clients_finished_;
     std::size_t active_clients_{0};
     std::mutex send_mutex_;
+    remotebsp::toolbusd::MotionGroupDispatchGate motion_dispatch_gate_;
     std::timed_mutex runtime_snapshot_mutex_;
     std::mutex state_mutex_;
     std::condition_variable state_changed_;
@@ -1102,7 +1322,8 @@ int main(int argc, char** argv) {
                      "[--arbitration-bitrate bit/s] "
                      "[--data-bitrate bit/s] "
                      "[--max-utilization-permille 1..1000] "
-                     "[--burst-window-ms 毫秒]\n";
+                     "[--burst-window-ms 毫秒] "
+                     "[--motion-max-clock-error-ns 纳秒]\n";
         return 2;
     }
     try {
@@ -1116,6 +1337,8 @@ int main(int argc, char** argv) {
                               : parse_mode(mode_text);
         std::string socket_path = "/tmp/toolbusd.sock";
         remotebsp::toolbusd::TrafficConfig traffic_config;
+        remotebsp::toolbusd::ClockSyncManagerConfig clock_sync_config;
+        remotebsp::toolbusd::MotionGroupServiceConfig motion_group_config;
         traffic_config.mode = (mock_usb || usb)
                                   ? remotebsp::toolbusd::TrafficBusMode::Usb
                                   : mode == remotebsp::transport::CanMode::Classical
@@ -1162,6 +1385,18 @@ int main(int argc, char** argv) {
                 }
                 traffic_config.burst_window =
                     std::chrono::milliseconds(value);
+            } else if (option == "--motion-max-clock-error-ns") {
+                if (value > 10000000U) {
+                    throw std::invalid_argument(
+                        "跨板运动最大时钟误差必须位于 1～10000000 ns");
+                }
+                motion_group_config.coordinator.maximum_clock_error_ns =
+                    value;
+                // 协调器不能使用已被 ClockModel 标成 degraded 的模型。
+                // 因此同一准入上限同时约束模型状态和事务冻结，避免把
+                // 高于模型默认 250 us 的配置变成表面可配、实际无效。
+                clock_sync_config.clock_model_config.maximum_error_bound_ns =
+                    value;
             } else {
                 throw std::invalid_argument("未知 toolbusd 选项");
             }
@@ -1187,7 +1422,8 @@ int main(int argc, char** argv) {
                     argv[1], mode);
         }
         ToolbusDaemon daemon(std::move(transport), std::move(socket_path),
-                             traffic_config);
+                             traffic_config, clock_sync_config,
+                             motion_group_config);
         daemon.run();
     } catch (const std::exception& error) {
         std::cerr << "toolbusd 启动失败: " << error.what() << '\n';

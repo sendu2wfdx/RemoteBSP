@@ -4,6 +4,7 @@
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
 #include "remotebsp/toolbusd/clock_model.hpp"
+#include "remotebsp/toolbusd/motion_group_service.hpp"
 
 #include <cstdint>
 #include <array>
@@ -26,11 +27,16 @@ enum class IpcRequestKind : std::uint8_t {
     TrafficStatus = 3,
     UartStreamRead = 4,
     RuntimeSnapshot = 5,
+    MotionGroupSubmit = 6,
+    MotionGroupStatus = 7,
+    MotionGroupCancel = 8,
 };
 
 constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 2U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
+constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
+constexpr std::uint16_t kMaximumIpcMotionGroupMembers = 32U;
 
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
@@ -44,6 +50,10 @@ struct IpcRequest {
     std::uint32_t object_id{};
     std::uint32_t maximum_length{};
     std::uint32_t timeout_ms{};
+    MotionGroupPlan motion_group_plan;
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
 };
 
 struct UartStreamChunk {
@@ -123,6 +133,14 @@ void write_ipc_uart_stream_read_request(
 void write_ipc_runtime_snapshot_request(
     int socket, std::uint16_t maximum_resources,
     std::uint32_t timeout_ms);
+void write_ipc_motion_group_submit_request(
+    int socket, const MotionGroupPlan& plan);
+void write_ipc_motion_group_status_request(
+    int socket, std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation);
+void write_ipc_motion_group_cancel_request(
+    int socket, std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -140,6 +158,14 @@ UartStreamChunk decode_ipc_uart_stream_chunk(
 std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
     const IpcRuntimeSnapshot& snapshot);
 IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_motion_group_plan(
+    const MotionGroupPlan& plan);
+MotionGroupPlan decode_ipc_motion_group_plan(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_motion_group_snapshot(
+    const MotionGroupServiceSnapshot& snapshot);
+MotionGroupServiceSnapshot decode_ipc_motion_group_snapshot(
     const std::vector<std::uint8_t>& body);
 
 void write_ipc_response(int socket, IpcStatus status,

@@ -245,6 +245,7 @@ void MotionGroupService::reset() {
     session_id_ = 0U;
     completed_routes_.clear();
     completed_order_.clear();
+    commit_dispatched_ = false;
 }
 
 MotionGroupState MotionGroupService::state() const noexcept {
@@ -262,6 +263,33 @@ std::size_t MotionGroupService::pending_route_count() const noexcept {
 
 std::uint32_t MotionGroupService::session_id() const noexcept {
     return session_id_;
+}
+
+MotionGroupServiceSnapshot MotionGroupService::snapshot() const noexcept {
+    MotionGroupServiceSnapshot result;
+    result.transaction_id = coordinator_.transaction_id();
+    result.group_id = coordinator_.group_id();
+    result.plan_generation = coordinator_.plan_generation();
+    result.state = coordinator_.state();
+    result.abort_reason = coordinator_.abort_reason();
+    const auto& members = coordinator_.frozen_members();
+    result.member_count = static_cast<std::uint16_t>(members.size());
+    result.ready_count = static_cast<std::uint16_t>(std::count_if(
+        members.begin(), members.end(),
+        [](const FrozenMotionGroupMember& member) { return member.ready; }));
+    result.committed_count = static_cast<std::uint16_t>(std::count_if(
+        members.begin(), members.end(),
+        [](const FrozenMotionGroupMember& member) {
+            return member.committed;
+        }));
+    result.pending_request_count =
+        static_cast<std::uint16_t>(routes_.size());
+    result.commit_dispatched = commit_dispatched_;
+    result.abort_is_best_effort =
+        commit_dispatched_ &&
+        (result.state == MotionGroupState::Aborting ||
+         result.state == MotionGroupState::Aborted);
+    return result;
 }
 
 std::uint64_t MotionGroupService::route_key(
@@ -333,6 +361,11 @@ std::vector<MotionGroupDispatch> MotionGroupService::submit_actions(
             MotionGroupServiceError::RouteCapacityReached,
             "运动组待处理请求超过有界路由容量");
     }
+    const bool contains_commit =
+        std::any_of(actions.begin(), actions.end(),
+                    [](const MotionGroupAction& action) {
+                        return action.phase == MotionGroupActionPhase::Commit;
+                    });
     std::vector<MotionGroupDispatch> dispatches;
     dispatches.reserve(actions.size());
     std::vector<std::uint64_t> inserted;
@@ -381,6 +414,11 @@ std::vector<MotionGroupDispatch> MotionGroupService::submit_actions(
             }
         }
         throw;
+    }
+    // 只有整个 COMMIT 批次都已形成可发送 dispatch 后才发布此事实；
+    // RequestManager 或路由分配异常会先完整回滚，不制造假阳性。
+    if (contains_commit && !dispatches.empty()) {
+        commit_dispatched_ = true;
     }
     return dispatches;
 }
