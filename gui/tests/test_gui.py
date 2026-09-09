@@ -295,6 +295,7 @@ class GuiTest(unittest.TestCase):
                 self.assertEqual(target["mode"], "static-firmware")
                 self.assertTrue(target["build_enabled"])
                 self.assertTrue(target["project_reports_enabled"])
+                self.assertTrue(target["project_compare_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -345,6 +346,19 @@ class GuiTest(unittest.TestCase):
                     self.assertTrue(any(
                         name.endswith("接线表.md")
                         for name in archive.namelist()))
+                compare_request = Request(
+                    base + "/api/project/compare",
+                    data=json.dumps({
+                        "left": self._default_project(board),
+                        "right": self._default_project(board),
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                comparison = json.loads(urlopen(compare_request).read())
+                self.assertTrue(comparison["ok"])
+                self.assertTrue(comparison["equal"])
+                self.assertEqual(comparison["format"],
+                                 "PROJECT_COMPARISON_V1")
                 request = Request(
                     base + "/api/project/generate",
                     data=json.dumps({
@@ -391,7 +405,9 @@ class GuiTest(unittest.TestCase):
                                b"stripTable", b"controlGpio", b"controlPwm",
                                b"controlStrips", b"compileConfig",
                                b"buildFirmware", b"exportReports",
-                               b"reportResult"):
+                               b"reportResult", b"compareProjects",
+                               b"compareLeftFile", b"compareRightFile",
+                               b"compareResult"):
                     self.assertIn(marker, page)
                 self.assertNotIn(b"deployConfig", page)
             finally:

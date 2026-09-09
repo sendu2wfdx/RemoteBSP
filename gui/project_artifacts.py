@@ -77,7 +77,8 @@ def _entry(key: str, kind: str, name: str, index: int, status: str,
     }
 
 
-def _resource_entries(board: dict, resources: dict) -> list[dict]:
+def build_resource_entries(board: dict, resources: dict) -> list[dict]:
+    """把已校验资源转换为稳定排序、可比较的 Studio 清单条目。"""
     entries: list[dict] = []
 
     for index, item in enumerate(resources["gpio"]):
@@ -385,7 +386,7 @@ def generate_project_reports(project: dict, catalog: dict
     inventory = collect_validated_project(project, catalog)
     prepared = inventory.prepared
     board = inventory.board
-    entries = _resource_entries(board, inventory.resources)
+    entries = build_resource_entries(board, inventory.resources)
     identity = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "board_id": board["id"],

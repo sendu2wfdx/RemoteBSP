@@ -27,6 +27,7 @@ from project_config import (
 )
 from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
 from project_artifacts import generate_project_reports
+from project_compare import compare_projects
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -142,6 +143,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "enabled": True,
                 "build_enabled": True,
                 "project_reports_enabled": True,
+                "project_compare_enabled": True,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
@@ -170,6 +172,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/project/generate",
                         "/api/project/generate-reports",
                         "/api/project/generate-mock-manifest",
+                        "/api/project/compare",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -180,7 +183,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/generate-reports":
+            if path == "/api/project/compare":
+                response = compare_projects(
+                    request.get("left"), request.get("right"), catalog)
+            elif path == "/api/project/generate-reports":
                 generated = generate_project_reports(project, catalog)
                 response = {
                     "ok": True,

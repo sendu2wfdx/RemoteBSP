@@ -88,6 +88,21 @@
 .report-download {display:block;margin-top:9px;padding:7px;border:1px solid var(--cyan);border-radius:6px;color:var(--cyan);text-align:center;text-decoration:none;background:rgba(67,217,189,.07)}
 .report-download:hover {background:rgba(67,217,189,.13)}
 .inspector .wide + .wide {margin-top:8px}
+.project-compare { margin-top:18px; }
+.compare-inputs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.compare-inputs > label { display:grid; gap:8px; color:var(--muted); font-size:11px; }
+.compare-inputs b { color:var(--text); font-size:12px; }
+.compare-inputs input[type="file"] { color:var(--muted); font-size:10px; }
+.compare-inputs textarea { min-height:150px; resize:vertical; padding:11px; border:1px solid var(--line); border-radius:9px; background:#0c1620; color:var(--text); font:10px/1.5 ui-monospace,monospace; }
+.compare-result { margin-top:14px; padding:13px; border:1px solid var(--line); border-radius:9px; background:#0d1720; color:var(--muted); font-size:11px; line-height:1.55; }
+.compare-result.valid { border-color:#065f46; }
+.compare-result.invalid { color:#fb7185; border-color:#881337; }
+.compare-result h3 { margin:0 0 8px; color:var(--text); font-size:14px; }
+.compare-counts { display:flex; flex-wrap:wrap; gap:7px; margin:9px 0; }
+.compare-counts span { padding:4px 7px; border:1px solid var(--line); border-radius:999px; }
+.compare-changes { display:grid; gap:6px; max-height:360px; overflow:auto; margin:10px 0 0; padding:0; list-style:none; }
+.compare-changes li { padding:7px 9px; border-left:3px solid var(--orange); background:#111827; color:var(--text); }
+.compare-hashes { display:block; margin-top:8px; word-break:break-all; }
 
 .endpoint-field { grid-column:span 2; }
 .endpoint-status { margin-left:auto; margin-right:12px; padding:4px 7px; border-radius:999px; font-size:9px; }
@@ -118,4 +133,5 @@
   .resource-fields {
     grid-template-columns: 1fr;
   }
+  .compare-inputs { grid-template-columns:1fr; }
 }
