@@ -3,6 +3,7 @@ add_library(remotebsp_request_manager
     src/clock_sync_manager.cpp
     src/ipc.cpp
     src/motion_group_coordinator.cpp
+    src/motion_group_service.cpp
     src/node_registry.cpp
     src/request_manager.cpp
     src/traffic_control.cpp

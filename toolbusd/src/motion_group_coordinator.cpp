@@ -272,6 +272,17 @@ MotionGroupEventOutcome MotionGroupCoordinator::cancel(TimePoint now) {
                        MotionGroupEventStatus::Cancelled, now);
 }
 
+MotionGroupEventOutcome MotionGroupCoordinator::abort_due_to(
+    protocol::MotionGroupAbortReason reason,
+    MotionGroupEventStatus status, TimePoint now) {
+    if (state_ != MotionGroupState::Preparing &&
+        state_ != MotionGroupState::Ready &&
+        state_ != MotionGroupState::Committing) {
+        return {MotionGroupEventStatus::InvalidState, {}};
+    }
+    return start_abort(reason, status, now);
+}
+
 MotionGroupEventOutcome MotionGroupCoordinator::poll(TimePoint now) {
     if (now < deadline_) {
         return {MotionGroupEventStatus::Accepted, {}};

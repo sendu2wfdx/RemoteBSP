@@ -129,6 +129,10 @@ public:
         const protocol::MotionGroupCommitAckPayload& ack,
         TimePoint now = Clock::now());
     MotionGroupEventOutcome cancel(TimePoint now = Clock::now());
+    MotionGroupEventOutcome abort_due_to(
+        protocol::MotionGroupAbortReason reason,
+        MotionGroupEventStatus status,
+        TimePoint now = Clock::now());
     MotionGroupEventOutcome poll(TimePoint now = Clock::now());
     void reset();
 
