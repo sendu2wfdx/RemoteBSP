@@ -63,9 +63,10 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
 | 总线与高速流 | I2C/SPI 原子事务、设备级 NACK/超时/忙/故障结果、主机 API 和 Mock 已实现；Stream 合同、打开、数据、信用和状态编解码已实现，实体 BSP 与流会话待实现 |
-| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；跨板事务已接入 `toolbusd` 主循环、版本化 IPC、C++ API 与 CLI，并通过双节点 Mock USB 进程级 PREPARE/COMMIT/显式取消闭环；实体固件尚未接入 |
+| 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，并通过双节点 Mock USB 及嵌入式主机测试；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 生成、32线程构建和产物归档；可确定性导出差异 JSON/中文报告、接线资料包、生产记录及带清单/校验和的生产批次包，并按工程哈希、构建 ID、板卡和记录哈希追溯。自动烧录/回读和持久化历史检索尚未实现 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 生成、32线程构建和产物归档；可确定性导出生产资料，并以内容哈希原子保存有界本地批次历史，支持复核、损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
+| Runtime API | 只读 HTTP v1、单次 RuntimeSnapshot IPC v2、短缓存、故障隔离和时钟质量告警已实现；无认证模式仅允许数字回环地址，非回环强制有界 API key 配置，支持 Bearer/X-API-Key 与最小公开存活探针。角色授权、TLS、事件流、写控制租约和审计待实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立，按确定性、资源模型、跨节点同步、故障隔离、可观测性、配置构建、升级恢复、Runtime/API、安全边界和硬件证据分层记录；当前整体对比结论明确为 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -101,7 +102,10 @@ DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 10
 `libremotebsp` 和 CLI。双节点 Mock USB 进程级回归验证了全员 READY 后才 COMMIT、
 短连接提交者退出不取消事务，以及显式取消在 COMMIT 前触发全组 ABORT；直接绕过
 事务 IPC 向单节点发送运动组命令会被守护进程拒绝。COMMIT 后的 ABORT 只保证尽力
-停止，不能声称物理回滚；STM32 参与者和实体跨板同步仍未实现。
+停止，不能声称物理回滚。STM32 公共 Remote Core 已实现可选参与者、完成水位、旧事务
+防重放和调度失败安全停机，并完成 F072/F103/G431 交叉编译；三款板当前故意不提供
+`motion_boot_epoch()`，因此普通单板运动可用而 TimeSync/运动组明确返回不支持。可靠
+启动代次、固件侧 STEPGEN 租约生命周期和实体跨板同步仍是开放前置条件。
 
 具体 GPIO、UART、运动、TMC、PWM 和定时位流映射由 Studio 生成到 Kconfig，构建为
 静态资源表。TMC2209 单线端点固定为 40000 bit/s，帧、CRC 和寄存器语义仍由 Linux
@@ -176,6 +180,9 @@ Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不
 RuntimeSnapshot IPC 已升级到 v2，把每个节点的启动代次、模型代次、同步状态、样本数、
 漂移及误差估计贯通到 Runtime API；Runtime 会按可配置误差与样本年龄阈值输出稳定
 质量告警，旧文本源只标记观测能力未知。这些是软件模型观测值，不代表硬件已达到相同精度。
+Runtime 的认证竖切只解决读取者身份：API key 不提供链路加密或角色授权，非回环部署仍
+必须由受控 TLS 反向代理、密钥文件权限、限速与审计补齐。`toolbusd` 本地控制套接字固定
+为 `0660`，拒绝删除其他用户的同名对象，并在退出时按 device/inode 核对后清理。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 
