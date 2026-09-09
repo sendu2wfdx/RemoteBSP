@@ -51,6 +51,19 @@ class MockBoardManifestResult:
     summary: dict
 
 
+@dataclass(frozen=True)
+class ProjectValidationResult:
+    """不假设实体 BSP 已实现的 Studio 全资源静态校验结果。"""
+
+    board_id: str
+    resource_count: int
+    project_sha256: str
+    project_schema_version: int
+    original_schema_version: int
+    migrations: tuple[str, ...]
+    summary: dict
+
+
 BOARD_CONFIGS = {
     "mellow-fly-d5-v1": (
         "configs/stm32f072_mellow_fly_d5_defconfig",
@@ -550,6 +563,18 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
         config, board["id"], target, count, prepared.sha256,
         prepared.schema_version, prepared.original_schema_version,
         prepared.migrations, prepared.summary)
+
+
+def validate_project(draft: dict, catalog: dict) -> ProjectValidationResult:
+    """用与生成器相同的规则校验 Studio 工程，不生成固件。"""
+    prepared = prepare_project(draft)
+    board, resources = _validate_and_collect(
+        prepared.document, catalog, allow_mock_bus=True)
+    return ProjectValidationResult(
+        board["id"], sum(len(items) for items in resources.values()),
+        prepared.sha256, prepared.schema_version,
+        prepared.original_schema_version, prepared.migrations,
+        prepared.summary)
 
 
 _BUS_RESOURCE_BASES = {

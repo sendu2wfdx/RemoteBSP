@@ -310,6 +310,18 @@ class GuiTest(unittest.TestCase):
                                  r"^[0-9a-f]{64}$")
                 self.assertEqual(inspected["summary"]["resource_count"],
                                  inspected["resource_count"])
+                validate_request = Request(
+                    base + "/api/project/validate",
+                    data=json.dumps({
+                        "project": self._default_project(board)
+                    }).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                validated = json.loads(urlopen(validate_request).read())
+                self.assertTrue(validated["ok"])
+                self.assertEqual(validated["format"], "PROJECT_VALIDATION")
+                self.assertEqual(validated["resource_count"],
+                                 inspected["resource_count"])
                 request = Request(
                     base + "/api/project/generate",
                     data=json.dumps({
@@ -351,6 +363,8 @@ class GuiTest(unittest.TestCase):
                 self.assertEqual(downloaded, b"test")
                 page = urlopen(base + "/").read()
                 for marker in (b"RemoteBSP Studio", b"gpioTable", b"pwmTable",
+                               b"i2cBusTable", b"i2cDeviceTable",
+                               b"spiBusTable", b"spiDeviceTable",
                                b"stripTable", b"controlGpio", b"controlPwm",
                                b"controlStrips", b"compileConfig",
                                b"buildFirmware"):

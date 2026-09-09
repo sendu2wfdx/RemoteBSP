@@ -13,6 +13,7 @@ from project_config import (  # noqa: E402
     ProjectConfigError,
     generate_mock_board_manifest,
     generate_project_config,
+    validate_project,
 )
 
 
@@ -38,6 +39,16 @@ class BusProjectTest(unittest.TestCase):
     def test_physical_firmware_rejects_unimplemented_bus_backend(self):
         with self.assertRaisesRegex(ProjectConfigError, "STM32 BSP尚未验收"):
             generate_project_config(self.project, self.catalog)
+
+    def test_full_project_validation_accepts_mixed_resources(self):
+        project = copy.deepcopy(self.project)
+        project["gpio"]["resources"].append({
+            "name": "button", "pin": "PA0", "direction": "input",
+            "pull": "down", "active_low": False, "safe_level": None,
+            "debounce_ms": 10,
+        })
+        result = validate_project(project, self.catalog)
+        self.assertEqual(result.resource_count, 5)
 
     def test_mock_bus_export_rejects_non_bus_resources(self):
         """未映射的 Studio 资源必须显式拒绝，不得静默丢失。"""

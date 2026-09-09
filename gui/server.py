@@ -23,6 +23,7 @@ from project_config import (
     ProjectConfigError,
     generate_mock_board_manifest,
     generate_project_config,
+    validate_project,
 )
 from project_contract import CURRENT_PROJECT_SCHEMA_VERSION
 
@@ -163,7 +164,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path not in ("/api/project/inspect", "/api/project/generate",
+        if path not in ("/api/project/inspect", "/api/project/validate",
+                        "/api/project/generate",
                         "/api/project/generate-mock-manifest",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
@@ -175,7 +177,22 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/project/generate-mock-manifest":
+            if path == "/api/project/validate":
+                validated = validate_project(project, catalog)
+                response = {
+                    "ok": True,
+                    "format": "PROJECT_VALIDATION",
+                    "board_id": validated.board_id,
+                    "resource_count": validated.resource_count,
+                    "project_schema_version":
+                        validated.project_schema_version,
+                    "project_original_schema_version":
+                        validated.original_schema_version,
+                    "project_migrations": list(validated.migrations),
+                    "project_sha256": validated.project_sha256,
+                    "summary": validated.summary,
+                }
+            elif path == "/api/project/generate-mock-manifest":
                 generated = generate_mock_board_manifest(project, catalog)
                 manifest_bytes = (json.dumps(
                     generated.manifest, ensure_ascii=False, indent=2) +
