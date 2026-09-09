@@ -63,9 +63,9 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
 | 总线与高速流 | I2C/SPI 原子事务、设备级 NACK/超时/忙/故障结果、主机 API 和 Mock 已实现；Stream 合同、打开、数据、信用和状态编解码已实现，实体 BSP 与流会话待实现 |
-| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；TimeSync 已接入 toolbusd 有界周期采样，已补充 512 段持续多轴与同步生命周期回归 |
+| 智能步进 Mock | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列、绝对/自动排程、欠载/限位安全停机和状态遥测；TimeSync 已接入 toolbusd 有界周期采样，跨板 PREPARE/READY/COMMIT 协调器与参与者 Mock 已完成纯软件闭环 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、稳定 schema/迁移、`.config` 生成、32线程构建和产物归档；可生成确定性中文接线表、资源摘要、稳定清单与校验文件。总线工程明确限制为 Mock；GUI 自动烧录/回读尚未实现 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、稳定 schema/迁移、工程差异、`.config` 生成、32线程构建和产物归档；可生成确定性中文接线表、资源摘要、稳定清单与校验文件。总线工程明确限制为 Mock；GUI 自动烧录/回读尚未实现 |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
 | STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
@@ -93,8 +93,9 @@ DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 10
 拉长脉宽或推迟关闭 EN 被误判为多发脉冲。持续高步频和示波器抖动验收仍待实现。
 跨板时钟同步已经完成 `TimeSync v1` 协议、确定性 Mock BSP、四时间戳主机闭环、启动代次
 校验和 `toolbusd` 有界周期调度；首帧发送与完整响应边界均显式锁存时间，离线、重启和
-最终超时会清理同步状态。实体计数器 BSP、硬件时间戳质量验证和跨板
-PREPARE/READY/COMMIT 仍待实现。
+最终超时会清理同步状态。跨板运动事务已增加版本化 PREPARE/READY/COMMIT/ABORT
+线格式、冻结时钟模型与节点 tick 的主机协调器，以及幂等参与者 Mock；它尚未接入
+`toolbusd` 主循环、Remote Core 或实体固件，不能作为跨板实体同步已经完成的结论。
 
 具体 GPIO、UART、运动、TMC、PWM 和定时位流映射由 Studio 生成到 Kconfig，构建为
 静态资源表。TMC2209 单线端点固定为 40000 bit/s，帧、CRC 和寄存器语义仍由 Linux
@@ -160,9 +161,10 @@ CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链�
 心跳、多节点、超时与去重、GPIO、UART、I2C/SPI资源合同与Mock故障隔离、资源租约、
 数字孪生、主机时钟模型、运动欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、
 流量准入、Kconfig生成、Studio总线图形编辑到Mock清单的黄金路径、TimeSync v1
-四时间戳闭环、GUI API，以及默认使用版本化 `remote-cli --json` 的只读 Runtime API。
-Runtime Provider 另提供 250 ms 单飞短缓存、资源状态有界并发和 HTTP 活动请求上限；
-失败不会回退陈旧快照，新鲜度通过响应字段和响应头显式给出。
+四时间戳闭环、跨板事务纯软件状态机、GUI API，以及默认使用版本化
+`remote-cli --json` 的只读 Runtime API。Runtime 已通过单次本地 IPC 快照消除一次刷新
+中的 N+1 进程与套接字连接，并保留拓扑稳定校验、资源/节点故障隔离和显式旧文本兼容；
+Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不会回退陈旧快照。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 
