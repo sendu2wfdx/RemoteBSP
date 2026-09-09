@@ -142,10 +142,16 @@ UART 接收有两种互斥模式：
   `uart_stream_read()` 从toolbusd按“节点+UART对象”隔离的64 KiB缓冲读取。
 
 通用高速流使用 `stream_contract()`、`stream_open()`、`stream_write()`、
-`stream_status()`、`stream_credit()` 和 `stream_stop()`。当前远端 Mock Core 只实现
-`HostToNode` 有界接收闭环；`NodeToHost`/双向数据面与 USB Bulk 路由尚未完成，
-相应调用会明确失败，不能依赖自动回退到 CAN。当前打开可写流前还必须通过通用
-资源 API 取得同一资源的独占租约；停止、租约失效或会话释放会清空未消费 Mock 字节。
+`stream_status()`、`stream_credit()` 和 `stream_stop()`。远端 Mock Core 已实现
+`HostToNode` 有界接收和 `NodeToHost` 事件/信用竖切；N2H 主机侧暂时通过通用
+`next_event()` 取得 `Command::StreamData` 事件、使用 `decode_stream_data()` 校验会话
+代次与连续序号，并在消费后用 `stream_credit()` 精确确认累计字节。打开 H2N 可写流前
+必须取得同一资源的独占租约；打开 N2H 流前必须取得合同允许的共享读或独占租约。停止、
+租约失效或会话释放会清空未消费 Mock 字节、信用和未确认块。
+
+这仍是 Mock BSP、Remote Core 和 MockNode 分片的纯软件能力。真实 N2H CAN/USB Bulk
+发送路径、toolbusd 专用流缓冲和便利读取 API 尚未完成；双向流与 USB Bulk 实际路由仍
+明确失败，不能依赖自动回退到 CAN。
   流式对象禁止再调用`uart_read()`，避免两个消费者争抢字节。
 
 每个流事件使用请求ID携带单调序号。toolbusd过滤重复/旧事件，统计

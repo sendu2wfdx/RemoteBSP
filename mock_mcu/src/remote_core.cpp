@@ -329,6 +329,19 @@ bool RemoteCore::session_has_exclusive_lease(
         });
 }
 
+bool RemoteCore::session_has_lease(
+    std::uint32_t resource_id, std::uint32_t session_id) const noexcept {
+    const auto found = leases_.find(resource_id);
+    if (found == leases_.end()) {
+        return false;
+    }
+    return std::any_of(
+        found->second.begin(), found->second.end(),
+        [session_id](const auto& lease) {
+            return lease.owner_session_id == session_id;
+        });
+}
+
 bool RemoteCore::resource_access_allowed(
     std::uint32_t resource_id, std::uint32_t session_id) const noexcept {
     const auto found = leases_.find(resource_id);
@@ -449,6 +462,9 @@ void RemoteCore::release_resource_objects(
             stream.owner_session_id == owner_session_id &&
             stream.state != protocol::StreamState::Stopped) {
             stream.state = protocol::StreamState::Stopped;
+            stream.available_credit = 0U;
+            stream.outstanding_begin = 0U;
+            stream.outstanding_count = 0U;
             if (stream_bsp_) {
                 stream_bsp_->reset(resource_id);
             }
@@ -515,6 +531,9 @@ std::size_t RemoteCore::release_session(std::uint32_t session_id) {
         if (stream.owner_session_id == session_id &&
             stream.state != protocol::StreamState::Stopped) {
             stream.state = protocol::StreamState::Stopped;
+            stream.available_credit = 0U;
+            stream.outstanding_begin = 0U;
+            stream.outstanding_count = 0U;
             if (stream_bsp_) {
                 stream_bsp_->reset(stream.resource_id);
             }
@@ -770,14 +789,52 @@ protocol::Packet RemoteCore::handle_resource_status(
     } else if (found->type == protocol::ResourceType::Stream &&
                stream_bsp_) {
         const auto buffered = stream_bsp_->buffered_bytes(resource_id);
-        status.rx_buffered = static_cast<std::uint32_t>(
+        const auto* stream_contract = stream_bsp_->contract(resource_id);
+        const auto bounded = static_cast<std::uint32_t>(
             std::min<std::size_t>(buffered,
                                   std::numeric_limits<std::uint32_t>::max()));
-        if (found->rx_capacity != 0U &&
-            static_cast<std::uint64_t>(buffered) * 4U >=
-                static_cast<std::uint64_t>(found->rx_capacity) * 3U) {
-            status.error_flags |= protocol::kResourceErrorRxHighWater;
-            status.health = protocol::ResourceHealth::Busy;
+        const auto dropped = stream_bsp_->dropped_bytes(resource_id);
+        if (stream_contract != nullptr && stream_contract->direction ==
+                protocol::StreamDirection::NodeToHost) {
+            status.tx_buffered = bounded;
+            status.tx_overruns = dropped;
+            if (dropped != 0U) {
+                status.error_flags |= protocol::kResourceErrorTxOverflow;
+                status.health = protocol::ResourceHealth::Degraded;
+            }
+            if (found->tx_capacity != 0U &&
+                static_cast<std::uint64_t>(buffered) * 4U >=
+                    static_cast<std::uint64_t>(found->tx_capacity) * 3U) {
+                status.error_flags |= protocol::kResourceErrorTxHighWater;
+                if (status.health == protocol::ResourceHealth::Normal) {
+                    status.health = protocol::ResourceHealth::Busy;
+                }
+            }
+        } else {
+            status.rx_buffered = bounded;
+            status.rx_overruns = dropped;
+            if (dropped != 0U) {
+                status.error_flags |= protocol::kResourceErrorRxOverflow;
+                status.health = protocol::ResourceHealth::Degraded;
+            }
+            if (found->rx_capacity != 0U &&
+                static_cast<std::uint64_t>(buffered) * 4U >=
+                    static_cast<std::uint64_t>(found->rx_capacity) * 3U) {
+                status.error_flags |= protocol::kResourceErrorRxHighWater;
+                if (status.health == protocol::ResourceHealth::Normal) {
+                    status.health = protocol::ResourceHealth::Busy;
+                }
+            }
+        }
+        const bool failed = std::any_of(
+            stream_sessions_.begin(), stream_sessions_.end(),
+            [resource_id](const auto& entry) {
+                return entry.second.resource_id == resource_id &&
+                       entry.second.state == protocol::StreamState::Failed;
+            });
+        if (failed) {
+            status.error_flags |= protocol::kResourceErrorBackendFailure;
+            status.health = protocol::ResourceHealth::Failed;
         }
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
@@ -850,6 +907,9 @@ protocol::Packet RemoteCore::handle_resource_reset(
         for (auto& entry : stream_sessions_) {
             if (entry.second.resource_id == resource_id) {
                 entry.second.state = protocol::StreamState::Stopped;
+                entry.second.available_credit = 0U;
+                entry.second.outstanding_begin = 0U;
+                entry.second.outstanding_count = 0U;
             }
         }
         return make_response(request, StatusCode::Ok);
@@ -1568,6 +1628,151 @@ std::vector<protocol::Packet> RemoteCore::poll_uart_events(
     return events;
 }
 
+std::vector<protocol::Packet> RemoteCore::poll_stream_events(
+    std::size_t maximum_events, TimePoint now) {
+    auto prepared = prepare_stream_events(maximum_events, now);
+    std::vector<protocol::Packet> events;
+    events.reserve(prepared.size());
+    for (auto& event : prepared) {
+        events.push_back(std::move(event.packet_));
+        if (!commit_stream_event(event, now)) {
+            events.pop_back();
+        }
+    }
+    return events;
+}
+
+std::vector<RemoteCore::PreparedStreamEvent>
+RemoteCore::prepare_stream_events(
+    std::size_t maximum_events, TimePoint now) {
+    if (maximum_events == 0U || maximum_events > kMaximumStreamSessions) {
+        throw std::invalid_argument("STREAM 单次事件数量无效");
+    }
+    static_cast<void>(expire_leases(now));
+    std::vector<PreparedStreamEvent> events;
+    if (!stream_bsp_) {
+        return events;
+    }
+    events.reserve(maximum_events);
+    std::vector<std::uint32_t> stream_ids;
+    stream_ids.reserve(stream_sessions_.size());
+    for (const auto& entry : stream_sessions_) {
+        stream_ids.push_back(entry.first);
+    }
+    std::sort(stream_ids.begin(), stream_ids.end());
+    for (const auto stream_id : stream_ids) {
+        if (events.size() >= maximum_events) {
+            break;
+        }
+        auto found = stream_sessions_.find(stream_id);
+        if (found == stream_sessions_.end()) {
+            continue;
+        }
+        auto& stream = found->second;
+        if (stream.direction != protocol::StreamDirection::NodeToHost ||
+            stream.state == protocol::StreamState::Stopped ||
+            stream.state == protocol::StreamState::Failed) {
+            continue;
+        }
+        const auto* contract = stream_bsp_->contract(stream.resource_id);
+        std::uint32_t buffered = 0U;
+        std::uint32_t unused_capacity = 0U;
+        if (contract == nullptr || contract->direction != stream.direction ||
+            !stream_capacity(*stream_bsp_, *contract, stream.resource_id,
+                             buffered, unused_capacity)) {
+            stream.state = protocol::StreamState::Failed;
+            continue;
+        }
+        if (buffered == 0U) {
+            continue;
+        }
+        if (stream.available_credit == 0U ||
+            stream.outstanding_count == stream.outstanding.size()) {
+            stream.state = protocol::StreamState::Backpressured;
+            continue;
+        }
+        if (stream.next_sequence ==
+                std::numeric_limits<std::uint32_t>::max()) {
+            stream.state = protocol::StreamState::Failed;
+            continue;
+        }
+        const auto maximum_bytes = std::min<std::uint32_t>(
+            {stream.negotiated_chunk_bytes, stream.available_credit,
+             buffered});
+        const auto pulled = stream_bsp_->peek(
+            stream.resource_id, maximum_bytes);
+        if (pulled.status != StreamPushStatus::Accepted ||
+            pulled.data.empty() || pulled.data.size() > maximum_bytes) {
+            if (pulled.status == StreamPushStatus::Failed ||
+                !pulled.data.empty() || pulled.data.size() > maximum_bytes) {
+                stream.state = protocol::StreamState::Failed;
+            }
+            continue;
+        }
+        PreparedStreamEvent event;
+        event.stream_id = stream_id;
+        event.sequence = stream.next_sequence;
+        event.bytes = static_cast<std::uint32_t>(pulled.data.size());
+        event.packet_.header.message_type = protocol::MessageType::Event;
+        event.packet_.header.command = static_cast<std::uint16_t>(
+            protocol::Command::StreamData);
+        event.packet_.header.session_id = stream.owner_session_id;
+        event.packet_.header.request_id = event.sequence + 1U;
+        event.packet_.header.object_id = stream.resource_id;
+        event.packet_.payload = protocol::encode_stream_data(
+            {stream_id, event.sequence, 0U, 0U, pulled.data});
+        events.push_back(std::move(event));
+    }
+    return events;
+}
+
+bool RemoteCore::commit_stream_event(
+    const PreparedStreamEvent& event, TimePoint now) noexcept {
+    if (!stream_bsp_ || event.stream_id == 0U || event.bytes == 0U) {
+        return false;
+    }
+    const auto found = stream_sessions_.find(event.stream_id);
+    if (found == stream_sessions_.end()) {
+        return false;
+    }
+    auto& stream = found->second;
+    const auto leases = leases_.find(stream.resource_id);
+    const bool lease_current = leases != leases_.end() && std::any_of(
+        leases->second.begin(), leases->second.end(),
+        [&](const auto& lease) {
+            return lease.owner_session_id == stream.owner_session_id &&
+                   lease.expires_at > now;
+        });
+    if (stream.direction != protocol::StreamDirection::NodeToHost ||
+        stream.state == protocol::StreamState::Stopped ||
+        stream.state == protocol::StreamState::Failed ||
+        stream.next_sequence != event.sequence ||
+        stream.next_sequence == std::numeric_limits<std::uint32_t>::max() ||
+        event.bytes > stream.negotiated_chunk_bytes ||
+        event.bytes > stream.available_credit ||
+        stream.outstanding_count == stream.outstanding.size() ||
+        !lease_current) {
+        return false;
+    }
+    if (!stream_bsp_->commit_pull(stream.resource_id, event.bytes)) {
+        stream.state = protocol::StreamState::Failed;
+        return false;
+    }
+    const auto outstanding_index =
+        (stream.outstanding_begin + stream.outstanding_count) %
+        stream.outstanding.size();
+    stream.outstanding[outstanding_index] = {event.sequence, event.bytes};
+    ++stream.outstanding_count;
+    stream.available_credit -= event.bytes;
+    ++stream.next_sequence;
+    stream.state = stream.available_credit == 0U &&
+                           stream_bsp_->buffered_bytes(stream.resource_id) !=
+                               0U
+                       ? protocol::StreamState::Backpressured
+                       : protocol::StreamState::Running;
+    return true;
+}
+
 protocol::Packet RemoteCore::handle_uart_write(
     const protocol::Packet& request) {
     if (!uart_bsp_ ||
@@ -1767,14 +1972,22 @@ protocol::Packet RemoteCore::handle_stream_open(
         contract == nullptr) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
-    // 首个可执行切片只实现 H2N。N2H/双向需要事件数据面，不能静默降级。
-    if (contract->direction != protocol::StreamDirection::HostToNode ||
+    // Mock 切片支持单向原始字节流；双向与时间戳仍不能静默降级。
+    if (contract->direction == protocol::StreamDirection::Bidirectional ||
         (contract->flags & protocol::kStreamFlagTimestamped) != 0U) {
         return make_response(request, StatusCode::UnsupportedCapability);
     }
-    if (open.initial_credit_bytes != 0U ||
-        open.requested_chunk_bytes > contract->maximum_chunk_bytes ||
+    const bool node_to_host = contract->direction ==
+        protocol::StreamDirection::NodeToHost;
+    if (open.requested_chunk_bytes > contract->maximum_chunk_bytes ||
         open.requested_flags != contract->flags) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if ((!node_to_host && open.initial_credit_bytes != 0U) ||
+        (node_to_host &&
+         (((contract->flags & protocol::kStreamFlagCreditRequired) == 0U) ||
+          open.initial_credit_bytes == 0U ||
+          open.initial_credit_bytes > contract->buffer_capacity_bytes))) {
         return make_response(request, StatusCode::InvalidPayload);
     }
     if (!resource_access_allowed(open.resource_id,
@@ -1782,16 +1995,26 @@ protocol::Packet RemoteCore::handle_stream_open(
         return make_response(request, StatusCode::AccessDenied);
     }
     const auto* resource_contract = find_contract(open.resource_id);
-    constexpr std::uint16_t required_access =
+    constexpr std::uint16_t required_h2n_access =
         protocol::kResourceAccessWritable |
         protocol::kResourceAccessExclusiveWrite |
         protocol::kResourceAccessLeaseSupported |
         protocol::kResourceAccessLeaseRequired;
-    if (resource_contract == nullptr ||
-        (resource_contract->access_flags & required_access) !=
-            required_access ||
-        !session_has_exclusive_lease(open.resource_id,
-                                     request.header.session_id)) {
+    constexpr std::uint16_t required_n2h_access =
+        protocol::kResourceAccessReadable |
+        protocol::kResourceAccessLeaseSupported |
+        protocol::kResourceAccessLeaseRequired;
+    const bool access_valid = resource_contract != nullptr &&
+        ((!node_to_host &&
+          (resource_contract->access_flags & required_h2n_access) ==
+              required_h2n_access &&
+          session_has_exclusive_lease(open.resource_id,
+                                      request.header.session_id)) ||
+         (node_to_host &&
+          (resource_contract->access_flags & required_n2h_access) ==
+              required_n2h_access &&
+          session_has_lease(open.resource_id, request.header.session_id)));
+    if (!access_valid) {
         return make_response(request, StatusCode::AccessDenied);
     }
     const bool active = std::any_of(
@@ -1818,11 +2041,19 @@ protocol::Packet RemoteCore::handle_stream_open(
         return make_response(request, StatusCode::ResourceExhausted);
     }
     const auto stream_id = next_stream_id_++;
-    stream_sessions_.emplace(
-        stream_id,
-        StreamSession{open.resource_id, request.header.session_id,
-                      open.requested_chunk_bytes, open.requested_flags,
-                      protocol::StreamState::Open, 0U, 0U});
+    if (node_to_host) {
+        // 新 stream_id 是新的会话代次；打开时丢弃上一代残留字节和计数。
+        stream_bsp_->reset(open.resource_id);
+    }
+    StreamSession session;
+    session.resource_id = open.resource_id;
+    session.owner_session_id = request.header.session_id;
+    session.direction = contract->direction;
+    session.negotiated_chunk_bytes = open.requested_chunk_bytes;
+    session.negotiated_flags = open.requested_flags;
+    session.credit_limit = node_to_host ? open.initial_credit_bytes : 0U;
+    session.available_credit = session.credit_limit;
+    stream_sessions_.emplace(stream_id, std::move(session));
     std::uint32_t buffered = 0U;
     std::uint32_t available = 0U;
     if (!stream_capacity(*stream_bsp_, *contract, open.resource_id,
@@ -1833,7 +2064,7 @@ protocol::Packet RemoteCore::handle_stream_open(
     auto response = make_response(request, StatusCode::Ok);
     const auto encoded = protocol::encode_stream_open_response(
         {stream_id, open.requested_chunk_bytes, open.requested_flags,
-         available});
+         node_to_host ? open.initial_credit_bytes : available});
     response.payload.insert(response.payload.end(), encoded.begin(),
                             encoded.end());
     return response;
@@ -1861,6 +2092,9 @@ protocol::Packet RemoteCore::handle_stream_data(
     auto& stream = found->second;
     if (stream.owner_session_id != request.header.session_id) {
         return make_response(request, StatusCode::AccessDenied);
+    }
+    if (stream.direction != protocol::StreamDirection::HostToNode) {
+        return make_response(request, StatusCode::UnsupportedCapability);
     }
     if (stream.state == protocol::StreamState::Stopped ||
         data.sequence != stream.next_sequence ||
@@ -1928,11 +2162,45 @@ protocol::Packet RemoteCore::handle_stream_credit(
     if (found == stream_sessions_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
-    if (found->second.owner_session_id != request.header.session_id) {
+    auto& stream = found->second;
+    if (stream.owner_session_id != request.header.session_id) {
         return make_response(request, StatusCode::AccessDenied);
     }
-    // H2N 中主机是发送方，无权给自身增发信用。N2H 数据面尚未实现。
-    return make_response(request, StatusCode::UnsupportedCapability);
+    if (stream.direction != protocol::StreamDirection::NodeToHost) {
+        // H2N 中主机是发送方，无权给自身增发信用。
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (stream.state == protocol::StreamState::Stopped ||
+        stream.state == protocol::StreamState::Failed) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    std::uint64_t acknowledged_bytes = 0U;
+    std::size_t acknowledged_count = 0U;
+    for (std::size_t offset = 0U; offset < stream.outstanding_count;
+         ++offset) {
+        const auto index = (stream.outstanding_begin + offset) %
+            stream.outstanding.size();
+        acknowledged_bytes += stream.outstanding[index].bytes;
+        if (stream.outstanding[index].sequence ==
+                credit.acknowledged_sequence) {
+            acknowledged_count = offset + 1U;
+            break;
+        }
+    }
+    if (acknowledged_count == 0U ||
+        acknowledged_bytes != credit.credit_bytes ||
+        acknowledged_bytes > stream.credit_limit - stream.available_credit) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    stream.outstanding_begin =
+        (stream.outstanding_begin + acknowledged_count) %
+        stream.outstanding.size();
+    stream.outstanding_count -= acknowledged_count;
+    stream.available_credit += static_cast<std::uint32_t>(acknowledged_bytes);
+    if (stream.state == protocol::StreamState::Backpressured) {
+        stream.state = protocol::StreamState::Running;
+    }
+    return make_response(request, StatusCode::Ok);
 }
 
 protocol::Packet RemoteCore::handle_stream_status(
@@ -1965,13 +2233,23 @@ protocol::Packet RemoteCore::handle_stream_status(
         return make_response(request, StatusCode::ResourceFailed);
     }
     auto state = stream.state;
+    if (stream.direction == protocol::StreamDirection::NodeToHost) {
+        available = stream.available_credit;
+    }
     if (state == protocol::StreamState::Backpressured && available != 0U) {
-        state = protocol::StreamState::Running;
+        if (stream.direction != protocol::StreamDirection::NodeToHost ||
+            stream.outstanding_count < stream.outstanding.size()) {
+            state = protocol::StreamState::Running;
+        }
     }
     auto response = make_response(request, StatusCode::Ok);
+    const auto dropped = stream.direction ==
+            protocol::StreamDirection::NodeToHost
+        ? stream_bsp_->dropped_bytes(stream.resource_id)
+        : stream.dropped_bytes;
     const auto encoded = protocol::encode_stream_status(
         {stream_id, state, buffered,
-         available, stream.dropped_bytes, stream.next_sequence});
+         available, dropped, stream.next_sequence});
     response.payload.insert(response.payload.end(), encoded.begin(),
                             encoded.end());
     return response;
@@ -1996,6 +2274,9 @@ protocol::Packet RemoteCore::handle_stream_stop(
         return make_response(request, StatusCode::AccessDenied);
     }
     found->second.state = protocol::StreamState::Stopped;
+    found->second.available_credit = 0U;
+    found->second.outstanding_begin = 0U;
+    found->second.outstanding_count = 0U;
     stream_bsp_->reset(found->second.resource_id);
     return make_response(request, StatusCode::Ok);
 }

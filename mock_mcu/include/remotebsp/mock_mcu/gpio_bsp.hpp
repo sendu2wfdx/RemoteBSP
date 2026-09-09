@@ -35,6 +35,11 @@ struct GpioPinSnapshot {
     bool value{};
 };
 
+struct GpioPendingInputSnapshot {
+    std::uint16_t pin{};
+    bool value{};
+};
+
 class MockGpioException : public std::runtime_error {
 public:
     MockGpioException(MockGpioError code, const char* message);
@@ -57,6 +62,7 @@ public:
     std::uint64_t read_count() const noexcept;
     std::uint64_t write_count() const noexcept;
     std::vector<GpioPinSnapshot> snapshot() const;
+    std::vector<GpioPendingInputSnapshot> pending_input_snapshot() const;
 
 private:
     struct PinState {

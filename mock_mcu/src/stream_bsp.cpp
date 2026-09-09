@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
+#include <utility>
 
 namespace remotebsp::mock_mcu {
 
@@ -14,11 +16,13 @@ MockStreamError MockStreamException::code() const noexcept { return code_; }
 void MockStreamBsp::add_resource(
     const protocol::StreamContract& contract) {
     static_cast<void>(protocol::encode_stream_contract(contract));
-    if (contract.direction != protocol::StreamDirection::HostToNode ||
-        (contract.flags & protocol::kStreamFlagTimestamped) != 0U) {
+    if (contract.direction == protocol::StreamDirection::Bidirectional ||
+        (contract.flags & protocol::kStreamFlagTimestamped) != 0U ||
+        (contract.direction == protocol::StreamDirection::NodeToHost &&
+         (contract.flags & protocol::kStreamFlagCreditRequired) == 0U)) {
         throw MockStreamException(
             MockStreamError::InvalidContract,
-            "当前 Mock 流后端只实现无时间戳的主机到节点字节流");
+            "当前 Mock 流后端只实现无时间戳H2N和带信用N2H字节流");
     }
     const auto inserted = resources_.emplace(
         contract.resource_id, Resource{contract, {}});
@@ -28,10 +32,51 @@ void MockStreamBsp::add_resource(
     }
 }
 
+StreamPushStatus MockStreamBsp::produce(
+    std::uint32_t resource_id,
+    const std::vector<std::uint8_t>& data) noexcept {
+    const auto found = resources_.find(resource_id);
+    if (found == resources_.end() || found->second.failed ||
+        found->second.contract.direction !=
+            protocol::StreamDirection::NodeToHost) {
+        return StreamPushStatus::Failed;
+    }
+    auto& resource = found->second;
+    if (resource.buffered.size() > resource.contract.buffer_capacity_bytes ||
+        data.size() > resource.contract.buffer_capacity_bytes -
+                          resource.buffered.size()) {
+        if ((resource.contract.flags & protocol::kStreamFlagLossless) == 0U) {
+            resource.dropped_bytes = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(
+                    static_cast<std::uint64_t>(resource.dropped_bytes) +
+                        data.size(),
+                    std::numeric_limits<std::uint32_t>::max()));
+        }
+        return StreamPushStatus::Backpressured;
+    }
+    try {
+        resource.buffered.insert(resource.buffered.end(), data.begin(),
+                                 data.end());
+    } catch (...) {
+        return StreamPushStatus::Failed;
+    }
+    return StreamPushStatus::Accepted;
+}
+
+void MockStreamBsp::set_failed(std::uint32_t resource_id, bool failed) {
+    const auto found = resources_.find(resource_id);
+    if (found == resources_.end()) {
+        throw MockStreamException(MockStreamError::ResourceNotFound,
+                                  "Mock 流资源不存在");
+    }
+    found->second.failed = failed;
+}
+
 std::vector<std::uint8_t> MockStreamBsp::consume(
     std::uint32_t resource_id, std::size_t maximum_bytes) {
     const auto found = resources_.find(resource_id);
-    if (found == resources_.end()) {
+    if (found == resources_.end() || found->second.contract.direction !=
+                                        protocol::StreamDirection::HostToNode) {
         throw MockStreamException(MockStreamError::ResourceNotFound,
                                   "Mock 流资源不存在");
     }
@@ -61,7 +106,9 @@ StreamPushStatus MockStreamBsp::push(
     std::uint32_t resource_id,
     const std::vector<std::uint8_t>& data) noexcept {
     const auto found = resources_.find(resource_id);
-    if (found == resources_.end()) {
+    if (found == resources_.end() || found->second.failed ||
+        found->second.contract.direction !=
+            protocol::StreamDirection::HostToNode) {
         return StreamPushStatus::Failed;
     }
     auto& resource = found->second;
@@ -79,10 +126,55 @@ StreamPushStatus MockStreamBsp::push(
     return StreamPushStatus::Accepted;
 }
 
+StreamPullResult MockStreamBsp::peek(
+    std::uint32_t resource_id, std::size_t maximum_bytes) noexcept {
+    const auto found = resources_.find(resource_id);
+    if (found == resources_.end() || found->second.failed ||
+        found->second.contract.direction !=
+            protocol::StreamDirection::NodeToHost || maximum_bytes == 0U) {
+        return {StreamPushStatus::Failed, {}};
+    }
+    auto& buffered = found->second.buffered;
+    const auto count = std::min(maximum_bytes, buffered.size());
+    if (count == 0U) {
+        return {StreamPushStatus::Accepted, {}};
+    }
+    std::vector<std::uint8_t> output;
+    try {
+        output.assign(buffered.begin(), buffered.begin() +
+                                            static_cast<std::ptrdiff_t>(count));
+    } catch (...) {
+        return {StreamPushStatus::Failed, {}};
+    }
+    return {StreamPushStatus::Accepted, std::move(output)};
+}
+
+bool MockStreamBsp::commit_pull(
+    std::uint32_t resource_id, std::size_t bytes) noexcept {
+    const auto found = resources_.find(resource_id);
+    if (found == resources_.end() || found->second.failed || bytes == 0U ||
+        found->second.contract.direction !=
+            protocol::StreamDirection::NodeToHost ||
+        bytes > found->second.buffered.size()) {
+        return false;
+    }
+    auto& buffered = found->second.buffered;
+    buffered.erase(buffered.begin(),
+                   buffered.begin() + static_cast<std::ptrdiff_t>(bytes));
+    return true;
+}
+
+std::uint32_t MockStreamBsp::dropped_bytes(
+    std::uint32_t resource_id) const noexcept {
+    const auto found = resources_.find(resource_id);
+    return found == resources_.end() ? 0U : found->second.dropped_bytes;
+}
+
 void MockStreamBsp::reset(std::uint32_t resource_id) noexcept {
     const auto found = resources_.find(resource_id);
     if (found != resources_.end()) {
         found->second.buffered.clear();
+        found->second.dropped_bytes = 0U;
     }
 }
 

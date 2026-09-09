@@ -91,6 +91,18 @@ public:
     using Clock = std::chrono::steady_clock;
     using TimePoint = Clock::time_point;
 
+    class PreparedStreamEvent {
+    public:
+        const protocol::Packet& packet() const noexcept { return packet_; }
+
+    private:
+        friend class RemoteCore;
+        protocol::Packet packet_;
+        std::uint32_t stream_id{};
+        std::uint32_t sequence{};
+        std::uint32_t bytes{};
+    };
+
     RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                std::shared_ptr<GpioBsp> gpio_bsp = nullptr,
                std::shared_ptr<UartBsp> uart_bsp = nullptr,
@@ -114,6 +126,17 @@ public:
     std::size_t release_session(std::uint32_t session_id);
     std::vector<protocol::Packet> poll_uart_events(
         std::size_t maximum_payload = 64);
+    std::vector<protocol::Packet> poll_stream_events(
+        std::size_t maximum_events = 16,
+        TimePoint now = Clock::now());
+    // MockNode 在完成协议编码、分片和回复入队后才提交，避免构造失败
+    // 消耗节点侧数据。单线程 Remote Core 中准备项在提交前不可重入。
+    std::vector<PreparedStreamEvent> prepare_stream_events(
+        std::size_t maximum_events = 16,
+        TimePoint now = Clock::now());
+    bool commit_stream_event(
+        const PreparedStreamEvent& event,
+        TimePoint now = Clock::now()) noexcept;
 
 private:
     protocol::Packet make_response(const protocol::Packet& request,
@@ -239,13 +262,25 @@ private:
     };
 
     struct StreamSession {
+        struct OutstandingChunk {
+            std::uint32_t sequence{};
+            std::uint32_t bytes{};
+        };
+
         std::uint32_t resource_id{};
         std::uint32_t owner_session_id{};
+        protocol::StreamDirection direction{
+            protocol::StreamDirection::HostToNode};
         std::uint16_t negotiated_chunk_bytes{};
         std::uint16_t negotiated_flags{};
         protocol::StreamState state{protocol::StreamState::Open};
         std::uint32_t dropped_bytes{};
         std::uint32_t next_sequence{};
+        std::uint32_t credit_limit{};
+        std::uint32_t available_credit{};
+        std::array<OutstandingChunk, 64> outstanding{};
+        std::size_t outstanding_begin{};
+        std::size_t outstanding_count{};
     };
 
     struct Lease {
@@ -265,6 +300,8 @@ private:
         std::uint32_t resource_id) const noexcept;
     bool resource_has_objects(std::uint32_t resource_id) const noexcept;
     bool session_has_exclusive_lease(
+        std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
+    bool session_has_lease(
         std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
     bool resource_access_allowed(
         std::uint32_t resource_id, std::uint32_t session_id) const noexcept;

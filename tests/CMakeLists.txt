@@ -32,6 +32,14 @@ target_compile_options(stream_session_tests PRIVATE
 )
 add_test(NAME stream_session_tests COMMAND stream_session_tests)
 
+add_executable(stream_n2h_session_tests stream_n2h_session_tests.cpp)
+target_link_libraries(stream_n2h_session_tests PRIVATE remotebsp_remote_core)
+target_compile_options(stream_n2h_session_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME stream_n2h_session_tests COMMAND stream_n2h_session_tests)
+
 add_executable(bus_resource_tests bus_resource_tests.cpp)
 target_link_libraries(bus_resource_tests PRIVATE remotebsp_remote_core)
 target_compile_options(bus_resource_tests PRIVATE
@@ -437,6 +445,19 @@ target_compile_options(board_manifest_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME board_manifest_tests COMMAND board_manifest_tests)
+
+add_executable(digital_twin_replay_tests digital_twin_replay_tests.cpp)
+target_link_libraries(digital_twin_replay_tests PRIVATE remotebsp_remote_core)
+target_compile_definitions(digital_twin_replay_tests PRIVATE
+    TEST_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json"
+    TEST_DEFAULT_MANIFEST="${CMAKE_SOURCE_DIR}/boards/mock-generic-v1.json"
+    TEST_REPLAY_OUTPUT="${CMAKE_CURRENT_BINARY_DIR}/digital-twin-replay-test.json"
+)
+target_compile_options(digital_twin_replay_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME digital_twin_replay_tests COMMAND digital_twin_replay_tests)
 
 add_executable(motion_executor_tests motion_executor_tests.cpp)
 target_link_libraries(motion_executor_tests PRIVATE remotebsp_remote_core)

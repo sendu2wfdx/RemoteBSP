@@ -75,6 +75,30 @@ std::vector<NodeReply> MockNode::poll_uart_events(
     return replies;
 }
 
+std::vector<NodeReply> MockNode::poll_stream_events(
+    std::size_t maximum_events) {
+    std::vector<NodeReply> replies;
+    auto prepared = core_.prepare_stream_events(maximum_events);
+    replies.reserve(prepared.size());
+    for (auto& event : prepared) {
+        try {
+            const std::uint16_t transfer_id = allocate_transfer_id();
+            NodeReply reply{
+                transfer_id,
+                fragmenter_.split(protocol::encode(event.packet()),
+                                  transfer_id)};
+            replies.push_back(std::move(reply));
+        } catch (const std::exception&) {
+            // 尚未提交，节点侧字节、信用和序号保持不变；其它资源继续。
+            continue;
+        }
+        if (!core_.commit_stream_event(event)) {
+            replies.pop_back();
+        }
+    }
+    return replies;
+}
+
 std::uint16_t MockNode::allocate_transfer_id() {
     const std::uint16_t result = next_outbound_transfer_id_++;
     if (next_outbound_transfer_id_ == 0U) {

@@ -87,4 +87,18 @@ std::vector<GpioPinSnapshot> MockGpioBsp::snapshot() const {
     return result;
 }
 
+std::vector<GpioPendingInputSnapshot>
+MockGpioBsp::pending_input_snapshot() const {
+    std::vector<GpioPendingInputSnapshot> result;
+    result.reserve(pending_input_values_.size());
+    for (const auto& entry : pending_input_values_) {
+        result.push_back({entry.first, entry.second});
+    }
+    std::sort(result.begin(), result.end(),
+              [](const auto& left, const auto& right) {
+                  return left.pin < right.pin;
+              });
+    return result;
+}
+
 }

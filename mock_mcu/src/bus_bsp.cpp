@@ -151,4 +151,18 @@ const protocol::BusResourceContract* MockBusBsp::contract(
     return found == devices_.end() ? nullptr : &found->second.contract;
 }
 
+std::vector<MockBusDeviceSnapshot> MockBusBsp::snapshot() const {
+    std::vector<MockBusDeviceSnapshot> result;
+    result.reserve(devices_.size());
+    for (const auto& entry : devices_) {
+        result.push_back({entry.first, entry.second.next_status,
+                          entry.second.data, entry.second.spi_response});
+    }
+    std::sort(result.begin(), result.end(),
+              [](const auto& left, const auto& right) {
+                  return left.resource_id < right.resource_id;
+              });
+    return result;
+}
+
 }  // namespace remotebsp::mock_mcu

@@ -13,9 +13,10 @@ RemoteBSP 不把所有板级总线透明隧道到 Linux。系统把硬件适配�
 - `STREAM`：连续采样、高速 UART、网络数据或大块传输的数据通道。
 
 当前代码提供协议合同、编解码、主机 API、Studio 静态资源图生成、
-Mock I2C/SPI 原子事务竖切，以及主机到节点方向的有界 Mock STREAM 会话。
-不访问实体板卡，不把 Ethernet 加入现有传输层；节点到主机与双向 STREAM 数据面
-仍明确返回不支持，不能把 Mock 闭环解释为 USB/Ethernet 性能已经成立。
+Mock I2C/SPI 原子事务竖切，以及 H2N/N2H 两个单向模式的有界 Mock STREAM 会话。
+N2H 目前只覆盖 Mock BSP、Remote Core 事件生成和 MockNode 分片；不访问实体板卡，
+不把 Ethernet 加入现有传输层，双向 STREAM 仍明确返回不支持，也不能把 Mock 闭环
+解释为真实 CAN、USB 或 Ethernet 性能已经成立。
 
 ## 2. 静态资源图
 
@@ -94,7 +95,7 @@ STREAM_CONTRACT → STREAM_OPEN → STREAM_DATA / STREAM_CREDIT
 `STREAM_DATA`，接收方消费数据后用 `STREAM_CREDIT` 归还额度。因此任何一端都
 不需要无界缓存。
 
-已实现的首个可执行切片限定为无时间戳、无记录边界的 `HostToNode` 原始字节流：
+已实现的 H2N 切片限定为无时间戳、无记录边界的 `HostToNode` 原始字节流：
 同一资源同时只允许一个活动会话，会话绑定 toolbusd 的远端 session，逐块严格校验
 连续序号和协商块长。首版要求请求采用合同的完整 flags，不能把无损资源静默降级为
 有损；所有可写流还必须由同一 session 持有静态资源合同声明的独占租约。
@@ -107,9 +108,32 @@ STREAM_CONTRACT → STREAM_OPEN → STREAM_DATA / STREAM_CREDIT
 `stream_id`。容量不变量一旦被后端破坏会按资源故障关闭处理，不能通过无符号下溢
 得到虚假的超大信用。
 
-当前 `STREAM_CREDIT` 对 H2N 明确返回不支持，因为主机是发送方，不能给自己增发
-信用。后续 N2H 数据面必须由节点事件/USB Bulk 接收路径发出数据，并由主机消费后
-归还信用；在这条路径完成前，不会假装支持 N2H 或双向流。
+当前 Mock 还实现了对应的 `NodeToHost` 有界会话竖切。N2H 合同必须声明
+`credit_required`，资源合同必须允许读取、支持租约并要求租约；打开者持有同一资源的
+共享读或独占租约后，才能用非零且不超过缓冲容量的初始字节信用打开。Mock 节点侧生产者
+只向合同容量内整块入队：无损流满载时整块背压且不计丢失，有损流整块丢弃并累计饱和的
+`dropped_bytes`。每次 Remote Core 轮询最多为每个活动会话生成一个 `STREAM_DATA`
+事件，MockNode 再通过既有 Fragmentation 层分片；单次轮询和会话总数都有固定上限。
+节点侧读取采用 `peek → 事件编码/分片/回复入队 → commit` 两阶段提交；构造失败或提交前
+租约到期不会删除缓冲字节、扣减信用或推进序号，避免产生无法确认的数据空洞。
+
+N2H 的 `stream_id` 是不可复用的会话代次，重新打开得到新 ID，旧代次中已经进入链路的
+事件不能混入新会话。每代序号从零严格连续增长，达到 32 位回绕前失败关闭。节点最多保存
+64 个未确认块；即使仍有字节信用，未确认窗口满也会背压。主机消费事件后发送
+`STREAM_CREDIT`，`acknowledged_sequence` 必须命中当前未确认窗口，`credit_bytes` 必须
+精确等于从最老未确认块到该序号的累计字节数；重复、过期、跳出窗口或字节数不符均拒绝，
+不会重复增发信用。H2N 的 `STREAM_CREDIT` 仍明确返回不支持，因为主机不能给自己增发
+额度。
+
+停止、资源复位、主机会话释放或资源租约超时会清空缓冲、信用和未确认窗口；后端故障只
+把所属流会话置为 `Failed`，轮询继续服务其他资源。每个 MockNode 持有独立 Remote Core
+与 BSP，因此单节点故障也不会共享或污染其他节点状态。资源状态对 N2H 使用 TX 缓冲、
+TX 溢出和后端故障字段，对 H2N 保持 RX 方向语义。
+
+以上只证明协议编解码、Mock BSP、Remote Core 事件生成和 MockNode 分片的纯软件闭环。
+运行中的 Mock 可执行程序尚未配置真实高速生产源，STM32 固件也未实现 N2H BSP；真实
+CAN/CAN-FD、USB Bulk 或 Ethernet 数据面、链路选择、热插拔和吞吐/时延均未完成，不能
+把 Mock 事件测试作为实体链路证据。双向流仍明确不支持。
 
 `StreamOpen v1` 尚未携带所选链路，Mock Remote Core 也不知道包实际来自 CAN 还是
 USB，因此目前不能强制 `transport_mask`。把流会话绑定到 USB Bulk/Ethernet 的实际
@@ -171,7 +195,8 @@ LinkTransport，并拒绝错链路打开，是接入真实高速数据面之前�
    现有 Mock 对等测试；
 3. 为 `toolbusd` 已接入合同缓存与按父总线仲裁；后续补充链路预算提示和总线级
    遥测；
-4. 将已验证的 H2N 会话状态机接入 USB Bulk，并补齐 N2H 事件数据面与信用归还；
+4. 将已验证的 H2N/N2H Mock 会话状态机接入 USB Bulk，并补齐真实节点生产源与主机侧
+   消费/信用归还闭环；
 5. 待真实吞吐需求明确后，再设计 Ethernet `LinkTransport` 和多链路路由；
 6. 上层 Web 配套可借鉴 Moonraker + Fluidd 的分层，但只通过 `toolbusd` 的稳定
    服务 API 使用节点、资源、作业和遥测，不直接访问 SocketCAN。

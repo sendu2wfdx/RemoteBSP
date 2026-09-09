@@ -36,6 +36,14 @@ private:
     MockBusError code_;
 };
 
+struct MockBusDeviceSnapshot {
+    std::uint32_t resource_id{};
+    protocol::BusTransactionStatus next_status{
+        protocol::BusTransactionStatus::Ok};
+    std::vector<std::uint8_t> data;
+    std::vector<std::uint8_t> spi_response;
+};
+
 // 面向主机测试的确定性后端。每个设备拥有独立故障状态，便于验证故障隔离。
 class MockBusBsp final : public BusBsp {
 public:
@@ -52,6 +60,7 @@ public:
         const protocol::SpiTransferRequest& request) override;
     const protocol::BusResourceContract* contract(
         std::uint32_t resource_id) const noexcept override;
+    std::vector<MockBusDeviceSnapshot> snapshot() const;
 
 private:
     struct DeviceState {

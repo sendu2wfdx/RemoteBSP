@@ -1,9 +1,12 @@
 #include "remotebsp/mock_mcu/board_manifest.hpp"
+#include "remotebsp/mock_mcu/twin_replay.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -1363,6 +1366,30 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
     : manifest_(std::move(manifest)),
       scenario_(std::move(scenario)),
       gpio_(std::make_shared<MockGpioBsp>()) {
+    if (scenario_.schema_version != kFaultScenarioSchemaVersion) {
+        schema_error(ManifestError::InvalidSchema,
+                     "不支持的故障场景 schema_version");
+    }
+    if (scenario_.events.size() > 0xFFFFU) {
+        schema_error(ManifestError::InvalidValue,
+                     "故障事件数量超过 65535");
+    }
+    for (std::size_t index = 0; index < scenario_.events.size(); ++index) {
+        const auto& event = scenario_.events[index];
+        if ((index != 0U &&
+             event.at_ms < scenario_.events[index - 1U].at_ms) ||
+            event.at_ms > static_cast<std::uint64_t>(
+                              std::numeric_limits<std::int64_t>::max())) {
+            schema_error(ManifestError::InvalidValue,
+                         "故障事件时间必须非递减且位于单调时钟范围内");
+        }
+        if (event.action == FaultAction::TriggerMotionLimit &&
+            event.at_ms > std::numeric_limits<std::uint64_t>::max() /
+                              1000000ULL) {
+            schema_error(ManifestError::InvalidValue,
+                         "运动限位事件时间换算溢出");
+        }
+    }
     std::uint32_t uart_rx_capacity = 1;
     std::uint32_t uart_tx_capacity = 1;
     for (const auto& resource : manifest_.resources) {
@@ -1419,15 +1446,22 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
             }
         } else if (event.action == FaultAction::SetBusStatus) {
             const auto* resource = find_resource(manifest_, event.resource_id);
-            if (!bus_ || resource == nullptr ||
+            if (event.bus_status >
+                    protocol::BusTransactionStatus::LimitExceeded ||
+                !bus_ || resource == nullptr ||
                 (resource->type != protocol::ResourceType::I2cDevice &&
                  resource->type != protocol::ResourceType::SpiDevice)) {
                 schema_error(ManifestError::InvalidValue,
                              "总线故障事件引用了不存在或类型错误的设备");
             }
-        } else if (event.resource_id != 0) {
+        } else if (event.action == FaultAction::SetNodeOnline) {
+            if (event.resource_id != 0) {
+                schema_error(ManifestError::InvalidValue,
+                             "节点级故障事件不能引用资源");
+            }
+        } else {
             schema_error(ManifestError::InvalidValue,
-                         "节点级故障事件不能引用资源");
+                         "故障事件动作枚举无效");
         }
     }
 }
@@ -1538,6 +1572,595 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
                        manifest.resources, manifest.contracts,
                        twin.motion(), twin.waveform(), device_parameters,
                        twin.bus());
+}
+
+namespace {
+
+constexpr std::size_t kMaximumReplayCheckpoints = 0xFFFFU;
+constexpr std::size_t kMaximumReplayJsonBytes = 16U * 1024U * 1024U;
+
+class StableDigest {
+public:
+    void add_u64(std::uint64_t value) noexcept {
+        for (unsigned index = 0; index < 8U; ++index) {
+            add_byte(static_cast<std::uint8_t>(value >> (index * 8U)));
+        }
+    }
+
+    void add_string(std::string_view value) noexcept {
+        add_u64(value.size());
+        for (const char byte : value) {
+            add_byte(static_cast<std::uint8_t>(byte));
+        }
+    }
+
+    template <typename Container>
+    void add_bytes(const Container& value) noexcept {
+        add_u64(value.size());
+        for (const auto byte : value) {
+            add_byte(static_cast<std::uint8_t>(byte));
+        }
+    }
+
+    std::string text() const {
+        std::ostringstream output;
+        output << "fnv1a64:" << std::hex << std::setfill('0')
+               << std::setw(16) << value_;
+        return output.str();
+    }
+
+private:
+    void add_byte(std::uint8_t byte) noexcept {
+        value_ ^= byte;
+        value_ *= 1099511628211ULL;
+    }
+
+    std::uint64_t value_{14695981039346656037ULL};
+};
+
+void add_manifest_identity(StableDigest& digest,
+                           const BoardManifest& manifest) {
+    digest.add_u64(manifest.schema_version);
+    digest.add_string(manifest.name);
+    digest.add_bytes(manifest.node_info.uuid);
+    digest.add_u64(manifest.node_info.firmware_major);
+    digest.add_u64(manifest.node_info.firmware_minor);
+    digest.add_u64(manifest.node_info.firmware_patch);
+    digest.add_u64(manifest.node_info.board_type);
+    digest.add_u64(manifest.node_info.protocol_version);
+    digest.add_u64(manifest.capabilities);
+
+    auto resources = manifest.resources;
+    std::sort(resources.begin(), resources.end(), [](const auto& left,
+                                                     const auto& right) {
+        return left.resource_id < right.resource_id;
+    });
+    digest.add_u64(resources.size());
+    for (const auto& resource : resources) {
+        digest.add_bytes(protocol::encode_resource_descriptor(resource));
+    }
+
+    auto contracts = manifest.contracts;
+    std::sort(contracts.begin(), contracts.end(), [](const auto& left,
+                                                     const auto& right) {
+        return left.resource_id < right.resource_id;
+    });
+    digest.add_u64(contracts.size());
+    for (const auto& contract : contracts) {
+        digest.add_bytes(protocol::encode_resource_contract(contract));
+    }
+
+    auto buses = manifest.bus_resources;
+    std::sort(buses.begin(), buses.end(), [](const auto& left,
+                                            const auto& right) {
+        return left.contract.resource_id < right.contract.resource_id;
+    });
+    digest.add_u64(buses.size());
+    for (const auto& bus : buses) {
+        digest.add_bytes(
+            protocol::encode_bus_resource_contract(bus.contract));
+        digest.add_u64(bus.i2c_address.has_value() ? 1U : 0U);
+        digest.add_u64(bus.i2c_address.value_or(0U));
+        digest.add_u64(bus.spi_mode.has_value() ? 1U : 0U);
+        digest.add_u64(bus.spi_mode.value_or(0U));
+        digest.add_u64(bus.bits_per_word.has_value() ? 1U : 0U);
+        digest.add_u64(bus.bits_per_word.value_or(0U));
+        digest.add_u64(bus.spi_chip_select.has_value() ? 1U : 0U);
+        digest.add_u64(bus.spi_chip_select.value_or(0U));
+        digest.add_bytes(bus.initial_data);
+        digest.add_bytes(bus.deterministic_response);
+    }
+
+    auto reserved = manifest.reserved_resources;
+    std::sort(reserved.begin(), reserved.end(), [](const auto& left,
+                                                   const auto& right) {
+        if (left.type != right.type) return left.type < right.type;
+        if (left.instance != right.instance) {
+            return left.instance < right.instance;
+        }
+        return left.owner < right.owner;
+    });
+    digest.add_u64(reserved.size());
+    for (const auto& resource : reserved) {
+        digest.add_u64(static_cast<std::uint8_t>(resource.type));
+        digest.add_u64(resource.instance);
+        digest.add_string(resource.owner);
+    }
+
+    auto axes = manifest.motion_axes;
+    std::sort(axes.begin(), axes.end(), [](const auto& left,
+                                          const auto& right) {
+        return left.resource_id < right.resource_id;
+    });
+    digest.add_u64(axes.size());
+    for (const auto& axis : axes) {
+        digest.add_u64(axis.resource_id);
+        digest.add_u64(axis.maximum_step_rate_hz);
+        digest.add_u64(axis.step_pulse_width_ns);
+        digest.add_u64(axis.minimum_step_low_ns);
+        digest.add_u64(axis.direction_setup_ns);
+        digest.add_u64(axis.driver_resource_id);
+        digest.add_u64(axis.driver_type);
+    }
+    digest.add_u64(manifest.motion_queue_capacity);
+    digest.add_u64(manifest.motion_maximum_total_step_rate_hz);
+
+    auto waveform = manifest.waveform_endpoints;
+    std::sort(waveform.begin(), waveform.end(), [](const auto& left,
+                                                   const auto& right) {
+        if (left.type != right.type) return left.type < right.type;
+        return left.instance < right.instance;
+    });
+    digest.add_u64(waveform.size());
+    for (const auto& endpoint : waveform) {
+        digest.add_u64(static_cast<std::uint8_t>(endpoint.type));
+        digest.add_u64(endpoint.instance);
+        digest.add_u64(endpoint.pin);
+        digest.add_u64(endpoint.timer);
+        digest.add_u64(endpoint.channel);
+        digest.add_u64(endpoint.dma_channel);
+        digest.add_u64(endpoint.maximum_frequency_hz);
+        digest.add_u64(endpoint.maximum_bits);
+        digest.add_u64(endpoint.maximum_bit_rate);
+    }
+}
+
+std::string scenario_identity(const FaultScenario& scenario) {
+    if (scenario.events.size() > kMaximumReplayCheckpoints) {
+        schema_error(ManifestError::InvalidValue,
+                     "回放输入故障事件数量超过 65535");
+    }
+    StableDigest digest;
+    digest.add_u64(scenario.schema_version);
+    digest.add_u64(scenario.events.size());
+    for (const auto& event : scenario.events) {
+        digest.add_u64(event.at_ms);
+        digest.add_u64(static_cast<std::uint8_t>(event.action));
+        digest.add_u64(event.resource_id);
+        digest.add_u64(event.value ? 1U : 0U);
+        digest.add_u64(static_cast<std::uint8_t>(event.bus_status));
+    }
+    return digest.text();
+}
+
+std::string twin_state_digest(const DigitalTwin& twin,
+                              std::uint32_t node_instance,
+                              std::uint64_t random_seed) {
+    StableDigest digest;
+    add_manifest_identity(digest, twin.manifest());
+    digest.add_u64(node_instance);
+    digest.add_u64(random_seed);
+    digest.add_u64(twin.online() ? 1U : 0U);
+
+    const auto gpio = twin.gpio()->snapshot();
+    digest.add_u64(gpio.size());
+    for (const auto& pin : gpio) {
+        digest.add_u64(pin.pin);
+        digest.add_u64(static_cast<std::uint8_t>(pin.direction));
+        digest.add_u64(pin.value ? 1U : 0U);
+    }
+    const auto pending_gpio = twin.gpio()->pending_input_snapshot();
+    digest.add_u64(pending_gpio.size());
+    for (const auto& pin : pending_gpio) {
+        digest.add_u64(pin.pin);
+        digest.add_u64(pin.value ? 1U : 0U);
+    }
+
+    std::vector<std::pair<std::uint32_t, std::uint16_t>> uart_resources;
+    for (const auto& resource : twin.manifest().resources) {
+        if (resource.type == protocol::ResourceType::Uart) {
+            uart_resources.emplace_back(resource.resource_id,
+                                        resource.instance);
+        }
+    }
+    std::sort(uart_resources.begin(), uart_resources.end());
+    digest.add_u64(uart_resources.size());
+    for (const auto& item : uart_resources) {
+        const auto status = twin.uart()->status(
+            static_cast<std::uint8_t>(item.second));
+        digest.add_u64(item.first);
+        digest.add_u64(status.failed ? 1U : 0U);
+        digest.add_u64(status.rx_buffered);
+        digest.add_u64(status.tx_buffered);
+        digest.add_u64(status.rx_overruns);
+        digest.add_u64(status.tx_overruns);
+    }
+
+    if (twin.motion()) {
+        const auto status = twin.motion()->status();
+        digest.add_u64(1U);
+        digest.add_u64(static_cast<std::uint8_t>(status.state));
+        digest.add_u64(static_cast<std::uint8_t>(status.fault));
+        digest.add_u64(status.node_time_ns);
+        digest.add_u64(status.queue_depth);
+        digest.add_u64(status.queue_capacity);
+        digest.add_u64(status.last_accepted_sequence);
+        digest.add_u64(status.last_completed_sequence);
+        digest.add_u64(status.metrics.accepted_segments);
+        digest.add_u64(status.metrics.rejected_segments);
+        digest.add_u64(status.metrics.completed_segments);
+        digest.add_u64(status.metrics.emitted_edges);
+        digest.add_u64(status.metrics.emitted_steps);
+        digest.add_u64(status.metrics.safety_stops);
+        digest.add_u64(status.metrics.limit_stops);
+        digest.add_u64(status.metrics.queue_underruns);
+        digest.add_u64(status.metrics.maximum_queue_depth);
+        digest.add_u64(status.axes.size());
+        for (const auto& axis : status.axes) {
+            digest.add_u64(axis.resource_id);
+            digest.add_u64(axis.enabled ? 1U : 0U);
+            digest.add_u64(axis.direction_positive ? 1U : 0U);
+            digest.add_u64(axis.step_level ? 1U : 0U);
+            digest.add_u64(static_cast<std::uint64_t>(axis.position_steps));
+            digest.add_u64(axis.emitted_steps);
+        }
+    } else {
+        digest.add_u64(0U);
+    }
+
+    if (twin.waveform()) {
+        digest.add_u64(1U);
+        const auto pwm = twin.waveform()->pwm_snapshot();
+        digest.add_u64(pwm.size());
+        for (const auto& channel : pwm) {
+            digest.add_u64(channel.channel);
+            digest.add_u64(channel.frequency_hz);
+            digest.add_u64(channel.duty);
+            digest.add_u64(channel.active_low ? 1U : 0U);
+            digest.add_u64(channel.running ? 1U : 0U);
+            digest.add_u64(channel.update_count);
+        }
+        const auto bitstreams = twin.waveform()->bitstream_snapshot();
+        digest.add_u64(bitstreams.size());
+        for (const auto& stream : bitstreams) {
+            digest.add_u64(stream.timing.channel);
+            digest.add_u64(stream.timing.bit_period_ns);
+            digest.add_u64(stream.timing.zero_high_ns);
+            digest.add_u64(stream.timing.one_high_ns);
+            digest.add_u64(stream.timing.reset_time_us);
+            digest.add_u64(stream.bit_count);
+            digest.add_bytes(stream.data);
+            digest.add_u64(stream.busy ? 1U : 0U);
+            digest.add_u64(stream.write_count);
+        }
+    } else {
+        digest.add_u64(0U);
+    }
+
+    const auto buses = twin.bus() ? twin.bus()->snapshot()
+                                  : std::vector<MockBusDeviceSnapshot>{};
+    digest.add_u64(buses.size());
+    for (const auto& bus : buses) {
+        digest.add_u64(bus.resource_id);
+        digest.add_u64(static_cast<std::uint8_t>(bus.next_status));
+        digest.add_u64(bus.data.size());
+        for (const auto byte : bus.data) digest.add_u64(byte);
+        digest.add_u64(bus.spi_response.size());
+        for (const auto byte : bus.spi_response) digest.add_u64(byte);
+    }
+    return digest.text();
+}
+
+bool valid_digest(const std::string& value) {
+    if (value.size() != 24U || value.compare(0U, 8U, "fnv1a64:") != 0) {
+        return false;
+    }
+    return std::all_of(value.begin() + 8, value.end(), [](char digit) {
+        return (digit >= '0' && digit <= '9') ||
+               (digit >= 'a' && digit <= 'f');
+    });
+}
+
+void validate_replay_record(const TwinReplayRecord& record) {
+    if (record.schema_version != kTwinReplaySchemaVersion) {
+        schema_error(ManifestError::InvalidSchema,
+                     "不支持的数字孪生回放 schema_version");
+    }
+    if (record.time_base != kTwinReplayTimeBase) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放时间基无效");
+    }
+    if (!valid_digest(record.scenario_id) || record.board_name.empty() ||
+        record.board_name.size() > 256U || record.node_instance == 0U ||
+        record.node_instance > 127U ||
+        record.checkpoints.size() > kMaximumReplayCheckpoints ||
+        record.summary.checkpoint_count != record.checkpoints.size() ||
+        !valid_digest(record.summary.final_state_digest)) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放根字段或摘要无效");
+    }
+    std::uint64_t total_events = 0U;
+    std::uint64_t previous_at_ms = 0U;
+    for (std::size_t index = 0; index < record.checkpoints.size(); ++index) {
+        const auto& checkpoint = record.checkpoints[index];
+        if (checkpoint.sequence != index + 1U ||
+            checkpoint.applied_events == 0U ||
+            !valid_digest(checkpoint.state_digest) ||
+            checkpoint.at_ms > static_cast<std::uint64_t>(
+                                   std::numeric_limits<std::int64_t>::max()) ||
+            (index != 0U && checkpoint.at_ms <= previous_at_ms)) {
+            schema_error(ManifestError::InvalidValue,
+                         "数字孪生回放检查点顺序或字段无效");
+        }
+        previous_at_ms = checkpoint.at_ms;
+        total_events += checkpoint.applied_events;
+        if (total_events > kMaximumReplayCheckpoints) {
+            schema_error(ManifestError::InvalidValue,
+                         "数字孪生回放事件总数超过 65535");
+        }
+    }
+    const auto expected_final_elapsed_ms = record.checkpoints.empty()
+                                               ? 0U
+                                               : record.checkpoints.back().at_ms;
+    if (record.summary.event_count != total_events ||
+        record.summary.final_elapsed_ms != expected_final_elapsed_ms) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放摘要与检查点不一致");
+    }
+}
+
+std::string replay_json_string(std::string_view value) {
+    std::string result{"\""};
+    for (const char character : value) {
+        switch (character) {
+            case '\\': result += "\\\\"; break;
+            case '"': result += "\\\""; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(character) < 0x20U) {
+                    schema_error(ManifestError::InvalidValue,
+                                 "回放字符串包含不支持的控制字符");
+                }
+                result += character;
+        }
+    }
+    result += '"';
+    return result;
+}
+
+}  // namespace
+
+TwinReplayRecord record_digital_twin(
+    const BoardManifest& manifest, const FaultScenario& scenario,
+    std::uint32_t node_instance, std::uint64_t random_seed) {
+    static_cast<void>(instantiate_node_info(manifest, node_instance));
+    DigitalTwin twin(manifest, scenario);
+    TwinReplayRecord record;
+    record.random_seed = random_seed;
+    record.scenario_id = scenario_identity(scenario);
+    record.board_name = manifest.name;
+    record.node_instance = node_instance;
+
+    std::size_t event_index = 0U;
+    while (event_index < scenario.events.size()) {
+        const auto at_ms = scenario.events[event_index].at_ms;
+        std::size_t expected = 0U;
+        while (event_index + expected < scenario.events.size() &&
+               scenario.events[event_index + expected].at_ms == at_ms) {
+            ++expected;
+        }
+        const auto applied = twin.advance_to(at_ms);
+        if (applied != expected) {
+            schema_error(ManifestError::Conflict,
+                         "数字孪生故障脚本推进结果不确定");
+        }
+        record.checkpoints.push_back({
+            static_cast<std::uint32_t>(record.checkpoints.size() + 1U),
+            at_ms, static_cast<std::uint32_t>(applied),
+            twin_state_digest(twin, node_instance, random_seed)});
+        event_index += expected;
+    }
+    record.summary.event_count =
+        static_cast<std::uint32_t>(scenario.events.size());
+    record.summary.checkpoint_count =
+        static_cast<std::uint32_t>(record.checkpoints.size());
+    record.summary.final_elapsed_ms = scenario.events.empty()
+                                          ? 0U
+                                          : scenario.events.back().at_ms;
+    record.summary.final_online = twin.online();
+    record.summary.final_state_digest =
+        twin_state_digest(twin, node_instance, random_seed);
+    validate_replay_record(record);
+    return record;
+}
+
+void verify_digital_twin_replay(
+    const BoardManifest& manifest, const FaultScenario& scenario,
+    std::uint32_t node_instance, const TwinReplayRecord& record) {
+    validate_replay_record(record);
+    const auto expected = record_digital_twin(
+        manifest, scenario, node_instance, record.random_seed);
+    if (record.scenario_id != expected.scenario_id ||
+        record.board_name != expected.board_name ||
+        record.node_instance != expected.node_instance ||
+        record.summary.event_count != expected.summary.event_count ||
+        record.summary.checkpoint_count != expected.summary.checkpoint_count ||
+        record.summary.final_elapsed_ms != expected.summary.final_elapsed_ms ||
+        record.summary.final_online != expected.summary.final_online ||
+        record.summary.final_state_digest !=
+            expected.summary.final_state_digest ||
+        record.checkpoints.size() != expected.checkpoints.size()) {
+        schema_error(ManifestError::Conflict,
+                     "数字孪生回放身份或最终摘要不匹配");
+    }
+    for (std::size_t index = 0; index < record.checkpoints.size(); ++index) {
+        const auto& actual = record.checkpoints[index];
+        const auto& wanted = expected.checkpoints[index];
+        if (actual.sequence != wanted.sequence ||
+            actual.at_ms != wanted.at_ms ||
+            actual.applied_events != wanted.applied_events ||
+            actual.state_digest != wanted.state_digest) {
+            schema_error(ManifestError::Conflict,
+                         "数字孪生回放检查点摘要不匹配");
+        }
+    }
+}
+
+std::string encode_twin_replay_record(const TwinReplayRecord& record) {
+    validate_replay_record(record);
+    std::ostringstream output;
+    output << "{\n  \"schema_version\": " << record.schema_version
+           << ",\n  \"time_base\": " << replay_json_string(record.time_base)
+           << ",\n  \"random_seed\": " << record.random_seed
+           << ",\n  \"scenario_id\": "
+           << replay_json_string(record.scenario_id)
+           << ",\n  \"board_name\": "
+           << replay_json_string(record.board_name)
+           << ",\n  \"node_instance\": " << record.node_instance
+           << ",\n  \"checkpoints\": [";
+    for (std::size_t index = 0; index < record.checkpoints.size(); ++index) {
+        const auto& checkpoint = record.checkpoints[index];
+        output << (index == 0U ? "\n" : ",\n")
+               << "    {\"sequence\": " << checkpoint.sequence
+               << ", \"at_ms\": " << checkpoint.at_ms
+               << ", \"applied_events\": " << checkpoint.applied_events
+               << ", \"state_digest\": "
+               << replay_json_string(checkpoint.state_digest) << "}";
+    }
+    output << (record.checkpoints.empty() ? "],\n" : "\n  ],\n")
+           << "  \"summary\": {\"event_count\": "
+           << record.summary.event_count
+           << ", \"checkpoint_count\": "
+           << record.summary.checkpoint_count
+           << ", \"final_elapsed_ms\": "
+           << record.summary.final_elapsed_ms
+           << ", \"final_online\": "
+           << (record.summary.final_online ? "true" : "false")
+           << ", \"final_state_digest\": "
+           << replay_json_string(record.summary.final_state_digest)
+           << "}\n}\n";
+    return output.str();
+}
+
+TwinReplayRecord parse_twin_replay_record(std::string_view json_text) {
+    if (json_text.size() > kMaximumReplayJsonBytes) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放 JSON 超过 16 MiB");
+    }
+    const auto root_value = JsonParser(json_text).parse();
+    const auto& root = require_object(root_value, "数字孪生回放根");
+    reject_unknown(root,
+                   {"schema_version", "time_base", "random_seed",
+                    "scenario_id", "board_name", "node_instance",
+                    "checkpoints", "summary"},
+                   "数字孪生回放根");
+    TwinReplayRecord record;
+    record.schema_version = require_u32(root, "schema_version");
+    record.time_base = require_string(root, "time_base");
+    record.random_seed = require_integer(root, "random_seed");
+    record.scenario_id = require_string(root, "scenario_id");
+    record.board_name = require_string(root, "board_name");
+    record.node_instance = require_u32(root, "node_instance");
+    const auto& checkpoints = require_array(root, "checkpoints");
+    if (checkpoints.size() > kMaximumReplayCheckpoints) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放检查点数量超过 65535");
+    }
+    record.checkpoints.reserve(checkpoints.size());
+    for (const auto& value : checkpoints) {
+        const auto& checkpoint = require_object(value, "回放检查点");
+        reject_unknown(checkpoint,
+                       {"sequence", "at_ms", "applied_events",
+                        "state_digest"},
+                       "回放检查点");
+        record.checkpoints.push_back({
+            require_u32(checkpoint, "sequence"),
+            require_integer(checkpoint, "at_ms"),
+            require_u32(checkpoint, "applied_events"),
+            require_string(checkpoint, "state_digest")});
+    }
+    const auto& summary = require_object(require_field(root, "summary"),
+                                         "回放摘要");
+    reject_unknown(summary,
+                   {"event_count", "checkpoint_count", "final_elapsed_ms",
+                    "final_online", "final_state_digest"},
+                   "回放摘要");
+    record.summary = {
+        require_u32(summary, "event_count"),
+        require_u32(summary, "checkpoint_count"),
+        require_integer(summary, "final_elapsed_ms"),
+        require_boolean(summary, "final_online"),
+        require_string(summary, "final_state_digest")};
+    validate_replay_record(record);
+    return record;
+}
+
+TwinReplayRecord load_twin_replay_record(const std::string& path) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        schema_error(ManifestError::Io, "无法读取数字孪生回放文件");
+    }
+    const auto size = input.tellg();
+    if (size < 0 || static_cast<std::uint64_t>(size) >
+                        kMaximumReplayJsonBytes) {
+        schema_error(ManifestError::InvalidValue,
+                     "数字孪生回放 JSON 超过 16 MiB");
+    }
+    std::string contents(static_cast<std::size_t>(size), '\0');
+    input.seekg(0, std::ios::beg);
+    if (!contents.empty() &&
+        !input.read(contents.data(), static_cast<std::streamsize>(size))) {
+        schema_error(ManifestError::Io, "读取数字孪生回放文件失败");
+    }
+    if (input.peek() != std::char_traits<char>::eof()) {
+        schema_error(ManifestError::Io,
+                     "读取期间数字孪生回放文件长度发生变化");
+    }
+    return parse_twin_replay_record(contents);
+}
+
+void write_twin_replay_record(const TwinReplayRecord& record,
+                              const std::string& path) {
+    if (path.empty()) {
+        schema_error(ManifestError::Io, "数字孪生回放文件路径不能为空");
+    }
+    const auto encoded = encode_twin_replay_record(record);
+    const auto temporary = path + ".tmp";
+    // 使用独占创建，拒绝遗留临时文件及同名符号链接，避免跟随可预测的
+    // `.tmp` 链接截断目标文件。并发写同一路径时由其中一方失败关闭。
+    std::FILE* output = std::fopen(temporary.c_str(), "wbx");
+    if (output == nullptr) {
+        schema_error(ManifestError::Io,
+                     "无法独占创建数字孪生回放临时文件");
+    }
+    const auto written = std::fwrite(encoded.data(), 1U, encoded.size(),
+                                     output);
+    const bool flushed = std::fflush(output) == 0;
+    const bool closed = std::fclose(output) == 0;
+    if (written != encoded.size() || !flushed || !closed) {
+        std::remove(temporary.c_str());
+        schema_error(ManifestError::Io,
+                     "写入数字孪生回放文件失败");
+    }
+    if (std::rename(temporary.c_str(), path.c_str()) != 0) {
+        std::remove(temporary.c_str());
+        schema_error(ManifestError::Io,
+                     "原子替换数字孪生回放文件失败");
+    }
 }
 
 }  // namespace remotebsp::mock_mcu
