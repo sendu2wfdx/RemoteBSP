@@ -376,6 +376,12 @@ const std::vector<MotionAxisConfig>& MotionExecutor::axes() const noexcept {
     return axis_configs_;
 }
 
+MotionSegment MotionExecutor::validate_enqueue(
+    MotionSegment segment, std::uint64_t now_ns) const {
+    MotionExecutor probe(*this);
+    return probe.enqueue(std::move(segment), now_ns);
+}
+
 std::uint64_t MotionExecutor::minimum_lead_time_ns() const noexcept {
     return minimum_lead_time_ns_;
 }

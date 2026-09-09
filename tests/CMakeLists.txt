@@ -88,6 +88,17 @@ target_compile_options(motion_group_tests PRIVATE
 )
 add_test(NAME motion_group_tests COMMAND motion_group_tests)
 
+add_executable(motion_group_remote_core_tests
+    motion_group_remote_core_tests.cpp)
+target_link_libraries(motion_group_remote_core_tests PRIVATE
+    remotebsp_remote_core)
+target_compile_options(motion_group_remote_core_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME motion_group_remote_core_tests
+    COMMAND motion_group_remote_core_tests)
+
 add_executable(waveform_protocol_tests waveform_protocol_tests.cpp)
 target_link_libraries(waveform_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(waveform_protocol_tests PRIVATE

@@ -95,6 +95,47 @@ TimeSyncBsp::TimePoint MockTimeSyncBsp::origin() const noexcept {
     return origin_;
 }
 
+std::uint64_t MockTimeSyncBsp::elapsed_ns(TimePoint now) const {
+    if (now < origin_) {
+        throw std::invalid_argument("Mock 时间早于节点启动时刻");
+    }
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - origin_)
+            .count());
+}
+
+std::optional<std::uint64_t> MockTimeSyncBsp::motion_time_ns_for_tick(
+    std::uint64_t extended_tick, TimePoint now) const {
+    const auto current_ns = elapsed_ns(now);
+    if (extended_tick < config_.initial_tick) {
+        return std::nullopt;
+    }
+    const auto elapsed_ticks = extended_tick - config_.initial_tick;
+    const auto whole_seconds =
+        elapsed_ticks / config_.nominal_tick_rate_hz;
+    const auto remainder_ticks =
+        elapsed_ticks % config_.nominal_tick_rate_hz;
+    if (whole_seconds >
+        std::numeric_limits<std::uint64_t>::max() /
+            kNanosecondsPerSecond) {
+        return std::nullopt;
+    }
+    const auto fractional_numerator =
+        remainder_ticks * kNanosecondsPerSecond;
+    const auto fractional_ns =
+        fractional_numerator / config_.nominal_tick_rate_hz +
+        (fractional_numerator % config_.nominal_tick_rate_hz != 0U ? 1U
+                                                                   : 0U);
+    const auto base_ns = whole_seconds * kNanosecondsPerSecond;
+    if (fractional_ns >
+        std::numeric_limits<std::uint64_t>::max() - base_ns) {
+        return std::nullopt;
+    }
+    const auto target_ns = base_ns + fractional_ns;
+    return target_ns >= current_ns ? std::optional<std::uint64_t>(target_ns)
+                                   : std::nullopt;
+}
+
 std::uint64_t MockTimeSyncBsp::generate_boot_epoch() noexcept {
     static std::atomic<std::uint64_t> sequence{1U};
     const auto count = Clock::now().time_since_epoch().count();

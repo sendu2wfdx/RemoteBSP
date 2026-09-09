@@ -97,6 +97,12 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                                 "资源能力合同与资源目录不一致");
         }
     }
+    const auto mock_clock =
+        std::dynamic_pointer_cast<MockTimeSyncBsp>(time_sync_bsp_);
+    if (motion_ != nullptr && mock_clock != nullptr) {
+        motion_group_ = std::make_shared<MockMotionGroupParticipant>(
+            motion_, mock_clock);
+    }
 }
 
 protocol::Packet RemoteCore::handle(const protocol::Packet& request,
@@ -195,6 +201,12 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_motion_clear_fault(request);
         case protocol::Command::MotionContract:
             return handle_motion_contract(request);
+        case protocol::Command::MotionGroupPrepare:
+            return handle_motion_group_prepare(request, now);
+        case protocol::Command::MotionGroupCommit:
+            return handle_motion_group_commit(request, now);
+        case protocol::Command::MotionGroupAbort:
+            return handle_motion_group_abort(request, now);
         default:
             return make_response(request, StatusCode::UnknownCommand);
     }
@@ -295,10 +307,19 @@ bool RemoteCore::resource_access_allowed(
 void RemoteCore::release_resource_objects(
     std::uint32_t resource_id, std::uint32_t owner_session_id) {
     const auto* released_resource = find_resource(resource_id);
+    bool group_aborted = false;
     if (released_resource != nullptr &&
         released_resource->type ==
             protocol::ResourceType::StepgenAxis &&
-        motion_ != nullptr) {
+        motion_group_ != nullptr &&
+        motion_group_->owned_by(owner_session_id) &&
+        motion_group_->uses_resource(resource_id)) {
+        group_aborted = motion_group_->emergency_abort();
+    }
+    if (released_resource != nullptr &&
+        released_resource->type ==
+            protocol::ResourceType::StepgenAxis &&
+        motion_ != nullptr && !group_aborted) {
         const auto motion_status = motion_->status();
         if (motion_status.state == MotionState::Armed ||
             motion_status.state == MotionState::Running) {
@@ -412,6 +433,9 @@ std::size_t RemoteCore::expire_leases(TimePoint now) {
 
 std::size_t RemoteCore::release_session(std::uint32_t session_id) {
     std::size_t released = 0;
+    if (motion_group_ != nullptr) {
+        static_cast<void>(motion_group_->cancel_session(session_id));
+    }
     for (auto map_iterator = leases_.begin();
          map_iterator != leases_.end();) {
         const auto resource_id = map_iterator->first;
@@ -1870,6 +1894,11 @@ protocol::Packet RemoteCore::handle_motion_enqueue(
     if (request.header.object_id != 0) {
         return make_response(request, StatusCode::InvalidPayload);
     }
+    if (motion_group_ != nullptr &&
+        (motion_group_->state() == MockMotionGroupState::Prepared ||
+         motion_group_->state() == MockMotionGroupState::Armed)) {
+        return make_response(request, StatusCode::ResourceBusy);
+    }
     protocol::MotionSegmentPayload decoded;
     try {
         decoded = protocol::decode_motion_segment(request.payload);
@@ -2003,6 +2032,123 @@ protocol::Packet RemoteCore::handle_motion_contract(
     return response;
 }
 
+protocol::Packet RemoteCore::handle_motion_group_prepare(
+    const protocol::Packet& request, TimePoint now) {
+    if (motion_group_ == nullptr || motion_ == nullptr ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::MotionGroupPreparePayload decoded;
+    try {
+        decoded = protocol::decode_motion_group_prepare(request.payload);
+    } catch (const protocol::MotionGroupPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    for (const auto& axis : decoded.segment.axes) {
+        const auto* resource = find_resource(axis.resource_id);
+        if (resource == nullptr ||
+            resource->type != protocol::ResourceType::StepgenAxis) {
+            return make_response(request, StatusCode::ObjectNotFound);
+        }
+        const auto* contract = find_contract(axis.resource_id);
+        const bool lease_required =
+            contract != nullptr &&
+            (contract->access_flags &
+             protocol::kResourceAccessLeaseRequired) != 0U;
+        const bool lease_active =
+            leases_.find(axis.resource_id) != leases_.end();
+        if ((lease_required || lease_active) &&
+            !session_has_exclusive_lease(
+                axis.resource_id, request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+    }
+    const auto ready = motion_group_->prepare(
+        decoded, protocol::MotionGroupReadyCode::Ready,
+        request.header.session_id, now);
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_motion_group_ready(ready);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_motion_group_commit(
+    const protocol::Packet& request, TimePoint now) {
+    if (motion_group_ == nullptr || motion_ == nullptr ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::MotionGroupCommitPayload decoded;
+    try {
+        decoded = protocol::decode_motion_group_commit(request.payload);
+    } catch (const protocol::MotionGroupPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (motion_group_->owned_by(request.header.session_id) &&
+        motion_group_->prepared().has_value()) {
+        for (const auto& axis :
+             motion_group_->prepared()->segment.axes) {
+            const auto* contract = find_contract(axis.resource_id);
+            const bool lease_required =
+                contract != nullptr &&
+                (contract->access_flags &
+                 protocol::kResourceAccessLeaseRequired) != 0U;
+            const bool lease_active =
+                leases_.find(axis.resource_id) != leases_.end();
+            if ((lease_required || lease_active) &&
+                !session_has_exclusive_lease(
+                    axis.resource_id, request.header.session_id)) {
+                static_cast<void>(motion_group_->emergency_abort());
+                auto response = make_response(request, StatusCode::Ok);
+                const auto encoded =
+                    protocol::encode_motion_group_commit_ack(
+                        {decoded.identity,
+                         protocol::MotionGroupCommitCode::Rejected});
+                response.payload.insert(response.payload.end(),
+                                        encoded.begin(), encoded.end());
+                return response;
+            }
+        }
+    }
+    const auto ack = motion_group_->commit(
+        decoded, protocol::MotionGroupCommitCode::Armed,
+        request.header.session_id, now);
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_motion_group_commit_ack(ack);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_motion_group_abort(
+    const protocol::Packet& request, TimePoint now) {
+    if (motion_group_ == nullptr || motion_ == nullptr ||
+        (capabilities_ & capability_mask(Capability::Motion)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::MotionGroupAbortPayload decoded;
+    try {
+        decoded = protocol::decode_motion_group_abort(request.payload);
+    } catch (const protocol::MotionGroupPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    return make_response(
+        request,
+        motion_group_->abort(decoded, request.header.session_id, now)
+            ? StatusCode::Ok
+            : StatusCode::AccessDenied);
+}
+
 protocol::Packet RemoteCore::handle_motion_abort(
     const protocol::Packet& request) {
     if (!motion_ || motion_->axes().empty() ||
@@ -2011,6 +2157,20 @@ protocol::Packet RemoteCore::handle_motion_abort(
     }
     if (request.header.object_id != 0 || !request.payload.empty()) {
         return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (motion_group_ != nullptr && motion_group_->emergency_abort()) {
+        // 普通 MOTION_ABORT 的既有契约要求锁存 Aborted。Prepared 事务尚未
+        // 入队，参与者失效后仍需显式驱动执行器进入同一故障状态。
+        if (motion_->status().fault == MotionFault::None) {
+            try {
+                static_cast<void>(motion_->abort(
+                    motion_->status().node_time_ns,
+                    MotionFault::Aborted));
+            } catch (const MotionException&) {
+                return make_response(request, StatusCode::ResourceFailed);
+            }
+        }
+        return make_response(request, StatusCode::Ok);
     }
     try {
         static_cast<void>(motion_->abort(
@@ -2038,6 +2198,9 @@ protocol::Packet RemoteCore::handle_motion_clear_fault(
         motion_->clear_fault();
     } catch (const MotionException&) {
         return make_response(request, StatusCode::ResourceBusy);
+    }
+    if (motion_group_ != nullptr) {
+        motion_group_->reset();
     }
     return make_response(request, StatusCode::Ok);
 }

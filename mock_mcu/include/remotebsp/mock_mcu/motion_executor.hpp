@@ -128,6 +128,9 @@ public:
 
     MotionSegment enqueue(MotionSegment segment,
                           std::uint64_t now_ns);
+    // 在有界副本上运行与 enqueue 完全相同的校验，不修改队列、序号或指标。
+    MotionSegment validate_enqueue(MotionSegment segment,
+                                   std::uint64_t now_ns) const;
     std::vector<MotionEdge> advance_to(std::uint64_t now_ns);
     std::vector<MotionEdge> abort(
         std::uint64_t now_ns,

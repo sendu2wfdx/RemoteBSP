@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace remotebsp::mock_mcu {
 
@@ -41,6 +42,9 @@ public:
         TimePoint request_received_at) const override;
     std::uint64_t boot_epoch() const noexcept;
     TimePoint origin() const noexcept;
+    std::uint64_t elapsed_ns(TimePoint now) const;
+    std::optional<std::uint64_t> motion_time_ns_for_tick(
+        std::uint64_t extended_tick, TimePoint now) const;
 
 private:
     static std::uint64_t generate_boot_epoch() noexcept;

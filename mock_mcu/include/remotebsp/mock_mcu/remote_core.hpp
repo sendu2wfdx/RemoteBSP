@@ -4,12 +4,14 @@
 #include "remotebsp/mock_mcu/bus_bsp.hpp"
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
+#include "remotebsp/mock_mcu/motion_group_participant.hpp"
 #include "remotebsp/mock_mcu/time_sync_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/motion.hpp"
+#include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/protocol/time_sync.hpp"
@@ -185,6 +187,12 @@ private:
         const protocol::Packet& request);
     protocol::Packet handle_motion_contract(
         const protocol::Packet& request) const;
+    protocol::Packet handle_motion_group_prepare(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_motion_group_commit(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_motion_group_abort(
+        const protocol::Packet& request, TimePoint now);
     protocol::Packet make_uart_error_response(
         const protocol::Packet& request,
         const std::exception& error) const;
@@ -246,6 +254,7 @@ private:
     std::shared_ptr<GpioBsp> gpio_bsp_;
     std::shared_ptr<UartBsp> uart_bsp_;
     std::shared_ptr<MotionExecutor> motion_;
+    std::shared_ptr<MockMotionGroupParticipant> motion_group_;
     std::shared_ptr<WaveformBsp> waveform_;
     std::shared_ptr<DeviceParameterStore> device_parameters_;
     std::shared_ptr<BusBsp> bus_bsp_;
