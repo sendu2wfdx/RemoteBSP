@@ -607,6 +607,50 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
                     ToolbusdSnapshotProvider(
                         FakeToolbusClient(), **{keyword: value})
 
+    def test_cache_refreshes_before_clock_sample_crosses_stale_threshold(self):
+        def parsed_with_age(sample_age_ns):
+            document = json.loads(
+                RemoteCliIpcClientTest._runtime_snapshot_document())
+            document["data"]["clocks"][0]["sample_age_ns"] = sample_age_ns
+            return RemoteCliIpcClient._json_runtime_snapshot(
+                json.dumps(document))
+
+        snapshots = [parsed_with_age(900_000_000),
+                     parsed_with_age(1_001_000_000)]
+
+        class AdvancingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def runtime_snapshot(self, maximum_resources):
+                value = snapshots[min(self.calls, len(snapshots) - 1)]
+                self.calls += 1
+                return value
+
+        now = [0]
+        client = AdvancingClient()
+        provider = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: now[0], cache_ttl_ms=10_000,
+            maximum_clock_sample_age_ms=1_000)
+        first = provider.read_snapshot()
+        self.assertEqual(first.cache_status, "refresh")
+        self.assertNotIn(
+            "clock_sync_sample_stale",
+            {alert["code"] for alert in first.snapshot["alerts"]})
+
+        now[0] = 100
+        boundary = provider.read_snapshot()
+        self.assertEqual(boundary.cache_status, "hit")
+        self.assertEqual(client.calls, 1)
+
+        now[0] = 101
+        stale = provider.read_snapshot()
+        self.assertEqual(stale.cache_status, "refresh")
+        self.assertEqual(client.calls, 2)
+        self.assertIn(
+            "clock_sync_sample_stale",
+            {alert["code"] for alert in stale.snapshot["alerts"]})
+
     def test_duplicate_numeric_node_id_fails_before_resource_fanout(self):
         """相同路由ID不能因UUID不同而被当作两个节点重复查询。"""
         class DuplicateRouteClient(FakeToolbusClient):

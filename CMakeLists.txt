@@ -30,6 +30,11 @@ if(BUILD_TESTING)
                 -s ${CMAKE_SOURCE_DIR}/runtime_api/tests -v)
     set_tests_properties(runtime_api_tests PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME maturity_manifest_tests
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/maturity_manifest_tests.py)
+    set_tests_properties(maturity_manifest_tests PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     add_test(NAME generated_pin_choices_are_current
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/firmware/scripts/generate_pin_choices.py --check)

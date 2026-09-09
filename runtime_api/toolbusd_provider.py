@@ -936,7 +936,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     f"主机时钟模型估计误差上界{error_bound_ns}纳秒，超过Runtime告警阈值"
                     f"{self.maximum_clock_error_bound_ns}纳秒",
                     captured_at_ms, severity="warning"))
-            sample_age_ns = int(clock["sample_age_ns"])
+            sample_age_ns = self._clock_age_at_capture_ns(
+                clock, captured_at_ms)
             age_threshold_ns = self.maximum_clock_sample_age_ms * 1_000_000
             if sample_age_ns > age_threshold_ns:
                 result.append(self._alert(
@@ -946,6 +947,15 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     f"{self.maximum_clock_sample_age_ms}毫秒",
                     captured_at_ms, severity="warning"))
         return result
+
+    @staticmethod
+    def _clock_age_at_capture_ns(clock: dict, captured_at_ms: int) -> int:
+        reported_age_ns = int(clock["sample_age_ns"])
+        last_sample_ns = int(clock["last_sample_host_time_ns"])
+        captured_ns = captured_at_ms * 1_000_000
+        if captured_ns < last_sample_ns:
+            return reported_age_ns
+        return max(reported_age_ns, captured_ns - last_sample_ns)
 
     def get_snapshot(self) -> dict:
         return self.read_snapshot().snapshot
@@ -1015,7 +1025,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         if now_ms < self._cache_stored_at_ms:
             return None
         age_ms = now_ms - self._cache_stored_at_ms
-        if self.cache_ttl_ms == 0 or age_ms > self.cache_ttl_ms:
+        if self.cache_ttl_ms == 0 or age_ms > self.cache_ttl_ms or \
+                self._cache_crossed_clock_stale_threshold(
+                    self._cached_snapshot, now_ms):
             return None
         return SnapshotRead(
             snapshot=copy.deepcopy(self._cached_snapshot),
@@ -1024,6 +1036,25 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 self._cached_snapshot["captured_at_ms"])),
             cache_ttl_ms=self.cache_ttl_ms,
         )
+
+    def _cache_crossed_clock_stale_threshold(
+            self, snapshot: dict, now_ms: int) -> bool:
+        """检查原本未陈旧的模型是否在缓存期间跨过告警阈值。"""
+        threshold_ns = self.maximum_clock_sample_age_ms * 1_000_000
+        captured_at_ms = int(snapshot["captured_at_ms"])
+        elapsed_ns = max(0, now_ms - captured_at_ms) * 1_000_000
+        for node in snapshot["nodes"]:
+            clock = node["runtime"].get("clock_sync")
+            if not isinstance(clock, dict) or \
+                    not bool(clock.get("source_available")) or \
+                    not bool(clock.get("estimate_valid")):
+                continue
+            sample_age_ns = self._clock_age_at_capture_ns(
+                clock, captured_at_ms)
+            if sample_age_ns <= threshold_ns and \
+                    sample_age_ns + elapsed_ns > threshold_ns:
+                return True
+        return False
 
     def _raise_cached_failure(self, now_ms: int) -> None:
         if self._cached_error is None or self._error_stored_at_ms is None:

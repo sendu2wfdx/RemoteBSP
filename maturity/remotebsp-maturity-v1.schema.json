@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remotebsp.local/schemas/remotebsp-maturity-v1.schema.json",
+  "title": "RemoteBSP 可审计成熟度基线 v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "manifest_id", "evidence_as_of", "status_definitions",
+    "dimensions", "blockers", "overall_comparison"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "manifest_id": {"const": "remotebsp-maturity-baseline-v1"},
+    "evidence_as_of": {"type": "string", "format": "date"},
+    "status_definitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["absent", "partial", "verified", "not_applicable"],
+      "properties": {
+        "absent": {"type": "string", "minLength": 1},
+        "partial": {"type": "string", "minLength": 1},
+        "verified": {"type": "string", "minLength": 1},
+        "not_applicable": {"type": "string", "minLength": 1}
+      }
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 10,
+      "items": {"$ref": "#/$defs/dimension"}
+    },
+    "blockers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blocker"}
+    },
+    "overall_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim", "allowed", "status", "blocker_ids",
+        "benchmark_evidence", "reason"
+      ],
+      "properties": {
+        "claim": {"const": "RemoteBSP 整体超过 Klipper"},
+        "allowed": {"type": "boolean"},
+        "status": {"enum": ["blocked", "ready"]},
+        "blocker_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "benchmark_evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "status": {
+      "enum": ["absent", "partial", "verified", "not_applicable"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path", "note"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "kind": {
+          "enum": [
+            "source", "document", "host_test", "mock_test", "vcan_test",
+            "cross_compile_record", "documented_cross_compile_result",
+            "hardware_artifact", "hardware_test_record",
+            "documented_hardware_result", "comparative_benchmark"
+          ]
+        },
+        "path": {"type": "string", "minLength": 1, "maxLength": 240},
+        "note": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    },
+    "level": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence", "blocker_ids"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "blocker_ids": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"}
+        }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "summary", "implemented", "automated_test",
+        "cross_compiled", "hardware_verified"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "implemented": {"$ref": "#/$defs/level"},
+        "automated_test": {"$ref": "#/$defs/level"},
+        "cross_compiled": {"$ref": "#/$defs/level"},
+        "hardware_verified": {"$ref": "#/$defs/level"}
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "dimension_id", "summary", "requires_hardware",
+        "closure_evidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "dimension_id": {
+          "oneOf": [
+            {"$ref": "#/$defs/identifier"},
+            {"type": "null"}
+          ]
+        },
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "requires_hardware": {"type": "boolean"},
+        "closure_evidence": {
+          "type": "string", "minLength": 1, "maxLength": 500
+        }
+      }
+    }
+  }
+}

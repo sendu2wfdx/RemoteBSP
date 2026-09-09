@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "manifest_id": "remotebsp-maturity-baseline-v1",
+  "evidence_as_of": "2026-09-09",
+  "status_definitions": {
+    "absent": "当前仓库没有足以支持该层级结论的证据。",
+    "partial": "已有明确证据，但覆盖范围或复现材料仍不完整。",
+    "verified": "该层级当前声明的范围有可定位、可复核的仓库证据。",
+    "not_applicable": "该维度在此层级不适用；不能把它换算成已验证。"
+  },
+  "dimensions": [
+    {
+      "id": "determinism",
+      "title": "确定性与实时边界",
+      "summary": "协议、时钟模型、Mock 运动执行和 MCU 有界队列已有实现与软件测试；实体波形和最坏时延尚未形成统一证据。",
+      "implemented": {
+        "status": "verified",
+        "evidence": [
+          {"id": "determinism_clock_source", "kind": "source", "path": "toolbusd/src/clock_model.cpp", "note": "主机时钟拟合、误差老化和状态判定实现。"},
+          {"id": "determinism_motion_source", "kind": "source", "path": "mock_mcu/src/motion_executor.cpp", "note": "确定性 Mock 运动时间线与安全状态实现。"}
+        ],
+        "blocker_ids": []
+      },
+      "automated_test": {
+        "status": "verified",
+        "evidence": [
+          {"id": "determinism_clock_test", "kind": "host_test", "path": "tests/clock_model_tests.cpp", "note": "覆盖漂移、RTT、老化和回绕。"},
+          {"id": "determinism_motion_mock_test", "kind": "mock_test", "path": "tests/motion_executor_tests.cpp", "note": "这是 Mock 执行器测试，不是实体 STEP 波形实测。"}
+        ],
+        "blocker_ids": []
+      },
+      "cross_compiled": {
+        "status": "partial",
+        "evidence": [
+          {"id": "determinism_cross_document", "kind": "documented_cross_compile_result", "path": "docs/stm32-build-and-flash.md", "note": "文档记录三类 STM32 运动后端交叉编译；未附统一可重放构建记录。"}
+        ],
+        "blocker_ids": ["determinism_hardware_timing"]
+      },
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "determinism_hardware_document", "kind": "documented_hardware_result", "path": "docs/weact-stm32g431cbu6-core.md", "note": "记录单轴空载步数验证；不覆盖抖动、跨板同步或最坏负载。"}
+        ],
+        "blocker_ids": ["determinism_hardware_timing"]
+      }
+    },
+    {
+      "id": "resource_model",
+      "title": "通用资源模型",
+      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 合同已部分贯通；ADC、Timer、Storage 与实体 I2C/SPI 仍缺失。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "resource_contract_document", "kind": "document", "path": "docs/bus-and-stream-resources.md", "note": "定义总线、设备与高速流资源边界。"},
+          {"id": "resource_protocol_source", "kind": "source", "path": "protocol/src/resource.cpp", "note": "资源描述、合同和状态协议实现。"}
+        ],
+        "blocker_ids": ["incomplete_resource_families"]
+      },
+      "automated_test": {
+        "status": "partial",
+        "evidence": [
+          {"id": "resource_model_test", "kind": "host_test", "path": "tests/resource_tests.cpp", "note": "资源协议与约束测试。"},
+          {"id": "resource_bus_mock_test", "kind": "mock_test", "path": "tests/bus_resource_tests.cpp", "note": "I2C/SPI 为 Mock 事务验证，不代表实体外设验证。"}
+        ],
+        "blocker_ids": ["incomplete_resource_families"]
+      },
+      "cross_compiled": {
+        "status": "partial",
+        "evidence": [
+          {"id": "resource_cross_document", "kind": "documented_cross_compile_result", "path": "docs/stm32-build-and-flash.md", "note": "GPIO、UART、PWM、位流和运动后端有交叉编译记录；I2C/SPI 实体 BSP 未实现。"}
+        ],
+        "blocker_ids": ["incomplete_resource_families"]
+      },
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "resource_hardware_document", "kind": "documented_hardware_result", "path": "docs/weact-bluepill-plus.md", "note": "记录 GPIO、UART 与 CAN 实体验证；不覆盖全部资源族。"}
+        ],
+        "blocker_ids": ["incomplete_resource_families"]
+      }
+    },
+    {
+      "id": "multi_node_synchronization",
+      "title": "多节点同步",
+      "summary": "TimeSync v1、主机时钟模型、有界同步调度和双 Mock 运动事务已实现，toolbusd 运动组主循环与实体参与者未接入。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "sync_manager_source", "kind": "source", "path": "toolbusd/src/clock_sync_manager.cpp", "note": "周期同步请求与生命周期管理。"},
+          {"id": "sync_group_source", "kind": "source", "path": "toolbusd/src/motion_group_service.cpp", "note": "多节点 PREPARE/COMMIT/ABORT 软件服务。"}
+        ],
+        "blocker_ids": ["multi_node_hardware_sync"]
+      },
+      "automated_test": {
+        "status": "verified",
+        "evidence": [
+          {"id": "sync_scheduler_test", "kind": "host_test", "path": "tests/clock_sync_scheduler_tests.cpp", "note": "覆盖容量、周期、离线和超时。"},
+          {"id": "sync_group_mock_test", "kind": "mock_test", "path": "tests/motion_group_service_tests.cpp", "note": "双 Mock Remote Core 事务测试，不是跨板实测。"}
+        ],
+        "blocker_ids": []
+      },
+      "cross_compiled": {"status": "absent", "evidence": [], "blocker_ids": ["multi_node_hardware_sync"]},
+      "hardware_verified": {"status": "absent", "evidence": [], "blocker_ids": ["multi_node_hardware_sync"]}
+    },
+    {
+      "id": "fault_isolation",
+      "title": "故障隔离",
+      "summary": "请求去重、超时、节点离线、资源级错误和 Runtime 单项失败隔离已有软件闭环；网络分区和实体压力恢复仍不完整。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "fault_request_source", "kind": "source", "path": "toolbusd/src/request_manager.cpp", "note": "有界请求、重试、取消和响应匹配。"},
+          {"id": "fault_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "资源级失败隔离、缓存失败合并和时钟质量告警。"}
+        ],
+        "blocker_ids": ["partial_failure_recovery"]
+      },
+      "automated_test": {
+        "status": "verified",
+        "evidence": [
+          {"id": "fault_request_test", "kind": "host_test", "path": "tests/request_manager_tests.cpp", "note": "请求超时、重试和匹配测试。"},
+          {"id": "fault_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "资源、节点、缓存和时钟告警隔离测试。"}
+        ],
+        "blocker_ids": []
+      },
+      "cross_compiled": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "fault_hardware_document", "kind": "documented_hardware_result", "path": "docs/mellow-fly-d5.md", "note": "记录欠载/停止关闭 EN；不覆盖网络分区和多节点恢复。"}
+        ],
+        "blocker_ids": ["partial_failure_recovery"]
+      }
+    },
+    {
+      "id": "observability",
+      "title": "可观测性",
+      "summary": "流量、资源健康、Runtime 快照和主机时钟模型质量已有稳定字段；MCU 运行指标、历史和硬件时间戳质量未实现。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "observability_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "Runtime 节点、资源、告警和时钟模型估计映射。"},
+          {"id": "observability_document", "kind": "document", "path": "docs/runtime-api.md", "note": "版本、阈值、估计语义和能力未知边界。"}
+        ],
+        "blocker_ids": ["hardware_observability"]
+      },
+      "automated_test": {
+        "status": "verified",
+        "evidence": [
+          {"id": "observability_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "HTTP、缓存元数据和能力契约测试。"},
+          {"id": "observability_snapshot_test", "kind": "host_test", "path": "tests/runtime_snapshot_ipc_tests.cpp", "note": "RuntimeSnapshot v2 严格编解码。"}
+        ],
+        "blocker_ids": []
+      },
+      "cross_compiled": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
+      "hardware_verified": {"status": "absent", "evidence": [], "blocker_ids": ["hardware_observability"]}
+    },
+    {
+      "id": "configuration_build",
+      "title": "配置与构建",
+      "summary": "Studio 工程、Kconfig 生成、冲突校验、构建归档和生产记录已部分实现；自动烧录和回读闭环缺失。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "config_project_source", "kind": "source", "path": "gui/project_config.py", "note": "版本化工程规范化、配置生成与 Mock 清单。"},
+          {"id": "config_record_source", "kind": "source", "path": "gui/production_record.py", "note": "区分设计、构建、烧录和硬件证据的生产记录。"}
+        ],
+        "blocker_ids": ["studio_flash_readback"]
+      },
+      "automated_test": {
+        "status": "partial",
+        "evidence": [
+          {"id": "config_gui_test", "kind": "host_test", "path": "gui/tests/test_gui.py", "note": "Studio API 和工程校验测试。"},
+          {"id": "config_production_test", "kind": "host_test", "path": "gui/tests/test_production_record.py", "note": "生产记录证据分类测试。"}
+        ],
+        "blocker_ids": ["studio_flash_readback"]
+      },
+      "cross_compiled": {
+        "status": "partial",
+        "evidence": [
+          {"id": "config_cross_document", "kind": "documented_cross_compile_result", "path": "docs/configuration-and-studio.md", "note": "记录三块正式板配置生成和交叉编译；基线未内嵌构建日志哈希。"}
+        ],
+        "blocker_ids": ["studio_flash_readback"]
+      },
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "config_hardware_document", "kind": "documented_hardware_result", "path": "docs/weact-stm32g431cbu6-core.md", "note": "记录 Studio 专用固件的部分实体资源验证，未完成自动烧录回读。"}
+        ],
+        "blocker_ids": ["studio_flash_readback"]
+      }
+    },
+    {
+      "id": "upgrade_recovery",
+      "title": "升级与恢复",
+      "summary": "Katapult 双模式构建、Flash 布局保护和工厂镜像工具已有实现；各板模式切换、失败恢复和参数掉电矩阵尚未闭合。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "upgrade_document", "kind": "document", "path": "docs/bootloader-upgrade.md", "note": "升级边界、PID、布局和恢复流程。"},
+          {"id": "upgrade_pack_source", "kind": "source", "path": "firmware/scripts/pack_factory_image.py", "note": "工厂镜像边界与打包实现。"}
+        ],
+        "blocker_ids": ["upgrade_matrix"]
+      },
+      "automated_test": {
+        "status": "partial",
+        "evidence": [
+          {"id": "upgrade_patch_test", "kind": "host_test", "path": "firmware/tests/test_katapult_dual_patch.sh", "note": "固定上游补丁和双模式配置测试。"},
+          {"id": "upgrade_pack_test", "kind": "host_test", "path": "firmware/tests/test_pack_factory_image.py", "note": "镜像范围和参数区保护测试。"}
+        ],
+        "blocker_ids": ["upgrade_matrix"]
+      },
+      "cross_compiled": {
+        "status": "partial",
+        "evidence": [
+          {"id": "upgrade_cross_document", "kind": "documented_cross_compile_result", "path": "docs/bootloader-upgrade.md", "note": "文档记录 F072/F103/G431 双模式构建；缺少统一归档的本次构建记录。"}
+        ],
+        "blocker_ids": ["upgrade_matrix"]
+      },
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "upgrade_hardware_document", "kind": "documented_hardware_result", "path": "docs/bootloader-upgrade.md", "note": "F103 有实体下载记录；F072/G431 模式切换矩阵未完成。"}
+        ],
+        "blocker_ids": ["upgrade_matrix"]
+      }
+    },
+    {
+      "id": "runtime_api",
+      "title": "Runtime 与 API",
+      "summary": "只读 Runtime API、单次快照、缓存、资源故障隔离和时钟告警已实现；认证、事件流和写控制面尚未实现。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "runtime_server_source", "kind": "source", "path": "runtime_api/server.py", "note": "只读版本化 HTTP API 与有界线程服务。"},
+          {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存和故障隔离。"}
+        ],
+        "blocker_ids": ["runtime_control_plane"]
+      },
+      "automated_test": {
+        "status": "verified",
+        "evidence": [
+          {"id": "runtime_http_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "HTTP 契约、错误和缓存测试。"},
+          {"id": "runtime_provider_contract_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "严格 JSON、单次快照、阈值和故障隔离测试。"}
+        ],
+        "blocker_ids": []
+      },
+      "cross_compiled": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
+      "hardware_verified": {"status": "not_applicable", "evidence": [], "blocker_ids": ["runtime_control_plane"]}
+    },
+    {
+      "id": "security_boundaries",
+      "title": "安全边界",
+      "summary": "回环监听、只读 HTTP、静态资源、包长与队列上限已有边界；身份认证、授权、审计和系统级威胁模型缺失。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "security_runtime_source", "kind": "source", "path": "runtime_api/server.py", "note": "无认证阶段强制回环且拒绝写方法。"},
+          {"id": "security_architecture_document", "kind": "document", "path": "docs/architecture.md", "note": "应用、守护进程、传输和 BSP 分层边界。"}
+        ],
+        "blocker_ids": ["auth_and_threat_model"]
+      },
+      "automated_test": {
+        "status": "partial",
+        "evidence": [
+          {"id": "security_http_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "回环、只读方法和错误路径测试。"},
+          {"id": "security_protocol_test", "kind": "host_test", "path": "tests/protocol_tests.cpp", "note": "协议长度、版本和字段边界测试。"}
+        ],
+        "blocker_ids": ["auth_and_threat_model"]
+      },
+      "cross_compiled": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
+      "hardware_verified": {"status": "absent", "evidence": [], "blocker_ids": ["auth_and_threat_model"]}
+    },
+    {
+      "id": "hardware_evidence",
+      "title": "实体硬件证据",
+      "summary": "三类 STM32 有分散的板卡文档和 Flash 备份，尚未形成统一、带环境与原始采样文件的可重放验收记录。",
+      "implemented": {
+        "status": "partial",
+        "evidence": [
+          {"id": "hardware_plan_document", "kind": "document", "path": "docs/stm32-hardware-plan.md", "note": "板卡覆盖与待验收范围。"},
+          {"id": "hardware_build_document", "kind": "document", "path": "docs/stm32-build-and-flash.md", "note": "分散的日期、接线和实体结果记录。"}
+        ],
+        "blocker_ids": ["hardware_records_not_reproducible"]
+      },
+      "automated_test": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
+      "cross_compiled": {
+        "status": "partial",
+        "evidence": [
+          {"id": "hardware_cross_document", "kind": "documented_cross_compile_result", "path": "docs/stm32-build-and-flash.md", "note": "交叉编译状态是软件证据，不能替代实体板证据。"}
+        ],
+        "blocker_ids": ["hardware_records_not_reproducible"]
+      },
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "hardware_f072_document", "kind": "documented_hardware_result", "path": "docs/mellow-fly-d5.md", "note": "F072/FLY-D5 的 CAN、GPIO、运动与 TMC 部分实体记录。"},
+          {"id": "hardware_f103_document", "kind": "documented_hardware_result", "path": "docs/weact-bluepill-plus.md", "note": "F103 的 CAN、GPIO、UART 和 Katapult 部分实体记录。"},
+          {"id": "hardware_g431_document", "kind": "documented_hardware_result", "path": "docs/weact-stm32g431cbu6-core.md", "note": "G431 的 CAN-FD、GPIO、PWM、UART 与单轴部分实体记录。"}
+        ],
+        "blocker_ids": ["hardware_records_not_reproducible", "hardware_evidence_incomplete"]
+      }
+    }
+  ],
+  "blockers": [
+    {"id": "determinism_hardware_timing", "dimension_id": "determinism", "summary": "缺少三类 MCU 在持续高负载下的 STEP 抖动、ISR 最坏耗时和跨板边沿原始采样。", "requires_hardware": true, "closure_evidence": "保存示波器或逻辑分析仪原始数据、环境、固件哈希、阈值与自动判定结果。"},
+    {"id": "incomplete_resource_families", "dimension_id": "resource_model", "summary": "ADC、通用 Timer、Storage、实体 I2C/SPI BSP 与高速流会话尚未闭合。", "requires_hardware": true, "closure_evidence": "实现缺失资源并分别提供软件、交叉编译和实体事务/故障注入记录。"},
+    {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "跨板同步仍停留在主机与双 Mock 闭环。", "requires_hardware": true, "closure_evidence": "至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络和失联恢复记录。"},
+    {"id": "partial_failure_recovery", "dimension_id": "fault_isolation", "summary": "网络分区、部分 COMMIT、总线饱和和实体资源卡死恢复矩阵未完成。", "requires_hardware": true, "closure_evidence": "固定故障脚本、期望状态机、原始链路记录和实体安全输出证据。"},
+    {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
+    {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
+    {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "Runtime 仍是只读骨架，缺少认证、事件流、写命令租约与审计。", "requires_hardware": false, "closure_evidence": "版本化接口、权限矩阵、并发冲突测试和安全审计记录。"},
+    {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "没有认证授权、密钥生命周期、审计日志和完整威胁模型。", "requires_hardware": false, "closure_evidence": "完成威胁模型、权限与密钥设计、攻击面测试和部署加固清单。"},
+    {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
+    {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},
+    {"id": "no_comparative_benchmark", "dimension_id": null, "summary": "没有与明确 Klipper 版本、同等硬件、同等负载和共同指标对齐的比较基准。", "requires_hardware": true, "closure_evidence": "预注册比较方案，公开两侧版本、配置、硬件、工作负载、原始数据、统计方法与可重复结果。"}
+  ],
+  "overall_comparison": {
+    "claim": "RemoteBSP 整体超过 Klipper",
+    "allowed": false,
+    "status": "blocked",
+    "blocker_ids": ["hardware_evidence_incomplete", "no_comparative_benchmark"],
+    "benchmark_evidence": [],
+    "reason": "当前只能陈述分项实现和证据，不能把架构目标、Mock、交叉编译或局部实板结果外推为整体优于 Klipper。"
+  }
+}
