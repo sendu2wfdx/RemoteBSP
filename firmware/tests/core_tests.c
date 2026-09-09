@@ -14,6 +14,21 @@ static rbsp_gpio_pull_t gpio_pulls[256];
 static unsigned gpio_configure_count;
 static unsigned gpio_write_count;
 static unsigned uart_read_count;
+#if defined(CONFIG_REMOTEBSP_BUS)
+enum {
+    TEST_I2C_BUS_ID = 0x0B000001U,
+    TEST_I2C_DEVICE_ID = 0x0C000001U,
+};
+
+static const rbsp_bus_resource_config_t test_bus_resources[] = {
+    {TEST_I2C_BUS_ID, 0U, 400000U, 100U, 100000U, 1000U,
+     128U, 1U, 0U, 1U, RBSP_BUS_I2C_BUS,
+     RBSP_BUS_CONTRACT_I2C_REPEATED_START, 0U, 0U},
+    {TEST_I2C_DEVICE_ID, TEST_I2C_BUS_ID, 400000U, 100U, 100000U, 1000U,
+     128U, 1U, 0x48U, 1U, RBSP_BUS_I2C_DEVICE,
+     RBSP_BUS_CONTRACT_I2C_REPEATED_START, 0U, 0U},
+};
+#endif
 static uint16_t pwm_duty[2];
 static bool pwm_stopped[2];
 static uint16_t timed_bit_count;
@@ -252,6 +267,23 @@ static bool fake_uart_write(uint8_t port, const uint8_t* data,
     return port < 2U && data != NULL && length != 0U;
 }
 
+#if defined(CONFIG_REMOTEBSP_BUS)
+static rbsp_bus_transaction_status_t fake_i2c_transfer(
+    const rbsp_bus_resource_config_t* device, uint32_t timeout_us,
+    uint16_t flags, const uint8_t* write_data, uint16_t write_length,
+    uint8_t* read_data, uint16_t read_length,
+    uint16_t* transmitted, uint16_t* received) {
+    (void)flags;
+    (void)write_data;
+    assert(device->resource_id == TEST_I2C_DEVICE_ID);
+    assert(timeout_us >= 100U);
+    *transmitted = write_length;
+    *received = read_length;
+    memset(read_data, 0xA5, read_length);
+    return RBSP_BUS_TRANSACTION_OK;
+}
+#endif
+
 
 static bool fake_pwm_configure(uint8_t channel, uint32_t frequency_hz,
                                uint16_t duty, bool active_low) {
@@ -434,6 +466,12 @@ int main(void) {
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,
         .uart_write = fake_uart_write,
+#if defined(CONFIG_REMOTEBSP_BUS)
+        .bus_resources = test_bus_resources,
+        .bus_resource_count = 2U,
+        .i2c_transfer = fake_i2c_transfer,
+        .spi_transfer = NULL,
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM)
         .pwm_configure = fake_pwm_configure,
         .pwm_write = fake_pwm_write,
@@ -547,6 +585,36 @@ int main(void) {
     assert(response[24U] == 0U && get_u32(response + 25U) == 0x09000000U);
     assert(response[29U] == 1U && response[30U] == 0U);
     assert(response[31U] == 0x3AU && response[32U] == 0U);
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+    /*
+     * BUS 与 MOTION 同时启用时，通用资源命令必须按 ResourceType
+     * 高字节稳定路由，不能把 I2C 设备误当作 STEPGEN。
+     */
+    put_u32(resource_id_payload, TEST_I2C_DEVICE_ID);
+    clear_sent();
+    request_size = make_request(request, 0x0034U, 96U, 0U,
+                                resource_id_payload,
+                                sizeof(resource_id_payload));
+    feed_packet(&core, 0x619U, 96U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 57U);
+    assert(response[24U] == 0U &&
+           get_u32(response + 25U) == TEST_I2C_DEVICE_ID);
+    assert(response[29U] == 1U && response[30U] == 0U);
+    assert(response[31U] == 0x3BU && response[32U] == 0U);
+    assert(get_u32(response + 41U) == 1000U);
+    assert(get_u32(response + 45U) == 1U);
+
+    put_u32(resource_id_payload, 0x09000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0034U, 97U, 0U,
+                                resource_id_payload,
+                                sizeof(resource_id_payload));
+    feed_packet(&core, 0x619U, 97U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 57U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x09000000U);
+    assert(response[31U] == 0x3AU && response[32U] == 0U);
+#endif
 
     uint8_t lease_request[9U];
     put_u32(lease_request, 0x09000000U);
