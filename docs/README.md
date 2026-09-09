@@ -8,6 +8,7 @@
 - [固件配置与 RemoteBSP Studio](configuration-and-studio.md)
 - [智能运动与资源模型](intelligent-motion-resources.md)
 - [板卡描述与数字孪生](board-manifest-and-digital-twin.md)
+- [数字孪生确定性记录与回放](digital-twin-replay.md)
 - [STM32 构建、烧录与验证](stm32-build-and-flash.md)
 - [Katapult 双模式升级与应急恢复](bootloader-upgrade.md)
 - [USB Vendor Bulk 传输](usb-transport.md)
@@ -68,8 +69,8 @@ flowchart LR
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
 | Studio | 构建阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料、`.config`与普通GPIO静态表生成；构建归档纳入源码/依赖/工具链身份并拒绝构建期漂移，自动烧录回读待实现 |
 | I2C / SPI | 协议、Mock、Studio、主机运行时及嵌入式公共Core竖切已实现 | `toolbusd`已增加合同首访单飞、父总线仲裁和节点代次失效；默认关闭的STM32公共Core固定端点合同、设备级租约和原子事务边界；三板真实HAL与实板验收待完成 |
-| 高速 Stream | H2N Mock会话已实现、已测试 | 独占租约、连续序号、信用、背压、原子块写和旧缓冲隔离已覆盖；N2H/双向及USB/Ethernet真实数据面待实现 |
-| Runtime API | 读取与控制租约竖切已实现、已测试 | RuntimeSnapshot、短缓存、时钟告警、增量事件，以及仅回环认证可用的短时排他控制租约、细粒度权限和幂等保护已测试；租约尚不下发设备命令，TLS、主动推送和持久审计待实现 |
+| 高速 Stream | H2N/N2H Mock会话已实现、已测试 | 连续序号、精确ACK信用、两阶段交付、背压、故障与旧缓冲隔离已覆盖；双向及USB/Ethernet真实数据面待实现 |
+| Runtime API | 读取与控制租约竖切已实现、已测试 | 短时控制租约已绑定强随机 `toolbusd` 实例身份，重启/不可达失败关闭；仍不下发设备命令，TLS、主动推送和持久审计待实现 |
 | 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；对照 v1 可锁定公平性、版本、环境和阈值，但硬拒绝 executed/胜出，待实体环境确定后实现仪器原始数据重算和完整失败运行索引 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 

@@ -62,11 +62,11 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和普通 GPIO 只读静态表；三板在编译期校验 schema/板型，并用同一表完成启动安全配置和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
-| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 有界合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；首个 H2N Mock Stream 会话具备独占租约、序号、信用、背压和会话清理。实体 I2C/SPI BSP、N2H/双向 Stream 与真实高速数据面待实现 |
+| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理。实体 I2C/SPI BSP、双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI 原子事务和运动执行，并可导出数字孪生状态 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本可生成带时间基、输入身份和状态摘要的确定性回放记录 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与普通 GPIO 只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警及有界增量事件短轮询已实现；回环认证模式另提供进程内短时控制租约、三类细粒度权限、绝对请求期限和有界幂等墓碑，但不下发设备命令。TLS、主动推送、跨重启事件、toolbusd 会话绑定与审计持久化/完整性仍待实现 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；回环认证模式的短时控制租约通过强随机 daemon identity 绑定本次 `toolbusd` 启动，重启/不可达时失败关闭，但仍不下发设备命令。TLS、主动推送、跨重启事件和审计持久化/完整性仍待实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -78,8 +78,9 @@ I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码
 Remote Core/HAL 骨架。嵌入式切片把端点、长度、超时、flags、独占租约与同步原子
 事务边界固定下来；合同首访单飞、节点代次失效和跨节点/跨总线隔离已有软件测试。
 三块板仍没有真实 HAL 映射，含总线资源的实体构建继续被 Studio
-拒绝。高速 Stream 已完成首个 H2N Mock 会话状态机，但未绑定实际 CAN/USB 链路；
-N2H、双向、USB Bulk 和 Ethernet 数据面仍未实现。
+拒绝。高速 Stream 已完成 H2N/N2H Mock 会话状态机；N2H 使用 peek/commit 两阶段
+交付，编码、分片、后端或租约失败时不提前消费数据。双向、USB Bulk 和 Ethernet
+真实数据面仍未实现。
 ADC、通用 Timer 和 Storage 仍按当前优先级后置。
 通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
 F072/F103/G431 固件后端第一阶段。PWM 直接描述频率、万分比占空比和极性；
