@@ -39,6 +39,14 @@ target_compile_options(bus_resource_tests PRIVATE
 )
 add_test(NAME bus_resource_tests COMMAND bus_resource_tests)
 
+add_executable(bus_runtime_tests bus_runtime_tests.cpp)
+target_link_libraries(bus_runtime_tests PRIVATE remotebsp_request_manager)
+target_compile_options(bus_runtime_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME bus_runtime_tests COMMAND bus_runtime_tests)
+
 add_executable(bus_manifest_tests bus_manifest_tests.cpp)
 target_link_libraries(bus_manifest_tests PRIVATE remotebsp_remote_core)
 target_compile_definitions(bus_manifest_tests PRIVATE

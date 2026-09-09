@@ -1,4 +1,5 @@
 #include "remotebsp/protocol/fragmentation.hpp"
+#include "remotebsp/toolbusd/bus_runtime.hpp"
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
@@ -20,6 +21,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -401,6 +403,7 @@ private:
                     if (previous != nullptr && previous->node_id != 0U) {
                         static_cast<void>(clock_sync_.cancel_node(
                             requests_, previous->node_id));
+                        invalidate_bus_node_locked(previous->node_id);
                     }
                     nodes_.mark_assignment_unconfirmed(identity.uuid);
                 }
@@ -551,6 +554,7 @@ private:
                 if (node != nullptr && node->node_id != 0U) {
                     static_cast<void>(clock_sync_.cancel_node(
                         requests_, node->node_id));
+                    invalidate_bus_node_locked(node->node_id);
                 }
             }
             const auto group = motion_group_.poll(
@@ -706,6 +710,170 @@ private:
         throw std::runtime_error(
             completed ? "Runtime 快照远端请求超时"
                       : "Runtime 快照达到总时间上限");
+    }
+
+    void invalidate_bus_node_locked(std::uint32_t node_id) {
+        if (node_id == 0U || node_id > kMaximumNodeId) {
+            return;
+        }
+        auto& generation = bus_node_generations_[node_id];
+        ++generation;
+        if (generation == 0U) {
+            ++generation;
+        }
+        bus_runtime_.invalidate_node(node_id);
+        const auto route = kNodeRequestBaseRoute + node_id;
+        for (auto entry = request_routes_.begin();
+             entry != request_routes_.end();) {
+            if (entry->second != route) {
+                ++entry;
+                continue;
+            }
+            const auto key = entry->first;
+            const auto session_id = static_cast<std::uint32_t>(key >> 32U);
+            const auto request_id = static_cast<std::uint32_t>(key);
+            static_cast<void>(requests_.cancel(session_id, request_id));
+            responses_.erase(key);
+            timed_out_.insert(key);
+            entry = request_routes_.erase(entry);
+        }
+        state_changed_.notify_all();
+    }
+
+    std::optional<std::uint64_t> ensure_bus_contract(
+        std::uint32_t node_id, remotebsp::protocol::Command transfer_command,
+        std::uint32_t resource_id) {
+        std::uint64_t node_generation = 0U;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                node_id > kMaximumNodeId) {
+                throw std::runtime_error(
+                    "目标节点尚未发现或已经离线");
+            }
+            node_generation = bus_node_generations_[node_id];
+        }
+        const auto expected_kind =
+            transfer_command == remotebsp::protocol::Command::I2cTransfer
+                ? remotebsp::protocol::BusResourceKind::I2cDevice
+                : remotebsp::protocol::BusResourceKind::SpiDevice;
+        const auto expected_resource_type =
+            transfer_command == remotebsp::protocol::Command::I2cTransfer
+                ? remotebsp::protocol::ResourceType::I2cDevice
+                : remotebsp::protocol::ResourceType::SpiDevice;
+        if (static_cast<std::uint8_t>(resource_id >> 24U) !=
+            static_cast<std::uint8_t>(expected_resource_type)) {
+            throw std::invalid_argument(
+                "总线事务的设备资源 ID 命名空间与命令不匹配");
+        }
+        const auto cached = bus_runtime_.find_contract(node_id, resource_id);
+        if (cached.has_value() && cached->kind == expected_kind) {
+            return node_generation;
+        }
+        auto load = bus_runtime_.begin_contract_load(node_id, resource_id);
+        if (!load) {
+            return std::nullopt;
+        }
+        // 首次检查和取得单飞令牌之间，另一线程可能刚完成加载。
+        const auto loaded = bus_runtime_.find_contract(node_id, resource_id);
+        if (loaded.has_value() && loaded->kind == expected_kind) {
+            return node_generation;
+        }
+        const auto contract_command =
+            transfer_command == remotebsp::protocol::Command::I2cTransfer
+                ? remotebsp::protocol::Command::I2cContract
+                : remotebsp::protocol::Command::SpiContract;
+        const auto body = request_snapshot_resource(
+            node_id, contract_command,
+            remotebsp::protocol::encode_resource_id(resource_id),
+            std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(2500));
+        const auto contract =
+            remotebsp::protocol::decode_bus_resource_contract(body);
+        if (contract.resource_id != resource_id) {
+            throw std::runtime_error(
+                "远端总线设备合同的资源 ID 与查询目标不一致");
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const auto* node = nodes_.find_by_node_id(node_id);
+        if (node == nullptr || !node->online || !node->assigned ||
+            node_id > kMaximumNodeId ||
+            bus_node_generations_[node_id] != node_generation) {
+            throw std::runtime_error(
+                "合同查询期间目标节点已离线或重新启动");
+        }
+        const auto update =
+            bus_runtime_.remember_contract(node_id, expected_kind, contract);
+        if (update == remotebsp::toolbusd::BusContractUpdate::CapacityReached) {
+            throw std::runtime_error("toolbusd 总线合同缓存容量已满");
+        }
+        if (update == remotebsp::toolbusd::BusContractUpdate::Invalid) {
+            throw std::runtime_error("远端返回的总线设备合同与请求不匹配");
+        }
+        return node_generation;
+    }
+
+    void remember_direct_bus_contract_locked(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        const remotebsp::protocol::Packet& request,
+        const remotebsp::protocol::Packet& response) noexcept {
+        try {
+            if (node_id == 0U || node_id > kMaximumNodeId ||
+                bus_node_generations_[node_id] != node_generation ||
+                request.header.object_id != 0U ||
+                response.header.message_type !=
+                    remotebsp::protocol::MessageType::Response ||
+                response.payload.empty() || response.payload.front() != 0U ||
+                (response.header.flags &
+                 remotebsp::protocol::kErrorResponseFlag) != 0U) {
+                return;
+            }
+            const auto command = static_cast<remotebsp::protocol::Command>(
+                request.header.command);
+            const auto expected_kind =
+                command == remotebsp::protocol::Command::I2cContract
+                    ? remotebsp::protocol::BusResourceKind::I2cDevice
+                    : remotebsp::protocol::BusResourceKind::SpiDevice;
+            if ((command != remotebsp::protocol::Command::I2cContract &&
+                 command != remotebsp::protocol::Command::SpiContract) ||
+                response.header.command != request.header.command) {
+                return;
+            }
+            const auto queried_resource_id =
+                remotebsp::protocol::decode_resource_id(request.payload);
+            const std::vector<std::uint8_t> body(
+                response.payload.begin() + 1U, response.payload.end());
+            const auto contract =
+                remotebsp::protocol::decode_bus_resource_contract(body);
+            if (contract.resource_id != queried_resource_id) {
+                return;
+            }
+            static_cast<void>(bus_runtime_.remember_contract(
+                node_id, expected_kind, contract));
+        } catch (const std::exception&) {
+            // 查询目标、响应合同或边界不一致时绝不能污染缓存。
+        }
+    }
+
+    static void write_local_bus_result(
+        int client, const remotebsp::protocol::Packet& request,
+        remotebsp::protocol::BusTransactionStatus status) {
+        remotebsp::protocol::Packet response;
+        response.header.message_type =
+            remotebsp::protocol::MessageType::Response;
+        response.header.command = request.header.command;
+        response.header.session_id = request.header.session_id;
+        response.header.request_id = request.header.request_id;
+        response.header.object_id = request.header.object_id;
+        response.payload.push_back(0U);
+        const auto result = remotebsp::protocol::encode_bus_transfer_result(
+            {status, 0U, 0U, {}});
+        response.payload.insert(response.payload.end(), result.begin(),
+                                result.end());
+        remotebsp::toolbusd::write_ipc_response(
+            client, remotebsp::toolbusd::IpcStatus::Ok,
+            remotebsp::protocol::encode(std::move(response)));
     }
 
     remotebsp::toolbusd::IpcRuntimeSnapshot build_runtime_snapshot(
@@ -1141,15 +1309,129 @@ private:
             // 重启后请求 ID 从头计数时与 MCU 中的旧去重缓存冲突。
             request.header.session_id = session_id_;
 
+            std::optional<remotebsp::toolbusd::BusRuntime::Reservation>
+                bus_reservation;
+            std::optional<std::uint64_t> bus_node_generation;
+            if (command == remotebsp::protocol::Command::I2cContract ||
+                command == remotebsp::protocol::Command::SpiContract) {
+                if (request.header.object_id != 0U) {
+                    throw std::invalid_argument(
+                        "总线设备合同查询的对象 ID 必须为零");
+                }
+                const auto resource_id =
+                    remotebsp::protocol::decode_resource_id(request.payload);
+                const auto expected_type =
+                    command == remotebsp::protocol::Command::I2cContract
+                        ? remotebsp::protocol::ResourceType::I2cDevice
+                        : remotebsp::protocol::ResourceType::SpiDevice;
+                if (static_cast<std::uint8_t>(resource_id >> 24U) !=
+                    static_cast<std::uint8_t>(expected_type)) {
+                    throw std::invalid_argument(
+                        "合同查询的资源 ID 命名空间与命令不匹配");
+                }
+            }
+            if (command == remotebsp::protocol::Command::I2cTransfer) {
+                if (request.header.object_id != 0U) {
+                    throw std::invalid_argument(
+                        "I2C 原子事务的对象 ID 必须为零");
+                }
+                const auto transfer =
+                    remotebsp::protocol::decode_i2c_transfer_request(
+                        request.payload);
+                bus_node_generation = ensure_bus_contract(
+                    ipc_request.node_id, command,
+                    transfer.device_resource_id);
+                if (!bus_node_generation.has_value()) {
+                    write_local_bus_result(
+                        client, request,
+                        remotebsp::protocol::BusTransactionStatus::Busy);
+                    return;
+                }
+                auto admission = bus_runtime_.admit_i2c(
+                    ipc_request.node_id, transfer);
+                if (admission.status !=
+                    remotebsp::toolbusd::BusAdmissionStatus::Accepted) {
+                    if (admission.status == remotebsp::toolbusd::
+                                                BusAdmissionStatus::
+                                                    ContractMissing) {
+                        throw std::runtime_error(
+                            "I2C 合同已因节点状态变化失效，请重试");
+                    }
+                    write_local_bus_result(
+                        client, request,
+                        admission.status == remotebsp::toolbusd::
+                                                BusAdmissionStatus::
+                                                    ResourceBusy
+                            ? remotebsp::protocol::BusTransactionStatus::Busy
+                            : remotebsp::protocol::BusTransactionStatus::
+                                  LimitExceeded);
+                    return;
+                }
+                bus_reservation.emplace(
+                    std::move(admission.reservation));
+            } else if (command ==
+                       remotebsp::protocol::Command::SpiTransfer) {
+                if (request.header.object_id != 0U) {
+                    throw std::invalid_argument(
+                        "SPI 原子事务的对象 ID 必须为零");
+                }
+                const auto transfer =
+                    remotebsp::protocol::decode_spi_transfer_request(
+                        request.payload);
+                bus_node_generation = ensure_bus_contract(
+                    ipc_request.node_id, command,
+                    transfer.device_resource_id);
+                if (!bus_node_generation.has_value()) {
+                    write_local_bus_result(
+                        client, request,
+                        remotebsp::protocol::BusTransactionStatus::Busy);
+                    return;
+                }
+                auto admission = bus_runtime_.admit_spi(
+                    ipc_request.node_id, transfer);
+                if (admission.status !=
+                    remotebsp::toolbusd::BusAdmissionStatus::Accepted) {
+                    if (admission.status == remotebsp::toolbusd::
+                                                BusAdmissionStatus::
+                                                    ContractMissing) {
+                        throw std::runtime_error(
+                            "SPI 合同已因节点状态变化失效，请重试");
+                    }
+                    write_local_bus_result(
+                        client, request,
+                        admission.status == remotebsp::toolbusd::
+                                                BusAdmissionStatus::
+                                                    ResourceBusy
+                            ? remotebsp::protocol::BusTransactionStatus::Busy
+                            : remotebsp::protocol::BusTransactionStatus::
+                                  LimitExceeded);
+                    return;
+                }
+                bus_reservation.emplace(
+                    std::move(admission.reservation));
+            }
+
             remotebsp::toolbusd::Submission submission;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 const auto* node =
                     nodes_.find_by_node_id(ipc_request.node_id);
-                if (node == nullptr || !node->online ||
-                    !node->assigned) {
+                if (ipc_request.node_id > kMaximumNodeId ||
+                    node == nullptr || !node->online ||
+                    !node->assigned ||
+                    (bus_node_generation.has_value() &&
+                     (bus_node_generations_[ipc_request.node_id] !=
+                          *bus_node_generation))) {
                     throw std::runtime_error(
                         "目标节点尚未发现或已经离线");
+                }
+                if (!bus_node_generation.has_value() &&
+                    (command ==
+                         remotebsp::protocol::Command::I2cContract ||
+                     command ==
+                         remotebsp::protocol::Command::SpiContract)) {
+                    bus_node_generation =
+                        bus_node_generations_[ipc_request.node_id];
                 }
                 submission = requests_.submit(std::move(request));
                 request_routes_[request_key(
@@ -1189,6 +1471,15 @@ private:
             });
             const auto response = responses_.find(key);
             if (response != responses_.end()) {
+                if (bus_node_generation.has_value() &&
+                    (command ==
+                         remotebsp::protocol::Command::I2cContract ||
+                     command ==
+                         remotebsp::protocol::Command::SpiContract)) {
+                    remember_direct_bus_contract_locked(
+                        ipc_request.node_id, *bus_node_generation,
+                        submission.packet, response->second);
+                }
                 const auto encoded =
                     remotebsp::protocol::encode(response->second);
                 responses_.erase(response);
@@ -1322,6 +1613,9 @@ private:
     remotebsp::toolbusd::ClockSyncManager clock_sync_;
     remotebsp::toolbusd::MotionGroupService motion_group_;
     remotebsp::toolbusd::NodeRegistry nodes_;
+    remotebsp::toolbusd::BusRuntime bus_runtime_;
+    std::array<std::uint64_t, kMaximumNodeId + 1U>
+        bus_node_generations_{};
     std::string socket_path_;
     int server_socket_{-1};
     dev_t socket_device_{};

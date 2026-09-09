@@ -605,6 +605,19 @@ int main(void) {
     assert(get_u32(response + 41U) == 1000U);
     assert(get_u32(response + 45U) == 1U);
 
+    uint8_t bus_lease_request[9U];
+    put_u32(bus_lease_request, TEST_I2C_DEVICE_ID);
+    put_u32(bus_lease_request + 4U, 1000U);
+    bus_lease_request[8U] = 2U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 98U, 0U,
+                                bus_lease_request,
+                                sizeof(bus_lease_request));
+    feed_packet(&core, 0x619U, 98U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U && core.bus_leases[1U].active);
+    assert(!core.stepgen_leases[0U].active);
+
     put_u32(resource_id_payload, 0x09000000U);
     clear_sent();
     request_size = make_request(request, 0x0034U, 97U, 0U,
@@ -629,6 +642,9 @@ int main(void) {
     assert(response[24U] == 0U && stepgen_lease_id != 0U);
     assert(get_u32(response + 37U) == 0x12345678U);
     assert(core.stepgen_leases[0].active);
+#if defined(CONFIG_REMOTEBSP_BUS)
+    assert(core.bus_leases[1U].active);
+#endif
 
     /* 相同请求命中去重缓存，不分配第二个租约；其它会话不能争用。 */
     clear_sent();

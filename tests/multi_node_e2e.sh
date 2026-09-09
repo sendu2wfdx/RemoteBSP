@@ -11,15 +11,12 @@ if [[ "$can_mode" == "usb-mock" ]]; then
     can_interface="/tmp/remotebsp-multi-usb-link-$$.sock"
 fi
 
-motion_clock_limit_ns=100000
-motion_clock_args=()
-if [[ "$can_mode" == "usb-mock" ]]; then
-    # 此用例验证多进程事务语义，不承担实体同步精度验收。WSL 在全量测试
-    # 负载下的本地流式套接字调度抖动和 100 ms 未来外推误差并不稳定，
-    # 因此只为纯软件测试使用 10 ms 上限；生产默认 100 us 保持不变。
-    motion_clock_limit_ns=10000000
-    motion_clock_args=(--motion-max-clock-error-ns "$motion_clock_limit_ns")
-fi
+# 此用例只使用 vcan 或本地 USB Mock，验证多进程事务语义，不承担实体
+# 同步精度验收。WSL 在全量测试负载下的调度抖动和 100 ms 未来外推误差
+# 可能超过生产门槛，因此只为纯软件测试使用 10 ms 上限；toolbusd 的生产
+# 默认 100 us 保持不变，实体 CAN/CAN-FD 精度由硬件验收计划单独判定。
+motion_clock_limit_ns=10000000
+motion_clock_args=(--motion-max-clock-error-ns "$motion_clock_limit_ns")
 
 socket_path="/tmp/remotebsp-multi-${can_mode}-$$.sock"
 mock1_log="/tmp/remotebsp-multi-mock1-${can_mode}-$$.log"
