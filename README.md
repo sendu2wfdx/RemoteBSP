@@ -64,7 +64,7 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 节点管理 | UUID 发现、节点分配、500 ms 心跳、2 s 离线判定 |
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
-| 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
+| 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板的固定占用、UART/PWM/TimedBitstream 端点由同一能力源派生为 Kconfig 与 schema v3 目录，生成时和 Studio 消费前均校验；固件再于编译期校验板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦。Studio Web 已提供只读快照、v2 备份以及默认关闭的受控写入/恢复；变更采用预检、5 分钟一次性令牌、精确确认、UUID/generation CAS，并在副作用前写入 HMAC 审计意图。CLI 保留同等保护；尚未完成实体参数区掉电验收 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 `ResourceReset` 已恢复兼容语义：UART 清缓冲/故障并释放对象、PWM 安全停止、TimedBitstream 中止，后端失败则保留对象和故障状态以便重试 |
 | 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 F072/F103/G431 板级 HAL 已实现并交叉编译；三板复用明确的 STM32 公共事务模块，各自保留静态端点，生产代码由主机 HAL 桩覆盖 I2C flags、统一超时预算、可选恢复、SPI 片选和失败恢复。总线测试固件仍未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；Manifest v4 可声明静态合同。单节点 Mock USB 已补主机定向消费 API/IPC/CLI 和真实三进程 E2E，Stream 在 toolbusd 启动链路上显式绑定 USB 并拒绝向 CAN 自动降级。单合同双向、STM32 N2H BSP和实体高速数据面仍待实现 |
@@ -132,7 +132,9 @@ DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 10
 定时器/DMA冲突。实体 STM32 的完整复用图仍需补齐。
 
 设备参数是独立机制：F103 在末尾保留 2 KiB，F072/G431 保留 4 KiB，采用双页
-Flash 仿 EEPROM 保存身份、制造和校准数据。Katapult 已限制 APP 写入上界，因此
+Flash 仿 EEPROM 保存身份、制造和校准数据。v1 读取器可迁移旧 schema 缺项及可无损
+保留的未知记录，未来存储格式失败关闭；缺失、默认值和持久值在 API 中显式区分，默认值
+不写 Flash、不推进代次。Katapult 已限制 APP 写入上界，因此
 在线升级不会覆盖参数区。Studio Web 已接入只读参数快照和备份；写入及恢复只通过显式
 CLI 执行，并在每次修改前核对节点 UUID、参数 generation 和固定维护确认短语。Studio
 构建归档、部署作业软件模块、显式 ST-Link CLI 与运行时固件身份读取适配器已实现；

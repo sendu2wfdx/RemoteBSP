@@ -63,6 +63,12 @@ typedef struct {
     rbsp_device_param_store_error last_error;
 } rbsp_device_param_store;
 
+typedef enum {
+    RBSP_DEVICE_PARAM_VALUE_ABSENT = 0,
+    RBSP_DEVICE_PARAM_VALUE_DEFAULTED,
+    RBSP_DEVICE_PARAM_VALUE_PERSISTED,
+} rbsp_device_param_value_source;
+
 bool rbsp_device_param_store_init(
     rbsp_device_param_store* store,
     const rbsp_device_param_backend* backend);
@@ -71,6 +77,14 @@ bool rbsp_device_param_store_boot(rbsp_device_param_store* store);
 bool rbsp_device_param_store_get(
     const rbsp_device_param_store* store, uint16_t id,
     rbsp_device_param_record* record);
+/*
+ * 读取持久值或schema默认值。返回true表示id属于当前schema；未知id返回false。
+ * DEFAULTED只存在于读取结果，不写Flash，也不推进generation。
+ */
+bool rbsp_device_param_store_resolve(
+    const rbsp_device_param_store* store, uint16_t id,
+    rbsp_device_param_record* record,
+    rbsp_device_param_value_source* source);
 bool rbsp_device_param_store_record_at(
     const rbsp_device_param_store* store, size_t index,
     rbsp_device_param_record* record);

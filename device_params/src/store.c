@@ -138,12 +138,18 @@ static bool page_valid(const rbsp_device_param_store* store, uint8_t page,
         rbsp_device_param_record record;
         rbsp_device_param_definition definition;
         size_t previous;
-        if (!parse_record(image, *length, index, 0U, false, &record) ||
-            !rbsp_device_param_find_definition(record.id, &definition) ||
-            definition.type != record.type ||
-            definition.flags != record.flags ||
-            !rbsp_device_param_validate_value(
-                record.id, record.value, record.length)) {
+        if (!parse_record(image, *length, index, 0U, false, &record)) {
+            return false;
+        }
+        /*
+         * v1允许较新schema写入的未知记录。它们保持为不透明字节，下一次
+         * 提交会原样复制；一旦本版本认识该ID，仍执行完整类型和值校验。
+         */
+        if (rbsp_device_param_find_definition(record.id, &definition) &&
+            (definition.type != record.type ||
+             definition.flags != record.flags ||
+             !rbsp_device_param_validate_value(
+                 record.id, record.value, record.length))) {
             return false;
         }
         for (previous = 0U; previous < index; ++previous) {
@@ -218,6 +224,34 @@ bool rbsp_device_param_store_get(
         image, store->image_length, 0U, id, true, record);
 }
 
+bool rbsp_device_param_store_resolve(
+    const rbsp_device_param_store* store, uint16_t id,
+    rbsp_device_param_record* record,
+    rbsp_device_param_value_source* source) {
+    rbsp_device_param_definition definition;
+    static const uint8_t empty_value = 0U;
+    if (record == NULL || source == NULL ||
+        !rbsp_device_param_find_definition(id, &definition)) {
+        return false;
+    }
+    if (rbsp_device_param_store_get(store, id, record)) {
+        *source = RBSP_DEVICE_PARAM_VALUE_PERSISTED;
+        return true;
+    }
+    record->id = id;
+    record->type = definition.type;
+    record->flags = definition.flags;
+    record->length = 0U;
+    record->value = &empty_value;
+    if (definition.minimum_length == 0U) {
+        *source = RBSP_DEVICE_PARAM_VALUE_DEFAULTED;
+    } else {
+        record->value = NULL;
+        *source = RBSP_DEVICE_PARAM_VALUE_ABSENT;
+    }
+    return true;
+}
+
 bool rbsp_device_param_store_record_at(
     const rbsp_device_param_store* store, size_t index,
     rbsp_device_param_record* record) {
@@ -248,6 +282,20 @@ static bool append_record(uint8_t* image, size_t capacity, size_t* offset,
         memcpy(image + *offset + RBSP_PARAM_RECORD_HEADER_SIZE,
                value, length);
     }
+    *offset += size;
+    return true;
+}
+
+static bool append_opaque_record(uint8_t* image, size_t capacity,
+                                 size_t* offset,
+                                 const rbsp_device_param_record* record) {
+    const size_t size = aligned_size(
+        RBSP_PARAM_RECORD_HEADER_SIZE + record->length, 4U);
+    const uint8_t* raw = record->value - RBSP_PARAM_RECORD_HEADER_SIZE;
+    if (size > capacity - *offset) {
+        return false;
+    }
+    memcpy(image + *offset, raw, size);
     *offset += size;
     return true;
 }
@@ -294,6 +342,7 @@ bool rbsp_device_param_store_set(
 
     for (index = 0U; index < store->record_count; ++index) {
         rbsp_device_param_record record;
+        rbsp_device_param_definition stored_definition;
         if (!rbsp_device_param_store_record_at(store, index, &record)) {
             store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_CORRUPT;
             return false;
@@ -301,9 +350,17 @@ bool rbsp_device_param_store_set(
         if (record.id == id) {
             continue;
         }
-        if (!append_record(workspace, RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE,
-                           &offset, record.id, record.type, record.flags,
-                           record.value, record.length)) {
+        if ((!rbsp_device_param_find_definition(
+                 record.id, &stored_definition) &&
+             !append_opaque_record(
+                 workspace, RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE,
+                 &offset, &record)) ||
+            (rbsp_device_param_find_definition(
+                 record.id, &stored_definition) &&
+             !append_record(workspace,
+                            RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE,
+                            &offset, record.id, record.type, record.flags,
+                            record.value, record.length))) {
             store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_NO_SPACE;
             return false;
         }

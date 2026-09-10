@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 KCONFIG_OUTPUT = ROOT / "firmware" / "Kconfig.motion_pins.generated"
 CATALOG_OUTPUT = ROOT / "gui" / "data" / "pin_catalog.json"
+sys.path.insert(0, str(ROOT / "gui"))
+from board_capabilities import CATALOG_SCHEMA_VERSION, validate_catalog  # noqa: E402
 
 MCUS = {
     "stm32f072rbt6": {
@@ -726,7 +729,9 @@ def generate_catalog() -> str:
                 for item in board["defaults"]
             ],
         })
-    return json.dumps({"schema_version": 2, "boards": boards}, ensure_ascii=False, indent=2) + "\n"
+    catalog = {"schema_version": CATALOG_SCHEMA_VERSION, "boards": boards}
+    validate_catalog(catalog)
+    return json.dumps(catalog, ensure_ascii=False, indent=2) + "\n"
 
 
 def main() -> int:

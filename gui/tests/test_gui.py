@@ -135,7 +135,7 @@ class GuiTest(unittest.TestCase):
 
     def test_pin_catalog_has_unique_defaults(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(catalog["schema_version"], 2)
+        self.assertEqual(catalog["schema_version"], 3)
         self.assertEqual(len(catalog["boards"]), 3)
         for board in catalog["boards"]:
             reserved = {item["pin"] for item in board["reserved"]}

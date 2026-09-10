@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remotebsp.local/schema/board-capability-v3.json",
+  "title": "RemoteBSP Studio 板卡能力目录 v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "boards"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "boards": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/board"}
+    }
+  },
+  "$defs": {
+    "pin": {"type": "string", "pattern": "^P[A-Z][0-9]{1,2}$"},
+    "endpointBase": {
+      "type": "object",
+      "required": ["endpoint_id", "backend_status", "enabled"],
+      "properties": {
+        "endpoint_id": {"type": "string", "minLength": 1},
+        "backend_status": {"enum": ["implemented", "planned"]},
+        "enabled": {"type": "boolean"},
+        "kconfig_symbol": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}
+      }
+    },
+    "board": {
+      "type": "object",
+      "required": ["id", "board_type", "label", "mcu", "pins", "reserved", "uart", "uart_defaults", "waveform"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "board_type": {"type": "string", "pattern": "^0x[0-9A-Fa-f]+$"},
+        "label": {"type": "string", "minLength": 1},
+        "mcu": {"type": "string", "minLength": 1},
+        "pins": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/pin"}},
+        "reserved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pin", "owner"],
+            "properties": {"pin": {"$ref": "#/$defs/pin"}, "owner": {"type": "string", "minLength": 1}}
+          }
+        },
+        "uart": {"type": "object", "required": ["endpoints"], "properties": {"endpoints": {"type": "array", "items": {"$ref": "#/$defs/endpointBase"}}}},
+        "uart_defaults": {"type": "array"},
+        "waveform": {
+          "type": "object",
+          "required": ["pwm", "ws2812"],
+          "properties": {
+            "pwm": {"type": "array", "items": {"$ref": "#/$defs/endpointBase"}},
+            "ws2812": {"type": "array", "items": {"$ref": "#/$defs/endpointBase"}}
+          }
+        }
+      }
+    }
+  }
+}

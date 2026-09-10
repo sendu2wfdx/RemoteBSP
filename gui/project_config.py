@@ -14,6 +14,7 @@ from pathlib import Path
 
 import kconfiglib
 
+from board_capabilities import BoardCapabilityError, validate_catalog
 from project_contract import PreparedProject, prepare_project
 
 
@@ -310,6 +311,10 @@ def _validate_bus_resources(draft: dict, board: dict, claim) -> dict:
 
 def _validate_and_collect(draft: dict, catalog: dict, *,
                           allow_mock_bus: bool = False) -> tuple[dict, dict]:
+    try:
+        validate_catalog(catalog)
+    except BoardCapabilityError as exc:
+        raise ProjectConfigError(str(exc)) from exc
     if not isinstance(draft, dict) or draft.get("schema_version") != 2:
         raise ProjectConfigError("工程schema_version必须为2")
     board = _find(catalog.get("boards", []), "id", draft.get("board_id"))

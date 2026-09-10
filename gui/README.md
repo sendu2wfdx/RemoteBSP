@@ -24,6 +24,28 @@ RemoteBSP Studio 是板卡专用固件的图形配置入口。它保存工程 JS
 整板步频、PWM 定时器频率以及定时位流端点。当前只允许选择已经实现的 UART、PWM
 和 WS2812 后端；更多预设组合会在后端实现并验证后开放。
 
+## 板卡能力单一来源
+
+三块正式板卡的引脚全集、固定占用、UART 完整端点、PWM 端点和
+TimedBitstream（当前为 WS2812）定时器/DMA 端点只在
+`firmware/scripts/generate_pin_choices.py` 的 `BOARDS` 中维护。
+该脚本同时生成固件 Kconfig 引脚选择和 Studio 的 `data/pin_catalog.json`，禁止手工
+修改派生目录。目录使用 schema v3；公开合同见
+`data/board_capability.schema.json`，跨字段规则由 `board_capabilities.py` 校验。
+
+生成脚本会在写文件前校验能力源；Studio 在工程校验、固件配置、静态资源表和 Mock
+清单消费目录前再次校验。校验覆盖板卡/端点唯一性、引脚归属、固定占用、UART
+波特率范围、默认逻辑端口、PWM/TimedBitstream 通道、implemented/planned 状态及
+Kconfig 绑定，损坏或过期的目录不会进入产物生成。修改能力源后执行：
+
+```sh
+python3 firmware/scripts/generate_pin_choices.py
+python3 firmware/scripts/generate_pin_choices.py --check
+```
+
+本阶段没有把 MCU AF 数据库、运动引脚组合和 I2C/SPI 后端状态完全迁入 schema；
+这些仍是后续扩展边界，不能据此宣称三板全部外设组合已完成共模。
+
 BluePill Plus与WeAct G431 Core当前均提供USART1、USART2、USART3三路普通硬件UART。USART1可选择
 PA9/PA10或PB6/PB7重映射，USART2固定PA2/PA3，USART3固定PB10/PB11。固件采用
 前N路静态裁剪，所以Studio按UART 0→1→2连续增加；移除中间端口时会同时移除
