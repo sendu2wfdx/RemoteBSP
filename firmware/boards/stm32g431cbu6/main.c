@@ -6,8 +6,29 @@
 #endif
 #include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
+#ifdef CONFIG_REMOTEBSP_BUS
+#include "board_bus.h"
+#endif
 #ifdef CONFIG_REMOTEBSP_DEVICE_PARAMS
 #include "remotebsp_embedded/device_parameter_flash.h"
+#endif
+
+#ifdef CONFIG_REMOTEBSP_BUS
+#if !defined(CONFIG_G431_BUS_I2C1_PB6_PB7) && \
+    !defined(CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15) && \
+    !defined(CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12)
+#error "G431启用总线核心时必须至少选择一个实体总线端点"
+#endif
+#ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
+#ifdef CONFIG_UART0_PINS_PB6_PB7
+#error "G431 I2C1 PB6/PB7与USART1重映射冲突"
+#endif
+#endif
+#ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
+#if defined(CONFIG_PWM0_PIN_PA6) || defined(CONFIG_TIMED_BITSTREAM0_PIN_PA7)
+#error "G431 SPI1 PA5/PA6/PA7与所选波形端点冲突"
+#endif
+#endif
 #endif
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
 #include "remotebsp_embedded/soft_half_duplex_uart.h"
@@ -511,12 +532,18 @@ static bool gpio_pin_present(uint16_t encoded_pin) {
 }
 
 static bool gpio_pin_reserved_by_board(uint16_t encoded_pin) {
-#ifdef CONFIG_WEACT_G431_PC6_PWM_BREATHING_LED
-    return encoded_pin == (2U * 16U + 6U);
-#else
     (void)encoded_pin;
-    return false;
+#ifdef CONFIG_WEACT_G431_PC6_PWM_BREATHING_LED
+    if (encoded_pin == (2U * 16U + 6U)) {
+        return true;
+    }
 #endif
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (rbsp_g431_bus_pin_reserved(encoded_pin)) {
+        return true;
+    }
+#endif
+    return false;
 }
 
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
@@ -589,6 +616,11 @@ static bool gpio_pin_allowed(uint16_t encoded_pin) {
         gpio_pin_reserved_by_board(encoded_pin)) {
         return false;
     }
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (rbsp_g431_bus_pin_reserved(encoded_pin)) {
+        return false;
+    }
+#endif
 #ifdef CONFIG_REMOTEBSP_MOTION
     if (motion_pin_reserved(encoded_pin)) {
         return false;
@@ -1556,10 +1588,30 @@ static bool board_uart_write(uint8_t port, const uint8_t* data,
     return false;
 }
 
-static bool board_resource_status(
+static bool board_uart_reset(uint8_t port) {
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        board_hardware_uart_stop(port);
+        hardware_uart_rx_overflows[port] = 0U;
+        return true;
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    return rbsp_soft_half_duplex_uart_reset(
+        &soft_uart,
+        (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE));
+#else
+    return false;
+#endif
+}
+
+static bool board_uart_resource_status(
     uint8_t resource_type, uint16_t instance,
     rbsp_resource_runtime_status_t* status) {
-    if (status == NULL || resource_type != 2U) {
+    if (status == NULL) {
+        return false;
+    }
+    if (resource_type != 2U) {
         return false;
     }
 #ifdef RBSP_HARDWARE_UART_ENABLED
@@ -1578,6 +1630,26 @@ static bool board_resource_status(
     }
 #endif
     return false;
+}
+#endif
+
+#if CONFIG_UART_RESOURCE_COUNT > 0 || defined(CONFIG_REMOTEBSP_BUS)
+static bool board_resource_status(
+    uint8_t resource_type, uint16_t instance,
+    rbsp_resource_runtime_status_t* status) {
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (rbsp_g431_bus_resource_status(resource_type, instance, status)) {
+        return true;
+    }
+#endif
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    return board_uart_resource_status(resource_type, instance, status);
+#else
+    (void)resource_type;
+    (void)instance;
+    (void)status;
+    return false;
+#endif
 }
 #endif
 
@@ -1768,6 +1840,11 @@ int main(void) {
     }
 #endif
     startup_gpio_configure();
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (!rbsp_g431_bus_init()) {
+        fatal_error();
+    }
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM) || defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
     if (!rbsp_board_waveform_init()) {
         fatal_error();
@@ -1832,14 +1909,23 @@ int main(void) {
         .gpio_configure_pull = board_gpio_configure_pull,
         .gpio_write = board_gpio_write,
         .gpio_read = board_gpio_read,
+#ifdef CONFIG_REMOTEBSP_BUS
+        .bus_resources = rbsp_g431_bus_resources(),
+        .bus_resource_count = rbsp_g431_bus_resource_count(),
+        .i2c_transfer = rbsp_g431_i2c_transfer,
+        .spi_transfer = rbsp_g431_spi_transfer,
+#endif
 #ifdef CONFIG_REMOTEBSP_STATIC_GPIO_MAP
         .gpio_resource_allowed = board_gpio_resource_allowed,
+#endif
+#if CONFIG_UART_RESOURCE_COUNT > 0 || defined(CONFIG_REMOTEBSP_BUS)
+        .resource_status = board_resource_status,
 #endif
 #if CONFIG_UART_RESOURCE_COUNT > 0
         .uart_configure = board_uart_configure,
         .uart_read = board_uart_read,
         .uart_write = board_uart_write,
-        .resource_status = board_resource_status,
+        .uart_reset = board_uart_reset,
 #endif
 #ifdef CONFIG_REMOTEBSP_PWM
         .pwm_configure = rbsp_board_pwm_configure,

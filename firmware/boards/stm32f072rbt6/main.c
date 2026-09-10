@@ -1430,6 +1430,22 @@ static bool board_uart_write(uint8_t port, const uint8_t* data,
 #endif
     return false;
 }
+
+static bool board_uart_reset(uint8_t port) {
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (port < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        board_hardware_uart_stop();
+        return true;
+    }
+#endif
+#ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
+    return rbsp_soft_half_duplex_uart_reset(
+        &soft_uart,
+        (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE));
+#else
+    return false;
+#endif
+}
 #endif
 
 static void can_configure(void) {
@@ -1589,6 +1605,7 @@ int main(void) {
         .uart_configure = board_uart_configure,
         .uart_read = board_uart_read,
         .uart_write = board_uart_write,
+        .uart_reset = board_uart_reset,
 #endif
 #ifdef CONFIG_REMOTEBSP_PWM
         .pwm_configure = rbsp_board_pwm_configure,

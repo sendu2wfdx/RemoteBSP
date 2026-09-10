@@ -51,5 +51,7 @@ size_t rbsp_soft_half_duplex_uart_read(
 bool rbsp_soft_half_duplex_uart_write(
     rbsp_soft_half_duplex_uart_t* uart, uint8_t port,
     const uint8_t* data, size_t length);
+bool rbsp_soft_half_duplex_uart_reset(
+    rbsp_soft_half_duplex_uart_t* uart, uint8_t port);
 
 #endif

@@ -558,6 +558,27 @@ config REMOTEBSP_BUS_MAX_TIMEOUT_US
     default 100000
     depends on REMOTEBSP_BUS
 
+config G431_BUS_I2C1_PB6_PB7
+    bool "G431 I2C1：PB6=SCL、PB7=SDA"
+    default n
+    depends on REMOTEBSP_BUS && BOARD_STM32G431CBU6
+
+config G431_BUS_I2C1_DEVICE_ADDRESS
+    int "G431 I2C1 静态设备7位地址"
+    range 1 127
+    default 72
+    depends on G431_BUS_I2C1_PB6_PB7
+
+config G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
+    bool "G431 SPI1：PA5/PA6/PA7，PA15片选"
+    default n
+    depends on REMOTEBSP_BUS && BOARD_STM32G431CBU6
+
+config G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
+    bool "G431 SPI2：PB13/PB14/PB15，PB12片选"
+    default n
+    depends on REMOTEBSP_BUS && BOARD_STM32G431CBU6
+
 endmenu
 
 menu "PWM 与定时位流（可选）"

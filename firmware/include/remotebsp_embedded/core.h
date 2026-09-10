@@ -238,6 +238,8 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+    /* 清空端口收发缓冲与板级故障锁存，不改变静态资源映射。 */
+    bool (*uart_reset)(uint8_t port);
     bool (*resource_status)(uint8_t resource_type, uint16_t instance,
                             rbsp_resource_runtime_status_t* status);
 #if defined(CONFIG_REMOTEBSP_BUS)

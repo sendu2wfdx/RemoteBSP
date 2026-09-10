@@ -75,6 +75,12 @@ case "${target}" in
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core-dual-pwm
         ;;
+    weact-stm32g431cbu6-core-bus-hal)
+        build_one g431-weact-core-bus-hal \
+            tests/configs/stm32g431_weact_core_bus_hal_defconfig \
+            remotebsp-stm32g431cbu6 \
+            remotebsp-stm32g431-weact-core-bus-hal
+        ;;
     weact-stm32g431cbu6-core-usb|g431-usb)
         build_one g431-weact-core-usb \
             configs/stm32g431_weact_core_usb_defconfig \

@@ -2144,6 +2144,132 @@ static bool process_request(rbsp_core_t* core,
             } else if (!find_static_resource(
                            core, get_u32(request->payload), &descriptor)) {
                 status = RBSP_STATUS_OBJECT_NOT_FOUND;
+            } else {
+                bool owned_by_peer = false;
+                (void)owned_by_peer;
+#if CONFIG_UART_RESOURCE_COUNT > 0
+                if (descriptor.type == RBSP_RESOURCE_TYPE_UART &&
+                    descriptor.instance < CONFIG_UART_RESOURCE_COUNT &&
+                    core->hal.uart_reset != NULL) {
+                    for (size_t index = 0U;
+                         index < CONFIG_UART_RESOURCE_COUNT; ++index) {
+                        const rbsp_uart_object_t* const object =
+                            &core->uart_objects[index];
+                        if (object->used &&
+                            object->port == descriptor.instance &&
+                            object->owner_session_id != request->session_id) {
+                            owned_by_peer = true;
+                            break;
+                        }
+                    }
+                    if (owned_by_peer) {
+                        status = RBSP_STATUS_ACCESS_DENIED;
+                    } else if (!core->hal.uart_reset(
+                                   (uint8_t)descriptor.instance)) {
+                        core->uart_status[descriptor.instance].backend_failed =
+                            true;
+                        status = RBSP_STATUS_RESOURCE_FAILED;
+                    } else {
+                        for (size_t index = 0U;
+                             index < CONFIG_UART_RESOURCE_COUNT; ++index) {
+                            rbsp_uart_object_t* const object =
+                                &core->uart_objects[index];
+                            if (object->used &&
+                                object->port == descriptor.instance) {
+                                object->used = false;
+                            }
+                        }
+                        memset(&core->uart_status[descriptor.instance], 0,
+                               sizeof(core->uart_status[descriptor.instance]));
+                        status = RBSP_STATUS_OK;
+                    }
+                } else
+#endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+                if (descriptor.type == RBSP_RESOURCE_TYPE_PWM &&
+                    descriptor.instance < CONFIG_PWM_RESOURCE_COUNT &&
+                    core->hal.pwm_stop != NULL) {
+                    for (size_t index = 0U;
+                         index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+                        const rbsp_pwm_object_t* const object =
+                            &core->pwm_objects[index];
+                        if (object->used &&
+                            object->channel == descriptor.instance &&
+                            object->owner_session_id != request->session_id) {
+                            owned_by_peer = true;
+                            break;
+                        }
+                    }
+                    if (owned_by_peer) {
+                        status = RBSP_STATUS_ACCESS_DENIED;
+                    } else if (!core->hal.pwm_stop(
+                                   (uint8_t)descriptor.instance)) {
+                        core->pwm_status[descriptor.instance].backend_failed =
+                            true;
+                        status = RBSP_STATUS_RESOURCE_FAILED;
+                    } else {
+                        for (size_t index = 0U;
+                             index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+                            rbsp_pwm_object_t* const object =
+                                &core->pwm_objects[index];
+                            if (object->used &&
+                                object->channel == descriptor.instance) {
+                                object->used = false;
+                            }
+                        }
+                        memset(&core->pwm_status[descriptor.instance], 0,
+                               sizeof(core->pwm_status[descriptor.instance]));
+                        status = RBSP_STATUS_OK;
+                    }
+                } else
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+                if (descriptor.type == RBSP_RESOURCE_TYPE_TIMED_BITSTREAM &&
+                    descriptor.instance <
+                        CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT &&
+                    core->hal.timed_bitstream_abort != NULL) {
+                    for (size_t index = 0U;
+                         index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT;
+                         ++index) {
+                        const rbsp_timed_bitstream_object_t* const object =
+                            &core->timed_bitstream_objects[index];
+                        if (object->used &&
+                            object->channel == descriptor.instance &&
+                            object->owner_session_id != request->session_id) {
+                            owned_by_peer = true;
+                            break;
+                        }
+                    }
+                    if (owned_by_peer) {
+                        status = RBSP_STATUS_ACCESS_DENIED;
+                    } else if (!core->hal.timed_bitstream_abort(
+                                   (uint8_t)descriptor.instance)) {
+                        core->timed_bitstream_status[descriptor.instance]
+                            .backend_failed = true;
+                        status = RBSP_STATUS_RESOURCE_FAILED;
+                    } else {
+                        for (size_t index = 0U;
+                             index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT;
+                             ++index) {
+                            rbsp_timed_bitstream_object_t* const object =
+                                &core->timed_bitstream_objects[index];
+                            if (object->used &&
+                                object->channel == descriptor.instance) {
+                                object->used = false;
+                            }
+                        }
+                        memset(
+                            &core->timed_bitstream_status[descriptor.instance],
+                            0,
+                            sizeof(core->timed_bitstream_status[
+                                descriptor.instance]));
+                        status = RBSP_STATUS_OK;
+                    }
+                } else
+#endif
+                {
+                    status = RBSP_STATUS_UNSUPPORTED_CAPABILITY;
+                }
             }
             response_size = make_status_response(
                 core, request, status, 0U, NULL, 0U);
@@ -3909,10 +4035,19 @@ size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
 #if CONFIG_UART_RESOURCE_COUNT > 0
     for (size_t index = 0U; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
         rbsp_uart_object_t* object = &core->uart_objects[index];
-        if (object->used && object->owner_session_id == session_id) {
-            memset(object, 0, sizeof(*object));
-            ++released;
+        if (!object->used || object->owner_session_id != session_id) {
+            continue;
         }
+        if (core->hal.uart_reset == NULL ||
+            !core->hal.uart_reset(object->port)) {
+            core->uart_status[object->port].backend_failed = true;
+            /* 底层仍可能持有缓冲或中断，保留对象供后续清理重试。 */
+            continue;
+        }
+        memset(&core->uart_status[object->port], 0,
+               sizeof(core->uart_status[object->port]));
+        memset(object, 0, sizeof(*object));
+        ++released;
     }
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)

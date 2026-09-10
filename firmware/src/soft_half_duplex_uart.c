@@ -215,4 +215,14 @@ bool rbsp_soft_half_duplex_uart_write(
     return success;
 }
 
+bool rbsp_soft_half_duplex_uart_reset(
+    rbsp_soft_half_duplex_uart_t* uart, uint8_t port) {
+    if (!port_valid(uart, port)) {
+        return false;
+    }
+    rbsp_byte_ring_clear(&uart->ports[port].receive_ring);
+    uart->ports[port].configured = false;
+    return uart->hal.set_input(uart->hal.context, port);
+}
+
 #endif

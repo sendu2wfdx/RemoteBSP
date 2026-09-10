@@ -110,5 +110,16 @@ int main(void) {
     assert(rbsp_soft_half_duplex_uart_read(
         &uart, 0U, &response_byte, 1U) == 1U);
     assert(response_byte == 0xA5U);
+    assert(rbsp_soft_half_duplex_uart_configure(
+        &uart, 0U, CONFIG_SOFT_HALF_DUPLEX_UART_BAUD, 8U, 1U, 0U));
+    assert(rbsp_soft_half_duplex_uart_write(
+        &uart, 0U, request, sizeof(request)));
+    assert(rbsp_soft_half_duplex_uart_reset(&uart, 0U));
+    assert(!mock.output_mode);
+    assert(rbsp_soft_half_duplex_uart_read(
+               &uart, 0U, &response_byte, 1U) == 0U);
+    assert(!rbsp_soft_half_duplex_uart_write(
+        &uart, 0U, request, sizeof(request)));
+    assert(!rbsp_soft_half_duplex_uart_reset(&uart, 1U));
     return 0;
 }

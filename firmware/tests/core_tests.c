@@ -28,6 +28,8 @@ static unsigned gpio_write_count;
 static bool gpio_write_must_fail;
 static unsigned uart_read_count;
 static unsigned uart_write_count;
+static unsigned uart_reset_count;
+static bool uart_reset_must_fail;
 #if defined(CONFIG_REMOTEBSP_BUS)
 enum {
     TEST_I2C_BUS_ID = 0x0B000001U,
@@ -51,6 +53,8 @@ static bool timed_bit_busy;
 static unsigned timed_bitstream_write_count;
 static unsigned timed_bitstream_abort_count;
 static unsigned pwm_stop_count;
+static bool pwm_stop_must_fail;
+static bool timed_bitstream_abort_must_fail;
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -295,6 +299,11 @@ static bool fake_uart_write(uint8_t port, const uint8_t* data,
     return true;
 }
 
+static bool fake_uart_reset(uint8_t port) {
+    ++uart_reset_count;
+    return port < 2U && !uart_reset_must_fail;
+}
+
 #if defined(CONFIG_REMOTEBSP_BUS)
 static rbsp_bus_transaction_status_t fake_i2c_transfer(
     const rbsp_bus_resource_config_t* device, uint32_t timeout_us,
@@ -334,7 +343,7 @@ static bool fake_pwm_write(uint8_t channel, uint16_t duty) {
 }
 
 static bool fake_pwm_stop(uint8_t channel) {
-    if (channel >= 2U) {
+    if (channel >= 2U || pwm_stop_must_fail) {
         return false;
     }
     ++pwm_stop_count;
@@ -384,7 +393,7 @@ static bool fake_timed_bitstream_busy(uint8_t channel) {
 }
 
 static bool fake_timed_bitstream_abort(uint8_t channel) {
-    if (channel != 0U) {
+    if (channel != 0U || timed_bitstream_abort_must_fail) {
         return false;
     }
     ++timed_bitstream_abort_count;
@@ -460,6 +469,132 @@ static void clear_sent(void) {
     memset(sent_frames, 0, sizeof(sent_frames));
 }
 
+static uint8_t exchange_status(rbsp_core_t* core, uint16_t command,
+                               uint32_t session_id, uint32_t request_id,
+                               uint32_t object_id, const uint8_t* payload,
+                               uint16_t payload_length,
+                               uint8_t response[1024]) {
+    uint8_t request[1024];
+    const uint16_t request_size = make_request_for_session(
+        request, command, session_id, request_id, object_id,
+        payload, payload_length);
+    clear_sent();
+    feed_packet(core, 0x619U, (uint16_t)request_id,
+                request, request_size);
+    (void)reassemble_sent(response, 0x599U);
+    return response[24U];
+}
+
+static void test_resource_reset(const rbsp_hal_t* hal,
+                                const rbsp_node_info_t* info) {
+    enum {
+        OWNER_SESSION = 0x11223344U,
+        PEER_SESSION = 0x55667788U,
+    };
+    rbsp_core_t core;
+    uint8_t response[1024];
+    uint8_t resource_id[4U];
+    assert(rbsp_core_init(&core, hal, RBSP_CAN_CLASSICAL, info));
+    core.node_id = 25U;
+
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    uint8_t uart_config[8U] = {0U};
+    put_u32(uart_config + 1U, 115200U);
+    uart_config[5U] = 8U;
+    uart_config[6U] = 1U;
+    assert(exchange_status(&core, 0x0200U, OWNER_SESSION, 400U, 0U,
+                           uart_config, sizeof(uart_config), response) == 0U);
+    const uint32_t uart_object_id = get_u32(response + 12U);
+    put_u32(resource_id, 0x02000000U);
+    const unsigned resets_before_uart = uart_reset_count;
+    assert(exchange_status(&core, 0x0033U, PEER_SESSION, 401U, 0U,
+                           resource_id, sizeof(resource_id), response) == 4U);
+    assert(uart_reset_count == resets_before_uart &&
+           core.uart_objects[0U].used);
+
+    core.uart_status[0U].rx_overruns = 3U;
+    core.uart_status[0U].tx_overruns = 2U;
+    uart_reset_must_fail = true;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 402U, 0U,
+                           resource_id, sizeof(resource_id), response) == 7U);
+    assert(core.uart_objects[0U].used &&
+           core.uart_objects[0U].object_id == uart_object_id &&
+           core.uart_status[0U].backend_failed);
+
+    uart_reset_must_fail = false;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 403U, 0U,
+                           resource_id, sizeof(resource_id), response) == 0U);
+    assert(!core.uart_objects[0U].used &&
+           core.uart_status[0U].rx_overruns == 0U &&
+           core.uart_status[0U].tx_overruns == 0U &&
+           !core.uart_status[0U].backend_failed);
+    /* 空闲资源重复复位必须保持幂等。 */
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 404U, 0U,
+                           resource_id, sizeof(resource_id), response) == 0U);
+#endif
+
+#if defined(CONFIG_REMOTEBSP_PWM)
+    uint8_t pwm_config[8U] = {0U};
+    put_u32(pwm_config + 1U, 1000U);
+    put_u16(pwm_config + 5U, 5000U);
+    assert(exchange_status(&core, 0x0600U, OWNER_SESSION, 410U, 0U,
+                           pwm_config, sizeof(pwm_config), response) == 0U);
+    const uint32_t pwm_object_id = get_u32(response + 12U);
+    put_u32(resource_id, 0x06000000U);
+    const unsigned stops_before_pwm = pwm_stop_count;
+    assert(exchange_status(&core, 0x0033U, PEER_SESSION, 411U, 0U,
+                           resource_id, sizeof(resource_id), response) == 4U);
+    assert(pwm_stop_count == stops_before_pwm && core.pwm_objects[0U].used);
+
+    pwm_stop_must_fail = true;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 412U, 0U,
+                           resource_id, sizeof(resource_id), response) == 7U);
+    assert(core.pwm_objects[0U].used &&
+           core.pwm_objects[0U].object_id == pwm_object_id &&
+           core.pwm_status[0U].backend_failed);
+    pwm_stop_must_fail = false;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 413U, 0U,
+                           resource_id, sizeof(resource_id), response) == 0U);
+    assert(!core.pwm_objects[0U].used && pwm_stopped[0U] &&
+           !core.pwm_status[0U].backend_failed);
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    uint8_t timed_config[17U] = {0U};
+    put_u32(timed_config + 1U, 1250U);
+    put_u32(timed_config + 5U, 350U);
+    put_u32(timed_config + 9U, 700U);
+    put_u32(timed_config + 13U, 80U);
+    assert(exchange_status(&core, 0x0700U, OWNER_SESSION, 420U, 0U,
+                           timed_config, sizeof(timed_config), response) == 0U);
+    const uint32_t timed_object_id = get_u32(response + 12U);
+    put_u32(resource_id, 0x0A000000U);
+    const unsigned aborts_before_timed = timed_bitstream_abort_count;
+    assert(exchange_status(&core, 0x0033U, PEER_SESSION, 421U, 0U,
+                           resource_id, sizeof(resource_id), response) == 4U);
+    assert(timed_bitstream_abort_count == aborts_before_timed &&
+           core.timed_bitstream_objects[0U].used);
+
+    timed_bitstream_abort_must_fail = true;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 422U, 0U,
+                           resource_id, sizeof(resource_id), response) == 7U);
+    assert(core.timed_bitstream_objects[0U].used &&
+           core.timed_bitstream_objects[0U].object_id == timed_object_id &&
+           core.timed_bitstream_status[0U].backend_failed);
+    timed_bitstream_abort_must_fail = false;
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 423U, 0U,
+                           resource_id, sizeof(resource_id), response) == 0U);
+    assert(!core.timed_bitstream_objects[0U].used &&
+           !core.timed_bitstream_status[0U].backend_failed);
+#endif
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+    put_u32(resource_id, TEST_I2C_DEVICE_ID);
+    assert(exchange_status(&core, 0x0033U, OWNER_SESSION, 430U, 0U,
+                           resource_id, sizeof(resource_id), response) == 6U);
+#endif
+}
+
 static void test_byte_ring(void) {
     uint8_t storage[8];
     rbsp_byte_ring_t ring;
@@ -509,6 +644,7 @@ int main(void) {
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,
         .uart_write = fake_uart_write,
+        .uart_reset = fake_uart_reset,
         .resource_status = fake_resource_status,
 #if defined(CONFIG_REMOTEBSP_BUS)
         .bus_resources = test_bus_resources,
@@ -547,6 +683,7 @@ int main(void) {
          0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
         0, 1, 0, 0x0103CB};
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
+    test_resource_reset(&hal, &info);
     uint8_t request[1024];
     uint8_t response[1024];
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -680,13 +817,15 @@ int main(void) {
            get_u16(response + 29U) == 1U &&
            get_u16(response + 31U) == 0x000AU);
 
+    const unsigned stops_before_idle_reset = pwm_stop_count;
     clear_sent();
     request_size = make_request(request, 0x0033U, 205U, 0U,
                                 static_resource_id,
                                 sizeof(static_resource_id));
     feed_packet(&core, 0x619U, 205U, request, request_size);
     assert(reassemble_sent(response, 0x599U) == 25U);
-    assert(response[24U] == 6U);
+    assert(response[24U] == 0U &&
+           pwm_stop_count == stops_before_idle_reset + 1U);
 
     put_u32(static_resource_id, 0xDEADBEEFU);
     clear_sent();
@@ -1394,9 +1533,13 @@ int main(void) {
            timed_bitstream_abort_count == aborts_before_denied &&
            timed_bit_busy);
 
+    const unsigned resets_before_release = uart_reset_count;
+    uart_reset_must_fail = true;
     assert(rbsp_core_release_session(
-               &object_session_core, object_owner_session) == 3U);
-    assert(!object_session_core.uart_objects[0U].used &&
+               &object_session_core, object_owner_session) == 2U);
+    assert(object_session_core.uart_objects[0U].used &&
+           object_session_core.uart_objects[0U].object_id ==
+               owner_uart_object &&
            object_session_core.uart_objects[1U].used &&
            object_session_core.uart_objects[1U].object_id ==
                peer_uart_object);
@@ -1409,6 +1552,15 @@ int main(void) {
     assert(!object_session_core.timed_bitstream_objects[0U].used &&
            !timed_bit_busy &&
            timed_bitstream_abort_count == aborts_before_denied + 1U);
+    assert(uart_reset_count == resets_before_release + 1U &&
+           object_session_core.uart_status[0U].backend_failed);
+
+    uart_reset_must_fail = false;
+    assert(rbsp_core_release_session(
+               &object_session_core, object_owner_session) == 1U);
+    assert(!object_session_core.uart_objects[0U].used &&
+           !object_session_core.uart_status[0U].backend_failed &&
+           uart_reset_count == resets_before_release + 2U);
     assert(rbsp_core_release_session(
                &object_session_core, object_owner_session) == 0U);
     assert(rbsp_core_release_session(

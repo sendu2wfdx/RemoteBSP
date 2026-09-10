@@ -48,6 +48,8 @@ else()
 endif()
 file(STRINGS "${RBSP_CONFIG}" RBSP_WAVEFORM_LINES
      REGEX "^CONFIG_REMOTEBSP_(PWM|TIMED_BITSTREAM)=y$")
+file(STRINGS "${RBSP_CONFIG}" RBSP_BUS_LINES
+     REGEX "^CONFIG_REMOTEBSP_BUS=y$")
 if(RBSP_MOTION_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES
          src/motion.c
@@ -226,6 +228,14 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32g431cbu6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-g4")
     set(HAL_DIR "${VENDOR_DIR}/stm32g4xx-hal-driver")
+    if(RBSP_BUS_LINES)
+        set(RBSP_G431_BUS_SOURCES
+            "${HAL_DIR}/Src/stm32g4xx_hal_i2c.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_i2c_ex.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_spi.c"
+            "${HAL_DIR}/Src/stm32g4xx_hal_spi_ex.c"
+            "${BOARD_DIR}/board_bus.c")
+    endif()
     if(RBSP_USB_LINK_LINES)
         set(USB_DEVICE_DIR "${VENDOR_DIR}/stm32-mw-usb-device")
         if(NOT EXISTS "${USB_DEVICE_DIR}/Core/Src/usbd_core.c")
@@ -262,10 +272,15 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
         "${HAL_DIR}/Src/stm32g4xx_hal_tim.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_fdcan.c"
         "${HAL_DIR}/Src/stm32g4xx_hal_uart.c"
+        ${RBSP_G431_BUS_SOURCES}
         ${RBSP_USB_BOARD_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32g431cbu6 PRIVATE
         USE_HAL_DRIVER STM32G431xx)
+    if(RBSP_BUS_LINES)
+        target_compile_definitions(remotebsp-stm32g431cbu6 PRIVATE
+            RBSP_G431_BUS_ENABLED=1)
+    endif()
     target_compile_options(remotebsp_embedded_core PRIVATE
         -mcpu=cortex-m4 -mthumb
         -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
