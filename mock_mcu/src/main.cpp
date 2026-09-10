@@ -34,6 +34,7 @@ constexpr auto kHeartbeatInterval = std::chrono::milliseconds(500);
 constexpr auto kUartStreamInterval = std::chrono::milliseconds(100);
 constexpr auto kVisualStateInterval = std::chrono::milliseconds(100);
 constexpr auto kGpioInputSampleInterval = std::chrono::milliseconds(1);
+constexpr auto kStreamSourceInterval = std::chrono::milliseconds(100);
 
 volatile std::sig_atomic_t stop_requested = 0;
 
@@ -81,6 +82,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "用法: mock_mcu <链路端点> <classical|fd|usb-mock> "
                      "[--instance 1..127] [--uart-stream] "
+                     "[--stream-source 资源ID] "
                      "[--board JSON] [--fault-scenario JSON] "
                      "[--visual-state JSON] "
                      "[--transport-record 文件]\n";
@@ -99,6 +101,7 @@ int main(int argc, char** argv) {
                               : parse_mode(mode_text);
         std::uint32_t instance = 1;
         bool uart_stream = false;
+        std::uint32_t stream_source_resource_id = 0U;
         std::string board_path = REMOTEBSP_DEFAULT_MOCK_BOARD_MANIFEST;
         std::string fault_scenario_path;
         std::string visual_state_path;
@@ -107,6 +110,17 @@ int main(int argc, char** argv) {
             if (option == "--uart-stream") {
                 uart_stream = true;
                 ++index;
+                continue;
+            }
+            if (option == "--stream-source" && index + 1 < argc) {
+                std::size_t consumed = 0U;
+                stream_source_resource_id = static_cast<std::uint32_t>(
+                    std::stoul(argv[index + 1], &consumed, 0));
+                if (consumed != std::string(argv[index + 1]).size() ||
+                    stream_source_resource_id == 0U) {
+                    throw std::invalid_argument("STREAM 生产源资源 ID 无效");
+                }
+                index += 2;
                 continue;
             }
             if ((option == "--board" || option == "--fault-scenario" ||
@@ -142,6 +156,10 @@ int main(int argc, char** argv) {
             }
             index += 2;
         }
+        if (stream_source_resource_id != 0U && !mock_usb) {
+            throw std::invalid_argument(
+                "--stream-source 仅绑定 usb-mock，不会自动降级到 CAN");
+        }
         auto manifest =
             remotebsp::mock_mcu::load_board_manifest(board_path);
         remotebsp::mock_mcu::FaultScenario fault_scenario;
@@ -152,6 +170,15 @@ int main(int argc, char** argv) {
         }
         remotebsp::mock_mcu::DigitalTwin twin(
             std::move(manifest), std::move(fault_scenario));
+        if (stream_source_resource_id != 0U) {
+            const auto* contract = twin.stream()
+                ? twin.stream()->contract(stream_source_resource_id) : nullptr;
+            if (contract == nullptr || contract->direction !=
+                    remotebsp::protocol::StreamDirection::NodeToHost) {
+                throw std::invalid_argument(
+                    "--stream-source 必须引用静态 N2H STREAM 资源");
+            }
+        }
         std::uint32_t uart_stream_resource_id = 0;
         if (uart_stream) {
             const auto& resources = twin.manifest().resources;
@@ -199,6 +226,7 @@ int main(int argc, char** argv) {
             started_at + kUartStreamInterval;
         auto next_visual_state = started_at;
         auto next_gpio_input_sample = started_at + kGpioInputSampleInterval;
+        auto next_stream_source = started_at + kStreamSourceInterval;
         std::cout << "Mock MCU 已连接 " << argv[1]
                   << "，板卡描述=" << twin.manifest().name
                   << "，按 Ctrl+C 退出\n";
@@ -238,6 +266,21 @@ int main(int argc, char** argv) {
                     }
                 }
                 next_gpio_input_sample = now + kGpioInputSampleInterval;
+            }
+            if (node.node_id() != 0U && twin.online()) {
+                if (stream_source_resource_id != 0U &&
+                    now >= next_stream_source) {
+                    const std::string text = "mock-stream\n";
+                    const std::vector<std::uint8_t> bytes(
+                        text.begin(), text.end());
+                    twin.stream()->produce(
+                        stream_source_resource_id, bytes);
+                    next_stream_source = now + kStreamSourceInterval;
+                }
+                for (const auto& event : node.poll_stream_events(16U)) {
+                    send_reply(*transport,
+                               kNodeEventBaseRoute + node.node_id(), event);
+                }
             }
             if (uart_stream && node.node_id() != 0 &&
                 now >= next_uart_stream) {
@@ -288,6 +331,9 @@ int main(int argc, char** argv) {
             if (node.node_id() != 0U) {
                 next_deadline = std::min(next_deadline,
                                          next_gpio_input_sample);
+            }
+            if (stream_source_resource_id != 0U) {
+                next_deadline = std::min(next_deadline, next_stream_source);
             }
             const auto timeout =
                 std::max(std::chrono::milliseconds(0),

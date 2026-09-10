@@ -103,9 +103,9 @@
 - 导出全局时间、本地 tick 和 STEP 边沿，验证同板及跨板同步；
 - 已完成故障脚本 replay v1、显式 Mock 逻辑传输钩子和 `RecordingLinkTransport` 会话
   录制：固定单调时间基、事件序号、H2N/N2H、节点代次、发送失败、接收空/异常以及
-  delay/drop/duplicate/reboot；会话文件有界、规范校验且拒绝不完整证据；下一步在
-  `toolbusd` 增加受控录制入口和离线消费，再接物理链路采集，不把逻辑回放冒充 CAN
-  仲裁、USB transaction 或真实复位时长；
+  delay/drop/duplicate/reboot；`toolbusd` 已增加默认关闭、固定目录、限额且禁止覆盖的
+  启动时逻辑录制入口及离线校验/回放。下一步补运行期 IPC/CLI 控制和信号退出进程测试，
+  再接物理链路采集；不把逻辑回放冒充 CAN 仲裁、USB transaction 或真实复位时长；
 
 ## P1：遥测、监控与故障隔离
 

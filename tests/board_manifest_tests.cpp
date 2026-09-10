@@ -213,6 +213,51 @@ void test_versioned_firmware_identity_manifest() {
     }
 }
 
+void test_versioned_stream_manifest_and_mock_source() {
+    const std::string json = R"json({
+      "schema_version": 4,
+      "name": "mock-stream-v4",
+      "board_type": 1,
+      "uuid": "00112233445566778899aabbccddee00",
+      "firmware_version": [0, 2, 0],
+      "firmware_identity": {
+        "project_sha256": null,
+        "config_sha256": null,
+        "firmware_input_sha256": null
+      },
+      "capabilities": ["stream"],
+      "resource_groups": [{
+        "type": "stream", "first_instance": 1, "count": 1,
+        "id_base": 251658241, "source": "native",
+        "rx_capacity": 64, "tx_capacity": 64,
+        "contract": {
+          "access": ["read", "shared_read", "lease_supported", "lease_required"],
+          "timing_resolution_ns": 1000, "worst_case_latency_us": 1000,
+          "maximum_operations_per_second": 1000, "queue_capacity": 64,
+          "maximum_rx_bits_per_second": 0,
+          "maximum_tx_bits_per_second": 1000000
+        }
+      }],
+      "bus_resources": [],
+      "stream_resources": [{
+        "resource_id": 251658241, "direction": "node_to_host",
+        "transports": ["usb"], "flags": ["lossless", "credit_required"],
+        "maximum_chunk_bytes": 16, "buffer_capacity_bytes": 64,
+        "sustained_bits_per_second": 100000, "peak_bits_per_second": 1000000,
+        "maximum_latency_us": 1000, "maximum_jitter_us": 100
+      }],
+      "reserved_resources": []
+    })json";
+    auto manifest = remotebsp::mock_mcu::parse_board_manifest(json);
+    assert(manifest.schema_version == 4U);
+    assert(manifest.stream_resources.size() == 1U);
+    DigitalTwin twin(std::move(manifest));
+    assert(twin.stream());
+    assert(twin.stream()->produce(251658241U, {1U, 2U}) ==
+           remotebsp::mock_mcu::StreamPushStatus::Accepted);
+    assert(twin.stream()->buffered_bytes(251658241U) == 2U);
+}
+
 }
 
 int main() {
@@ -221,4 +266,5 @@ int main() {
     test_digital_twin_fault_isolation();
     test_fault_file_and_schema_rejection();
     test_versioned_firmware_identity_manifest();
+    test_versioned_stream_manifest_and_mock_source();
 }

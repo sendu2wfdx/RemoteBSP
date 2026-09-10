@@ -3,6 +3,7 @@
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/remote_core.hpp"
+#include "remotebsp/mock_mcu/stream_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 
@@ -16,7 +17,7 @@
 
 namespace remotebsp::mock_mcu {
 
-constexpr std::uint32_t kBoardManifestSchemaVersion = 3;
+constexpr std::uint32_t kBoardManifestSchemaVersion = 4;
 constexpr std::uint32_t kFaultScenarioSchemaVersion = 1;
 
 struct ReservedResource {
@@ -57,6 +58,7 @@ struct BoardManifest {
     std::vector<protocol::ResourceDescriptor> resources;
     std::vector<protocol::ResourceContract> contracts;
     std::vector<BusManifestResource> bus_resources;
+    std::vector<protocol::StreamContract> stream_resources;
     std::vector<ReservedResource> reserved_resources;
     std::vector<MotionAxisConfig> motion_axes;
     std::vector<WaveformEndpointCapability> waveform_endpoints;
@@ -122,6 +124,7 @@ public:
     const std::shared_ptr<MotionExecutor>& motion() const noexcept;
     const std::shared_ptr<WaveformBsp>& waveform() const noexcept;
     const std::shared_ptr<MockBusBsp>& bus() const noexcept;
+    const std::shared_ptr<MockStreamBsp>& stream() const noexcept;
     bool online() const noexcept;
     std::optional<std::uint64_t> next_event_ms() const noexcept;
     std::size_t advance_to(std::uint64_t elapsed_ms);
@@ -139,6 +142,7 @@ private:
     std::shared_ptr<MotionExecutor> motion_;
     std::shared_ptr<WaveformBsp> waveform_;
     std::shared_ptr<MockBusBsp> bus_;
+    std::shared_ptr<MockStreamBsp> stream_;
     std::vector<MotionEdge> pending_motion_edges_;
     std::size_t next_event_index_{};
     bool online_{true};

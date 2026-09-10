@@ -486,6 +486,55 @@ protocol::BusTransactionStatus parse_bus_status(const std::string& text) {
     schema_error(ManifestError::InvalidValue, "未知总线故障状态 " + text);
 }
 
+protocol::StreamDirection parse_stream_direction(const std::string& text) {
+    if (text == "host_to_node") return protocol::StreamDirection::HostToNode;
+    if (text == "node_to_host") return protocol::StreamDirection::NodeToHost;
+    if (text == "bidirectional") return protocol::StreamDirection::Bidirectional;
+    schema_error(ManifestError::InvalidValue, "未知 STREAM 方向 " + text);
+}
+
+std::uint8_t parse_stream_transports(const std::vector<JsonValue>& values) {
+    std::uint8_t flags = 0U;
+    for (const auto& value : values) {
+        if (value.type != JsonValue::Type::String) {
+            schema_error(ManifestError::InvalidSchema,
+                         "stream_resource.transports 元素必须是字符串");
+        }
+        std::uint8_t flag = 0U;
+        if (value.string == "can") flag = protocol::kStreamTransportCan;
+        else if (value.string == "usb") flag = protocol::kStreamTransportUsb;
+        else if (value.string == "ethernet") flag = protocol::kStreamTransportEthernet;
+        else schema_error(ManifestError::InvalidValue,
+                          "未知 STREAM 链路 " + value.string);
+        if ((flags & flag) != 0U) {
+            schema_error(ManifestError::Conflict, "STREAM 链路重复 " + value.string);
+        }
+        flags = static_cast<std::uint8_t>(flags | flag);
+    }
+    return flags;
+}
+
+std::uint16_t parse_stream_flags(const std::vector<JsonValue>& values) {
+    std::uint16_t flags = 0U;
+    for (const auto& value : values) {
+        if (value.type != JsonValue::Type::String) {
+            schema_error(ManifestError::InvalidSchema,
+                         "stream_resource.flags 元素必须是字符串");
+        }
+        std::uint16_t flag = 0U;
+        if (value.string == "lossless") flag = protocol::kStreamFlagLossless;
+        else if (value.string == "timestamped") flag = protocol::kStreamFlagTimestamped;
+        else if (value.string == "credit_required") flag = protocol::kStreamFlagCreditRequired;
+        else schema_error(ManifestError::InvalidValue,
+                          "未知 STREAM 标志 " + value.string);
+        if ((flags & flag) != 0U) {
+            schema_error(ManifestError::Conflict, "STREAM 标志重复 " + value.string);
+        }
+        flags = static_cast<std::uint16_t>(flags | flag);
+    }
+    return flags;
+}
+
 protocol::ResourceType parse_resource_type(const std::string& text) {
     if (text == "gpio") {
         return protocol::ResourceType::Gpio;
@@ -706,6 +755,7 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
                    {"schema_version", "name", "board_type", "uuid",
                     "firmware_version", "capabilities",
                     "resource_groups", "reserved_resources", "bus_resources",
+                    "stream_resources",
                     "motion_axes", "motion_maximum_total_step_rate_hz",
                     "waveform_endpoints", "firmware_identity"},
                    "板卡描述根");
@@ -725,6 +775,11 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
         root.count("firmware_identity") != 0U) {
         schema_error(ManifestError::InvalidSchema,
                      "schema_version 1/2 不能声明 firmware_identity");
+    }
+    if (manifest.schema_version < 4U &&
+        root.count("stream_resources") != 0U) {
+        schema_error(ManifestError::InvalidSchema,
+                     "schema_version 1/2/3 不能声明 stream_resources");
     }
     manifest.name = require_string(root, "name");
     if (manifest.name.empty() || manifest.name.size() > 64) {
@@ -1147,6 +1202,65 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
         }
     }
 
+    std::set<std::uint32_t> configured_stream_resources;
+    if (manifest.schema_version >= 4U) {
+        for (const auto& stream_value :
+             require_array(root, "stream_resources")) {
+            const auto& stream = require_object(stream_value,
+                                                 "stream_resource");
+            reject_unknown(
+                stream,
+                {"resource_id", "direction", "transports", "flags",
+                 "maximum_chunk_bytes", "buffer_capacity_bytes",
+                 "sustained_bits_per_second", "peak_bits_per_second",
+                 "maximum_latency_us", "maximum_jitter_us"},
+                "stream_resource");
+            protocol::StreamContract contract;
+            contract.resource_id = require_u32(stream, "resource_id");
+            contract.direction = parse_stream_direction(
+                require_string(stream, "direction"));
+            contract.transport_mask = parse_stream_transports(
+                require_array(stream, "transports"));
+            contract.flags = parse_stream_flags(require_array(stream, "flags"));
+            contract.maximum_chunk_bytes =
+                require_u16(stream, "maximum_chunk_bytes");
+            contract.buffer_capacity_bytes =
+                require_u32(stream, "buffer_capacity_bytes");
+            contract.sustained_bits_per_second =
+                require_u32(stream, "sustained_bits_per_second");
+            contract.peak_bits_per_second =
+                require_u32(stream, "peak_bits_per_second");
+            contract.maximum_latency_us =
+                require_u32(stream, "maximum_latency_us");
+            contract.maximum_jitter_us =
+                require_u32(stream, "maximum_jitter_us");
+            try {
+                static_cast<void>(protocol::encode_stream_contract(contract));
+            } catch (const protocol::BusStreamPayloadException& error) {
+                schema_error(ManifestError::InvalidValue,
+                             std::string("STREAM 合同无效: ") + error.what());
+            }
+            const auto* resource = find_resource(manifest, contract.resource_id);
+            if (resource == nullptr ||
+                resource->type != protocol::ResourceType::Stream) {
+                schema_error(ManifestError::Conflict,
+                             "STREAM 合同引用了缺失或类型不匹配的公开资源");
+            }
+            if (!configured_stream_resources.insert(contract.resource_id).second) {
+                schema_error(ManifestError::Conflict,
+                             "stream_resources 包含重复资源 ID");
+            }
+            manifest.stream_resources.push_back(contract);
+        }
+    }
+    for (const auto& resource : manifest.resources) {
+        if (resource.type == protocol::ResourceType::Stream &&
+            configured_stream_resources.count(resource.resource_id) == 0U) {
+            schema_error(ManifestError::Conflict,
+                         "公开 STREAM 资源缺少 stream_resources 合同");
+        }
+    }
+
     const auto waveform_endpoints = root.find("waveform_endpoints");
     std::set<std::pair<protocol::ResourceType, std::uint16_t>>
         configured_waveform_endpoints;
@@ -1496,6 +1610,12 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
             }
         }
     }
+    if (!manifest_.stream_resources.empty()) {
+        stream_ = std::make_shared<MockStreamBsp>();
+        for (const auto& contract : manifest_.stream_resources) {
+            stream_->add_resource(contract);
+        }
+    }
     for (const auto& event : scenario_.events) {
         if (event.action == FaultAction::SetUartFailed) {
             require_resource(event.resource_id,
@@ -1554,6 +1674,10 @@ const std::shared_ptr<WaveformBsp>& DigitalTwin::waveform() const noexcept {
 
 const std::shared_ptr<MockBusBsp>& DigitalTwin::bus() const noexcept {
     return bus_;
+}
+
+const std::shared_ptr<MockStreamBsp>& DigitalTwin::stream() const noexcept {
+    return stream_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1637,7 +1761,7 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
                        twin.gpio(), twin.uart(),
                        manifest.resources, manifest.contracts,
                        twin.motion(), twin.waveform(), device_parameters,
-                       twin.bus());
+                       twin.bus(), nullptr, twin.stream());
 }
 
 namespace {
