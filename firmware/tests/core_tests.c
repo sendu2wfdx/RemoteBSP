@@ -27,6 +27,7 @@ static unsigned gpio_configure_count;
 static unsigned gpio_write_count;
 static bool gpio_write_must_fail;
 static unsigned uart_read_count;
+static unsigned uart_write_count;
 #if defined(CONFIG_REMOTEBSP_BUS)
 enum {
     TEST_I2C_BUS_ID = 0x0B000001U,
@@ -47,6 +48,9 @@ static bool pwm_stopped[2];
 static uint16_t timed_bit_count;
 static uint8_t timed_bit_data[96];
 static bool timed_bit_busy;
+static unsigned timed_bitstream_write_count;
+static unsigned timed_bitstream_abort_count;
+static unsigned pwm_stop_count;
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -284,7 +288,11 @@ static bool fake_uart_configure(uint8_t port, uint32_t baud_rate,
 
 static bool fake_uart_write(uint8_t port, const uint8_t* data,
                             size_t length) {
-    return port < 2U && data != NULL && length != 0U;
+    if (port >= 2U || data == NULL || length == 0U) {
+        return false;
+    }
+    ++uart_write_count;
+    return true;
 }
 
 #if defined(CONFIG_REMOTEBSP_BUS)
@@ -329,8 +337,21 @@ static bool fake_pwm_stop(uint8_t channel) {
     if (channel >= 2U) {
         return false;
     }
+    ++pwm_stop_count;
     pwm_duty[channel] = 0U;
     pwm_stopped[channel] = true;
+    return true;
+}
+
+static bool fake_resource_status(
+    uint8_t resource_type, uint16_t instance,
+    rbsp_resource_runtime_status_t* status) {
+    if (status == NULL || resource_type != 2U || instance != 0U) {
+        return false;
+    }
+    status->rx_buffered = 7U;
+    status->tx_buffered = 3U;
+    status->rx_overruns = 2U;
     return true;
 }
 
@@ -354,6 +375,7 @@ static bool fake_timed_bitstream_write(uint8_t channel,
     memcpy(timed_bit_data, data, size);
     timed_bit_count = bit_count;
     timed_bit_busy = true;
+    ++timed_bitstream_write_count;
     return true;
 }
 
@@ -365,6 +387,7 @@ static bool fake_timed_bitstream_abort(uint8_t channel) {
     if (channel != 0U) {
         return false;
     }
+    ++timed_bitstream_abort_count;
     timed_bit_busy = false;
     return true;
 }
@@ -486,6 +509,7 @@ int main(void) {
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,
         .uart_write = fake_uart_write,
+        .resource_status = fake_resource_status,
 #if defined(CONFIG_REMOTEBSP_BUS)
         .bus_resources = test_bus_resources,
         .bus_resource_count = 2U,
@@ -1217,6 +1241,183 @@ int main(void) {
     assert(rbsp_core_release_session(&core, second_gpio_session) == 0U);
 
     /*
+     * UART、PWM 和定时位流对象同样绑定创建会话。其他会话不能借用
+     * object_id 访问资源；会话释放只清理其所有对象并执行安全停机。
+     */
+    rbsp_core_t object_session_core;
+    assert(rbsp_core_init(
+        &object_session_core, &hal, RBSP_CAN_CLASSICAL, &info));
+    object_session_core.node_id = 28U;
+    const uint32_t object_owner_session = 0x33333333U;
+    const uint32_t object_peer_session = 0x44444444U;
+
+    uint8_t owner_uart_config[8U] = {0U};
+    put_u32(owner_uart_config + 1U, 115200U);
+    owner_uart_config[5U] = 8U;
+    owner_uart_config[6U] = 1U;
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0200U, object_owner_session, 1U, 0U,
+        owner_uart_config, sizeof(owner_uart_config));
+    feed_packet(&object_session_core, 0x61CU, 1U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    const uint32_t owner_uart_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && owner_uart_object != 0U);
+
+    uint8_t peer_uart_config[8U] = {1U};
+    put_u32(peer_uart_config + 1U, 57600U);
+    peer_uart_config[5U] = 8U;
+    peer_uart_config[6U] = 1U;
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0200U, object_peer_session, 1U, 0U,
+        peer_uart_config, sizeof(peer_uart_config));
+    feed_packet(&object_session_core, 0x61CU, 2U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    const uint32_t peer_uart_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && peer_uart_object != 0U);
+
+    uint8_t owner_pwm_config[8U] = {0U};
+    put_u32(owner_pwm_config + 1U, 20000U);
+    put_u16(owner_pwm_config + 5U, 2500U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0600U, object_owner_session, 2U, 0U,
+        owner_pwm_config, sizeof(owner_pwm_config));
+    feed_packet(&object_session_core, 0x61CU, 3U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    const uint32_t owner_pwm_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && owner_pwm_object != 0U &&
+           pwm_duty[0U] == 2500U && !pwm_stopped[0U]);
+
+    uint8_t peer_pwm_config[8U] = {1U};
+    put_u32(peer_pwm_config + 1U, 10000U);
+    put_u16(peer_pwm_config + 5U, 3500U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0600U, object_peer_session, 2U, 0U,
+        peer_pwm_config, sizeof(peer_pwm_config));
+    feed_packet(&object_session_core, 0x61CU, 4U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    const uint32_t peer_pwm_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && peer_pwm_object != 0U &&
+           pwm_duty[1U] == 3500U && !pwm_stopped[1U]);
+
+    uint8_t owner_bitstream_config[17U] = {0U};
+    put_u32(owner_bitstream_config + 1U, 1250U);
+    put_u32(owner_bitstream_config + 5U, 350U);
+    put_u32(owner_bitstream_config + 9U, 700U);
+    put_u32(owner_bitstream_config + 13U, 80U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0700U, object_owner_session, 3U, 0U,
+        owner_bitstream_config, sizeof(owner_bitstream_config));
+    feed_packet(&object_session_core, 0x61CU, 5U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    const uint32_t owner_bitstream_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && owner_bitstream_object != 0U);
+
+    const uint8_t owner_bitstream_write[] = {8U, 0U, 0x5AU};
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0701U, object_owner_session, 4U,
+        owner_bitstream_object, owner_bitstream_write,
+        sizeof(owner_bitstream_write));
+    feed_packet(&object_session_core, 0x61CU, 6U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 0U && timed_bit_busy &&
+           timed_bit_count == 8U && timed_bit_data[0U] == 0x5AU);
+
+    const unsigned reads_before_denied = uart_read_count;
+    const unsigned writes_before_denied = uart_write_count;
+    const unsigned stops_before_denied = pwm_stop_count;
+    const unsigned bit_writes_before_denied = timed_bitstream_write_count;
+    const unsigned aborts_before_denied = timed_bitstream_abort_count;
+    uint8_t one_byte_read[2U];
+    put_u16(one_byte_read, 1U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0201U, object_peer_session, 10U,
+        owner_uart_object, one_byte_read, sizeof(one_byte_read));
+    feed_packet(&object_session_core, 0x61CU, 10U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U && uart_read_count == reads_before_denied);
+
+    const uint8_t uart_byte = 0xA5U;
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0202U, object_peer_session, 11U,
+        owner_uart_object, &uart_byte, sizeof(uart_byte));
+    feed_packet(&object_session_core, 0x61CU, 11U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U && uart_write_count == writes_before_denied);
+
+    uint8_t denied_pwm_duty[2U];
+    put_u16(denied_pwm_duty, 9000U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0601U, object_peer_session, 12U,
+        owner_pwm_object, denied_pwm_duty, sizeof(denied_pwm_duty));
+    feed_packet(&object_session_core, 0x61CU, 12U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U && pwm_duty[0U] == 2500U);
+
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0602U, object_peer_session, 13U,
+        owner_pwm_object, NULL, 0U);
+    feed_packet(&object_session_core, 0x61CU, 13U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U &&
+           pwm_stop_count == stops_before_denied &&
+           object_session_core.pwm_objects[0U].used);
+
+    const uint8_t denied_bitstream_write[] = {8U, 0U, 0xC3U};
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0701U, object_peer_session, 14U,
+        owner_bitstream_object, denied_bitstream_write,
+        sizeof(denied_bitstream_write));
+    feed_packet(&object_session_core, 0x61CU, 14U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U &&
+           timed_bitstream_write_count == bit_writes_before_denied &&
+           timed_bit_data[0U] == 0x5AU);
+
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0702U, object_peer_session, 15U,
+        owner_bitstream_object, NULL, 0U);
+    feed_packet(&object_session_core, 0x61CU, 15U, request, request_size);
+    assert(reassemble_sent(response, 0x59CU) == 25U);
+    assert(response[24U] == 4U &&
+           timed_bitstream_abort_count == aborts_before_denied &&
+           timed_bit_busy);
+
+    assert(rbsp_core_release_session(
+               &object_session_core, object_owner_session) == 3U);
+    assert(!object_session_core.uart_objects[0U].used &&
+           object_session_core.uart_objects[1U].used &&
+           object_session_core.uart_objects[1U].object_id ==
+               peer_uart_object);
+    assert(!object_session_core.pwm_objects[0U].used &&
+           object_session_core.pwm_objects[1U].used &&
+           object_session_core.pwm_objects[1U].object_id ==
+               peer_pwm_object);
+    assert(pwm_stopped[0U] && !pwm_stopped[1U] &&
+           pwm_stop_count == stops_before_denied + 1U);
+    assert(!object_session_core.timed_bitstream_objects[0U].used &&
+           !timed_bit_busy &&
+           timed_bitstream_abort_count == aborts_before_denied + 1U);
+    assert(rbsp_core_release_session(
+               &object_session_core, object_owner_session) == 0U);
+    assert(rbsp_core_release_session(
+               &object_session_core, object_peer_session) == 2U);
+    assert(!object_session_core.uart_objects[1U].used &&
+           !object_session_core.pwm_objects[1U].used &&
+           pwm_stopped[1U]);
+
+    /*
      * 1024 字节测试配置下，999 字节 PING 产生恰好 1024 字节的响应。
      * 它超过 256 字节去重缓存，但 PING 无副作用，可以安全地重新计算。
      */
@@ -1250,6 +1451,21 @@ int main(void) {
     reassemble_sent(response, 0x599U);
     const uint32_t uart_object = get_u32(response + 12U);
     assert(response[24] == 0U && uart_object != 0U);
+
+    /* 实体状态合并板级缓冲/溢出与 Core 对象占用。 */
+    uint8_t observed_resource_id[4U];
+    put_u32(observed_resource_id, 0x02000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 300U, 0U,
+                                observed_resource_id,
+                                sizeof(observed_resource_id));
+    feed_packet(&core, 0x619U, 300U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 2U);
+    assert(get_u32(response + 30U) == 1U);
+    assert(get_u32(response + 34U) == 7U);
+    assert(get_u32(response + 38U) == 3U);
+    assert(get_u32(response + 42U) == 2U);
 
     /*
      * UART_READ 会消费接收数据，因此最大响应必须完整装入去重缓存。
@@ -1329,6 +1545,15 @@ int main(void) {
     assert(response[24] == 0U && pwm_object != 0U);
     assert(pwm_duty[0] == 2500U);
 
+    put_u32(observed_resource_id, 0x06000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 301U, 0U,
+                                observed_resource_id,
+                                sizeof(observed_resource_id));
+    feed_packet(&core, 0x619U, 301U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 1U);
+
     clear_sent();
     uint8_t pwm_write[2];
     put_u16(pwm_write, 7500U);
@@ -1342,6 +1567,36 @@ int main(void) {
     request_size = make_request(request, 0x0602U, 32U, pwm_object,
                                 NULL, 0U);
     feed_packet(&core, 0x619U, 32U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U && pwm_stopped[0]);
+
+    /* STOP 成功后释放对象槽；重复请求仍由去重缓存返回同一成功响应。 */
+    clear_sent();
+    feed_packet(&core, 0x619U, 32U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 0U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0601U, 304U, pwm_object,
+                                pwm_write, sizeof(pwm_write));
+    feed_packet(&core, 0x619U, 304U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    assert(response[24] == 3U);
+
+    clear_sent();
+    put_u32(pwm_config + 1U, 100000U);
+    request_size = make_request(request, 0x0600U, 305U, 0U,
+                                pwm_config, sizeof(pwm_config));
+    feed_packet(&core, 0x619U, 305U, request, request_size);
+    reassemble_sent(response, 0x599U);
+    const uint32_t recreated_pwm_object = get_u32(response + 12U);
+    assert(response[24] == 0U && recreated_pwm_object != 0U &&
+           recreated_pwm_object != pwm_object);
+
+    clear_sent();
+    request_size = make_request(request, 0x0602U, 306U,
+                                recreated_pwm_object, NULL, 0U);
+    feed_packet(&core, 0x619U, 306U, request, request_size);
     reassemble_sent(response, 0x599U);
     assert(response[24] == 0U && pwm_stopped[0]);
 
@@ -1368,6 +1623,25 @@ int main(void) {
     reassemble_sent(response, 0x599U);
     assert(response[24] == 0U && timed_bit_count == 24U);
     assert(memcmp(timed_bit_data, bitstream_write + 2U, 3U) == 0);
+
+    put_u32(observed_resource_id, 0x0A000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 302U, 0U,
+                                observed_resource_id,
+                                sizeof(observed_resource_id));
+    feed_packet(&core, 0x619U, 302U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 1U);
+
+    core.timed_bitstream_status[0].backend_failed = true;
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 303U, 0U,
+                                observed_resource_id,
+                                sizeof(observed_resource_id));
+    feed_packet(&core, 0x619U, 303U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 3U);
+    assert(get_u32(response + 30U) == 4U);
 
     clear_sent();
     request_size = make_request(request, 0x0702U, 35U,

@@ -85,6 +85,13 @@ enum {
     RBSP_RESOURCE_TYPE_I2C_DEVICE = 12,
     RBSP_RESOURCE_TYPE_SPI_BUS = 13,
     RBSP_RESOURCE_TYPE_SPI_DEVICE = 14,
+    RBSP_RESOURCE_HEALTH_NORMAL = 0,
+    RBSP_RESOURCE_HEALTH_BUSY = 1,
+    RBSP_RESOURCE_HEALTH_DEGRADED = 2,
+    RBSP_RESOURCE_HEALTH_FAILED = 3,
+    RBSP_RESOURCE_ERROR_RX_OVERFLOW = 1U << 0,
+    RBSP_RESOURCE_ERROR_TX_OVERFLOW = 1U << 1,
+    RBSP_RESOURCE_ERROR_BACKEND_FAILURE = 1U << 2,
     RBSP_FRAGMENT_FIRST = 0x01,
     RBSP_FRAGMENT_LAST = 0x02,
     RBSP_FRAGMENT_FLAG_MASK = 0x03,
@@ -1483,6 +1490,113 @@ static bool find_static_resource(
     return false;
 }
 
+static uint32_t saturating_add_u32(uint32_t left, uint32_t right) {
+    return UINT32_MAX - left < right ? UINT32_MAX : left + right;
+}
+
+static rbsp_core_resource_counters_t* resource_counters(
+    rbsp_core_t* core, const rbsp_static_resource_descriptor_t* descriptor) {
+    const uint16_t instance = descriptor->instance;
+    (void)core;
+    (void)instance;
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    if (descriptor->type == RBSP_RESOURCE_TYPE_UART &&
+        instance < CONFIG_UART_RESOURCE_COUNT) {
+        return &core->uart_status[instance];
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_PWM &&
+        instance < CONFIG_PWM_RESOURCE_COUNT) {
+        return &core->pwm_status[instance];
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_TIMED_BITSTREAM &&
+        instance < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT) {
+        return &core->timed_bitstream_status[instance];
+    }
+#endif
+    return NULL;
+}
+
+static void encode_resource_runtime_status(
+    rbsp_core_t* core, const rbsp_static_resource_descriptor_t* descriptor,
+    uint8_t output[RBSP_RESOURCE_STATUS_SIZE]) {
+    rbsp_resource_runtime_status_t status = {0U};
+    if (core->hal.resource_status != NULL) {
+        (void)core->hal.resource_status(
+            descriptor->type, descriptor->instance, &status);
+    }
+    rbsp_core_resource_counters_t* const counters =
+        resource_counters(core, descriptor);
+    if (counters != NULL) {
+        status.rx_overruns = saturating_add_u32(
+            status.rx_overruns, counters->rx_overruns);
+        status.tx_overruns = saturating_add_u32(
+            status.tx_overruns, counters->tx_overruns);
+        status.backend_failed =
+            status.backend_failed || counters->backend_failed;
+    }
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    if (descriptor->type == RBSP_RESOURCE_TYPE_UART) {
+        for (size_t index = 0U; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
+            const rbsp_uart_object_t* const object = &core->uart_objects[index];
+            if (object->used && object->port == descriptor->instance) {
+                status.busy = true;
+                status.rx_buffered = saturating_add_u32(
+                    status.rx_buffered, object->pending_length);
+                break;
+            }
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_PWM) {
+        for (size_t index = 0U; index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+            if (core->pwm_objects[index].used &&
+                core->pwm_objects[index].channel == descriptor->instance) {
+                status.busy = true;
+                break;
+            }
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_TIMED_BITSTREAM) {
+        if (core->hal.timed_bitstream_busy != NULL &&
+            core->hal.timed_bitstream_busy((uint8_t)descriptor->instance)) {
+            status.busy = true;
+        }
+    }
+#endif
+    uint32_t errors = 0U;
+    if (status.rx_overruns != 0U) {
+        errors |= RBSP_RESOURCE_ERROR_RX_OVERFLOW;
+    }
+    if (status.tx_overruns != 0U) {
+        errors |= RBSP_RESOURCE_ERROR_TX_OVERFLOW;
+    }
+    if (status.backend_failed) {
+        errors |= RBSP_RESOURCE_ERROR_BACKEND_FAILURE;
+    }
+    const uint8_t health = status.backend_failed
+                               ? RBSP_RESOURCE_HEALTH_FAILED
+                               : errors != 0U
+                                     ? RBSP_RESOURCE_HEALTH_DEGRADED
+                                     : status.busy
+                                           ? RBSP_RESOURCE_HEALTH_BUSY
+                                           : RBSP_RESOURCE_HEALTH_NORMAL;
+    memset(output, 0, RBSP_RESOURCE_STATUS_SIZE);
+    put_u32(output, descriptor->resource_id);
+    output[4U] = health;
+    put_u32(output + 5U, errors);
+    put_u32(output + 9U, status.rx_buffered);
+    put_u32(output + 13U, status.tx_buffered);
+    put_u32(output + 17U, status.rx_overruns);
+    put_u32(output + 21U, status.tx_overruns);
+}
+
 static bool basic_resource_contract(
     rbsp_core_t* core, const rbsp_request_t* request,
     uint16_t* response_size) {
@@ -1995,8 +2109,8 @@ static bool process_request(rbsp_core_t* core,
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     0U, NULL, 0U);
             } else {
-                uint8_t data[RBSP_RESOURCE_STATUS_SIZE] = {0U};
-                put_u32(data, descriptor.resource_id);
+                uint8_t data[RBSP_RESOURCE_STATUS_SIZE];
+                encode_resource_runtime_status(core, &descriptor, data);
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK, 0U,
                     data, sizeof(data));
@@ -2551,12 +2665,14 @@ static bool process_request(rbsp_core_t* core,
                            get_u32(request->payload + 1U),
                            request->payload[5], request->payload[6],
                            request->payload[7])) {
+                core->uart_status[request->payload[0]].backend_failed = true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     0U, NULL, 0U);
             } else {
                 free_object->used = true;
                 free_object->object_id = core->next_object_id++;
+                free_object->owner_session_id = request->session_id;
                 free_object->port = request->payload[0];
                 free_object->streaming =
                     request->payload_length == 9U &&
@@ -2594,6 +2710,10 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (object->streaming) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_ACCESS_DENIED,
@@ -2602,6 +2722,7 @@ static bool process_request(rbsp_core_t* core,
                 const size_t count = core->hal.uart_read(
                     object->port, payload + 1U, requested);
                 if (count > requested) {
+                    core->uart_status[object->port].backend_failed = true;
                     response_size = make_status_response(
                         core, request, RBSP_STATUS_RESOURCE_FAILED,
                         request->object_id, NULL, 0U);
@@ -2627,9 +2748,16 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (!core->hal.uart_write(
                            object->port, request->payload,
                            request->payload_length)) {
+                core->uart_status[object->port].tx_overruns =
+                    saturating_add_u32(
+                        core->uart_status[object->port].tx_overruns, 1U);
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
@@ -2698,12 +2826,14 @@ static bool process_request(rbsp_core_t* core,
             } else if (!core->hal.pwm_configure(
                            channel, frequency, duty,
                            request->payload[7] != 0U)) {
+                core->pwm_status[channel].backend_failed = true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     0U, NULL, 0U);
             } else {
                 free_object->used = true;
                 free_object->object_id = core->next_object_id++;
+                free_object->owner_session_id = request->session_id;
                 free_object->channel = channel;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
@@ -2727,7 +2857,12 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (!core->hal.pwm_write(object->channel, duty)) {
+                core->pwm_status[object->channel].backend_failed = true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
@@ -2750,11 +2885,18 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (!core->hal.pwm_stop(object->channel)) {
+                core->pwm_status[object->channel].backend_failed = true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
             } else {
+                /* PWM_STOP 是该对象的终止操作；成功后立即释放对象槽。 */
+                object->used = false;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
                     request->object_id, NULL, 0U);
@@ -2819,12 +2961,14 @@ static bool process_request(rbsp_core_t* core,
                     0U, NULL, 0U);
             } else if (!core->hal.timed_bitstream_configure(
                            channel, period, zero_high, one_high, reset_us)) {
+                core->timed_bitstream_status[channel].backend_failed = true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     0U, NULL, 0U);
             } else {
                 free_object->used = true;
                 free_object->object_id = core->next_object_id++;
+                free_object->owner_session_id = request->session_id;
                 free_object->channel = channel;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
@@ -2850,6 +2994,10 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (core->hal.timed_bitstream_busy != NULL &&
                        core->hal.timed_bitstream_busy(object->channel)) {
                 response_size = make_status_response(
@@ -2858,6 +3006,8 @@ static bool process_request(rbsp_core_t* core,
             } else if (!core->hal.timed_bitstream_write(
                            object->channel, request->payload + 2U,
                            bit_count)) {
+                core->timed_bitstream_status[object->channel].backend_failed =
+                    true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
@@ -2880,7 +3030,13 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (!core->hal.timed_bitstream_abort(object->channel)) {
+                core->timed_bitstream_status[object->channel].backend_failed =
+                    true;
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
@@ -3707,8 +3863,10 @@ bool rbsp_core_motion_tick(rbsp_core_t* core) {
 }
 #endif
 
-#if CONFIG_GPIO_RESOURCE_COUNT > 0 || defined(CONFIG_REMOTEBSP_MOTION) || \
-    defined(CONFIG_REMOTEBSP_BUS)
+#if CONFIG_GPIO_RESOURCE_COUNT > 0 || CONFIG_UART_RESOURCE_COUNT > 0 || \
+    defined(CONFIG_REMOTEBSP_PWM) || \
+    defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM) || \
+    defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
 size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
     if (core == NULL || session_id == 0U) {
         return 0U;
@@ -3724,6 +3882,45 @@ size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
             (core->hal.gpio_write == NULL ||
              !core->hal.gpio_write(object->pin, false))) {
             /* 无法确认安全低电平时保留所有权和对象，供后续清理重试。 */
+            continue;
+        }
+        memset(object, 0, sizeof(*object));
+        ++released;
+    }
+#endif
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    for (size_t index = 0U; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
+        rbsp_uart_object_t* object = &core->uart_objects[index];
+        if (object->used && object->owner_session_id == session_id) {
+            memset(object, 0, sizeof(*object));
+            ++released;
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    for (size_t index = 0U; index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+        rbsp_pwm_object_t* object = &core->pwm_objects[index];
+        if (!object->used || object->owner_session_id != session_id) {
+            continue;
+        }
+        if (core->hal.pwm_stop == NULL ||
+            !core->hal.pwm_stop(object->channel)) {
+            continue;
+        }
+        memset(object, 0, sizeof(*object));
+        ++released;
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    for (size_t index = 0U;
+         index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT; ++index) {
+        rbsp_timed_bitstream_object_t* object =
+            &core->timed_bitstream_objects[index];
+        if (!object->used || object->owner_session_id != session_id) {
+            continue;
+        }
+        if (core->hal.timed_bitstream_abort == NULL ||
+            !core->hal.timed_bitstream_abort(object->channel)) {
             continue;
         }
         memset(object, 0, sizeof(*object));

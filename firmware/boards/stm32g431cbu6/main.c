@@ -108,6 +108,8 @@ static uint8_t hardware_uart_tx_storage
     [CONFIG_HARDWARE_UART_RESOURCE_COUNT][CONFIG_UART_TX_BUFFER_SIZE];
 static volatile bool
     hardware_uart_configured[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
+static volatile uint32_t
+    hardware_uart_rx_overflows[CONFIG_HARDWARE_UART_RESOURCE_COUNT];
 
 volatile uint32_t rbsp_diag_uart_rx_bytes;
 volatile uint32_t rbsp_diag_uart_tx_bytes;
@@ -1475,6 +1477,7 @@ static void hardware_uart_irq_service(uint8_t port) {
                 ++rbsp_diag_uart_rx_bytes;
             } else {
                 ++rbsp_diag_uart_rx_overflows;
+                ++hardware_uart_rx_overflows[port];
             }
         }
         if ((status & (USART_ISR_ORE | USART_ISR_NE |
@@ -1483,6 +1486,7 @@ static void hardware_uart_irq_service(uint8_t port) {
                 USART_ICR_ORECF | USART_ICR_NECF |
                 USART_ICR_FECF | USART_ICR_PECF;
             ++rbsp_diag_uart_errors;
+            ++hardware_uart_rx_overflows[port];
         }
     }
 
@@ -1548,6 +1552,30 @@ static bool board_uart_write(uint8_t port, const uint8_t* data,
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
     return board_soft_uart_write(
         (uint8_t)(port - CONFIG_TMC2209_UART_OBJECT_BASE), data, length);
+#endif
+    return false;
+}
+
+static bool board_resource_status(
+    uint8_t resource_type, uint16_t instance,
+    rbsp_resource_runtime_status_t* status) {
+    if (status == NULL || resource_type != 2U) {
+        return false;
+    }
+#ifdef RBSP_HARDWARE_UART_ENABLED
+    if (instance < CONFIG_HARDWARE_UART_RESOURCE_COUNT) {
+        const uint32_t interrupt_state = __get_PRIMASK();
+        __disable_irq();
+        status->rx_buffered = (uint32_t)rbsp_byte_ring_size(
+            &hardware_uart_rx_rings[instance]);
+        status->tx_buffered = (uint32_t)rbsp_byte_ring_size(
+            &hardware_uart_tx_rings[instance]);
+        status->rx_overruns = hardware_uart_rx_overflows[instance];
+        if (interrupt_state == 0U) {
+            __enable_irq();
+        }
+        return true;
+    }
 #endif
     return false;
 }
@@ -1811,6 +1839,7 @@ int main(void) {
         .uart_configure = board_uart_configure,
         .uart_read = board_uart_read,
         .uart_write = board_uart_write,
+        .resource_status = board_resource_status,
 #endif
 #ifdef CONFIG_REMOTEBSP_PWM
         .pwm_configure = rbsp_board_pwm_configure,

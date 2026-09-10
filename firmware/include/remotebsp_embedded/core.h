@@ -152,6 +152,16 @@ typedef struct {
     uint32_t board_type;
 } rbsp_node_info_t;
 
+/* 板级驱动可选上报的瞬时状态；false 表示没有额外数据，并非资源故障。 */
+typedef struct {
+    uint32_t rx_buffered;
+    uint32_t tx_buffered;
+    uint32_t rx_overruns;
+    uint32_t tx_overruns;
+    bool busy;
+    bool backend_failed;
+} rbsp_resource_runtime_status_t;
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
 typedef struct {
     uint32_t logical_id;
@@ -228,6 +238,8 @@ typedef struct {
                            uint8_t parity);
     size_t (*uart_read)(uint8_t port, uint8_t* data, size_t capacity);
     bool (*uart_write)(uint8_t port, const uint8_t* data, size_t length);
+    bool (*resource_status)(uint8_t resource_type, uint16_t instance,
+                            rbsp_resource_runtime_status_t* status);
 #if defined(CONFIG_REMOTEBSP_BUS)
     const rbsp_bus_resource_config_t* bus_resources;
     uint8_t bus_resource_count;
@@ -314,6 +326,7 @@ typedef struct {
 typedef struct {
     bool used;
     uint32_t object_id;
+    uint32_t owner_session_id;
     uint8_t channel;
 } rbsp_pwm_object_t;
 #endif
@@ -322,6 +335,7 @@ typedef struct {
 typedef struct {
     bool used;
     uint32_t object_id;
+    uint32_t owner_session_id;
     uint8_t channel;
 } rbsp_timed_bitstream_object_t;
 #endif
@@ -330,6 +344,7 @@ typedef struct {
 typedef struct {
     bool used;
     uint32_t object_id;
+    uint32_t owner_session_id;
     uint8_t port;
     bool streaming;
     uint16_t pending_length;
@@ -338,6 +353,12 @@ typedef struct {
     uint8_t pending[CONFIG_UART_EVENT_CHUNK_SIZE];
 } rbsp_uart_object_t;
 #endif
+
+typedef struct {
+    uint32_t rx_overruns;
+    uint32_t tx_overruns;
+    bool backend_failed;
+} rbsp_core_resource_counters_t;
 
 typedef struct {
     rbsp_hal_t hal;
@@ -356,6 +377,7 @@ typedef struct {
     rbsp_gpio_object_t gpio_objects[CONFIG_GPIO_RESOURCE_COUNT];
 #if CONFIG_UART_RESOURCE_COUNT > 0
     rbsp_uart_object_t uart_objects[CONFIG_UART_RESOURCE_COUNT];
+    rbsp_core_resource_counters_t uart_status[CONFIG_UART_RESOURCE_COUNT];
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     rbsp_bus_lease_t bus_leases[CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT];
@@ -363,9 +385,12 @@ typedef struct {
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)
     rbsp_pwm_object_t pwm_objects[CONFIG_PWM_RESOURCE_COUNT];
+    rbsp_core_resource_counters_t pwm_status[CONFIG_PWM_RESOURCE_COUNT];
 #endif
 #if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
     rbsp_timed_bitstream_object_t timed_bitstream_objects[
+        CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
+    rbsp_core_resource_counters_t timed_bitstream_status[
         CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
