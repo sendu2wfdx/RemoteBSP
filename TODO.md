@@ -95,8 +95,9 @@
 - 资源：UART 溢出、GPIO 滤波事件、PWM/位流故障、运动限位与驱动错误；
 - 指标采用稳定 ID、单位、时间基准和版本，不把人类文本作为机器接口；
 - `HealthSnapshot v1` 协议契约已完成，生产者代际为必填字段，并区分 available、
-  unavailable、unknown 和缺席；下一步接入 Remote Core/toolbusd 软件生产者，实体 MCU
-  CPU/ISR/栈与硬件时间戳仍需板卡环境；
+  unavailable、unknown 和缺席；toolbusd 已接入真实软件生产者、版本化只读 IPC、CLI 与
+  Runtime 可信投影，下一步接入 Remote Core/MCU 生产者；实体 CPU/ISR/栈与硬件时间戳仍
+  需板卡环境；
 - 单节点或单资源异常不得阻塞其他节点；恢复必须显式、可观测、可测试；
 - GUI 增加趋势、峰值锁存、阈值告警和按节点/资源下钻；
 - 明确区分估算值、软件测量值和硬件实测值。
@@ -138,9 +139,10 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
   版本化 daemon identity 绑定本次 `toolbusd` 启动，重启、身份非法或不可达时失败关闭；
   认证回环 HTTP 已把 `runtime.gpio.write`、稳定 UUID、节点代次、剩余 TTL 和幂等键映射到
   `toolbusd` GPIO IPC v2；首次对象创建为低电平，释放、过期和关停均执行资源级安全
-  停机，未知对象/停机失败按资源 poison 隔离；能力证明绑定 daemon 身份与单调 revision，
-  普通目标错误仅回滚本租约，错误不向 HTTP 暴露内部路径；下一步增加 `GPIO_CLOSE`、
-  结构化 IPC 错误、统一端到端控制期限、跨租约过期的 exactly-once 查询、TLS 部署基线、密钥
+  写低并执行 `GPIO_CLOSE`，Close 响应不确定时保持单资源 poison、幂等重试只补 Close，确认
+  后同一节点代次可以安全重建；固件对象绑定传输会话并隔离跨会话访问；能力证明绑定 daemon
+  身份与单调 revision，普通目标错误仅回滚本租约，错误不向 HTTP 暴露内部路径；下一步增加
+  结构化 IPC 错误、统一端到端控制期限与可查询操作结果账本、跨租约过期的 exactly-once 查询、TLS 部署基线、密钥
   热撤销、持久审计完整性、跨重启事件存储和主动推送；
 - Runtime API 只通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
 - 在现有版本化 REST 和短轮询之上评估 WebSocket/SSE 事件订阅与遥测流；

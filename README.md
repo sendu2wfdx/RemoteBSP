@@ -66,8 +66,8 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与 GPIO/UART/PWM/定时位流只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行资源级安全停机，能力证明绑定 daemon 身份与单调 revision；USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。`GPIO_CLOSE`、结构化 IPC 错误、TLS、统一控制总期限、跨过期 exactly-once、主动推送和持久审计仍待实现 |
-| 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。当前仅有协议契约，尚未接入 MCU/Remote Core/toolbusd 生产者或实体采样 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。结构化 IPC 错误、TLS、统一控制总期限、跨过期 exactly-once、主动推送和持久审计仍待实现 |
+| 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。toolbusd 软件生产者、版本化只读 IPC、CLI 与 Runtime 可信投影已接入；MCU/Remote Core 生产者和实体采样尚未实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -191,6 +191,9 @@ Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不
 RuntimeSnapshot IPC 已升级到 v2，把每个节点的启动代次、模型代次、同步状态、样本数、
 漂移及误差估计贯通到 Runtime API；Runtime 会按可配置误差与样本年龄阈值输出稳定
 质量告警，旧文本源只标记观测能力未知。这些是软件模型观测值，不代表硬件已达到相同精度。
+toolbusd 另通过独立版本化只读 IPC 生产 `HealthSnapshot v1`，把 daemon instance ID 与随机
+非零生产者代际原子返回；认证 Runtime 健康接口严格校验来源、序号、时间和指标语义，公开
+存活探针不读取 Provider。该快照仅报告 toolbusd 可证明的软件状态，不冒充 MCU 或物理链路测量。
 Runtime 的认证授权已包含 API key 身份、`runtime.read`、`runtime.gpio.write` 及控制租约
 申请/释放/撤销权限：
 密钥以固定长度摘要比较，审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出。控制租约仅在

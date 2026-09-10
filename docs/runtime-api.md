@@ -8,6 +8,13 @@ Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现可替换 Pr
 最小写控制闭环；Runtime 不访问 SocketCAN、USB 或实体板，成功响应只证明对应远端
 命令收到成功应答，不等于更高层业务事务完成。
 
+认证读取 `/api/v1/health` 还会返回 `toolbusd_health`：它通过版本化只读 IPC 取得与
+daemon instance ID 原子绑定的 `HealthSnapshot v1`，再按来源、节点、生产者代际、序号、
+时间和单位做严格投影。`available=false` 只隔离本次遥测失败，不影响 Runtime 资源快照；
+未认证的公开存活探针仍只返回固定的 `status/scope`，不会触发 Provider 或泄漏指标。
+当前健康数据仅证明 toolbusd 请求队列、租约及流量准入等软件状态，不能代表 MCU 或物理
+CAN/USB 测量。
+
 当前明确不提供：
 
 - UART、运动、PWM、I2C、SPI 等其他写命令；
@@ -327,7 +334,7 @@ remote-cli --json --socket /tmp/toolbusd.sock runtime-snapshot 128 1900
 }
 ```
 
-五种 `data` 形状分别为：
+六种 `data` 形状分别为：
 
 - `traffic-status`：`traffic` 对象，包含链路模式、速率、准入汇总和固定顺序的六类
   业务计数器；
@@ -337,6 +344,8 @@ remote-cli --json --socket /tmp/toolbusd.sock runtime-snapshot 128 1900
 - `resource-status`：目标 `node_id` 和单个 `resource` 状态对象。
 - `runtime-snapshot`：快照 IPC 版本和守护进程序号、流量、节点、带状态有效位的资源，
   封闭的节点级错误项，以及与节点一一对应的时钟同步质量项。
+- `health-snapshot`：IPC 版本、daemon instance ID，以及来源固定为本机 toolbusd、节点为 0
+  的 `HealthSnapshot v1`；物理收发和 MCU 指标没有来源时明确为 unavailable。
 
 `RuntimeSnapshot IPC v2` 是 `IpcRequestKind::RuntimeSnapshot`。请求必须携带版本 2、
 1～128 的最大资源数和 1～5000 ms 的总时间上限；响应仍受本地 IPC 64 KiB 硬上限。

@@ -3,9 +3,10 @@
 ## 当前范围
 
 `protocol/health.hpp` 定义了 MCU、Remote Core 和 toolbusd 共用的机器可读契约，命令号
-为 `HealthSnapshot (0x0021)`。本轮只完成协议结构、严格编解码和一致性校验，尚未把它
-接到 MockNode、Remote Core、toolbusd IPC 或 Runtime HTTP。任何界面在生产者接线完成前
-都不得宣称已经取得实时遥测。
+为 `HealthSnapshot (0x0021)`。toolbusd 已接入仅汇总自身可证明软件状态的生产者，并经
+版本化只读 IPC、`libremotebsp`、`remote-cli --json` 和 Runtime 可信投影贯通到认证读取
+接口。MCU、Remote Core 与实体板采样仍未接入，任何界面都不得把 toolbusd 软件快照外推
+成远端节点或物理总线遥测。
 
 这是一份软件状态契约，不是物理测量合同。Mock 环境不能真实测得 MCU CPU/ISR 占用、
 栈水位、CAN 仲裁延迟、USB transaction 延迟、温度、电压或电气错误；这类指标必须标为
@@ -56,8 +57,10 @@ v1 使用 36 字节固定头和最多 48 个 12 字节指标项，单个编码�
 `HealthSource::Toolbusd` 只能由本机 toolbusd 状态采集路径产生。来自 CAN、USB、Mock 链路
 或其他远端输入、却自称 toolbusd 的快照必须拒绝进入受信状态，不能因为枚举值合法而接受。
 未知非零 `source` 为前向兼容会被解码并原样保留，但在消费者显式支持并绑定可信路由前，
-不得参与任何安全判断，也不得冒充 MCU、Remote Core 或 toolbusd。当前版本尚未接生产者，
-因此这些要求是后续接线必须满足的门槛，不代表已经完成身份认证或会话绑定。
+不得参与任何安全判断，也不得冒充 MCU、Remote Core 或 toolbusd。当前 toolbusd 正式接线
+在同一个 IPC 响应中原子返回 daemon instance ID 与独立随机、非零的生产者代际；Runtime
+按实例和代际建立可信路由，并拒绝陈旧序号、同序号异载荷和采样时钟回退。该绑定只覆盖
+受信本机 toolbusd 来源，不代表 MCU/Remote Core 已完成身份认证或生产者接线。
 
 ## 标准指标
 

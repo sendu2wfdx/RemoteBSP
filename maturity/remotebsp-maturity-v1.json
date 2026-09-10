@@ -159,14 +159,17 @@
     {
       "id": "observability",
       "title": "可观测性",
-      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；遥测生产者、历史和硬件时间戳质量尚未实现。",
+      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；toolbusd 软件生产者、只读 IPC 和 Runtime 可信投影已贯通，MCU/Remote Core 生产者、历史和硬件时间戳质量尚未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "observability_runtime_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "Runtime 节点、资源、告警和时钟模型估计映射。"},
           {"id": "observability_document", "kind": "document", "path": "docs/runtime-api.md", "note": "版本、阈值、估计语义和能力未知边界。"},
-          {"id": "observability_health_contract_source", "kind": "source", "path": "protocol/src/health.cpp", "note": "HealthSnapshot v1 的必填生产者代际、稳定指标 ID/单位及 available/unavailable/unknown 严格语义；当前未接采样生产者。"},
-          {"id": "observability_health_contract_document", "kind": "document", "path": "docs/telemetry-health-contract.md", "note": "说明可信来源/节点绑定、软件与硬件测量边界及协议演进规则。"}
+          {"id": "observability_health_contract_source", "kind": "source", "path": "protocol/src/health.cpp", "note": "HealthSnapshot v1 的必填生产者代际、稳定指标 ID/单位及 available/unavailable/unknown 严格语义。"},
+          {"id": "observability_health_producer_source", "kind": "source", "path": "toolbusd/src/health_producer.cpp", "note": "只生产 toolbusd 可证明的软件状态，物理收发和 MCU 指标明确 unavailable，并在边界执行公共 wire 校验。"},
+          {"id": "observability_health_projection_source", "kind": "source", "path": "runtime_api/health_projection.py", "note": "按 daemon 身份与独立生产者代际绑定本机来源，拒绝陈旧、同序号异载荷和时钟回退。"},
+          {"id": "observability_health_contract_document", "kind": "document", "path": "docs/telemetry-health-contract.md", "note": "说明可信来源/节点绑定、软件与硬件测量边界及协议演进规则。"},
+          {"id": "observability_health_production_document", "kind": "document", "path": "docs/toolbusd-health-production.md", "note": "记录 toolbusd 指标来源、时间基、扩展 ID、Runtime 投影和非目标。"}
         ],
         "blocker_ids": ["hardware_observability"]
       },
@@ -175,7 +178,9 @@
         "evidence": [
           {"id": "observability_runtime_test", "kind": "host_test", "path": "runtime_api/tests/test_runtime_api.py", "note": "HTTP、缓存元数据和能力契约测试。"},
           {"id": "observability_snapshot_test", "kind": "host_test", "path": "tests/runtime_snapshot_ipc_tests.cpp", "note": "RuntimeSnapshot v2 严格编解码。"},
-          {"id": "observability_health_contract_test", "kind": "host_test", "path": "tests/health_contract_tests.cpp", "note": "Release/NDEBUG 下仍有效的健康契约往返、代际、单位、可用性、容量与篡改测试。"}
+          {"id": "observability_health_contract_test", "kind": "host_test", "path": "tests/health_contract_tests.cpp", "note": "Release/NDEBUG 下仍有效的健康契约往返、代际、单位、可用性、容量与篡改测试。"},
+          {"id": "observability_health_producer_test", "kind": "host_test", "path": "tests/toolbusd_health_producer_tests.cpp", "note": "覆盖生产者代际、序号、时间、流量汇总、可用性和并发采样。"},
+          {"id": "observability_health_process_test", "kind": "mock_test", "path": "tests/e2e_vcan.sh", "note": "Mock 节点上的真实 toolbusd/remote-cli/Runtime 进程链验证认证健康读取及公开探针隔离；不是实体测量。"}
         ],
         "blocker_ids": []
       },
@@ -258,18 +263,19 @@
     {
       "id": "runtime_api",
       "title": "Runtime 与 API",
-      "summary": "Runtime 读取、快照、缓存、告警和增量事件已实现；认证回环 HTTP 已将细粒度权限、短租约、稳定 UUID、节点代次与幂等键映射到 toolbusd GPIO IPC v2。TLS、统一控制总期限、跨过期 exactly-once、主动推送和持久审计仍缺失。",
+      "summary": "Runtime 读取、快照、缓存、告警和增量事件已实现；认证回环 HTTP 已将细粒度权限、短租约、稳定 UUID、节点代次与幂等键映射到 toolbusd GPIO IPC v2，并以安全写低、GPIO_CLOSE 和固件会话所有权完成对象生命周期；toolbusd 健康软件生产链也已贯通。TLS、统一控制总期限、跨过期 exactly-once、主动推送和持久审计仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "runtime_server_source", "kind": "source", "path": "runtime_api/server.py", "note": "版本化读取 API 与认证回环 GPIO 最小控制入口；能力证明绑定 daemon 身份与单调 revision，普通失败只回滚本租约并向 HTTP 泛化底层错误。"},
-          {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存、故障隔离及稳定 UUID 到受控 GPIO IPC v2 的严格映射。"},
+          {"id": "runtime_provider_source", "kind": "source", "path": "runtime_api/toolbusd_provider.py", "note": "单次快照、缓存、故障隔离、toolbusd 健康可信投影及稳定 UUID 到受控 GPIO IPC v2 的严格映射。"},
           {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "有界 API key 身份、固定长度摘要比较、读取、控制租约及 runtime.gpio.write 细粒度权限。"},
           {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"},
           {"id": "runtime_events_source", "kind": "source", "path": "runtime_api/events.py", "note": "进程实例游标、有界保留、稳定差分和明确过期的增量事件短轮询。"},
           {"id": "runtime_control_lease_source", "kind": "source", "path": "runtime_api/control_leases.py", "note": "短时排他租约、有界终态幂等保护、单租约回滚和 daemon 实例单飞绑定。"},
           {"id": "runtime_daemon_identity_source", "kind": "source", "path": "toolbusd/src/ipc.cpp", "note": "版本化 daemon identity 与 Runtime GPIO 控制 IPC v2，实例身份由 Linux getrandom 生成并绑定远端会话。"},
-          {"id": "runtime_gpio_gate_source", "kind": "source", "path": "toolbusd/src/runtime_control.cpp", "note": "预期 UUID、节点代次、显式租约、静态合同、每资源串行、跨资源隔离和有界幂等控制门；只信任本机 socket 权限组。"}
+          {"id": "runtime_gpio_gate_source", "kind": "source", "path": "toolbusd/src/runtime_control.cpp", "note": "预期 UUID、节点代次、显式租约、静态合同、每资源串行、跨资源隔离、安全写低、GPIO_CLOSE 不确定冻结/重试和有界幂等控制门；只信任本机 socket 权限组。"},
+          {"id": "runtime_gpio_firmware_source", "kind": "source", "path": "firmware/src/core.c", "note": "GPIO 对象绑定创建会话，跨会话访问拒绝，Close 幂等且会话结束仅安全释放自有对象。"}
         ],
         "blocker_ids": ["runtime_control_plane"]
       },
@@ -281,7 +287,7 @@
           {"id": "runtime_auth_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "身份、权限、固定长度密钥摘要、配置上限和攻击输入测试。"},
           {"id": "runtime_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计脱敏、容量、慢输出非阻塞、丢弃计数、异常隔离和关闭测试。"},
           {"id": "runtime_control_lease_test", "kind": "host_test", "path": "runtime_api/tests/test_control_leases.py", "note": "覆盖 HTTP 权限、并发排他、过期、幂等终态、daemon 重启/不可达、身份单飞和异常输入。"},
-          {"id": "runtime_gpio_gate_test", "kind": "host_test", "path": "tests/runtime_control_gate_tests.cpp", "note": "覆盖未知租约拒绝、合同/代次、幂等、首次低电平、释放/过期/关停安全写低、未知对象与停机失败资源级隔离、异常事务回滚、同资源串行和跨资源并发。"},
+          {"id": "runtime_gpio_gate_test", "kind": "host_test", "path": "tests/runtime_control_gate_tests.cpp", "note": "覆盖未知租约拒绝、合同/代次、幂等、首次低电平、释放/过期/关停安全写低与 Close、不确定 Close 冻结/重试、同代复用、异常事务回滚、同资源串行和跨资源并发。"},
           {"id": "runtime_gpio_http_test", "kind": "host_test", "path": "runtime_api/tests/test_gpio_control.py", "note": "覆盖 HTTP GPIO 权限、稳定 UUID/范围、幂等、单租约回滚、剩余 TTL、daemon 重启、revision/CAS 能力状态和错误脱敏。"},
           {"id": "runtime_gpio_process_test", "kind": "mock_test", "path": "tests/e2e_vcan.sh", "note": "USB Mock、Classical CAN vcan 与 CAN-FD vcan 的 HTTP 下游所用 IPC 登记/写入/重放/释放闭环；不是实体设备实测。"}
         ],
@@ -293,7 +299,7 @@
     {
       "id": "security_boundaries",
       "title": "安全边界",
-      "summary": "API key 身份与读取/控制/GPIO 权限、有界脱敏审计、控制入口回环限制、请求读取期限、Unix 套接字权限及 HTTP 到受信本机 GPIO 最终准入的 UUID/代次映射已实现；GPIO 对象创建、释放、过期和关停具备资源级失效安全。`GPIO_CLOSE`、结构化 IPC 错误、统一命令总期限、TLS、持久审计和总线消息认证仍缺失。",
+      "summary": "API key 身份与读取/控制/GPIO 权限、有界脱敏审计、控制入口回环限制、请求读取期限、Unix 套接字权限及 HTTP 到受信本机 GPIO 最终准入的 UUID/代次映射已实现；GPIO 对象创建、释放、过期和关停具备安全写低、显式 Close、失败冻结及固件会话所有权。结构化 IPC 错误、统一命令总期限、TLS、持久审计和总线消息认证仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -358,7 +364,7 @@
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
     {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
-    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2 的最小闭环及失效安全停机已完成；缺少 GPIO_CLOSE 导致已退休对象在同一节点代次内不能复用，且仍缺结构化 IPC 错误、统一端到端控制期限、租约过期后的跨进程 exactly-once 查询、主动推送、跨重启事件、TLS 与持久审计。", "requires_hardware": false, "closure_evidence": "补齐显式对象销毁、结构化错误、控制总期限与不确定提交恢复、TLS/密钥生命周期、主动推送、跨重启事件和持久审计完整性，并完成资源耗尽攻击测试。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2 的最小闭环、显式对象销毁、同代安全复用、固件会话所有权及失效安全停机已完成；仍缺结构化 IPC 错误、单一端到端控制期限、可查询且跨进程的提交结果、主动推送、跨重启事件、TLS 与持久审计。", "requires_hardware": false, "closure_evidence": "补齐结构化错误、控制总期限与不确定提交恢复账本、TLS/密钥生命周期、主动推送、跨重启事件和持久审计完整性，并完成资源耗尽攻击测试。"},
     {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限和有界审计已建立，但 TLS/密钥生命周期、审计完整性、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、持久审计完整性、攻击面测试、总线认证和部署加固验证。"},
     {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
     {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},
