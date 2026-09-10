@@ -64,6 +64,8 @@ enum class Command : std::uint16_t {
     I2cTransfer = 0x0301,
     SpiContract = 0x0400,
     SpiTransfer = 0x0401,
+    AdcContract = 0x0500,
+    AdcSample = 0x0501,
     PwmCreate = 0x0600,
     PwmWrite = 0x0601,
     PwmStop = 0x0602,

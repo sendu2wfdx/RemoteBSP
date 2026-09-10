@@ -215,6 +215,10 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_spi_contract(request);
         case protocol::Command::SpiTransfer:
             return handle_spi_transfer(request);
+        case protocol::Command::AdcContract:
+            return handle_adc_contract(request);
+        case protocol::Command::AdcSample:
+            return handle_adc_sample(request);
         case protocol::Command::StreamContract:
             return handle_stream_contract(request);
         case protocol::Command::StreamOpen:
@@ -2277,6 +2281,56 @@ protocol::Packet RemoteCore::handle_spi_transfer(
     const auto encoded = protocol::encode_bus_transfer_result(result);
     response.payload.insert(response.payload.end(), encoded.begin(),
                             encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_adc_contract(
+    const protocol::Packet& request) const {
+    if (!adc_bsp_ || (capabilities_ & capability_mask(Capability::Adc)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    if (request.header.object_id != 0U || request.payload.size() != 4U)
+        return make_response(request, StatusCode::InvalidPayload);
+    const auto resource_id = protocol::decode_resource_id(request.payload);
+    const auto* resource = find_resource(resource_id);
+    if (resource == nullptr || resource->type != protocol::ResourceType::Adc)
+        return make_response(request, StatusCode::ObjectNotFound);
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_adc_contract(
+        {protocol::kAdcProtocolVersion, 12U, resource_id, 10000U, 3300U,
+         protocol::kMaximumAdcSamples});
+    response.payload.insert(response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_adc_sample(const protocol::Packet& request) {
+    if (!adc_bsp_ || (capabilities_ & capability_mask(Capability::Adc)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    if (request.header.object_id != 0U)
+        return make_response(request, StatusCode::InvalidPayload);
+    protocol::AdcSampleRequest sample;
+    try { sample = protocol::decode_adc_sample_request(request.payload); }
+    catch (const std::invalid_argument&) { return make_response(request, StatusCode::InvalidPayload); }
+    const auto* resource = find_resource(sample.resource_id);
+    if (resource == nullptr || resource->type != protocol::ResourceType::Adc)
+        return make_response(request, StatusCode::ObjectNotFound);
+    if (!resource_access_allowed(sample.resource_id, request.header.session_id))
+        return make_response(request, StatusCode::AccessDenied);
+    // Mock 合同上限为 10 kS/s；批量采样不得绕过静态合同。
+    if (sample.sample_count > 1U && sample.interval_us < 100U)
+        return make_response(request, StatusCode::InvalidPayload);
+    std::vector<std::uint16_t> values;
+    try { values = adc_bsp_->sample(sample); }
+    catch (const std::exception&) { return make_response(request, StatusCode::ResourceFailed); }
+    if (values.size() != sample.sample_count ||
+        std::any_of(values.begin(), values.end(), [](auto value) { return value > 4095U; }))
+        return make_response(request, StatusCode::ResourceFailed);
+    auto& sequence = adc_sequences_[sample.resource_id];
+    ++sequence;
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_adc_sample_result(
+        {sample.resource_id, sequence,
+         sample.interval_us * (sample.sample_count - 1U), std::move(values)});
+    response.payload.insert(response.payload.end(), encoded.begin(), encoded.end());
     return response;
 }
 

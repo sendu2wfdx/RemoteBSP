@@ -1,4 +1,5 @@
 add_library(remotebsp_remote_core
+    src/adc_bsp.cpp
     src/board_manifest.cpp
     src/bus_bsp.cpp
     src/device_parameter_store.cpp

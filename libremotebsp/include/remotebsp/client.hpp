@@ -1,4 +1,5 @@
 #pragma once
+#include "remotebsp/protocol/adc.hpp"
 
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
@@ -443,6 +444,9 @@ public:
         std::uint32_t device_resource_id) const;
     protocol::BusTransferResult spi_transfer(
         const protocol::SpiTransferRequest& request) const;
+    protocol::AdcContract adc_contract(std::uint32_t resource_id) const;
+    protocol::AdcSampleResult adc_sample(
+        const protocol::AdcSampleRequest& request) const;
     protocol::StreamContract stream_contract(
         std::uint32_t resource_id) const;
     protocol::StreamOpenResponse stream_open(

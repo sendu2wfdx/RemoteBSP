@@ -96,6 +96,8 @@ python3 -m runtime_api.server \
   --snapshot-cache-ms 250 \
   --status-query-workers 8 \
   --event-capacity 1024 \
+  --event-store-dir /var/lib/remotebsp/runtime-events \
+  --event-store-maximum-bytes 8388608 \
   --clock-error-warning-ns 250000 \
   --clock-sample-age-warning-ms 1000
 ```
@@ -377,7 +379,7 @@ HMAC 是共享密钥完整性认证，不是签名、加密、可信时间或不
 
 `GET /api/v1/events` 提供 `RuntimeEvent v1` 的立即返回式短轮询，不建立 WebSocket、SSE
 或服务端等待线程。它与其他只读端点调用同一个 `RuntimeProvider.read_snapshot()`；一次
-成功的 RuntimeSnapshot 会在进程内差分为节点、资源、告警和时钟质量事件。Provider
+成功的 RuntimeSnapshot 会差分为节点、资源、告警和时钟质量事件。Provider
 缓存命中仍由既有缓存策略合并，读取失败返回原有 `provider_unavailable`，不会推进事件
 状态或游标；恢复后的首个成功快照再与失败前状态比较。
 
@@ -416,14 +418,30 @@ X-API-Key: <api-key>
 ```
 
 游标是严格的 `e1:<128位小写十六进制日志incarnation>:<十进制序号>`，不能猜测为
-时间戳。incarnation 在 Runtime 进程创建事件日志时随机生成；测试或嵌入调用可以显式注入，
-但线上不得复用旧进程的值。`limit` 默认 50，只允许规范十进制 1～100；参数重复、未知
+时间戳。incarnation 在每个 Runtime 进程创建事件日志时重新随机生成，即使启用了历史恢复
+也绝不复用；因此旧进程的轮询游标和 SSE 连接不能被伪装为连续。测试或嵌入调用可以显式
+注入，但线上不得复用旧进程的值。`limit` 默认 50，只允许规范十进制 1～100；参数重复、未知
 参数、未知版本、负数、前导零、超长或领先服务端的游标均返回稳定 400 错误。日志默认
 保留 1024 条，可由 `--event-capacity` 配置为 1～4096 条。游标早于保留窗口或 incarnation
 与当前进程不匹配时返回 HTTP 409、`event_cursor_expired`，并在
-`error.details.reset_cursor` 提供当前游标；客户端必须重新读取完整快照后才能使用重置
+`error.details.reset_cursor` 提供当前进程基线游标；客户端必须重新读取完整快照后才能使用重置
 游标，不能把日志轮换或进程重启造成的缺口伪装成连续事件。incarnation 使用 128 位系统
 随机数防止跨进程误接受，但它不是持久计数器；其唯一性保证仍是概率性的。
+
+跨重启恢复默认关闭。显式配置 `--event-store-dir` 后，服务在固定
+`event-history-v1.json` 中保存最多 `--event-capacity` 条最近事件、下一序号和建立差分所需
+的最后完整快照；文件上限默认 8 MiB，可在 4 KiB～32 MiB 内调整。每次成功观察先以独占
+临时文件写入、`fsync`、原子替换并同步目录，落盘失败时不推进内存游标。目录与文件在 Unix
+上必须由服务用户独占，且不能是符号链接或多链接。JSON 损坏、未知字段、越界序号或非法
+快照会被硬链接到随机且不覆盖的 `event-history-v1.corrupt-*.json` 后隔离，当前进程从空历史
+重新建立基线；无法安全隔离则拒绝启动。根端点的
+`capabilities.incremental_events.persistence` 会显示 `disabled|empty|recovered|corrupt_isolated`
+以及恢复条数。
+
+恢复事件会改绑到新进程 incarnation，但序号继续递增。携带旧 incarnation 的请求总是先
+返回 409，且不会为了验证旧游标而读取 Provider；此时 reset cursor 指向当前保留窗口最早
+事件之前。客户端必须先获取完整 `/snapshot`，再决定是否从 reset cursor 重放恢复窗口。
+不带 cursor 的常规首次调用仍只建立最新基线，不会突然把历史推给普通实时消费者。
 
 同一快照和内容相同的后续快照不会重复产生事件。单次差分按 `node`、`resource`、
 `alert`、`clock_quality` 固定类别顺序，再按稳定实体 ID 排序；并发观察由同一锁串行分配
@@ -836,7 +854,8 @@ API 已有本地租约状态写入口，不能据此推断设备可写；是否�
 
 认证 SSE 完整状态推送已经实现：连接数、采样速率、单事件大小和每连接队列均有界，
 慢客户端相互隔离；浏览器断线后回退到轮询。SSE 携带快照身份/修订语义，客户端不能
-凭丢失的事件猜测当前设备状态。跨 Runtime 重启的事件历史与可恢复增量遥测仍未实现。
+凭丢失的事件猜测当前设备状态。增量短轮询已经支持显式、本地、有界的跨重启历史恢复；
+SSE 仍是进程内完整状态流，重连必须以新进程首条完整投影建立基线。
 
 ## 构建接入
 

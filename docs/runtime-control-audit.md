@@ -136,8 +136,36 @@ operation，不得删除、覆盖或伪装成第一次就成功。
 
 首次部署应由密钥管理流程生成高熵随机密钥，在 Runtime 未运行时完成目录和文件权限设置，
 再把路径交给服务管理器。已有 journal 绝不能用新随机密钥“试着打开”；错误密钥应失败
-关闭。密钥轮换需要明确的日志世代、旧链验证和归档方案，在该方案实现前应通过维护窗口
-重启，并保留旧密钥与旧 journal 的受控只读归档。仅替换文件后热加载不属于当前保证。
+关闭。现提供 `python3 -m runtime_api.control_audit_admin` 离线管理入口：
+
+- `anchor-export` 先完整打开并验证 journal，再以 `O_EXCL` 导出含链头、记录数、活动段、
+  密钥标识和 HMAC 的 JSON。`exported_at_ms_untrusted` 明确来自不可信主机时钟；把该文件
+  复制到独立系统才构成“外部保存”，本工具不会虚构远端服务、可信时间或 WORM；
+- `anchor-verify` 要求显式提供 1～16 把受信密钥，按 `key_id` 选择并复验 HMAC。未知、
+  重复、越界或错误密钥全部失败关闭；
+- `key-rotate` 只允许停机执行。它先用旧密钥验证完整旧 journal，确认没有未决 intent，
+  再把旧目录原样封存为独立世代，并用新密钥创建新的空活动世代；旧段不重写、不用新密钥
+  重签。交接收据同时由新旧 HMAC 认证；
+- `rotation-verify` 必须同时持有并信任新旧密钥，才能验证交接收据。最多接受 16 把密钥，
+  避免无界扫描或含糊的“尝试所有密钥”。
+
+例如：
+
+```bash
+python3 -m runtime_api.control_audit_admin anchor-export \
+  --journal-dir /var/lib/remotebsp/control-audit \
+  --key-file /run/credentials/control-audit.key \
+  --output /secure-transfer/control-head.json --label shift-a
+python3 -m runtime_api.control_audit_admin key-rotate \
+  --journal-dir /var/lib/remotebsp/control-audit \
+  --current-key-file /run/credentials/control-audit.key \
+  --new-key-file /run/credentials/control-audit-next.key \
+  --archive-root /var/lib/remotebsp/control-audit-archive
+```
+
+轮换后服务管理器必须明确改用新密钥路径。仅原地替换密钥文件、在运行中热加载或删除旧
+密钥都不属于保证。旧密钥需按保留策略受控保存，才能验证对应旧世代；交接收据证明的是
+两把共享密钥对同一边界达成一致，不是数字签名或不可否认性。
 
 ## 6. 有界容量、分段和保留
 
@@ -198,6 +226,8 @@ durable intent 视为 unknown，不能当作从未发生。
 - intent 同步失败确保下游零调用；下游开始后的 terminal 同步失败确保不盲目重试或
   覆盖 operation ledger；
 - 磁盘满、容量耗尽、短写、`EIO`、文件同步和目录同步失败；
+- 停机密钥轮换、旧世代原样复验、新旧双 HMAC 交接、错误/重复/超过16把可信密钥拒绝；
+- 链头独占导出、篡改检测，以及不可信主机时间的明确标注；
 - 记录字段封闭、长度上限及 API 密钥、认证头、幂等键、请求体不落盘；
 - 真实 Runtime、`remote-cli`、`toolbusd` 与 USB Mock/vcan 的进程级控制闭环。
 
@@ -223,7 +253,8 @@ durable intent 视为 unknown，不能当作从未发生。
 - operation ledger 保留期之外的 exactly-once，或对 `expired_unknown` 的自动重放；
 - 跨重启 Runtime 事件历史与可恢复增量遥测；认证 SSE 完整状态推送、慢客户端隔离和
   轮询降级已实现，但不提供跨重启续传保证；
-- 集中日志、异地备份、数字签名、可信时间、WORM、外部链头锚定和不可否认性；
+- 集中日志、自动异地备份、数字签名、可信时间、WORM 和不可否认性；当前只提供可复制到
+  外部系统的本地链头证据及离线复验，不声称已接入独立可信锚定服务；
 - 实体掉电、物理 GPIO 电平、MCU 固件可信、总线洪泛、卡死资源或最坏安全停机时延。
 
 因此，本功能完成后可以收窄 `runtime_control_plane` 和 `auth_and_threat_model` 中的

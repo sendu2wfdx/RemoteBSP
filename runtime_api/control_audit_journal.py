@@ -124,6 +124,19 @@ class ControlAuditHealth:
     dangling_intents: int
 
 
+@dataclasses.dataclass(frozen=True)
+class ControlAuditChainHead:
+    """可导出的本地链头；时间字段仅用于排序，不构成可信时间。"""
+
+    schema_version: int
+    record_count: int
+    last_sequence: int
+    last_mac: str
+    active_segment: int
+    total_bytes: int
+    key_id: str
+
+
 class ControlAuditJournal:
     """同步、追加式 HMAC 链审计日志。
 
@@ -147,6 +160,7 @@ class ControlAuditJournal:
         self._dir_fd = -1
         self._lock_fd = -1
         self._key = b""
+        self._key_id = ""
         self._records: list[ControlAuditRecord] = []
         self._intents: dict[int, ControlAuditRecord] = {}
         self._finalized: set[int] = set()
@@ -158,6 +172,7 @@ class ControlAuditJournal:
         try:
             self._open_directory()
             self._key = self._load_key(Path(key_file))
+            self._key_id = hashlib.sha256(self._key).hexdigest()[:16]
             self._acquire_lock()
             self._load_or_initialize()
             self._operational = True
@@ -200,6 +215,19 @@ class ControlAuditJournal:
     def snapshot(self) -> tuple[ControlAuditRecord, ...]:
         with self._mutex:
             return tuple(self._records)
+
+    def chain_head(self) -> ControlAuditChainHead:
+        """返回已由 manifest 固化的链头，不泄露 HMAC 密钥。"""
+        with self._mutex:
+            self._ensure_operational()
+            return ControlAuditChainHead(
+                schema_version=CONTROL_AUDIT_SCHEMA_VERSION,
+                record_count=len(self._records),
+                last_sequence=self._last_sequence,
+                last_mac=self._last_mac.hex(),
+                active_segment=self._active_segment,
+                total_bytes=self._total_bytes,
+                key_id=self._key_id)
 
     def request_digest(self, value: bytes) -> str:
         """为受控规范请求生成不可离线枚举的域分隔摘要。

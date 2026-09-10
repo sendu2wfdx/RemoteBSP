@@ -1,10 +1,13 @@
 import copy
 import json
+import os
 import threading
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from pathlib import Path
 
 from runtime_api.auth import (
     RUNTIME_READ_PERMISSION,
@@ -17,6 +20,7 @@ from runtime_api.events import (
     InvalidEventCursor,
     RuntimeEventLog,
 )
+from runtime_api.event_store import EventStoreError, RuntimeEventStore
 from runtime_api.provider import RuntimeProvider, RuntimeProviderError, mock_snapshot
 from runtime_api.server import make_server
 
@@ -36,6 +40,59 @@ def _authenticator(api_key: str) -> ApiKeyAuthenticator:
 
 
 class RuntimeEventLogTest(unittest.TestCase):
+    def test_persistent_history_recovers_with_new_process_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RuntimeEventStore(Path(directory))
+            first = RuntimeEventLog(
+                capacity=8, incarnation=EVENT_INCARNATION, store=store)
+            self.assertTrue(first.observe(mock_snapshot()))
+            old_cursor = first.latest_cursor
+
+            restarted = RuntimeEventLog(
+                capacity=8, incarnation=OTHER_INCARNATION,
+                store=RuntimeEventStore(Path(directory)))
+            self.assertEqual(restarted.recovered_event_count, 3)
+            self.assertEqual(restarted.persistence_status["load_status"],
+                             "recovered")
+            with self.assertRaises(ExpiredEventCursor) as caught:
+                restarted.validate_cursor_incarnation(old_cursor)
+            self.assertEqual(caught.exception.reset_cursor,
+                             f"e1:{OTHER_INCARNATION}:0")
+            recovered = restarted.read_page(caught.exception.reset_cursor, 8)
+            self.assertEqual(len(recovered.events), 3)
+            self.assertTrue(all(event.incarnation == OTHER_INCARNATION
+                                for event in recovered.events))
+
+            changed = mock_snapshot()
+            changed["snapshot_id"] = "after-restart"
+            changed["captured_at_ms"] = 0
+            changed["nodes"][0]["resources"][0]["available"] = False
+            self.assertTrue(restarted.observe(changed))
+            page = restarted.read_page(recovered.next_cursor, 8)
+            self.assertEqual([(item.entity_type, item.change)
+                              for item in page.events],
+                             [("resource", "updated")])
+
+    def test_corrupt_history_is_quarantined_and_write_failure_rolls_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.joinpath("event-history-v1.json").write_text(
+                "{broken", encoding="utf-8")
+            os.chmod(root / "event-history-v1.json", 0o600)
+            store = RuntimeEventStore(root)
+            log = RuntimeEventLog(
+                capacity=8, incarnation=EVENT_INCARNATION, store=store)
+            self.assertEqual(log.persistence_status["load_status"],
+                             "corrupt_isolated")
+            self.assertEqual(len(list(root.glob(
+                "event-history-v1.corrupt-*.json"))), 1)
+            with patch.object(store, "save",
+                              side_effect=EventStoreError("注入写失败")):
+                self.assertFalse(log.observe(mock_snapshot()))
+            self.assertEqual(log.latest_cursor, _cursor(0))
+            with self.assertRaises(EventLogError):
+                log.read_page(_cursor(0), 8)
+
     def test_diff_order_dedup_and_clock_sample_age_filter(self):
         snapshot = mock_snapshot()
         snapshot["nodes"][0]["runtime"]["clock_sync"] = {
@@ -296,6 +353,37 @@ class RuntimeEventsHttpTest(unittest.TestCase):
         _, empty = self._read(f"/api/v1/events?cursor={latest}")
         self.assertEqual(empty["data"]["events"], [])
         self.assertEqual(empty["data"]["next_cursor"], latest)
+
+    def test_http_restart_rejects_old_cursor_then_exposes_recovered_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = RuntimeEventLog(
+                8, incarnation=EVENT_INCARNATION,
+                store=RuntimeEventStore(Path(directory)))
+            self.assertTrue(first.observe(self.provider.snapshot))
+            old_cursor = first.latest_cursor
+            self.server.event_log = RuntimeEventLog(  # type: ignore[attr-defined]
+                8, incarnation=OTHER_INCARNATION,
+                store=RuntimeEventStore(Path(directory)))
+
+            error, payload = self._error(
+                f"/api/v1/events?cursor={old_cursor}")
+            self.assertEqual(error.code, 409)
+            self.assertEqual(payload["error"]["code"],
+                             "event_cursor_expired")
+            reset = payload["error"]["details"]["reset_cursor"]
+            self.assertEqual(reset, f"e1:{OTHER_INCARNATION}:0")
+            _, recovered = self._read(
+                f"/api/v1/events?cursor={reset}&limit=8")
+            self.assertEqual(len(recovered["data"]["events"]), 3)
+            self.assertTrue(all(item["cursor"].startswith(
+                f"e1:{OTHER_INCARNATION}:")
+                for item in recovered["data"]["events"]))
+            _, root = self._read("/api/v1")
+            persistence = root["data"]["capabilities"][
+                "incremental_events"]["persistence"]
+            self.assertEqual(persistence, {
+                "enabled": True, "load_status": "recovered",
+                "recovered_events": 3})
 
     def test_invalid_cursor_is_rejected_before_provider_read(self):
         calls = self.provider.calls

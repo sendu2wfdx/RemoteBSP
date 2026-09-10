@@ -1,4 +1,5 @@
 add_library(remotebsp_protocol
+    src/adc.cpp
     src/bus_stream.cpp
     src/crc32.cpp
     src/device_parameters.cpp

@@ -458,6 +458,8 @@ void print_usage() {
         << "  resource-renew <资源ID> <租约ID> <毫秒>\n"
         << "  resource-release <资源ID> <租约ID>\n"
         << "  resource-lease-status <资源ID>\n"
+        << "  adc-contract <资源ID>\n"
+        << "  adc-sample <资源ID> <样本数1..32> <间隔us> <超时us>\n"
         << "  stream-contract <资源ID>\n"
         << "  stream-open <资源ID> <块字节> <flags> <初始信用字节>\n"
         << "  stream-read <stream ID> <预期序号> [超时毫秒]\n"
@@ -1210,6 +1212,33 @@ int run(const std::vector<std::string>& arguments,
         print_lease(client.resource_lease_status(
             parse_u32(arguments[1], "资源 ID")));
         return 0;
+    }
+    if (name == "adc-contract" && arguments.size() == 2) {
+        const auto value = client.adc_contract(parse_u32(arguments[1], "ADC资源ID"));
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << std::dec
+                  << " version=" << value.version << " resolution_bits=" << value.resolution_bits
+                  << " maximum_sample_rate_hz=" << value.maximum_sample_rate_hz
+                  << " reference_mv=" << value.reference_mv
+                  << " maximum_batch_samples=" << value.maximum_batch_samples << '\n';
+        return 0;
+    }
+    if (name == "adc-sample" && arguments.size() == 5) {
+        const auto count = parse_u32(arguments[2], "ADC样本数");
+        if (!count || count > remotebsp::protocol::kMaximumAdcSamples)
+            throw std::invalid_argument("ADC样本数必须位于1～32");
+        const auto value = client.adc_sample({parse_u32(arguments[1], "ADC资源ID"),
+            parse_u32(arguments[4], "ADC超时"), parse_u32(arguments[3], "ADC间隔"),
+            static_cast<std::uint16_t>(count)});
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << std::dec
+                  << " sequence=" << value.sequence << " elapsed_us=" << value.elapsed_us
+                  << " samples=";
+        for (std::size_t i=0;i<value.samples.size();++i) {
+            if (i != 0U) {
+                std::cout << ',';
+            }
+            std::cout << value.samples[i];
+        }
+        std::cout << '\n'; return 0;
     }
     if (name == "gpio-create" &&
         (arguments.size() == 3 || arguments.size() == 4)) {

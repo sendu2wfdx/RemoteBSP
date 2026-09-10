@@ -86,6 +86,13 @@ target_compile_options(bus_stream_protocol_tests PRIVATE
 )
 add_test(NAME bus_stream_protocol_tests COMMAND bus_stream_protocol_tests)
 
+add_executable(adc_resource_tests adc_resource_tests.cpp)
+target_link_libraries(adc_resource_tests PRIVATE remotebsp remotebsp_remote_core)
+target_compile_options(adc_resource_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>)
+add_test(NAME adc_resource_tests COMMAND adc_resource_tests)
+
 add_executable(stream_session_tests stream_session_tests.cpp)
 target_link_libraries(stream_session_tests PRIVATE remotebsp_remote_core)
 target_compile_options(stream_session_tests PRIVATE

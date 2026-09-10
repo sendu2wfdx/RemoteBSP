@@ -10,6 +10,10 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
+from .event_store import (
+    EVENT_STORE_KIND, EVENT_STORE_SCHEMA_VERSION, EventStoreError,
+    RuntimeEventStore)
+
 
 EVENT_SCHEMA_VERSION = 1
 DEFAULT_EVENT_CAPACITY = 1024
@@ -182,7 +186,8 @@ class RuntimeEventLog:
     """线程安全差分日志；观察快照和分页读取均为有限操作。"""
 
     def __init__(self, capacity: int = DEFAULT_EVENT_CAPACITY, *,
-                 incarnation: str | None = None):
+                 incarnation: str | None = None,
+                 store: RuntimeEventStore | None = None):
         if capacity < 1 or capacity > MAXIMUM_EVENT_CAPACITY:
             raise ValueError(f"事件容量必须位于1～{MAXIMUM_EVENT_CAPACITY}")
         selected_incarnation = secrets.token_hex(16) \
@@ -201,6 +206,83 @@ class RuntimeEventLog:
         self._last_snapshot_id: str | None = None
         self._last_error: str | None = None
         self._lock = threading.Lock()
+        self._store = store
+        self._baseline_snapshot: dict | None = None
+        self.recovered_event_count = 0
+        if store is not None:
+            self._restore(store.load())
+
+    def _restore(self, document: dict | None) -> None:
+        if document is None:
+            return
+        try:
+            next_sequence = document["next_sequence"]
+            raw_events = document["events"]
+            baseline = document["baseline_snapshot"]
+            if type(next_sequence) is not int or not \
+                    1 <= next_sequence <= MAXIMUM_EVENT_SEQUENCE + 1 or \
+                    not isinstance(raw_events, list) or \
+                    len(raw_events) > self.capacity or not isinstance(baseline, dict):
+                raise ValueError("事件历史边界不合法")
+            states = _snapshot_states(baseline)
+            restored: list[RuntimeEvent] = []
+            fields = {"sequence", "snapshot_id", "captured_at_ms",
+                      "entity_type", "change", "node_id", "resource_id",
+                      "alert_id", "payload", "payload_omitted"}
+            for raw in raw_events:
+                if not isinstance(raw, dict) or set(raw) != fields:
+                    raise ValueError("事件历史记录字段不合法")
+                sequence = raw["sequence"]
+                if type(sequence) is not int or not 1 <= sequence < next_sequence or \
+                        (restored and sequence <= restored[-1].sequence) or \
+                        raw["entity_type"] not in _KIND_ORDER or \
+                        raw["change"] not in {"added", "updated", "removed"} or \
+                        type(raw["captured_at_ms"]) is not int or \
+                        raw["captured_at_ms"] < 0 or \
+                        not isinstance(raw["snapshot_id"], str) or \
+                        not raw["snapshot_id"] or \
+                        type(raw["payload_omitted"]) is not bool:
+                    raise ValueError("事件历史记录值不合法")
+                for name in ("node_id", "resource_id", "alert_id"):
+                    if raw[name] is not None and not isinstance(raw[name], str):
+                        raise ValueError("事件历史身份不合法")
+                if raw["payload"] is not None and not isinstance(raw["payload"], dict):
+                    raise ValueError("事件历史载荷不合法")
+                restored.append(RuntimeEvent(
+                    incarnation=self.incarnation, **raw))
+            self._events.extend(restored)
+            self._states = states
+            self._next_sequence = next_sequence
+            # captured_at_ms 属于进程内单调时间；新进程必须重新建立时间基线。
+            self._last_captured_at_ms = -1
+            self._last_snapshot_id = None
+            self._baseline_snapshot = copy.deepcopy(baseline)
+            self.recovered_event_count = len(restored)
+        except (EventLogError, KeyError, TypeError, ValueError) as error:
+            # 结构校验属于存储完整性的一部分；复用隔离流程且不载入半条历史。
+            assert self._store is not None
+            self._store.quarantine()
+            self._events.clear()
+            self._states = {kind: {} for kind in _KIND_ORDER}
+            self._next_sequence = 1
+            self._baseline_snapshot = None
+
+    @staticmethod
+    def _stored_event(event: RuntimeEvent) -> dict:
+        value = event.to_dict()
+        value.pop("event_schema_version")
+        value.pop("cursor")
+        return value
+
+    def _store_document(self, events: list[RuntimeEvent], next_sequence: int,
+                        baseline: dict) -> dict:
+        return {
+            "schema_version": EVENT_STORE_SCHEMA_VERSION,
+            "kind": EVENT_STORE_KIND,
+            "next_sequence": next_sequence,
+            "baseline_snapshot": baseline,
+            "events": [self._stored_event(event) for event in events],
+        }
 
     def observe(self, snapshot: dict) -> bool:
         """原子观察一份快照；越界时保留既有游标窗口并标记不可用。"""
@@ -255,6 +337,8 @@ class RuntimeEventLog:
             if len(pending) > MAXIMUM_EVENT_SEQUENCE - self._next_sequence + 1:
                 self._last_error = "事件序号空间耗尽"
                 return False
+            new_events: list[RuntimeEvent] = []
+            next_sequence = self._next_sequence
             for kind, _, change, item in pending:
                 assert item is not None
                 payload = None if change == "removed" else item.payload
@@ -262,7 +346,7 @@ class RuntimeEventLog:
                     item.payload_size > MAXIMUM_EVENT_PAYLOAD_BYTES
                 event = RuntimeEvent(
                     incarnation=self.incarnation,
-                    sequence=self._next_sequence,
+                    sequence=next_sequence,
                     snapshot_id=snapshot_id,
                     captured_at_ms=captured_at_ms,
                     entity_type=kind,
@@ -272,11 +356,23 @@ class RuntimeEventLog:
                     alert_id=item.alert_id,
                     payload=None if payload_omitted else payload,
                     payload_omitted=payload_omitted)
-                self._events.append(event)
-                self._next_sequence += 1
+                new_events.append(event)
+                next_sequence += 1
+            retained = (list(self._events) + new_events)[-self.capacity:]
+            if self._store is not None:
+                try:
+                    self._store.save(self._store_document(
+                        retained, next_sequence, snapshot))
+                except EventStoreError as error:
+                    self._last_error = str(error)
+                    return False
+            self._events.clear()
+            self._events.extend(retained)
+            self._next_sequence = next_sequence
             self._states = states
             self._last_captured_at_ms = captured_at_ms
             self._last_snapshot_id = snapshot_id
+            self._baseline_snapshot = copy.deepcopy(snapshot)
             self._last_error = None
             return True
 
@@ -318,11 +414,29 @@ class RuntimeEventLog:
         incarnation, _ = _decode_cursor(cursor)
         with self._lock:
             if incarnation != self.incarnation:
+                earliest = self._events[0].sequence if self._events else \
+                    self._next_sequence
                 raise ExpiredEventCursor(
-                    _encode_cursor(self.incarnation,
-                                   self._next_sequence - 1))
+                    _encode_cursor(self.incarnation, earliest - 1))
 
     @property
     def latest_cursor(self) -> str:
         with self._lock:
             return _encode_cursor(self.incarnation, self._next_sequence - 1)
+
+    @property
+    def restart_reset_cursor(self) -> str:
+        """新进程基线；明确触发409后可从恢复窗口最早位置重读。"""
+        with self._lock:
+            earliest = self._events[0].sequence if self._events else \
+                self._next_sequence
+            return _encode_cursor(self.incarnation, earliest - 1)
+
+    @property
+    def persistence_status(self) -> dict:
+        return {
+            "enabled": self._store is not None,
+            "load_status": ("disabled" if self._store is None
+                            else self._store.load_status),
+            "recovered_events": self.recovered_event_count,
+        }

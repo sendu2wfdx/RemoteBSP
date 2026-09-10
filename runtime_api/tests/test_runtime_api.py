@@ -717,6 +717,7 @@ class RuntimeServerCliTest(unittest.TestCase):
                         "runtime-api", "--host", "0.0.0.0",
                         "--api-key-file", str(path),
                         "--event-capacity", "64",
+                        "--event-store-dir", str(Path(directory) / "events"),
                         "--control-lease-capacity", "32",
                         "--http-request-timeout-ms", "2500",
                 ]):
@@ -726,6 +727,8 @@ class RuntimeServerCliTest(unittest.TestCase):
         # 配置路径消失必须立即撤销，不得把启动时副本永久留在内存。
         self.assertFalse(authenticator.verify("c" * 32))
         self.assertEqual(factory.call_args.kwargs["event_capacity"], 64)
+        self.assertIsInstance(factory.call_args.kwargs["event_store"],
+                              runtime_server.RuntimeEventStore)
         self.assertEqual(factory.call_args.kwargs[
             "control_lease_capacity"], 32)
         self.assertEqual(factory.call_args.kwargs[
@@ -746,6 +749,19 @@ class RuntimeServerCliTest(unittest.TestCase):
                     patch("sys.stderr"):
                 with self.assertRaises(SystemExit):
                     runtime_server.main()
+
+        for value in ("4095", "33554433"):
+            with self.subTest(event_store_maximum_bytes=value), patch(
+                    "sys.argv", ["runtime-api", "--event-store-dir", "/tmp/events",
+                                 "--event-store-maximum-bytes", value]), patch(
+                    "sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+        with patch("sys.argv", [
+                "runtime-api", "--event-store-maximum-bytes", "4096"]), \
+                patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                runtime_server.main()
 
         for value in ("99", "30001"):
             with self.subTest(http_request_timeout_ms=value), patch(

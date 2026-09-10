@@ -912,6 +912,17 @@ protocol::BusTransferResult Client::spi_transfer(
         protocol::encode_spi_transfer_request(request))));
 }
 
+protocol::AdcContract Client::adc_contract(std::uint32_t resource_id) const {
+    return protocol::decode_adc_contract(body(command(
+        protocol::Command::AdcContract, protocol::encode_resource_id(resource_id))));
+}
+
+protocol::AdcSampleResult Client::adc_sample(
+    const protocol::AdcSampleRequest& request) const {
+    return protocol::decode_adc_sample_result(body(command(
+        protocol::Command::AdcSample, protocol::encode_adc_sample_request(request))));
+}
+
 protocol::StreamContract Client::stream_contract(
     std::uint32_t resource_id) const {
     return protocol::decode_stream_contract(body(command(

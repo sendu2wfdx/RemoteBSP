@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/mock_mcu/device_parameter_store.hpp"
+#include "remotebsp/mock_mcu/adc_bsp.hpp"
 #include "remotebsp/mock_mcu/bus_bsp.hpp"
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/motion_executor.hpp"
@@ -10,6 +11,7 @@
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
+#include "remotebsp/protocol/adc.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/firmware_identity.hpp"
@@ -126,6 +128,7 @@ public:
         TimePoint now = Clock::now());
     const NodeInfo& node_info() const noexcept;
     std::uint64_t capabilities() const noexcept;
+    void set_adc_bsp(std::shared_ptr<AdcBsp> bsp) { adc_bsp_ = std::move(bsp); }
     bool bootloader_requested() const noexcept;
     std::size_t expire_leases(TimePoint now = Clock::now());
     std::size_t release_session(std::uint32_t session_id);
@@ -211,6 +214,8 @@ private:
         const protocol::Packet& request) const;
     protocol::Packet handle_spi_transfer(
         const protocol::Packet& request);
+    protocol::Packet handle_adc_contract(const protocol::Packet& request) const;
+    protocol::Packet handle_adc_sample(const protocol::Packet& request);
     protocol::Packet handle_stream_contract(
         const protocol::Packet& request) const;
     protocol::Packet handle_stream_open(
@@ -348,6 +353,8 @@ private:
     std::shared_ptr<BusBsp> bus_bsp_;
     std::shared_ptr<TimeSyncBsp> time_sync_bsp_;
     std::shared_ptr<StreamBsp> stream_bsp_;
+    std::shared_ptr<AdcBsp> adc_bsp_{std::make_shared<DeterministicAdcBsp>()};
+    std::unordered_map<std::uint32_t, std::uint32_t> adc_sequences_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;

@@ -77,6 +77,9 @@ from .events import (
     RuntimeEventLog,
     validate_event_cursor,
 )
+from .event_store import (
+    DEFAULT_EVENT_STORE_MAXIMUM_BYTES, MAXIMUM_EVENT_STORE_MAXIMUM_BYTES,
+    EventStoreError, RuntimeEventStore)
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION
 from .deadline import (
     MonotonicDeadline,
@@ -2647,6 +2650,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "transport": "short_poll",
                         "maximum_page_size": MAXIMUM_EVENT_PAGE_LIMIT,
                         "capacity": self.event_log.capacity,
+                        "persistence": self.event_log.persistence_status,
                     },
                     **self._runtime_capabilities(),
                 },
@@ -3006,6 +3010,7 @@ def make_server(host: str, port: int,
                 audit_output: Callable[[dict], None] | None = None,
                 event_capacity: int = DEFAULT_EVENT_CAPACITY,
                 event_incarnation: str | None = None,
+                event_store: RuntimeEventStore | None = None,
                 control_lease_capacity: int = DEFAULT_CONTROL_LEASE_CAPACITY,
                 control_lease_manager: ControlLeaseManager | None = None,
                 control_audit_journal: ControlAuditJournal | None = None,
@@ -3040,7 +3045,7 @@ def make_server(host: str, port: int,
     resolved_control_leases = control_lease_manager or \
         ControlLeaseManager(control_lease_capacity)
     event_log = RuntimeEventLog(
-        event_capacity, incarnation=event_incarnation)
+        event_capacity, incarnation=event_incarnation, store=event_store)
     server_type = IPv6ThreadingHTTPServer if ":" in host \
         else BoundedThreadingHTTPServer
     server = server_type((host, port), RuntimeRequestHandler,
@@ -3125,6 +3130,12 @@ def main() -> int:
     parser.add_argument("--event-capacity", type=int,
                         default=DEFAULT_EVENT_CAPACITY,
                         help="进程内增量事件保留条数，默认1024条")
+    parser.add_argument("--event-store-dir", type=Path,
+                        help="显式启用增量事件跨重启恢复的专用目录")
+    parser.add_argument(
+        "--event-store-maximum-bytes", type=int,
+        default=DEFAULT_EVENT_STORE_MAXIMUM_BYTES,
+        help="事件历史持久文件字节上限，默认8388608")
     parser.add_argument("--trend-capacity", type=int,
                         default=60,
                         help="每个趋势序列的样本上限，默认60条")
@@ -3169,6 +3180,12 @@ def main() -> int:
         parser.error("--http-request-timeout-ms必须位于100～30000")
     if args.event_capacity < 1 or args.event_capacity > MAXIMUM_EVENT_CAPACITY:
         parser.error(f"--event-capacity必须位于1～{MAXIMUM_EVENT_CAPACITY}")
+    if args.event_store_maximum_bytes < 4096 or \
+            args.event_store_maximum_bytes > MAXIMUM_EVENT_STORE_MAXIMUM_BYTES:
+        parser.error("--event-store-maximum-bytes必须位于4096～33554432")
+    if args.event_store_dir is None and args.event_store_maximum_bytes != \
+            DEFAULT_EVENT_STORE_MAXIMUM_BYTES:
+        parser.error("--event-store-maximum-bytes必须与--event-store-dir一起使用")
     if args.trend_capacity < 1 or args.trend_capacity > 600:
         parser.error("--trend-capacity必须位于1～600")
     if args.trend_store_maximum_bytes < 4096 or \
@@ -3242,6 +3259,10 @@ def main() -> int:
         except ControlAuditError as error:
             parser.error(f"控制审计配置无效：{error}")
     try:
+        event_store = RuntimeEventStore(
+            args.event_store_dir,
+            maximum_bytes=args.event_store_maximum_bytes
+        ) if args.event_store_dir is not None else None
         alert_rules = AlertRuleManager(AlertRuleStore(
             args.alert_rule_store_dir)) if args.alert_rule_store_dir else \
             AlertRuleManager()
@@ -3251,7 +3272,8 @@ def main() -> int:
         ) if args.trend_store_dir is not None else None
         runtime_dashboard = RuntimeDashboard(
             args.trend_capacity, trend_store, alert_rules)
-    except (TrendStoreError, AlertRuleError, ValueError) as error:
+    except (TrendStoreError, AlertRuleError, EventStoreError,
+            ValueError) as error:
         parser.error(f"Runtime持久配置无效：{error}")
     try:
         server = make_server(
@@ -3259,6 +3281,7 @@ def main() -> int:
             maximum_workers=args.http_workers,
             authenticator=authenticator,
             event_capacity=args.event_capacity,
+            event_store=event_store,
             control_lease_manager=control_lease_manager,
             control_audit_journal=control_audit_journal,
             control_lease_capacity=(
