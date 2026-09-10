@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 HEALTH_CONTRACT_VERSION = 1
 HEALTH_SOURCE_TOOLBUSD = 3
+HEALTH_SOURCE_MCU = 1
+HEALTH_SOURCE_REMOTE_CORE = 2
 MAXIMUM_HEALTH_METRICS = 48
 _HEADER_SIZE = 36
 _METRIC_SIZE = 12
@@ -142,8 +144,10 @@ def _project(snapshot: _DecodedSnapshot) -> dict:
         })
     return {
         "contract_version": HEALTH_CONTRACT_VERSION,
-        "source": "toolbusd" if snapshot.source == HEALTH_SOURCE_TOOLBUSD
-                  else f"unknown_source_{snapshot.source}",
+        "source": {HEALTH_SOURCE_MCU: "mcu",
+                   HEALTH_SOURCE_REMOTE_CORE: "remote_core",
+                   HEALTH_SOURCE_TOOLBUSD: "toolbusd"}.get(
+                       snapshot.source, f"unknown_source_{snapshot.source}"),
         "node_id": snapshot.node_id,
         "producer_generation": snapshot.producer_generation,
         "sample_sequence": snapshot.sequence,
@@ -189,6 +193,50 @@ class TrustedToolbusdHealthProjection:
         with self._lock:
             if decoded.producer_generation != self._generation:
                 raise HealthProjectionError("健康载荷与当前 daemon 代际不匹配")
+            if decoded.sequence == self._last_sequence:
+                if payload != self._last_payload or self._last_projection is None:
+                    raise HealthProjectionError("相同采样序号出现不同载荷")
+                return copy.deepcopy(self._last_projection)
+            if decoded.sequence < self._last_sequence:
+                raise HealthProjectionError("健康载荷采样序号陈旧")
+            if self._last_sequence != 0 and \
+                    decoded.sample_time_ms < self._last_sample_time_ms:
+                raise HealthProjectionError("健康载荷采样时钟回退")
+            projected = _project(decoded)
+            self._last_sequence = decoded.sequence
+            self._last_sample_time_ms = decoded.sample_time_ms
+            self._last_payload = payload
+            self._last_projection = projected
+            return copy.deepcopy(projected)
+
+
+class TrustedNodeHealthProjection:
+    """绑定一个已发现节点的来源、ID 与生产者代际，隔离陈旧或冒充样本。"""
+
+    def __init__(self, source: int, node_id: int, producer_generation: int):
+        if source not in {HEALTH_SOURCE_MCU, HEALTH_SOURCE_REMOTE_CORE}:
+            raise HealthProjectionError("节点健康来源必须是 MCU 或 Remote Core")
+        if type(node_id) is not int or not 0 <= node_id <= 127:
+            raise HealthProjectionError("可信节点 ID 无效")
+        if type(producer_generation) is not int or not \
+                1 <= producer_generation <= 0xFFFFFFFFFFFFFFFF:
+            raise HealthProjectionError("可信节点健康代际无效")
+        self._source = source
+        self._node_id = node_id
+        self._generation = producer_generation
+        self._last_sequence = 0
+        self._last_sample_time_ms = 0
+        self._last_payload: bytes | None = None
+        self._last_projection: dict | None = None
+        self._lock = threading.Lock()
+
+    def ingest(self, payload: bytes) -> dict:
+        decoded = _decode(payload)
+        if decoded.source != self._source or decoded.node_id != self._node_id:
+            raise HealthProjectionError("健康载荷与可信节点路由不匹配")
+        if decoded.producer_generation != self._generation:
+            raise HealthProjectionError("健康载荷与可信节点代际不匹配")
+        with self._lock:
             if decoded.sequence == self._last_sequence:
                 if payload != self._last_payload or self._last_projection is None:
                     raise HealthProjectionError("相同采样序号出现不同载荷")

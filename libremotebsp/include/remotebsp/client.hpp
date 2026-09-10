@@ -304,6 +304,7 @@ public:
         const std::vector<std::uint8_t>& data) const;
     NodeInfo get_info() const;
     protocol::FirmwareIdentityPayload firmware_identity() const;
+    protocol::HealthSnapshot node_health_snapshot() const;
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     DaemonIdentity daemon_identity() const;
@@ -406,6 +407,11 @@ public:
     bool gpio_read(std::uint32_t object_id) const;
     void gpio_write(std::uint32_t object_id, bool value) const;
     void gpio_close(std::uint32_t object_id) const;
+    void gpio_input_subscribe(
+        std::uint32_t object_id,
+        const protocol::GpioInputSubscription& subscription) const;
+    protocol::GpioInputEventStatus gpio_input_event_status(
+        std::uint32_t object_id) const;
 
     std::uint32_t pwm_create(
         const protocol::PwmCreatePayload& config) const;

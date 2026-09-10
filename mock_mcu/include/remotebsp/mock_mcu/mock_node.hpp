@@ -47,6 +47,10 @@ public:
     NodeReply make_heartbeat();
     std::vector<NodeReply> poll_uart_events(
         std::size_t maximum_payload = 64);
+    std::vector<NodeReply> poll_gpio_input_events(
+        std::size_t maximum_events = 16,
+        protocol::Reassembler::TimePoint now =
+            protocol::Reassembler::Clock::now());
     std::vector<NodeReply> poll_stream_events(
         std::size_t maximum_events = 16);
     std::uint16_t allocate_transfer_id();

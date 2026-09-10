@@ -5,6 +5,7 @@ import json
 
 from runtime_api.health_projection import (
     HealthProjectionError,
+    TrustedNodeHealthProjection,
     TrustedToolbusdHealthProjection,
 )
 from runtime_api.provider import RuntimeProviderError
@@ -33,6 +34,24 @@ def payload(*, source=3, overall=0, sequence=1, sample_time_ms=100,
 
 
 class HealthProjectionTests(unittest.TestCase):
+    def test_node_projection_binds_source_node_and_generation(self):
+        registry = TrustedNodeHealthProjection(1, 7, 33)
+        wire = payload(source=1, node_id=7, generation=33,
+                       metrics=[(1, 2, 3, 0), (6, 1, 1, 2),
+                                (7, 1, 1, 8)])
+        projected = registry.ingest(wire)
+        self.assertEqual(projected["source"], "mcu")
+        self.assertEqual(projected["node_id"], 7)
+        self.assertIsNone(projected["metrics"][0]["value"])
+        self.assertEqual(projected["metrics"][1]["value"], 2)
+        self.assertEqual(registry.ingest(wire), projected)
+        for invalid in (
+                payload(source=2, node_id=7, generation=33),
+                payload(source=1, node_id=8, generation=33),
+                payload(source=1, node_id=7, generation=34)):
+            with self.assertRaises(HealthProjectionError):
+                registry.ingest(invalid)
+
     def test_projects_stable_schema_and_null_for_unavailable(self):
         projection = TrustedToolbusdHealthProjection(9).ingest(payload())
         self.assertEqual(projection, {

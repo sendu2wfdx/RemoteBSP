@@ -116,6 +116,9 @@ void test_session_and_response_validation() {
 
     auto event = make_response(request.packet);
     event.header.message_type = protocol::MessageType::Event;
+    event.header.command = static_cast<std::uint16_t>(
+        protocol::Command::GpioInputEvent);
+    event.header.object_id = 42U;
     CHECK(manager.accept_response(event, now).status ==
           toolbusd::ResponseStatus::Unexpected);
     CHECK(manager.pending_count() == 1);

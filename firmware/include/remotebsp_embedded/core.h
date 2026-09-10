@@ -166,6 +166,26 @@ typedef struct {
     bool backend_failed;
 } rbsp_resource_runtime_status_t;
 
+enum {
+    RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE = 1U << 0,
+    RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE = 1U << 1,
+    RBSP_MCU_HEALTH_STACK_FREE_AVAILABLE = 1U << 2,
+    RBSP_MCU_HEALTH_SAMPLE_OVERRUN_AVAILABLE = 1U << 3,
+};
+
+/*
+ * 板级采样器只填写它能够真实测量的字段。producer_generation 必须在每次
+ * MCU 重启后变化且非零；不能满足时回调应返回 false，Core 将明确返回不支持。
+ */
+typedef struct {
+    uint64_t producer_generation;
+    uint32_t available_fields;
+    uint16_t cpu_load_permille;
+    uint16_t isr_load_permille;
+    uint32_t minimum_stack_free_bytes;
+    uint64_t sample_overrun_total;
+} rbsp_mcu_health_sample_t;
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
 typedef struct {
     uint32_t logical_id;
@@ -246,6 +266,7 @@ typedef struct {
     bool (*uart_reset)(uint8_t port);
     bool (*resource_status)(uint8_t resource_type, uint16_t instance,
                             rbsp_resource_runtime_status_t* status);
+    bool (*health_sample)(rbsp_mcu_health_sample_t* sample);
 #if defined(CONFIG_REMOTEBSP_BUS)
     const rbsp_bus_resource_config_t* bus_resources;
     uint8_t bus_resource_count;
@@ -378,6 +399,9 @@ typedef struct {
     uint32_t bootloader_request_ms;
     rbsp_bootloader_mode_t bootloader_request_mode;
     bool bootloader_request_pending;
+    uint32_t health_started_ms;
+    uint64_t health_producer_generation;
+    uint64_t health_sample_sequence;
     rbsp_reassembly_slot_t reassembly[CONFIG_REMOTE_REASSEMBLY_SLOTS];
     rbsp_request_cache_entry_t cache[CONFIG_REMOTE_REQUEST_CACHE_ENTRIES];
     rbsp_gpio_object_t gpio_objects[CONFIG_GPIO_RESOURCE_COUNT];

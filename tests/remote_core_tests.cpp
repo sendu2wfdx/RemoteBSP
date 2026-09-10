@@ -106,6 +106,52 @@ void test_ping() {
               mock_mcu::StatusCode::InvalidPayload)}));
 }
 
+void test_health_snapshot_is_honest_and_monotonic() {
+    auto core = make_core();
+    auto request = make_request(protocol::Command::HealthSnapshot);
+    request.header.object_id = 0U;
+    const auto start = mock_mcu::RemoteCore::TimePoint{} +
+        std::chrono::milliseconds(100U);
+    const auto first = core.handle(request, start);
+    CHECK(first.header.flags == 0U && first.payload[0] == 0U);
+    const auto decoded = protocol::decode_health_snapshot(
+        {first.payload.begin() + 1, first.payload.end()});
+    CHECK(decoded.source == protocol::HealthSource::RemoteCore);
+    CHECK(decoded.overall == protocol::OverallHealth::Unknown);
+    CHECK(decoded.sample_sequence == 1U);
+    CHECK(decoded.sample_time_ms == 0U);
+    CHECK(decoded.producer_generation != 0U);
+    const auto* cpu = protocol::find_health_metric(
+        decoded, protocol::HealthMetricId::CpuLoadPermille);
+    const auto* request_depth = protocol::find_health_metric(
+        decoded, protocol::HealthMetricId::RequestQueueDepth);
+    const auto* leases = protocol::find_health_metric(
+        decoded, protocol::HealthMetricId::ActiveLeaseCount);
+    CHECK(cpu != nullptr &&
+          cpu->availability == protocol::MetricAvailability::Unavailable);
+    CHECK(request_depth != nullptr &&
+          request_depth->availability ==
+              protocol::MetricAvailability::Unavailable);
+    CHECK(leases != nullptr &&
+          leases->availability == protocol::MetricAvailability::Available &&
+          leases->value == 0U);
+
+    request.header.request_id++;
+    const auto second = core.handle(request, start +
+                                             std::chrono::milliseconds(5U));
+    const auto second_decoded = protocol::decode_health_snapshot(
+        {second.payload.begin() + 1, second.payload.end()});
+    CHECK(second_decoded.sample_sequence == 2U);
+    CHECK(second_decoded.sample_time_ms == 5U);
+
+    auto restarted = make_core();
+    const auto after_restart = restarted.handle(request, start);
+    const auto restart_decoded = protocol::decode_health_snapshot(
+        {after_restart.payload.begin() + 1, after_restart.payload.end()});
+    CHECK(restart_decoded.producer_generation !=
+          decoded.producer_generation);
+}
+
 void test_bootloader_enter() {
     auto request = make_request(protocol::Command::BootloaderEnter);
     request.header.object_id = 0;
@@ -168,6 +214,7 @@ int main() {
     test_get_info();
     test_get_capability();
     test_ping();
+    test_health_snapshot_is_honest_and_monotonic();
     test_bootloader_enter();
     test_errors();
     if (failures != 0) {

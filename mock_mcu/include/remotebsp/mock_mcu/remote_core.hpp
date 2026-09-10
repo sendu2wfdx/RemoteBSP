@@ -13,6 +13,7 @@
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/firmware_identity.hpp"
+#include "remotebsp/protocol/health.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/packet.hpp"
@@ -22,6 +23,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
@@ -129,6 +131,10 @@ public:
     std::size_t release_session(std::uint32_t session_id);
     std::vector<protocol::Packet> poll_uart_events(
         std::size_t maximum_payload = 64);
+    std::vector<protocol::Packet> poll_gpio_input_events(
+        std::size_t maximum_events = 16,
+        TimePoint now = Clock::now());
+    void sample_gpio_inputs(TimePoint now = Clock::now());
     std::vector<protocol::Packet> poll_stream_events(
         std::size_t maximum_events = 16,
         TimePoint now = Clock::now());
@@ -152,6 +158,8 @@ private:
     protocol::Packet handle_ping(const protocol::Packet& request) const;
     protocol::Packet handle_time_sync(
         const protocol::Packet& request, TimePoint now) const;
+    protocol::Packet handle_health_snapshot(
+        const protocol::Packet& request, TimePoint now);
     protocol::Packet handle_bootloader_enter(
         const protocol::Packet& request);
     protocol::Packet handle_resource_enum(
@@ -188,6 +196,10 @@ private:
     protocol::Packet handle_gpio_read(const protocol::Packet& request) const;
     protocol::Packet handle_gpio_write(const protocol::Packet& request);
     protocol::Packet handle_gpio_close(const protocol::Packet& request);
+    protocol::Packet handle_gpio_input_subscribe(
+        const protocol::Packet& request, TimePoint now);
+    protocol::Packet handle_gpio_input_event_status(
+        const protocol::Packet& request) const;
     protocol::Packet handle_uart_create(const protocol::Packet& request);
     protocol::Packet handle_uart_read(const protocol::Packet& request);
     protocol::Packet handle_uart_write(const protocol::Packet& request);
@@ -245,6 +257,15 @@ private:
         GpioDirection direction{GpioDirection::Input};
         std::uint32_t resource_id{};
         std::uint32_t owner_session_id{};
+        bool input_events_enabled{};
+        protocol::GpioInputSubscription input_subscription{};
+        bool stable_value{};
+        bool candidate_value{};
+        bool candidate_active{};
+        TimePoint candidate_since{};
+        std::uint32_t event_sequence{};
+        std::uint32_t dropped_events{};
+        std::deque<protocol::GpioInputEvent> input_events;
     };
 
     struct UartObject {
@@ -344,6 +365,10 @@ private:
     std::uint32_t parameter_unlock_token_{};
     TimePoint parameter_unlock_expires_{};
     bool parameter_restart_required_{};
+    std::uint64_t health_producer_generation_{};
+    std::uint64_t health_sample_sequence_{};
+    TimePoint health_started_at_{};
+    bool health_started_{};
 };
 
 }

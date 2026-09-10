@@ -32,6 +32,15 @@ int main(int argc, char** argv) {
     assert(info.protocol_version ==
            remotebsp::protocol::kProtocolVersion);
     assert(client.get_capabilities() != 0);
+    const auto node_health = client.node_health_snapshot();
+    assert(node_health.source ==
+           remotebsp::protocol::HealthSource::RemoteCore);
+    assert(node_health.sample_sequence == 1U);
+    assert(node_health.producer_generation != 0U);
+    const auto* node_cpu = remotebsp::protocol::find_health_metric(
+        node_health, remotebsp::protocol::HealthMetricId::CpuLoadPermille);
+    assert(node_cpu != nullptr && node_cpu->availability ==
+           remotebsp::protocol::MetricAvailability::Unavailable);
 
     const auto resources = client.list_resources();
     assert(resources.size() == 30);
@@ -72,6 +81,31 @@ int main(int argc, char** argv) {
     assert(client.gpio_read(gpio));
     client.gpio_close(gpio);
     client.gpio_close(gpio);
+
+    const auto gpio_input = client.gpio_create(
+        11, remotebsp::GpioDirection::Input, false);
+    remotebsp::protocol::GpioInputSubscription gpio_subscription;
+    gpio_subscription.debounce_us = 2500U;
+    gpio_subscription.queue_capacity = 4U;
+    client.gpio_input_subscribe(gpio_input, gpio_subscription);
+    const auto gpio_event_status =
+        client.gpio_input_event_status(gpio_input);
+    assert(gpio_event_status.queued_events == 0U);
+    assert(gpio_event_status.queue_capacity == 4U);
+    assert(gpio_event_status.dropped_events == 0U);
+    try {
+        static_cast<void>(client.gpio_input_event_status(0U));
+        assert(false);
+    } catch (const remotebsp::ClientException&) {
+    }
+    auto invalid_gpio_subscription = gpio_subscription;
+    invalid_gpio_subscription.queue_capacity = 0U;
+    try {
+        client.gpio_input_subscribe(gpio_input, invalid_gpio_subscription);
+        assert(false);
+    } catch (const remotebsp::protocol::GpioPayloadException&) {
+    }
+    client.gpio_close(gpio_input);
 
     remotebsp::UartConfig config;
     config.port = 1;

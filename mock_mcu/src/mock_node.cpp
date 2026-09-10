@@ -75,6 +75,19 @@ std::vector<NodeReply> MockNode::poll_uart_events(
     return replies;
 }
 
+std::vector<NodeReply> MockNode::poll_gpio_input_events(
+    std::size_t maximum_events, protocol::Reassembler::TimePoint now) {
+    std::vector<NodeReply> replies;
+    for (auto& event : core_.poll_gpio_input_events(maximum_events, now)) {
+        const std::uint16_t transfer_id = allocate_transfer_id();
+        replies.push_back(
+            {transfer_id,
+             fragmenter_.split(protocol::encode(std::move(event)),
+                               transfer_id)});
+    }
+    return replies;
+}
+
 std::vector<NodeReply> MockNode::poll_stream_events(
     std::size_t maximum_events) {
     std::vector<NodeReply> replies;

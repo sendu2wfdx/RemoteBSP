@@ -21,6 +21,7 @@ enum {
     RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
     RBSP_COMMAND_FIRMWARE_IDENTITY = 0x0015,
     RBSP_COMMAND_TIME_SYNC = 0x0020,
+    RBSP_COMMAND_HEALTH_SNAPSHOT = 0x0021,
     RBSP_COMMAND_RESOURCE_ENUM = 0x0030,
     RBSP_COMMAND_RESOURCE_DESCRIBE = 0x0031,
     RBSP_COMMAND_RESOURCE_STATUS = 0x0032,
@@ -129,6 +130,20 @@ enum {
     RBSP_FIRMWARE_IDENTITY_INPUT_SHA256 = 1U << 2U,
 };
 
+enum {
+    RBSP_HEALTH_SOURCE_MCU = 1U,
+    RBSP_OVERALL_HEALTH_UNKNOWN = 0U,
+    RBSP_OVERALL_HEALTH_FAULT = 3U,
+    RBSP_METRIC_AVAILABLE = 1U,
+    RBSP_METRIC_UNAVAILABLE = 2U,
+    RBSP_METRIC_UNIT_COUNT = 1U,
+    RBSP_METRIC_UNIT_BYTES = 2U,
+    RBSP_METRIC_UNIT_PERMILLE = 3U,
+    RBSP_METRIC_UNIT_MILLISECONDS = 4U,
+    RBSP_HEALTH_HEADER_SIZE = 36U,
+    RBSP_HEALTH_METRIC_SIZE = 12U,
+};
+
 #ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
 static int hex_nibble(char value) {
     if (value >= '0' && value <= '9') {
@@ -218,6 +233,58 @@ static uint32_t get_u32(const uint8_t* input) {
            ((uint32_t)input[1] << 8U) |
            ((uint32_t)input[2] << 16U) |
            ((uint32_t)input[3] << 24U);
+}
+
+static void put_health_metric(uint8_t* output, uint16_t id,
+                              uint8_t availability, uint8_t unit,
+                              uint64_t value) {
+    put_u16(output, id);
+    output[2U] = availability;
+    output[3U] = unit;
+    put_u64(output + 4U,
+            availability == RBSP_METRIC_AVAILABLE ? value : 0U);
+}
+
+static uint64_t active_lease_count(const rbsp_core_t* core) {
+    uint64_t count = 0U;
+    (void)core;
+#if defined(CONFIG_REMOTEBSP_BUS)
+    for (size_t index = 0U; index < CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT;
+         ++index) {
+        if (core->bus_leases[index].active) ++count;
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_MOTION)
+    for (size_t index = 0U; index < CONFIG_MOTION_MAX_AXES; ++index) {
+        if (core->stepgen_leases[index].active) ++count;
+    }
+#endif
+    return count;
+}
+
+static uint64_t resource_fault_count(const rbsp_core_t* core) {
+    uint64_t count = 0U;
+    (void)core;
+#if CONFIG_UART_RESOURCE_COUNT > 0
+    for (size_t index = 0U; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
+        if (core->uart_status[index].backend_failed) ++count;
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_PWM)
+    for (size_t index = 0U; index < CONFIG_PWM_RESOURCE_COUNT; ++index) {
+        if (core->pwm_status[index].backend_failed) ++count;
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+    for (size_t index = 0U; index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT;
+         ++index) {
+        if (core->timed_bitstream_status[index].backend_failed) ++count;
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_MOTION)
+    if (core->motion.fault != RBSP_MOTION_FAULT_NONE) ++count;
+#endif
+    return count;
 }
 
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
@@ -2083,6 +2150,114 @@ static bool process_request(rbsp_core_t* core,
                 core, request, RBSP_STATUS_OK, 0U, payload + 1U, 120U);
             break;
 
+        case RBSP_COMMAND_HEALTH_SNAPSHOT: {
+            rbsp_mcu_health_sample_t sample;
+            memset(&sample, 0, sizeof(sample));
+            if (request->object_id != 0U || request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+                break;
+            }
+            if (core->hal.health_sample == NULL ||
+                !core->hal.health_sample(&sample) ||
+                sample.producer_generation == 0U ||
+                (sample.available_fields & ~UINT32_C(0x0F)) != 0U ||
+                (((sample.available_fields &
+                   RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE) != 0U) &&
+                 sample.cpu_load_permille > 1000U) ||
+                (((sample.available_fields &
+                   RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE) != 0U) &&
+                 sample.isr_load_permille > 1000U) ||
+                (core->health_producer_generation != 0U &&
+                 core->health_producer_generation !=
+                     sample.producer_generation) ||
+                core->health_sample_sequence == UINT64_MAX) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_UNSUPPORTED_CAPABILITY,
+                    0U, NULL, 0U);
+                break;
+            }
+            core->health_producer_generation = sample.producer_generation;
+            const uint64_t faults = resource_fault_count(core);
+            const uint16_t metric_count = 11U;
+            const uint32_t uptime_ms =
+                core->hal.milliseconds() - core->health_started_ms;
+            uint8_t* data = payload + 1U;
+            memset(data, 0, RBSP_HEALTH_HEADER_SIZE +
+                            metric_count * RBSP_HEALTH_METRIC_SIZE);
+            put_u16(data, 1U);
+            data[2U] = RBSP_HEALTH_SOURCE_MCU;
+            data[3U] = faults != 0U ||
+                       (((sample.available_fields &
+                          RBSP_MCU_HEALTH_STACK_FREE_AVAILABLE) != 0U) &&
+                        sample.minimum_stack_free_bytes == 0U)
+                           ? RBSP_OVERALL_HEALTH_FAULT
+                           : RBSP_OVERALL_HEALTH_UNKNOWN;
+            put_u64(data + 4U, ++core->health_sample_sequence);
+            put_u64(data + 12U, uptime_ms);
+            put_u32(data + 20U, core->node_id);
+            put_u64(data + 24U, sample.producer_generation);
+            put_u16(data + 32U, metric_count);
+            uint8_t* metric = data + RBSP_HEALTH_HEADER_SIZE;
+#define RBSP_PUT_HEALTH_METRIC(id, availability, unit, value)             \
+    do {                                                                  \
+        put_health_metric(metric, (id), (availability), (unit), (value)); \
+        metric += RBSP_HEALTH_METRIC_SIZE;                                \
+    } while (0)
+            RBSP_PUT_HEALTH_METRIC(
+                1U, (sample.available_fields &
+                     RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE) != 0U
+                        ? RBSP_METRIC_AVAILABLE : RBSP_METRIC_UNAVAILABLE,
+                RBSP_METRIC_UNIT_PERMILLE, sample.cpu_load_permille);
+            RBSP_PUT_HEALTH_METRIC(
+                2U, (sample.available_fields &
+                     RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE) != 0U
+                        ? RBSP_METRIC_AVAILABLE : RBSP_METRIC_UNAVAILABLE,
+                RBSP_METRIC_UNIT_PERMILLE, sample.isr_load_permille);
+            RBSP_PUT_HEALTH_METRIC(
+                3U, (sample.available_fields &
+                     RBSP_MCU_HEALTH_STACK_FREE_AVAILABLE) != 0U
+                        ? RBSP_METRIC_AVAILABLE : RBSP_METRIC_UNAVAILABLE,
+                RBSP_METRIC_UNIT_BYTES, sample.minimum_stack_free_bytes);
+            RBSP_PUT_HEALTH_METRIC(4U, RBSP_METRIC_UNAVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT, 0U);
+            RBSP_PUT_HEALTH_METRIC(5U, RBSP_METRIC_UNAVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT, 0U);
+#if defined(CONFIG_REMOTEBSP_MOTION)
+            RBSP_PUT_HEALTH_METRIC(6U, RBSP_METRIC_AVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT,
+                                   core->motion.size);
+            RBSP_PUT_HEALTH_METRIC(7U, RBSP_METRIC_AVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT,
+                                   CONFIG_MOTION_QUEUE_DEPTH);
+#else
+            RBSP_PUT_HEALTH_METRIC(6U, RBSP_METRIC_UNAVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT, 0U);
+            RBSP_PUT_HEALTH_METRIC(7U, RBSP_METRIC_UNAVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT, 0U);
+#endif
+            RBSP_PUT_HEALTH_METRIC(20U, RBSP_METRIC_AVAILABLE,
+                                   RBSP_METRIC_UNIT_MILLISECONDS,
+                                   uptime_ms);
+            RBSP_PUT_HEALTH_METRIC(21U, RBSP_METRIC_AVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT,
+                                   active_lease_count(core));
+            RBSP_PUT_HEALTH_METRIC(22U, RBSP_METRIC_AVAILABLE,
+                                   RBSP_METRIC_UNIT_COUNT, faults);
+            RBSP_PUT_HEALTH_METRIC(
+                23U, (sample.available_fields &
+                      RBSP_MCU_HEALTH_SAMPLE_OVERRUN_AVAILABLE) != 0U
+                         ? RBSP_METRIC_AVAILABLE : RBSP_METRIC_UNAVAILABLE,
+                RBSP_METRIC_UNIT_COUNT, sample.sample_overrun_total);
+#undef RBSP_PUT_HEALTH_METRIC
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, data,
+                (uint16_t)(RBSP_HEALTH_HEADER_SIZE +
+                           metric_count * RBSP_HEALTH_METRIC_SIZE));
+            break;
+        }
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_TIME_SYNC: {
             if (!motion_available(core)) {
@@ -3920,6 +4095,7 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
 #endif
     core->next_transfer_id = 1U;
     core->last_heartbeat_ms = hal->milliseconds();
+    core->health_started_ms = core->last_heartbeat_ms;
     return true;
 }
 

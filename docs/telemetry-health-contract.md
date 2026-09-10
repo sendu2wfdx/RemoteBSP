@@ -5,8 +5,10 @@
 `protocol/health.hpp` 定义了 MCU、Remote Core 和 toolbusd 共用的机器可读契约，命令号
 为 `HealthSnapshot (0x0021)`。toolbusd 已接入仅汇总自身可证明软件状态的生产者，并经
 版本化只读 IPC、`libremotebsp`、`remote-cli --json` 和 Runtime 可信投影贯通到认证读取
-接口。MCU、Remote Core 与实体板采样仍未接入，任何界面都不得把 toolbusd 软件快照外推
-成远端节点或物理总线遥测。
+接口。公共嵌入式 Remote Core 和 Mock Remote Core 已实现单节点 `HealthSnapshot` 应答，
+`libremotebsp` 与 `remote-cli node-health-snapshot` 可读取原始节点快照；Runtime 提供按可信
+来源、节点 ID 和生产者代际绑定的严格投影器。实体板尚未提供可保证跨重启变化的健康生产者
+代际和 CPU/ISR/栈采样后端，因此当前板级 HAL 会诚实返回不支持，不能据此声称已有实体遥测。
 
 这是一份软件状态契约，不是物理测量合同。Mock 环境不能真实测得 MCU CPU/ISR 占用、
 栈水位、CAN 仲裁延迟、USB transaction 延迟、温度、电压或电气错误；这类指标必须标为
@@ -79,6 +81,12 @@ v1 使用 36 字节固定头和最多 48 个 12 字节指标项，单个编码�
 | active leases/resource faults | count | Remote Core 或 toolbusd 可由当前状态计算 |
 | sample overruns | count | 有界周期采样器跳过样本时累计 |
 
+嵌入式 HAL 的 `health_sample` 回调必须提供每次重启均变化的非零生产者代际，并通过字段位图
+逐项声明 CPU、ISR、最小栈余量和采样丢失计数是否真实可用。回调缺失、代际为零、字段位非法
+或负载超过 1000 时，Remote Core 返回 `UnsupportedCapability`，不会生成全零“正常”快照。
+运动队列深度/容量、活动租约数、资源故障数和 uptime 由公共 Core 从同一时刻的软件状态计算；
+同步处理路径没有请求队列，因此请求队列深度和容量明确标为 `unavailable`。
+
 CPU 和 ISR 负载的 available 值限制为 0～1000。队列或缓冲区的 available 容量必须大于
 0；当深度和容量同时 available 时，深度不得超过容量。available 的代际值必须大于 0。
 累计计数器允许为 0；生产者重启导致计数归零时，必须更换头部必填的
@@ -103,5 +111,6 @@ CPU 和 ISR 负载的 available 值限制为 0～1000。队列或缓冲区的 av
 Ubuntu WSL 单元测试覆盖规范往返、available 零值与 unavailable/unknown 的区别、未知
 来源/指标/单位保留、重复与乱序指标、标准单位不匹配、非 available 非零值、负载范围、
 队列关系、必填生产者代际与可选指标零代际、数量上限、保留位、截断和尾随字节。测试
-使用始终执行的显式检查，不依赖 `assert`，并在 Release/`NDEBUG` 配置验证。本测试不使用
-vcan，也不形成实体硬件或实时性能结论。
+使用始终执行的显式检查，不依赖 `assert`，并在 Release/`NDEBUG` 配置验证。嵌入式单测还
+覆盖 MCU 样本字段、代际、序号、时间基、运动队列以及不可用语义；Mock 单测覆盖生产者代际
+隔离与单调序号。本测试不使用 vcan，也不形成实体硬件或实时性能结论。

@@ -55,6 +55,18 @@ static unsigned timed_bitstream_abort_count;
 static unsigned pwm_stop_count;
 static bool pwm_stop_must_fail;
 static bool timed_bitstream_abort_must_fail;
+static bool health_sample_supported = true;
+static rbsp_mcu_health_sample_t health_sample = {
+    .producer_generation = 77U,
+    .available_fields = RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE |
+                        RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE |
+                        RBSP_MCU_HEALTH_STACK_FREE_AVAILABLE |
+                        RBSP_MCU_HEALTH_SAMPLE_OVERRUN_AVAILABLE,
+    .cpu_load_permille = 321U,
+    .isr_load_permille = 45U,
+    .minimum_stack_free_bytes = 768U,
+    .sample_overrun_total = 2U,
+};
 static unsigned bootloader_enter_count;
 static rbsp_bootloader_mode_t last_bootloader_mode;
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -364,6 +376,12 @@ static bool fake_resource_status(
     return true;
 }
 
+static bool fake_health_sample(rbsp_mcu_health_sample_t* sample) {
+    if (!health_sample_supported || sample == NULL) return false;
+    *sample = health_sample;
+    return true;
+}
+
 
 static bool fake_timed_bitstream_configure(
     uint8_t channel, uint32_t bit_period_ns, uint32_t zero_high_ns,
@@ -646,6 +664,7 @@ int main(void) {
         .uart_write = fake_uart_write,
         .uart_reset = fake_uart_reset,
         .resource_status = fake_resource_status,
+        .health_sample = fake_health_sample,
 #if defined(CONFIG_REMOTEBSP_BUS)
         .bus_resources = test_bus_resources,
         .bus_resource_count = 2U,
@@ -688,6 +707,39 @@ int main(void) {
     };
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     core.node_id = 25U;
+    now_ms = 1234U;
+    uint8_t health_response[1024U];
+    assert(exchange_status(&core, 0x0021U, 0x12345678U, 191U, 0U,
+                           NULL, 0U, health_response) == 0U);
+    /* status 后紧跟 HealthSnapshot v1 的36字节头和11个指标。 */
+    assert(get_u16(health_response + 25U) == 1U);
+    assert(health_response[27U] == 1U && health_response[28U] == 0U);
+    assert(get_u64(health_response + 29U) == 1U);
+    assert(get_u64(health_response + 37U) == 1234U);
+    assert(get_u32(health_response + 45U) == 25U);
+    assert(get_u64(health_response + 49U) == 77U);
+    assert(get_u16(health_response + 57U) == 11U);
+    assert(get_u16(health_response + 61U) == 1U &&
+           health_response[63U] == 1U &&
+           health_response[64U] == 3U &&
+           get_u64(health_response + 65U) == 321U);
+    /* 同步 Remote Core 没有请求队列，必须明确 unavailable 而不是伪报0。 */
+    assert(get_u16(health_response + 97U) == 4U &&
+           health_response[99U] == 2U &&
+           get_u64(health_response + 101U) == 0U);
+
+    health_sample_supported = false;
+    assert(exchange_status(&core, 0x0021U, 0x12345678U, 192U, 0U,
+                           NULL, 0U, health_response) == 6U);
+    health_sample_supported = true;
+    health_sample.cpu_load_permille = 1001U;
+    assert(exchange_status(&core, 0x0021U, 0x12345678U, 193U, 0U,
+                           NULL, 0U, health_response) == 6U);
+    health_sample.cpu_load_permille = 321U;
+    health_sample.producer_generation = 78U;
+    assert(exchange_status(&core, 0x0021U, 0x12345678U, 194U, 0U,
+                           NULL, 0U, health_response) == 6U);
+    health_sample.producer_generation = 77U;
     clear_sent();
     uint8_t identity_request[64U];
     uint8_t identity_response[192U];
@@ -704,6 +756,7 @@ int main(void) {
     for (size_t index = 49U; index < 145U; ++index) {
         assert(identity_response[index] == 0U);
     }
+    now_ms = 0U;
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     test_resource_reset(&hal, &info);
     uint8_t request[1024];

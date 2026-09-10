@@ -413,6 +413,7 @@ void print_usage() {
         << "  traffic-status\n"
         << "  daemon-identity\n"
         << "  health-snapshot\n"
+        << "  node-health-snapshot\n"
         << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <租约ms>\n"
         << "  runtime-gpio-write <daemon实例ID> <控制租约ID> "
@@ -448,6 +449,9 @@ void print_usage() {
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
         << "  gpio-close <对象ID>\n"
+        << "  gpio-input-subscribe <对象ID> <rising|falling|both> "
+           "<去抖微秒> <队列容量>\n"
+        << "  gpio-input-event-status <对象ID>\n"
         << "  pwm-create <通道> <频率Hz> <占空比0..10000> [active-high|active-low]\n"
         << "  pwm-write <对象ID> <占空比0..10000>\n"
         << "  pwm-stop <对象ID>\n"
@@ -521,6 +525,23 @@ int run(const std::vector<std::string>& arguments,
                       << snapshot.health.sample_time_ms
                       << " metrics=" << snapshot.health.metrics.size()
                       << '\n';
+        }
+        return 0;
+    }
+
+    if (name == "node-health-snapshot" && arguments.size() == 1) {
+        const auto snapshot = client.node_health_snapshot();
+        if (json_output) {
+            remotebsp::cli_json::write_node_health_snapshot(
+                std::cout, snapshot);
+        } else {
+            std::cout << "health_version=" << snapshot.version
+                      << " source=" << static_cast<unsigned>(snapshot.source)
+                      << " node_id=" << snapshot.node_id
+                      << " generation=" << snapshot.producer_generation
+                      << " sequence=" << snapshot.sample_sequence
+                      << " sample_time_ms=" << snapshot.sample_time_ms
+                      << " metrics=" << snapshot.metrics.size() << '\n';
         }
         return 0;
     }
@@ -1051,6 +1072,39 @@ int run(const std::vector<std::string>& arguments,
         std::cout << "ok\n";
         return 0;
     }
+    if (name == "gpio-input-subscribe" && arguments.size() == 5) {
+        remotebsp::protocol::GpioInputSubscription subscription;
+        if (arguments[2] == "rising") {
+            subscription.edge_mask = remotebsp::protocol::kGpioEdgeRising;
+        } else if (arguments[2] == "falling") {
+            subscription.edge_mask = remotebsp::protocol::kGpioEdgeFalling;
+        } else if (arguments[2] == "both") {
+            subscription.edge_mask = remotebsp::protocol::kGpioEdgeRising |
+                                     remotebsp::protocol::kGpioEdgeFalling;
+        } else {
+            throw std::invalid_argument("GPIO 边沿必须是 rising、falling 或 both");
+        }
+        subscription.debounce_us = parse_u32(arguments[3], "GPIO 去抖微秒");
+        const auto capacity = parse_u32(arguments[4], "GPIO 事件队列容量");
+        if (capacity == 0U || capacity >
+                remotebsp::protocol::kMaximumGpioInputEventQueueCapacity) {
+            throw std::invalid_argument("GPIO 事件队列容量必须位于 1～64");
+        }
+        subscription.queue_capacity = static_cast<std::uint16_t>(capacity);
+        client.gpio_input_subscribe(
+            parse_u32(arguments[1], "GPIO 对象 ID"), subscription);
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "gpio-input-event-status" && arguments.size() == 2) {
+        const auto status = client.gpio_input_event_status(
+            parse_u32(arguments[1], "GPIO 对象 ID"));
+        std::cout << "queued=" << status.queued_events
+                  << " capacity=" << status.queue_capacity
+                  << " dropped=" << status.dropped_events
+                  << " last_sequence=" << status.last_sequence << '\n';
+        return 0;
+    }
     if (name == "pwm-create" &&
         (arguments.size() == 4 || arguments.size() == 5)) {
         const auto channel = parse_u32(arguments[1], "PWM 通道");
@@ -1473,6 +1527,7 @@ int main(int argc, char** argv) {
             (arguments[0] != "traffic-status" &&
              arguments[0] != "daemon-identity" &&
              arguments[0] != "health-snapshot" &&
+             arguments[0] != "node-health-snapshot" &&
              arguments[0] != "node-list" &&
              arguments[0] != "runtime-snapshot" &&
              arguments[0] != "runtime-control-acquire" &&

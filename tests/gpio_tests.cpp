@@ -261,6 +261,81 @@ void test_duplicate_write_is_atomic() {
     CHECK(node.cached_response_count() == 1);
 }
 
+void test_input_debounce_events_and_bounded_overflow() {
+    auto gpio = std::make_shared<mock_mcu::MockGpioBsp>();
+    auto core = make_core(gpio);
+    const auto base = mock_mcu::RemoteCore::TimePoint{} +
+                      std::chrono::seconds(1);
+
+    auto create = make_request(protocol::Command::GpioCreate, 40U);
+    create.payload = {6U, 0U,
+                      static_cast<std::uint8_t>(
+                          mock_mcu::GpioDirection::Input),
+                      0U};
+    const auto created = core.handle(create, base);
+    check_status(created, mock_mcu::StatusCode::Ok);
+
+    protocol::GpioInputSubscription config;
+    config.queue_capacity = 1U;
+    config.debounce_us = 1000U;
+    auto subscribe = make_request(protocol::Command::GpioInputSubscribe,
+                                  41U, created.header.object_id);
+    subscribe.payload = protocol::encode_gpio_input_subscription(config);
+    check_status(core.handle(subscribe, base), mock_mcu::StatusCode::Ok);
+
+    // 小于 1 ms 的往返抖动不能产生事件。
+    gpio->set_input_value(6U, true);
+    core.sample_gpio_inputs(base + std::chrono::microseconds(100U));
+    gpio->set_input_value(6U, false);
+    core.sample_gpio_inputs(base + std::chrono::microseconds(500U));
+    CHECK(core.poll_gpio_input_events(
+              4U, base + std::chrono::microseconds(999U)).empty());
+
+    // 稳定达到窗口后只产生一个上升沿；先不取走以制造有界队列压力。
+    gpio->set_input_value(6U, true);
+    core.sample_gpio_inputs(base + std::chrono::microseconds(2000U));
+    core.sample_gpio_inputs(base + std::chrono::microseconds(3000U));
+    gpio->set_input_value(6U, false);
+    core.sample_gpio_inputs(base + std::chrono::microseconds(4000U));
+    core.sample_gpio_inputs(base + std::chrono::microseconds(5000U));
+
+    auto status_request = make_request(
+        protocol::Command::GpioInputEventStatus, 42U,
+        created.header.object_id);
+    const auto status_response = core.handle(status_request);
+    check_status(status_response, mock_mcu::StatusCode::Ok);
+    const auto status = protocol::decode_gpio_input_event_status(
+        {status_response.payload.begin() + 1U, status_response.payload.end()});
+    CHECK(status.queued_events == 1U);
+    CHECK(status.queue_capacity == 1U);
+    CHECK(status.dropped_events == 1U);
+    CHECK(status.last_sequence == 2U);
+
+    const auto events = core.poll_gpio_input_events(
+        1U, base + std::chrono::microseconds(5001U));
+    CHECK(events.size() == 1U);
+    CHECK(events[0].header.object_id == created.header.object_id);
+    CHECK(events[0].header.command == static_cast<std::uint16_t>(
+        protocol::Command::GpioInputEvent));
+    const auto event = protocol::decode_gpio_input_event(events[0].payload);
+    CHECK(event.sequence == 1U);
+    CHECK(event.value);
+    CHECK(event.edge == protocol::kGpioEdgeRising);
+    CHECK(event.timestamp_us == 1003000U);
+    CHECK(event.dropped_events == 1U);
+
+    // 输出对象和非所有者都不能订阅输入事件。
+    auto other = subscribe;
+    other.header.request_id = 43U;
+    other.header.session_id = 2U;
+    check_status(core.handle(other), mock_mcu::StatusCode::AccessDenied);
+
+    const auto decoded = protocol::decode_gpio_input_subscription(
+        protocol::encode_gpio_input_subscription(config));
+    CHECK(decoded.debounce_us == 1000U);
+    CHECK(decoded.queue_capacity == 1U);
+}
+
 }
 
 int main() {
@@ -269,6 +344,7 @@ int main() {
     test_close_is_versioned_idempotent_and_safe();
     test_unleased_object_is_session_owned_and_released();
     test_duplicate_write_is_atomic();
+    test_input_debounce_events_and_bounded_overflow();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";
         return 1;

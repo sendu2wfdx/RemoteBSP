@@ -33,6 +33,7 @@ constexpr std::uint32_t kNodeId = 0;
 constexpr auto kHeartbeatInterval = std::chrono::milliseconds(500);
 constexpr auto kUartStreamInterval = std::chrono::milliseconds(100);
 constexpr auto kVisualStateInterval = std::chrono::milliseconds(100);
+constexpr auto kGpioInputSampleInterval = std::chrono::milliseconds(1);
 
 volatile std::sig_atomic_t stop_requested = 0;
 
@@ -197,6 +198,7 @@ int main(int argc, char** argv) {
         auto next_uart_stream =
             started_at + kUartStreamInterval;
         auto next_visual_state = started_at;
+        auto next_gpio_input_sample = started_at + kGpioInputSampleInterval;
         std::cout << "Mock MCU 已连接 " << argv[1]
                   << "，板卡描述=" << twin.manifest().name
                   << "，按 Ctrl+C 退出\n";
@@ -225,6 +227,17 @@ int main(int argc, char** argv) {
                                node.make_heartbeat());
                 }
                 next_heartbeat = now + kHeartbeatInterval;
+            }
+            if (node.node_id() != 0U && now >= next_gpio_input_sample) {
+                if (twin.online()) {
+                    for (const auto& event :
+                         node.poll_gpio_input_events(16U, now)) {
+                        send_reply(*transport,
+                                   kNodeEventBaseRoute + node.node_id(),
+                                   event);
+                    }
+                }
+                next_gpio_input_sample = now + kGpioInputSampleInterval;
             }
             if (uart_stream && node.node_id() != 0 &&
                 now >= next_uart_stream) {
@@ -271,6 +284,10 @@ int main(int argc, char** argv) {
             }
             if (!visual_state_path.empty()) {
                 next_deadline = std::min(next_deadline, next_visual_state);
+            }
+            if (node.node_id() != 0U) {
+                next_deadline = std::min(next_deadline,
+                                         next_gpio_input_sample);
             }
             const auto timeout =
                 std::max(std::chrono::milliseconds(0),

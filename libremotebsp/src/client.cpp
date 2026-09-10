@@ -281,6 +281,11 @@ protocol::FirmwareIdentityPayload Client::firmware_identity() const {
         body(command(protocol::Command::FirmwareIdentity), 120U));
 }
 
+protocol::HealthSnapshot Client::node_health_snapshot() const {
+    return protocol::decode_health_snapshot(
+        body(command(protocol::Command::HealthSnapshot)));
+}
+
 std::uint64_t Client::get_capabilities() const {
     const auto data = body(command(protocol::Command::GetCapability), 8);
     return read_u64(data.data());
@@ -890,6 +895,26 @@ void Client::gpio_close(std::uint32_t object_id) const {
     }
     body(command(protocol::Command::GpioClose,
                  protocol::encode_gpio_close(), object_id));
+}
+
+void Client::gpio_input_subscribe(
+    std::uint32_t object_id,
+    const protocol::GpioInputSubscription& subscription) const {
+    if (object_id == 0U) {
+        throw ClientException("GPIO 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::GpioInputSubscribe,
+                 protocol::encode_gpio_input_subscription(subscription),
+                 object_id));
+}
+
+protocol::GpioInputEventStatus Client::gpio_input_event_status(
+    std::uint32_t object_id) const {
+    if (object_id == 0U) {
+        throw ClientException("GPIO 对象 ID 不能为零");
+    }
+    return protocol::decode_gpio_input_event_status(
+        body(command(protocol::Command::GpioInputEventStatus, {}, object_id)));
 }
 
 std::uint32_t Client::pwm_create(

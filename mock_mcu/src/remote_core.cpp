@@ -1,6 +1,7 @@
 #include "remotebsp/mock_mcu/remote_core.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <unordered_set>
 
@@ -10,6 +11,11 @@ namespace {
 constexpr std::uint32_t kMinimumLeaseDurationMs = 100;
 constexpr std::uint32_t kMaximumLeaseDurationMs = 60000;
 constexpr std::size_t kMaximumStreamSessions = 16;
+
+std::uint64_t next_health_generation() noexcept {
+    static std::atomic<std::uint64_t> generation{1U};
+    return generation.fetch_add(1U, std::memory_order_relaxed);
+}
 
 bool stream_capacity(const StreamBsp& bsp,
                      const protocol::StreamContract& contract,
@@ -85,7 +91,8 @@ RemoteCore::RemoteCore(NodeInfo node_info, std::uint64_t capabilities,
                          : std::make_shared<MockTimeSyncBsp>()),
       stream_bsp_(std::move(stream_bsp)),
       resources_(std::move(resources)),
-      contracts_(std::move(contracts)) {
+      contracts_(std::move(contracts)),
+      health_producer_generation_(next_health_generation()) {
     if (node_info_.protocol_version != protocol::kProtocolVersion) {
         throw CoreException(CoreError::UnsupportedVersion,
                             "节点协议版本与远程核心不兼容");
@@ -147,6 +154,8 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_ping(request);
         case protocol::Command::TimeSync:
             return handle_time_sync(request, now);
+        case protocol::Command::HealthSnapshot:
+            return handle_health_snapshot(request, now);
         case protocol::Command::BootloaderEnter:
         case protocol::Command::BootloaderEnterUsb:
             return handle_bootloader_enter(request);
@@ -188,6 +197,10 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_gpio_write(request);
         case protocol::Command::GpioClose:
             return handle_gpio_close(request);
+        case protocol::Command::GpioInputSubscribe:
+            return handle_gpio_input_subscribe(request, now);
+        case protocol::Command::GpioInputEventStatus:
+            return handle_gpio_input_event_status(request);
         case protocol::Command::UartCreate:
             return handle_uart_create(request);
         case protocol::Command::UartRead:
@@ -706,6 +719,93 @@ protocol::Packet RemoteCore::handle_time_sync(
         return make_response(request, StatusCode::ResourceFailed);
     }
     auto response = make_response(request, StatusCode::Ok);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_health_snapshot(
+    const protocol::Packet& request, TimePoint now) {
+    if (!request.payload.empty() || request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    if (!health_started_) {
+        health_started_at_ = now;
+        health_started_ = true;
+    }
+    if (now < health_started_at_ || health_sample_sequence_ ==
+                                      std::numeric_limits<std::uint64_t>::max()) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    protocol::HealthSnapshot snapshot;
+    snapshot.source = protocol::HealthSource::RemoteCore;
+    snapshot.overall = protocol::OverallHealth::Unknown;
+    snapshot.sample_sequence = ++health_sample_sequence_;
+    snapshot.sample_time_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - health_started_at_).count());
+    snapshot.node_id = 0U;
+    snapshot.producer_generation = health_producer_generation_;
+    const auto unavailable = [](protocol::HealthMetricId id,
+                                protocol::HealthMetricUnit unit) {
+        return protocol::HealthMetric{
+            static_cast<std::uint16_t>(id),
+            protocol::MetricAvailability::Unavailable, unit, 0U};
+    };
+    const auto available = [](protocol::HealthMetricId id,
+                              protocol::HealthMetricUnit unit,
+                              std::uint64_t value) {
+        return protocol::HealthMetric{
+            static_cast<std::uint16_t>(id),
+            protocol::MetricAvailability::Available, unit, value};
+    };
+    snapshot.metrics = {
+        unavailable(protocol::HealthMetricId::CpuLoadPermille,
+                    protocol::HealthMetricUnit::Permille),
+        unavailable(protocol::HealthMetricId::IsrLoadPermille,
+                    protocol::HealthMetricUnit::Permille),
+        unavailable(protocol::HealthMetricId::MinimumStackFreeBytes,
+                    protocol::HealthMetricUnit::Bytes),
+        unavailable(protocol::HealthMetricId::RequestQueueDepth,
+                    protocol::HealthMetricUnit::Count),
+        unavailable(protocol::HealthMetricId::RequestQueueCapacity,
+                    protocol::HealthMetricUnit::Count),
+    };
+    if (motion_ != nullptr) {
+        const auto status = motion_->status();
+        snapshot.metrics.push_back(available(
+            protocol::HealthMetricId::MotionQueueDepth,
+            protocol::HealthMetricUnit::Count, status.queue_depth));
+        snapshot.metrics.push_back(available(
+            protocol::HealthMetricId::MotionQueueCapacity,
+            protocol::HealthMetricUnit::Count, status.queue_capacity));
+    } else {
+        snapshot.metrics.push_back(unavailable(
+            protocol::HealthMetricId::MotionQueueDepth,
+            protocol::HealthMetricUnit::Count));
+        snapshot.metrics.push_back(unavailable(
+            protocol::HealthMetricId::MotionQueueCapacity,
+            protocol::HealthMetricUnit::Count));
+    }
+    std::uint64_t lease_count = 0U;
+    for (const auto& [resource, leases] : leases_) {
+        static_cast<void>(resource);
+        lease_count += leases.size();
+    }
+    snapshot.metrics.push_back(available(
+        protocol::HealthMetricId::UptimeMilliseconds,
+        protocol::HealthMetricUnit::Milliseconds, snapshot.sample_time_ms));
+    snapshot.metrics.push_back(available(
+        protocol::HealthMetricId::ActiveLeaseCount,
+        protocol::HealthMetricUnit::Count, lease_count));
+    snapshot.metrics.push_back(unavailable(
+        protocol::HealthMetricId::ResourceFaultCount,
+        protocol::HealthMetricUnit::Count));
+    snapshot.metrics.push_back(unavailable(
+        protocol::HealthMetricId::SampleOverrunTotal,
+        protocol::HealthMetricUnit::Count));
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_health_snapshot(snapshot);
     response.payload.insert(response.payload.end(), encoded.begin(),
                             encoded.end());
     return response;
@@ -1462,11 +1562,12 @@ protocol::Packet RemoteCore::handle_gpio_create(
     gpio_bsp_->configure(pin, direction, initial_value);
 
     const std::uint32_t object_id = next_object_id_++;
-    gpio_objects_.emplace(
-        object_id,
-        GpioObject{pin, direction,
-                   resource == nullptr ? 0U : resource->resource_id,
-                   owner_session_id});
+    GpioObject object;
+    object.pin = pin;
+    object.direction = direction;
+    object.resource_id = resource == nullptr ? 0U : resource->resource_id;
+    object.owner_session_id = owner_session_id;
+    gpio_objects_.emplace(object_id, std::move(object));
     protocol::Packet response = make_response(request, StatusCode::Ok);
     response.header.object_id = object_id;
     return response;
@@ -1551,6 +1652,164 @@ protocol::Packet RemoteCore::handle_gpio_close(
     }
     gpio_objects_.erase(found);
     return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_gpio_input_subscribe(
+    const protocol::Packet& request, TimePoint now) {
+    if (!gpio_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Gpio)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id == 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    protocol::GpioInputSubscription subscription;
+    try {
+        subscription = protocol::decode_gpio_input_subscription(request.payload);
+    } catch (const protocol::GpioPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    auto found = gpio_objects_.find(request.header.object_id);
+    if (found == gpio_objects_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    auto& object = found->second;
+    if (object.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (object.direction != GpioDirection::Input) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    try {
+        object.stable_value = gpio_bsp_->read(object.pin);
+    } catch (const std::exception&) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
+    object.input_subscription = subscription;
+    object.input_events_enabled = true;
+    object.candidate_value = object.stable_value;
+    object.candidate_active = false;
+    object.candidate_since = now;
+    object.event_sequence = 0U;
+    object.dropped_events = 0U;
+    object.input_events.clear();
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_gpio_input_event_status(
+    const protocol::Packet& request) const {
+    if (!gpio_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Gpio)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (!request.payload.empty() || request.header.object_id == 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto found = gpio_objects_.find(request.header.object_id);
+    if (found == gpio_objects_.end()) {
+        return make_response(request, StatusCode::ObjectNotFound);
+    }
+    const auto& object = found->second;
+    if (object.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (!object.input_events_enabled) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    protocol::GpioInputEventStatus status;
+    status.queued_events = static_cast<std::uint16_t>(object.input_events.size());
+    status.queue_capacity = object.input_subscription.queue_capacity;
+    status.dropped_events = object.dropped_events;
+    status.last_sequence = object.event_sequence;
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_gpio_input_event_status(status);
+    response.payload.insert(response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+std::vector<protocol::Packet> RemoteCore::poll_gpio_input_events(
+    std::size_t maximum_events, TimePoint now) {
+    if (maximum_events == 0U) {
+        throw std::invalid_argument("GPIO 输入事件批次上限必须大于零");
+    }
+    std::vector<protocol::Packet> output;
+    if (!gpio_bsp_) {
+        return output;
+    }
+    sample_gpio_inputs(now);
+    for (auto& [object_id, object] : gpio_objects_) {
+        if (!object.input_events_enabled) {
+            continue;
+        }
+        while (!object.input_events.empty() && output.size() < maximum_events) {
+            auto event = object.input_events.front();
+            object.input_events.pop_front();
+            event.dropped_events = object.dropped_events;
+            protocol::Packet packet;
+            packet.header.message_type = protocol::MessageType::Event;
+            packet.header.command = static_cast<std::uint16_t>(
+                protocol::Command::GpioInputEvent);
+            packet.header.object_id = object_id;
+            packet.payload = protocol::encode_gpio_input_event(event);
+            output.push_back(std::move(packet));
+        }
+        if (output.size() >= maximum_events) {
+            break;
+        }
+    }
+    return output;
+}
+
+void RemoteCore::sample_gpio_inputs(TimePoint now) {
+    if (!gpio_bsp_) {
+        return;
+    }
+    for (auto& [object_id, object] : gpio_objects_) {
+        static_cast<void>(object_id);
+        if (!object.input_events_enabled) {
+            continue;
+        }
+        bool raw_value = object.stable_value;
+        try {
+            raw_value = gpio_bsp_->read(object.pin);
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (raw_value == object.stable_value) {
+            object.candidate_active = false;
+        } else if (!object.candidate_active ||
+                   raw_value != object.candidate_value) {
+            object.candidate_active = true;
+            object.candidate_value = raw_value;
+            object.candidate_since = now;
+        } else {
+            const auto elapsed = std::chrono::duration_cast<
+                std::chrono::microseconds>(now - object.candidate_since);
+            if (elapsed.count() >= object.input_subscription.debounce_us) {
+                object.stable_value = raw_value;
+                object.candidate_active = false;
+                const auto edge = raw_value ? protocol::kGpioEdgeRising
+                                            : protocol::kGpioEdgeFalling;
+                ++object.event_sequence;
+                if ((object.input_subscription.edge_mask & edge) != 0U) {
+                    protocol::GpioInputEvent event;
+                    event.sequence = object.event_sequence;
+                    event.timestamp_us = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            now.time_since_epoch()).count());
+                    event.value = raw_value;
+                    event.edge = edge;
+                    event.dropped_events = object.dropped_events;
+                    if (object.input_events.size() >=
+                        object.input_subscription.queue_capacity) {
+                        ++object.dropped_events;
+                    } else {
+                        object.input_events.push_back(event);
+                    }
+                }
+            }
+        }
+    }
 }
 
 protocol::Packet RemoteCore::handle_uart_create(
