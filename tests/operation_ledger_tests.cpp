@@ -83,6 +83,13 @@ OperationTerminalResult gpio_committed_result(bool value = true) {
     return result;
 }
 
+RuntimePwmConfigureOperation pwm_operation(std::uint32_t frequency = 20000U,
+                                           std::uint16_t duty = 4200U,
+                                           bool active_low = false) {
+    return {identity(0x11U), identity(0x44U), identity(0x33U), "owner",
+            "pwm-idem", 2U, 7U, 0x06000000U, frequency, duty, active_low};
+}
+
 std::string hex(const OperationDigest& digest) {
     constexpr char digits[] = "0123456789abcdef";
     std::string result;
@@ -113,6 +120,53 @@ OperationLedgerOptions options(const TestDirectory& directory,
         result.wall_clock_ms = [now] { return *now; };
     }
     return result;
+}
+
+void check_pwm_record_is_lossless_and_durable() {
+    TestDirectory directory;
+    OperationDigest id{};
+    {
+        OperationLedger ledger(options(directory));
+        const auto first = ledger.begin_pwm_configure(pwm_operation());
+        CHECK(first.record.kind == OperationKind::RuntimePwmConfigure);
+        CHECK(first.record.requested_frequency_hz == 20000U);
+        CHECK(first.record.requested_duty == 4200U);
+        CHECK(first.record.requested_active_low == false);
+        auto changed = pwm_operation(25000U, 4200U, false);
+        check_error(OperationLedgerError::IdempotencyConflict, [&] {
+            (void)ledger.begin_pwm_configure(changed);
+        });
+        OperationTerminalResult result;
+        result.object_id = 19U;
+        result.frequency_hz = 20000U;
+        result.duty = 4200U;
+        result.active_low = false;
+        (void)ledger.finish(first.record.operation_id,
+                            first.record.request_digest,
+                            OperationState::Committed,
+                            OperationRecovery::None, result);
+        id = first.record.operation_id;
+    }
+    OperationLedger reopened(options(directory));
+    const auto found = reopened.lookup(id, "owner");
+    CHECK(found.disposition == OperationLookupDisposition::Found);
+    CHECK(found.record->result.object_id == 19U);
+    CHECK(found.record->result.frequency_hz == 20000U);
+    CHECK(found.record->result.duty == 4200U);
+    CHECK(found.record->result.active_low == false);
+
+    TestDirectory pending_directory;
+    OperationDigest pending_id{};
+    {
+        OperationLedger ledger(options(pending_directory));
+        pending_id = ledger.begin_pwm_configure(
+            pwm_operation(1000U, 0U, true)).record.operation_id;
+    }
+    OperationLedger recovered(options(pending_directory));
+    const auto pending = recovered.lookup(pending_id, "owner");
+    CHECK(pending.record->state == OperationState::Unknown);
+    CHECK(pending.record->requested_active_low == true);
+    CHECK(!pending.record->result.active_low.has_value());
 }
 
 void check_stable_ids_and_business_conflict() {
@@ -786,6 +840,7 @@ void check_mid_log_corruption_fails_closed() {
 }  // namespace
 
 int main() {
+    check_pwm_record_is_lossless_and_durable();
     check_stable_ids_and_business_conflict();
     check_process_lock_and_durable_terminal();
     check_restart_pending_becomes_unknown();

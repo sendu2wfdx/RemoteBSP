@@ -28,6 +28,7 @@ using OperationIdentity =
 enum class OperationKind : std::uint8_t {
     RuntimeGpioWrite = 1U,
     RuntimeControlRelease = 2U,
+    RuntimePwmConfigure = 3U,
 };
 
 enum class OperationState : std::uint8_t {
@@ -117,10 +118,33 @@ struct RuntimeControlReleaseOperation {
     std::string owner_key_id;
 };
 
+struct RuntimePwmConfigureOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint32_t frequency_hz{};
+    std::uint16_t duty{};
+    bool active_low{};
+};
+
 struct OperationTerminalResult {
+    OperationTerminalResult() = default;
+    OperationTerminalResult(std::optional<std::uint32_t> object,
+                            std::optional<bool> gpio_value,
+                            std::uint16_t error_code)
+        : object_id(object), value(gpio_value),
+          stable_error_code(error_code) {}
     std::optional<std::uint32_t> object_id;
     std::optional<bool> value;
     std::uint16_t stable_error_code{};
+    std::optional<std::uint32_t> frequency_hz;
+    std::optional<std::uint16_t> duty;
+    std::optional<bool> active_low;
 };
 
 struct OperationRecord {
@@ -138,6 +162,9 @@ struct OperationRecord {
     std::uint32_t node_id{};
     std::uint64_t admission_id{};
     std::optional<bool> requested_value;
+    std::optional<std::uint32_t> requested_frequency_hz;
+    std::optional<std::uint16_t> requested_duty;
+    std::optional<bool> requested_active_low;
     OperationTerminalResult result;
     std::uint64_t sequence{};
     std::uint64_t recorded_at_ms{};
@@ -194,17 +221,23 @@ public:
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_operation_id(
         const RuntimeControlReleaseOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimePwmConfigureOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeControlReleaseOperation& operation,
         const ServerResolvedLease& lease);
+    static OperationDigest derive_request_digest(
+        const RuntimePwmConfigureOperation& operation);
 
     OperationBeginResult begin_gpio_write(
         const RuntimeGpioWriteOperation& operation);
     OperationBeginResult begin_release(
         const RuntimeControlReleaseOperation& operation,
         const ServerResolvedLease& server_resolved_lease);
+    OperationBeginResult begin_pwm_configure(
+        const RuntimePwmConfigureOperation& operation);
 
     OperationRecord finish(const OperationDigest& operation_id,
                            const OperationDigest& request_digest,

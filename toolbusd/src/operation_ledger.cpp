@@ -28,7 +28,7 @@ constexpr std::size_t kRecordHeaderBytes = 136U;
 constexpr std::size_t kRecordTrailerBytes = 12U;
 constexpr std::size_t kMaximumRecordBytes = 1024U;
 constexpr std::size_t kManifestBytes = 152U;
-constexpr std::uint16_t kLedgerFormatVersion = 1U;
+constexpr std::uint16_t kLedgerFormatVersion = 2U;
 constexpr std::uint64_t kCommitMarker = 0x314D4F434C4F4252ULL;
 constexpr char kRecordMagic[8] = {'R', 'B', 'O', 'P', 'L', 'G', '1', '\0'};
 constexpr char kManifestMagic[8] = {'R', 'B', 'O', 'L', 'M', 'F', '1', '\0'};
@@ -299,7 +299,8 @@ std::string segment_name(std::uint64_t number) {
 bool valid_kind(std::uint8_t value) noexcept {
     return value == static_cast<std::uint8_t>(OperationKind::RuntimeGpioWrite) ||
            value == static_cast<std::uint8_t>(
-               OperationKind::RuntimeControlRelease);
+               OperationKind::RuntimeControlRelease) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimePwmConfigure);
 }
 
 bool parse_segment_name(const std::string& name,
@@ -340,7 +341,7 @@ bool valid_state_recovery(OperationKind kind, OperationState state,
         return recovery == OperationRecovery::None;
     }
     if (state == OperationState::Committed) {
-        return recovery == (kind == OperationKind::RuntimeGpioWrite
+        return recovery == (kind != OperationKind::RuntimeControlRelease
             ? OperationRecovery::None : OperationRecovery::SafeClosed);
     }
     if (state == OperationState::Rejected) {
@@ -366,9 +367,19 @@ bool valid_terminal_result(const OperationRecord& existing,
                    *result.object_id != 0U && result.value.has_value() &&
                    existing.requested_value == result.value;
         }
-        return !result.object_id.has_value() && !result.value.has_value();
+        if (existing.kind == OperationKind::RuntimePwmConfigure) {
+            return result.object_id.has_value() && *result.object_id != 0U &&
+                   result.frequency_hz == existing.requested_frequency_hz &&
+                   result.duty == existing.requested_duty &&
+                   result.active_low == existing.requested_active_low;
+        }
+        return !result.object_id.has_value() && !result.value.has_value() &&
+               !result.frequency_hz.has_value() && !result.duty.has_value() &&
+               !result.active_low.has_value();
     }
     return !result.object_id.has_value() && !result.value.has_value() &&
+           !result.frequency_hz.has_value() && !result.duty.has_value() &&
+           !result.active_low.has_value() &&
            result.stable_error_code != 0U &&
            result.stable_error_code <=
                kOperationLedgerMaximumStableErrorCode;
@@ -485,6 +496,35 @@ public:
         record.permissions = operation.permissions;
         record.node_id = operation.node_id;
         record.requested_value = operation.value;
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_pwm_configure(
+        const RuntimePwmConfigureOperation& operation) {
+        validate_common(operation.daemon_origin, operation.lease_id,
+                        operation.owner_key_id);
+        if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+            operation.node_id > 127U || operation.resource_id == 0U ||
+            operation.permissions == 0U || operation.frequency_hz == 0U ||
+            operation.duty > 10000U ||
+            !valid_text(operation.idempotency_key)) {
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "PWM配置参数不符合账本合同");
+        }
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = OperationLedger::derive_request_digest(operation);
+        record.kind = OperationKind::RuntimePwmConfigure;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.scope = {operation.expected_node_uuid, operation.resource_id};
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.node_id = operation.node_id;
+        record.requested_frequency_hz = operation.frequency_hz;
+        record.requested_duty = operation.duty;
+        record.requested_active_low = operation.active_low;
         return begin(std::move(record));
     }
 
@@ -974,7 +1014,8 @@ private:
     Manifest decode_manifest(const std::vector<std::uint8_t>& data) const {
         if (data.size() != kManifestBytes ||
             std::memcmp(data.data(), kManifestMagic, 8U) != 0 ||
-            get_u16(data.data() + 8U) != kLedgerFormatVersion ||
+            (get_u16(data.data() + 8U) != 1U &&
+             get_u16(data.data() + 8U) != kLedgerFormatVersion) ||
             get_u16(data.data() + 10U) != kManifestBytes ||
             get_u64(data.data() + kManifestBytes - 8U) != kCommitMarker ||
             get_u32(data.data() + kManifestBytes - 12U) !=
@@ -1188,6 +1229,10 @@ private:
         if (record.result.value.has_value()) {
             flags |= 0x04U;
         }
+        if (record.requested_frequency_hz.has_value()) flags |= 0x08U;
+        if (record.result.frequency_hz.has_value()) flags |= 0x10U;
+        if (record.requested_duty.has_value()) flags |= 0x20U;
+        if (record.result.duty.has_value()) flags |= 0x40U;
         payload.push_back(static_cast<std::uint8_t>(record.kind));
         payload.push_back(flags);
         put_u16(payload, record.permissions);
@@ -1202,6 +1247,12 @@ private:
         put_u32(payload, record.result.object_id.value_or(0U));
         put_u16(payload, record.result.stable_error_code);
         put_u64(payload, record.admission_id);
+        put_u32(payload, record.requested_frequency_hz.value_or(0U));
+        put_u32(payload, record.result.frequency_hz.value_or(0U));
+        put_u16(payload, record.requested_duty.value_or(0U));
+        put_u16(payload, record.result.duty.value_or(0U));
+        payload.push_back(record.requested_active_low.value_or(false) ? 1U : 0U);
+        payload.push_back(record.result.active_low.value_or(false) ? 1U : 0U);
         append_text(payload, record.owner_key_id);
         append_text(payload, record.idempotency_key);
         return payload;
@@ -1274,7 +1325,8 @@ private:
         const auto* data = bytes.data() + offset;
         const auto type_value = data[10U];
         if (std::memcmp(data, kRecordMagic, 8U) != 0 ||
-            get_u16(data + 8U) != kLedgerFormatVersion ||
+            (get_u16(data + 8U) != 1U &&
+             get_u16(data + 8U) != kLedgerFormatVersion) ||
             (type_value < 1U || type_value > 3U) ||
             !valid_state(data[11U]) || !valid_recovery(data[12U]) ||
             data[13U] != 0U || get_u16(data + 14U) != kRecordHeaderBytes ||
@@ -1320,7 +1372,8 @@ private:
             decoded.owner_hash = get_array<32U>(payload + 24U);
             decoded.business_key_hash = get_array<32U>(payload + 56U);
         } else {
-            decode_full_payload(decoded, payload, payload_size);
+            decode_full_payload(decoded, payload, payload_size,
+                                get_u16(data + 8U));
         }
         if (!valid_state_recovery(decoded.record.kind, decoded.record.state,
                                   decoded.record.recovery)) {
@@ -1331,6 +1384,8 @@ private:
             const auto result_valid =
                 decoded.record.state == OperationState::Pending
                 ? !result.object_id.has_value() && !result.value.has_value() &&
+                      !result.frequency_hz.has_value() && !result.duty.has_value() &&
+                      !result.active_low.has_value() &&
                       result.stable_error_code == 0U
                 : valid_terminal_result(decoded.record,
                                         decoded.record.state, result);
@@ -1343,9 +1398,11 @@ private:
     }
 
     void decode_full_payload(DecodedRecord& decoded, const std::uint8_t* data,
-                             std::size_t size) const {
-        constexpr std::size_t fixed = 78U;
-        if (size < fixed || !valid_kind(data[0]) || (data[1] & 0xf8U) != 0U ||
+                             std::size_t size, std::uint16_t format_version) const {
+        const std::size_t fixed = format_version == 1U ? 78U : 92U;
+        if (size < fixed || !valid_kind(data[0]) ||
+            (format_version == 1U && (data[1] & 0xf8U) != 0U) ||
+            (format_version == 2U && (data[1] & 0x80U) != 0U) ||
             get_u16(data + 62U) != 0U) {
             throw_corrupt("OperationLedger完整载荷固定字段无效");
         }
@@ -1379,6 +1436,29 @@ private:
         }
         record.result.stable_error_code = get_u16(data + 68U);
         record.admission_id = get_u64(data + 70U);
+        if (format_version != 1U) {
+        const auto requested_frequency = get_u32(data + 78U);
+        const auto result_frequency = get_u32(data + 82U);
+        const auto requested_duty = get_u16(data + 86U);
+        const auto result_duty = get_u16(data + 88U);
+        if (data[90U] > 1U || data[91U] > 1U) throw_corrupt("OperationLedger PWM布尔字段无效");
+        if ((flags & 0x08U) != 0U) record.requested_frequency_hz = requested_frequency;
+        else if (requested_frequency != 0U) throw_corrupt("OperationLedger缺失PWM请求频率");
+        if ((flags & 0x10U) != 0U) record.result.frequency_hz = result_frequency;
+        else if (result_frequency != 0U) throw_corrupt("OperationLedger缺失PWM结果频率");
+        if ((flags & 0x20U) != 0U) record.requested_duty = requested_duty;
+        else if (requested_duty != 0U) throw_corrupt("OperationLedger缺失PWM请求占空比");
+        if ((flags & 0x40U) != 0U) record.result.duty = result_duty;
+        else if (result_duty != 0U) throw_corrupt("OperationLedger缺失PWM结果占空比");
+        if (record.kind == OperationKind::RuntimePwmConfigure) {
+            record.requested_active_low = data[90U] != 0U;
+            if (record.state == OperationState::Committed) {
+                record.result.active_low = data[91U] != 0U;
+            }
+        } else if (data[90U] != 0U || data[91U] != 0U) {
+            throw_corrupt("OperationLedger非PWM记录包含极性");
+        }
+        }
         std::size_t cursor = fixed;
         if (cursor + 2U > size) {
             throw_corrupt("OperationLedger owner长度缺失");
@@ -1431,6 +1511,23 @@ private:
                     OperationLedger::derive_request_digest(operation) !=
                         record.request_digest) {
                     throw_corrupt("GPIO写记录身份摘要不匹配");
+                }
+            } else if (record.kind == OperationKind::RuntimePwmConfigure) {
+                if (!record.requested_frequency_hz.has_value() ||
+                    !record.requested_duty.has_value() ||
+                    !record.requested_active_low.has_value() ||
+                    record.requested_value.has_value() || record.admission_id != 0U) {
+                    throw_corrupt("PWM配置记录字段组合无效");
+                }
+                RuntimePwmConfigureOperation operation{
+                    record.daemon_origin, record.lease_id,
+                    record.scope.expected_node_uuid, record.owner_key_id,
+                    record.idempotency_key, record.permissions, record.node_id,
+                    record.scope.resource_id, *record.requested_frequency_hz,
+                    *record.requested_duty, *record.requested_active_low};
+                if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
+                    OperationLedger::derive_request_digest(operation) != record.request_digest) {
+                    throw_corrupt("PWM配置记录身份摘要不匹配");
                 }
             } else {
                 if (record.requested_value.has_value() ||
@@ -2085,6 +2182,50 @@ OperationDigest OperationLedger::derive_operation_id(
     return sha256(canonical);
 }
 
+OperationDigest OperationLedger::derive_operation_id(
+    const RuntimePwmConfigureOperation& operation) {
+    validate_common(operation.daemon_origin, operation.lease_id,
+                    operation.owner_key_id);
+    if (!valid_text(operation.idempotency_key)) {
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "PWM幂等键无效");
+    }
+    std::vector<std::uint8_t> canonical;
+    append_domain(canonical);
+    canonical.push_back(static_cast<std::uint8_t>(OperationKind::RuntimePwmConfigure));
+    put_array(canonical, operation.lease_id);
+    append_text(canonical, operation.owner_key_id);
+    append_text(canonical, operation.idempotency_key);
+    return sha256(canonical);
+}
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimePwmConfigureOperation& operation) {
+    const auto operation_id = derive_operation_id(operation);
+    if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+        operation.node_id > 127U || operation.resource_id == 0U ||
+        operation.permissions == 0U || operation.frequency_hz == 0U ||
+        operation.duty > 10000U) {
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "PWM请求摘要字段无效");
+    }
+    std::vector<std::uint8_t> canonical;
+    append_domain(canonical);
+    canonical.push_back(0x83U);
+    put_array(canonical, operation_id);
+    put_array(canonical, operation.daemon_origin);
+    put_array(canonical, operation.lease_id);
+    append_text(canonical, operation.owner_key_id);
+    put_u16(canonical, operation.permissions);
+    put_array(canonical, operation.expected_node_uuid);
+    put_u32(canonical, operation.node_id);
+    put_u32(canonical, operation.resource_id);
+    put_u32(canonical, operation.frequency_hz);
+    put_u16(canonical, operation.duty);
+    canonical.push_back(operation.active_low ? 1U : 0U);
+    return sha256(canonical);
+}
+
 OperationDigest OperationLedger::derive_request_digest(
     const RuntimeGpioWriteOperation& operation) {
     const auto operation_id = derive_operation_id(operation);
@@ -2148,6 +2289,11 @@ OperationBeginResult OperationLedger::begin_release(
     const RuntimeControlReleaseOperation& operation,
     const ServerResolvedLease& server_resolved_lease) {
     return impl_->begin_release(operation, server_resolved_lease);
+}
+
+OperationBeginResult OperationLedger::begin_pwm_configure(
+    const RuntimePwmConfigureOperation& operation) {
+    return impl_->begin_pwm_configure(operation);
 }
 
 OperationRecord OperationLedger::finish(
