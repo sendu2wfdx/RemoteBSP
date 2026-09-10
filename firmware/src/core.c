@@ -1570,6 +1570,24 @@ static void encode_resource_runtime_status(
         }
     }
 #endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_I2C_DEVICE ||
+        descriptor->type == RBSP_RESOURCE_TYPE_SPI_DEVICE) {
+        size_t resource_index = 0U;
+        const rbsp_bus_resource_config_t* const resource =
+            find_bus_resource(core, descriptor->resource_id,
+                              &resource_index);
+        if (resource != NULL &&
+            resource_index < core->hal.bus_resource_count &&
+            core->bus_leases[resource_index].active) {
+            /*
+             * 总线事务是同步原子操作，执行中的瞬态无法被另一个请求观测；
+             * 设备持有独占租约才是主机可观测、可操作的 Busy 状态。
+             */
+            status.busy = true;
+        }
+    }
+#endif
     uint32_t errors = 0U;
     if (status.rx_overruns != 0U) {
         errors |= RBSP_RESOURCE_ERROR_RX_OVERFLOW;

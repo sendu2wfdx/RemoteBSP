@@ -244,6 +244,16 @@ int main(void) {
     assert(output[24U] == 4U && i2c_calls == 0U);
 
     acquire(&core, I2C_DEVICE_ID, 11U, 2U);
+
+    /* 独占租约是主机可观测的 BUS 设备 Busy 生命周期。 */
+    uint8_t status_query[4U];
+    put_u32(status_query, I2C_DEVICE_ID);
+    size = make_request(request, 0x0032U, 11U, 61U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 61U, output) == 50U);
+    assert(output[24U] == 0U && get_u32(output + 25U) == I2C_DEVICE_ID);
+    assert(output[29U] == 1U);
+
     size = make_request(request, 0x0301U, 11U, 3U, transfer, 15U);
     assert(exchange(&core, request, size, 3U, output) == 32U);
     assert(output[24U] == 0U && output[25U] == RBSP_BUS_TRANSACTION_OK);
@@ -273,6 +283,12 @@ int main(void) {
     size = make_request(request, 0x0301U, 11U, 4U, transfer, 15U);
     assert(exchange(&core, request, size, 4U, output) == 25U);
     assert(output[24U] == 4U && i2c_calls == 2U);
+
+    size = make_request(request, 0x0032U, 11U, 62U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 62U, output) == 50U);
+    assert(output[24U] == 0U && get_u32(output + 25U) == I2C_DEVICE_ID);
+    assert(output[29U] == 0U);
 
     now_ms = 1001U;
     acquire(&core, I2C_DEVICE_ID, 11U, 5U);
@@ -305,6 +321,13 @@ int main(void) {
     assert(i2c_calls == 6U);
 
     acquire(&core, SPI_DEVICE_ID, 22U, 7U);
+    put_u32(status_query, SPI_DEVICE_ID);
+    size = make_request(request, 0x0032U, 22U, 63U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 63U, output) == 50U);
+    assert(output[24U] == 0U && get_u32(output + 25U) == SPI_DEVICE_ID);
+    assert(output[29U] == 1U);
+
     memset(transfer, 0, sizeof(transfer));
     put_u32(transfer, SPI_DEVICE_ID);
     put_u32(transfer + 4U, 1000U);
@@ -320,6 +343,12 @@ int main(void) {
 
     assert(rbsp_core_release_session(&core, 22U) == 1U);
     assert(!core.bus_leases[4U].active);
+    size = make_request(request, 0x0032U, 22U, 64U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 64U, output) == 50U);
+    assert(output[24U] == 0U && get_u32(output + 25U) == SPI_DEVICE_ID);
+    assert(output[29U] == 0U);
+
     size = make_request(request, 0x0401U, 22U, 9U, transfer, 16U);
     assert(exchange(&core, request, size, 9U, output) == 25U);
     assert(output[24U] == 4U && spi_calls == 1U);
