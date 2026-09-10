@@ -105,6 +105,14 @@ python3 -m runtime_api.server \
 输入上限为 1 MiB；数据损坏、文件缺失或 schema 错误返回 HTTP 503，不回退到陈旧
 快照或演示数据，以免界面把旧状态误报为在线。
 
+`GET /api/v1/overview` 是 Runtime Web 的单板只读下钻模型：每个节点包含链路、资源、
+活动告警和运行时趋势，资源明确区分 `available` 与 `unavailable`；toolbusd 健康载荷
+缺失、过期或无有效值时统一显示 `unknown`，绝不把缺失字段或数值 `0` 猜成健康。
+趋势窗口在进程内按不同 `snapshot_id` 最多保存 60 个样本，同一快照重复读取不重复
+计数，节点消失即清理其历史。峰值只统计 Runtime 契约中明确存在的整数测量，布尔值
+不会被当成数值。CPU/ISR 指标只有在 `availability=available` 时才参与阈值告警：
+千分之 800 为 warning、950 为 critical；这是一项软件展示策略，不是实体板测量结论。
+
 Toolbusd Provider 默认只执行一次 `runtime-snapshot` 只读命令；命令使用参数数组启动，
 不经过 shell。显式旧文本兼容模式继续执行 `traffic-status`、`node-list`、
 `resource-list` 和 `resource-status`。全局 IPC

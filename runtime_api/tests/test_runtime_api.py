@@ -226,6 +226,12 @@ class RuntimeHttpTest(unittest.TestCase):
             "/api/v1/nodes/mock-node-1/alerts")["data"]), 1)
         self.assertEqual(self._get("/api/v1/snapshot")["data"][
             "schema_version"], 1)
+        overview = self._get("/api/v1/overview")["data"]
+        self.assertEqual(overview["schema_version"], 1)
+        self.assertEqual(overview["nodes"][0]["resources"][0][
+            "availability"], "available")
+        self.assertEqual(overview["toolbusd_health"]["availability"],
+                         "unknown")
         request = Request(self.base + "/api/v1/nodes", method="HEAD")
         with urlopen(request) as response:
             self.assertEqual(response.status, 200)

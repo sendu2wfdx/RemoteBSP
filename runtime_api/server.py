@@ -86,6 +86,7 @@ from .provider import (
     SnapshotRead,
 )
 from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
+from .dashboard import RuntimeDashboard
 
 
 API_VERSION = "v1"
@@ -819,7 +820,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if parts == ["api", API_VERSION]:
             return "root"
         if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
-                parts[2] in {"health", "snapshot", "nodes", "resources",
+                parts[2] in {"health", "snapshot", "overview", "nodes", "resources",
                              "alerts", "events", "control-leases"}:
             return "control_leases" if parts[2] == "control-leases" \
                 else parts[2]
@@ -2224,7 +2225,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     },
                     **self._runtime_capabilities(),
                 },
-                "endpoints": ["health", "snapshot", "nodes", "resources",
+                "endpoints": ["health", "snapshot", "overview", "nodes", "resources",
                               "alerts", "events", "control-leases",
                               "control/operations/{operation_id}",
                               "control/operation-lookups"] +
@@ -2302,6 +2303,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         endpoint = parts[2]
         if parts == ["api", API_VERSION, "snapshot"]:
             self._success(snapshot, read=read)
+            return
+        if parts == ["api", API_VERSION, "overview"]:
+            try:
+                toolbusd_health = self._toolbusd_health()
+            except RequestDeadlineExceeded:
+                toolbusd_health = {"available": False, "snapshot": None,
+                                   "reason": "deadline_exceeded"}
+            dashboard = self.server.runtime_dashboard.observe(  # type: ignore[attr-defined]
+                snapshot, toolbusd_health)
+            self._success(dashboard, read=read)
             return
         if parts == ["api", API_VERSION, "nodes"]:
             self._success([
@@ -2537,6 +2548,7 @@ def make_server(host: str, port: int,
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
         capacity=audit_capacity, output=audit_output)
     server.event_log = event_log  # type: ignore[attr-defined]
+    server.runtime_dashboard = RuntimeDashboard()  # type: ignore[attr-defined]
     server.control_leases = resolved_control_leases  # type: ignore[attr-defined]
     server.control_audit_journal = control_audit_journal  # type: ignore[attr-defined]
     server.control_audit_state_lock = threading.Lock()  # type: ignore[attr-defined]
