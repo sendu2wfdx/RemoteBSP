@@ -40,7 +40,7 @@
         "status": "partial",
         "evidence": [
           {"id": "determinism_hardware_document", "kind": "documented_hardware_result", "path": "docs/weact-stm32g431cbu6-core.md", "note": "记录单轴空载步数验证；不覆盖抖动、跨板同步或最坏负载。"},
-          {"id": "determinism_g431_dl16_document", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "关闭 DL16 官方上位机后，atk-logic 以10MHz/20ms采集 PA6 1kHz/50% PWM，40边沿、最短脉宽499.9µs、0毛刺；仅证明单路采集，不覆盖STEP、最坏负载或跨板同步。"}
+          {"id": "determinism_g431_dl16_document", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "PA6/D5 已采集1kHz/50%、1kHz/12.34%、100kHz/50%和100kHz/25%，全部0毛刺；最高频组为50MHz/2ms、400边沿，最短脉宽2.5µs，生命周期修复固件重复通过100kHz/25%。仅证明单路PWM，不覆盖STEP、最坏负载或跨板同步。"}
         ],
         "blocker_ids": ["determinism_hardware_timing"]
       }
@@ -48,7 +48,7 @@
     {
       "id": "resource_model",
       "title": "通用资源模型",
-      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；Studio/固件共用 GPIO/UART/PWM/位流静态表，I2C/SPI 已有 toolbusd 父总线仲裁，H2N/N2H Stream 已到 Mock，ADC、Timer、Storage、双向流与实体数据面缺失。",
+      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；Studio/固件共用 GPIO/UART/PWM/位流静态表，G431 已接入 UART 水位/溢出和 PWM/TimedBitstream 基础状态及 PWM 停止释放对象，I2C/SPI 已有 toolbusd 父总线仲裁，H2N/N2H Stream 已到 Mock，ADC、Timer、Storage、双向流与实体数据面缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -56,7 +56,7 @@
           {"id": "resource_protocol_source", "kind": "source", "path": "protocol/src/resource.cpp", "note": "资源描述、合同和状态协议实现。"},
           {"id": "resource_bus_runtime_source", "kind": "source", "path": "toolbusd/src/bus_runtime.cpp", "note": "有界设备合同缓存、首访单飞、父总线非阻塞仲裁和节点失效处理。"},
           {"id": "resource_static_table_source", "kind": "source", "path": "firmware/src/static_resources.c", "note": "Studio 生成 GPIO/UART/PWM/定时位流表的启动完整性和运行白名单公共消费者。"},
-          {"id": "resource_embedded_enum_source", "kind": "source", "path": "firmware/src/core.c", "note": "STM32 Remote Core 已把静态表接入 ResourceEnum/Describe/Status/Contract 四个只读命令；缺失能力和非法索引失败关闭。"}
+          {"id": "resource_embedded_enum_source", "kind": "source", "path": "firmware/src/core.c", "note": "STM32 Remote Core 已把静态表接入 ResourceEnum/Describe/Status/Contract 四个只读命令，并汇总 UART/PWM/TimedBitstream 基础状态；PWM 停止成功释放对象槽，缺失能力和非法索引失败关闭。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -70,7 +70,7 @@
           {"id": "resource_stream_n2h_test", "kind": "mock_test", "path": "tests/stream_n2h_session_tests.cpp", "note": "N2H 精确累计 ACK、两阶段交付、回绕、溢出、租约到期和跨资源/节点隔离；Mock不是实体实测，且未绑定真实高速链路。"},
           {"id": "resource_bus_runtime_test", "kind": "host_test", "path": "tests/bus_runtime_tests.cpp", "note": "覆盖合同边界、首访单飞、父总线争用、跨节点隔离和失效期间 ABA 防护；不代表实体总线时序。"},
           {"id": "resource_static_table_test", "kind": "host_test", "path": "firmware/tests/startup_gpio_tests.c", "note": "覆盖静态资源表边界、跨类型引脚冲突与 UART/波形白名单；不代表实体引脚时序。"},
-          {"id": "resource_embedded_enum_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "覆盖 STM32 ResourceEnum/Describe/Status/Contract 的多资源分页、严格索引、会话无关和缺失回调边界。"}
+          {"id": "resource_embedded_enum_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "覆盖 STM32 ResourceEnum/Describe/Status/Contract 的多资源分页、严格索引、UART/PWM/TimedBitstream 状态、后端失败，以及PWM停止后对象重建。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -86,7 +86,7 @@
         "status": "partial",
         "evidence": [
           {"id": "resource_hardware_document", "kind": "documented_hardware_result", "path": "docs/weact-bluepill-plus.md", "note": "记录 GPIO、UART 与 CAN 实体验证；不覆盖全部资源族。"},
-          {"id": "resource_g431_enum_hardware", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "G431 重刷后经实体 CAN-FD 枚举 3 UART、PWM0、TimedBitstream0，并由 RuntimeSnapshot 返回 1 节点/5 资源；不证明这些资源的全部电气与时序行为。"}
+          {"id": "resource_g431_enum_hardware", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "G431 经实体 CAN-FD 枚举3 UART、PWM0、TimedBitstream0并由RuntimeSnapshot返回1节点/5资源；PWM实板验证Busy->Normal、对象1停止后不复位重建对象2及最高100kHz波形，不证明其余资源的全部电气与时序行为。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       }
@@ -165,7 +165,7 @@
     {
       "id": "observability",
       "title": "可观测性",
-      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；toolbusd 软件生产者、只读 IPC、操作账本可变更状态/记录数量和 Runtime 可信投影已贯通。G431 真机已证明 1 节点/5 静态资源进入 RuntimeSnapshot，但这不是 MCU 健康遥测；MCU/Remote Core 生产者、历史和硬件时间戳质量仍未实现。",
+      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；toolbusd 软件生产者、只读 IPC、操作账本可变更状态/记录数量和 Runtime 可信投影已贯通。G431 已把 UART 环形缓冲水位/溢出及 PWM/TimedBitstream 基础状态接入 ResourceStatus，并实板验证 PWM Busy->Normal；这仍不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列、历史和硬件时间戳质量仍未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -175,7 +175,8 @@
           {"id": "observability_health_producer_source", "kind": "source", "path": "toolbusd/src/health_producer.cpp", "note": "只生产 toolbusd 可证明的软件状态，包括操作账本可变更状态和记录数量；物理收发和 MCU 指标明确 unavailable，并在边界执行公共 wire 校验。"},
           {"id": "observability_health_projection_source", "kind": "source", "path": "runtime_api/health_projection.py", "note": "按 daemon 身份与独立生产者代际绑定本机来源，拒绝陈旧、同序号异载荷和时钟回退。"},
           {"id": "observability_health_contract_document", "kind": "document", "path": "docs/telemetry-health-contract.md", "note": "说明可信来源/节点绑定、软件与硬件测量边界及协议演进规则。"},
-          {"id": "observability_health_production_document", "kind": "document", "path": "docs/toolbusd-health-production.md", "note": "记录 toolbusd 指标来源、时间基、扩展 ID、Runtime 投影和非目标。"}
+          {"id": "observability_health_production_document", "kind": "document", "path": "docs/toolbusd-health-production.md", "note": "记录 toolbusd 指标来源、时间基、扩展 ID、Runtime 投影和非目标。"},
+          {"id": "observability_embedded_resource_status_source", "kind": "source", "path": "firmware/src/core.c", "note": "聚合 UART 实际水位/溢出、PWM/TimedBitstream 忙和后端失败为资源级状态；不生产 CPU/ISR/栈等 MCU 健康指标。"}
         ],
         "blocker_ids": ["hardware_observability"]
       },
@@ -186,24 +187,32 @@
           {"id": "observability_snapshot_test", "kind": "host_test", "path": "tests/runtime_snapshot_ipc_tests.cpp", "note": "RuntimeSnapshot v2 严格编解码。"},
           {"id": "observability_health_contract_test", "kind": "host_test", "path": "tests/health_contract_tests.cpp", "note": "Release/NDEBUG 下仍有效的健康契约往返、代际、单位、可用性、容量与篡改测试。"},
           {"id": "observability_health_producer_test", "kind": "host_test", "path": "tests/toolbusd_health_producer_tests.cpp", "note": "覆盖生产者代际、序号、时间、流量汇总、操作账本降级、可用性和并发采样。"},
-          {"id": "observability_health_process_test", "kind": "mock_test", "path": "tests/e2e_vcan.sh", "note": "Mock 节点上的真实 toolbusd/remote-cli/Runtime 进程链验证认证健康读取及公开探针隔离；不是实体测量。"}
+          {"id": "observability_health_process_test", "kind": "mock_test", "path": "tests/e2e_vcan.sh", "note": "Mock 节点上的真实 toolbusd/remote-cli/Runtime 进程链验证认证健康读取及公开探针隔离；不是实体测量。"},
+          {"id": "observability_embedded_resource_status_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "覆盖 UART/PWM/TimedBitstream 忙、水位、溢出和后端失败到 ResourceStatus 的映射；不替代实体 MCU 遥测测试。"}
         ],
         "blocker_ids": []
       },
       "cross_compiled": {"status": "not_applicable", "evidence": [], "blocker_ids": []},
-      "hardware_verified": {"status": "absent", "evidence": [], "blocker_ids": ["hardware_observability"]}
+      "hardware_verified": {
+        "status": "partial",
+        "evidence": [
+          {"id": "observability_g431_resource_status_hardware", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "G431 实板确认 PWM ResourceStatus 在运行/停止时 Busy->Normal；UART水位/溢出与失败分支未做完整实体注入，且不覆盖CPU/ISR/栈/运动队列。"}
+        ],
+        "blocker_ids": ["hardware_observability"]
+      }
     },
     {
       "id": "configuration_build",
       "title": "配置与构建",
-      "summary": "Studio 工程、Kconfig 与 GPIO/UART/PWM/定时位流静态表生成、冲突校验、带源码身份的构建归档、生产批次包及有界本地历史检索已部分实现；自动烧录和回读闭环缺失。",
+      "summary": "Studio 工程、Kconfig 与 GPIO/UART/PWM/定时位流静态表生成、冲突校验、带源码身份的构建归档、生产批次包及有界本地历史检索已部分实现；部署作业软件模块已覆盖受保护固件校验、安全ST-Link计划、重试和身份核对，但实际烧录器执行及实体回读适配器尚未接入。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "config_project_source", "kind": "source", "path": "gui/project_config.py", "note": "版本化工程规范化、Kconfig、GPIO/UART/PWM/定时位流固件静态表与 Mock 清单生成。"},
           {"id": "config_builder_source", "kind": "source", "path": "gui/firmware_builder.py", "note": "构建 ID 纳入源码、依赖和工具链身份；构建期漂移拒绝归档，下载复核边界、大小与哈希。"},
           {"id": "config_record_source", "kind": "source", "path": "gui/production_record.py", "note": "区分设计、构建、烧录和硬件证据的生产记录。"},
-          {"id": "config_history_source", "kind": "source", "path": "gui/production_history.py", "note": "按内容哈希原子保存、复核、隔离和有界检索生产批次历史。"}
+          {"id": "config_history_source", "kind": "source", "path": "gui/production_history.py", "note": "按内容哈希原子保存、复核、隔离和有界检索生产批次历史。"},
+          {"id": "config_deployment_source", "kind": "source", "path": "gui/firmware_deployment.py", "note": "部署作业校验受保护构建记录与固件，生成无shell拼接的ST-Link计划并核对板型/工程/配置/固件身份；实际执行器和回读器由调用者提供。"}
         ],
         "blocker_ids": ["studio_flash_readback"]
       },
@@ -212,7 +221,8 @@
         "evidence": [
           {"id": "config_gui_test", "kind": "host_test", "path": "gui/tests/test_gui.py", "note": "Studio API、多资源静态表确定性、端点伪造拒绝、源码身份隔离、归档完整性和工程校验测试。"},
           {"id": "config_production_test", "kind": "host_test", "path": "gui/tests/test_production_record.py", "note": "生产记录证据分类测试。"},
-          {"id": "config_history_test", "kind": "host_test", "path": "gui/tests/test_production_history.py", "note": "历史目录所有权、原子保存、损坏隔离、容量和查询边界测试。"}
+          {"id": "config_history_test", "kind": "host_test", "path": "gui/tests/test_production_history.py", "note": "历史目录所有权、原子保存、损坏隔离、容量和查询边界测试。"},
+          {"id": "config_deployment_test", "kind": "host_test", "path": "gui/tests/test_firmware_deployment.py", "note": "覆盖命令参数安全、篡改固件预拒绝、烧录重试、四字段身份核对和不匹配失败；使用注入式适配器，不代表实体自动烧录。"}
         ],
         "blocker_ids": ["studio_flash_readback"]
       },
@@ -350,13 +360,13 @@
     {
       "id": "hardware_evidence",
       "title": "实体硬件证据",
-      "summary": "三类 STM32 有分散板卡记录；2026-09-10 新增一份绑定 G431 芯片/Option Bytes、原厂备份摘要、CAN-FD 压力、恢复、资源枚举和 PA6 PWM 原始采集的结构化文档，但完整命令原始输出、接线确认和其余板卡/信号仍缺失，尚未形成覆盖三板的统一可重放验收记录。",
+      "summary": "三类 STM32 有分散板卡记录；2026-09-10 的结构化 G431 文档已绑定芯片/Option Bytes、原厂备份摘要、CAN-FD 压力、恢复、资源枚举、PWM停止重建生命周期和 PA6 多频率/占空比原始采集，但完整命令原始输出、接线确认和其余板卡/信号仍缺失，尚未形成覆盖三板的统一可重放验收记录。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "hardware_plan_document", "kind": "document", "path": "docs/stm32-hardware-plan.md", "note": "板卡覆盖与待验收范围。"},
           {"id": "hardware_build_document", "kind": "document", "path": "docs/stm32-build-and-flash.md", "note": "分散的日期、接线和实体结果记录。"},
-          {"id": "hardware_g431_20260910_document", "kind": "document", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "按设备身份、Flash保护、链路压力、恢复、资源枚举、DL16采集和证据层级记录本轮 G431 实体工作；公开记录省略敏感设备标识。"}
+          {"id": "hardware_g431_20260910_document", "kind": "document", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "按设备身份、Flash保护、链路压力、恢复、资源枚举、PWM生命周期、DL16多组采集和证据层级记录本轮 G431 实体工作；公开记录省略敏感设备标识。"}
         ],
         "blocker_ids": ["hardware_records_not_reproducible"]
       },
@@ -375,7 +385,7 @@
           {"id": "hardware_f072_document", "kind": "documented_hardware_result", "path": "docs/mellow-fly-d5.md", "note": "F072/FLY-D5 的 CAN、GPIO、运动与 TMC 部分实体记录。"},
           {"id": "hardware_f103_document", "kind": "documented_hardware_result", "path": "docs/weact-bluepill-plus.md", "note": "F103 的 CAN、GPIO、UART 和 Katapult 部分实体记录。"},
           {"id": "hardware_g431_document", "kind": "documented_hardware_result", "path": "docs/weact-stm32g431cbu6-core.md", "note": "G431 的 CAN-FD、GPIO、PWM、UART 与单轴部分实体记录。"},
-          {"id": "hardware_g431_20260910_result", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "记录 G431 CAN-FD 压力、三类恢复、5项资源枚举及PA6 1kHz/50% PWM原始采集；PA0/PA4与公共GND仍待复核，不外推其他波形。"}
+          {"id": "hardware_g431_20260910_result", "kind": "documented_hardware_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "记录 G431 CAN-FD 压力、三类恢复、5项资源枚举、PWM Busy->Normal与无复位对象重建，以及PA6从1kHz到100kHz多占空比原始采集；PA0/PA4与公共GND仍待复核，不外推STEP、TimedBitstream或跨板波形。"}
         ],
         "blocker_ids": ["hardware_records_not_reproducible", "hardware_evidence_incomplete"]
       }
@@ -387,7 +397,7 @@
     {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "通用启动代次日志已有软件证据，但尚未绑定板级独立 Flash 区，实体同步也未完成。", "requires_hardware": true, "closure_evidence": "先逐板证明 boot epoch 区域、升级保留和掉电行为，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络、租约失效和失联恢复记录。"},
     {"id": "partial_failure_recovery", "dimension_id": "fault_isolation", "summary": "响应丢失和 daemon 重启后的 GPIO 不确定提交已有持久软件账本与作用域阻断；网络分区、跨节点部分 COMMIT、总线饱和和实体资源卡死恢复矩阵仍未完成。", "requires_hardware": true, "closure_evidence": "固定故障脚本、期望状态机、原始链路记录和实体安全输出证据。"},
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
-    {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
+    {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "部署作业软件模块已存在，但 Studio 尚未接入实际烧录器、重启后的实体身份/配置哈希回读和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
     {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2、显式对象销毁、同代安全复用、固件会话所有权、结构化错误、统一控制期限、可查询的跨进程不确定提交账本及 HMAC 链持久控制审计已完成；仍缺主动推送、跨重启事件历史、TLS/密钥生命周期和系统级资源耗尽验证。", "requires_hardware": false, "closure_evidence": "实现 TLS/密钥生命周期、主动推送和跨重启事件历史，并完成进程/线程/磁盘/IPC 容量耗尽攻击测试。"},
     {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限、有界普通审计和 HMAC 链持久控制审计已建立，但 TLS/密钥生命周期、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、攻击面测试、总线认证和部署加固验证。"},

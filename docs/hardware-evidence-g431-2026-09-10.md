@@ -89,9 +89,12 @@ node 1 是本次会话中的临时数字路由号，不是持久设备身份。�
 - `ResourceStatus`；
 - `ResourceContract`。
 
-其中 `ResourceStatus` 当前只完成协议可达性，实体静态资源仍返回 `Normal` 和零计数占位；
-`ResourceContract` 未声明的时延、吞吐和操作队列指标保持为 `0`。二者不能作为真实 MCU
-健康、缓冲水位或性能保证证据。
+后续同轮迭代又把 `ResourceStatus` 的 G431 UART 字段接到真实 RX/TX 环形缓冲水位和
+溢出计数，并为 PWM、TimedBitstream 接入对象/后端忙状态与后端失败锁存。PWM 的
+`Busy -> Normal` 生命周期已在本板复验；其余失败分支主要仍是代码和自动测试证据。
+这些资源级基础状态不是 CPU/空闲率、ISR 最大耗时、栈水位、运动队列或硬件时间戳等
+完整 MCU 遥测。`ResourceContract` 未声明的时延、吞吐和操作队列指标仍保持为 `0`，
+不能解释为无限能力或性能保证。
 
 修复后完成主机全量 72/72 测试，并交叉编译以下六个正式目标：F072、F103、
 F103/BluePill Plus、F072/FLY-D5、G431、G431/WeAct Core。两类结果属于自动测试和
@@ -107,6 +110,17 @@ F103/BluePill Plus、F072/FLY-D5、G431、G431/WeAct Core。两类结果属于�
 静态表、Remote Core 四个只读资源命令、`toolbusd` 和 Runtime 快照已经在实体 CAN-FD
 链路上贯通。它不证明 UART 电气收发、PWM/TimedBitstream 波形、I2C/SPI、ADC、Timer、
 Storage 或高速 Stream 已完成实体验收。
+
+本轮继续操作 PWM 时发现一个资源生命周期缺口：首次创建得到对象 1，`pwm-stop`
+虽然停止了后端输出，却没有释放 Remote Core 对象槽；同一资源再次创建因此返回状态 8
+（`ResourceBusy`）。修复为仅在后端停止成功后释放对象后，实体板验证了：
+
+- PWM 运行期间 `ResourceStatus` 为 `Busy`；
+- `pwm-stop` 后同一资源状态回到 `Normal`；
+- 不复位 MCU 即可在同一通道把对象 1 停止并重新创建为对象 2。
+
+这证明当前 G431 PWM 单对象停止/重建路径已经闭合，但不等于所有资源类型、会话清理、
+后端失败恢复或节点复位矩阵都已完成。
 
 ## 6. DL16 识别、通道映射与采集结果
 
@@ -128,7 +142,8 @@ DL16 在 5 MHz、20 ms 窗口下完成全低电平基线采集。此前 `incompl
 PA4 两个被测通道出现，不能再概括成“任一 MCU 通道为高电平都会失败”；当时设备侧进度
 显示完成，但结果中没有 channel bytes。这两个通道仍需复测。
 
-关闭 DL16 官方上位机、释放设备后，`atk-logic` 已成功采集 D5/PA6 的测试 PWM：
+关闭 DL16 官方上位机、释放设备后，`atk-logic` 已成功采集 D5/PA6 的测试 PWM。
+首轮 1 kHz、50% 基线为：
 
 | 采集项 | 结果 |
 |---|---:|
@@ -149,10 +164,34 @@ hardware-backups/round21/pa6-d5-pwm-1khz.csv
 hardware-backups/round21/pa6-d5-pwm-1khz-report.md
 ```
 
-这份结果证明 DL16 与 `atk-logic` 的单路采集/解码链路可用，并形成一份 PA6、1 kHz、
-50% PWM 的实体波形记录。由于公共 GND 仍待用户口头确认、PA0/PA4 尚未复测，且该信号
-不是持续高负载 STEP/DIR/EN 或跨板同步边沿，不能据此关闭确定性时序 blocker，也不能
-外推 TimedBitstream、最坏抖动、ISR 耗时或安全停机时延。
+同一 PA6/D5 通道又完成三组占空比与高频采集：
+
+| 设定 | 采样率 / 窗口 | 样本数 | 边沿 | 占空比 | 最短脉宽 | 毛刺 |
+|---|---|---:|---:|---:|---:|---:|
+| 1 kHz / 12.34% | 10 MHz / 20 ms | 200000 | 40 | 12.34% | 123.3 µs | 0 |
+| 100 kHz / 50% | 50 MHz / 2 ms | 100000 | 400 | 50.00% | 5.0 µs | 0 |
+| 100 kHz / 25% | 50 MHz / 2 ms | 100000 | 400 | 25.00% | 2.5 µs | 0 |
+
+三组原始 CSV 与分析报告位于 `hardware-backups/round22/`。修复上述 PWM 对象生命周期后，
+最终固件再次完成 100 kHz / 25% 采集：50 MHz、2 ms、100000 样本、400 边沿、
+25.00%、最短脉宽 2.5 µs、0 毛刺。对应忽略目录文件为：
+
+```text
+hardware-backups/round22/pa6-d5-pwm-1khz-12p34.csv
+hardware-backups/round22/pa6-d5-pwm-1khz-12p34-report.md
+hardware-backups/round22/pa6-d5-pwm-100khz-50.csv
+hardware-backups/round22/pa6-d5-pwm-100khz-50-report.md
+hardware-backups/round22/pa6-d5-pwm-100khz-25.csv
+hardware-backups/round22/pa6-d5-pwm-100khz-25-report.md
+hardware-backups/round22/pa6-d5-pwm-100khz-25-lifecycle-fixed.csv
+hardware-backups/round22/pa6-d5-pwm-100khz-25-lifecycle-fixed-report.md
+```
+
+这些结果证明 DL16 与 `atk-logic` 的单路采集/解码链路可用，并验证 PA6 上 1 kHz 两种
+占空比、100 kHz 两种占空比及生命周期修复后的重复高频输出。由于公共 GND 仍待用户
+口头确认、PA0/PA4 尚未复测，且这些信号不是持续高负载 STEP/DIR/EN 或跨板同步边沿，
+不能据此关闭确定性时序 blocker，也不能外推 TimedBitstream、最坏抖动、ISR 耗时或
+安全停机时延。
 
 ## 7. 证据层级与仍开放的门槛
 
@@ -162,12 +201,16 @@ hardware-backups/round21/pa6-d5-pwm-1khz-report.md
 - ST-Link 写入板卡专用 APP 并校验成功；
 - 单节点 CAN-FD 发现、基础命令、200 次顺序与 200 次并发请求、2023 字节分片；
 - daemon 重启、MCU 复位和 `can0` down/up 后恢复；
-- 修复后的 5 项静态资源枚举和 RuntimeSnapshot 实体链路贯通。
+- 修复后的 5 项静态资源枚举和 RuntimeSnapshot 实体链路贯通；
+- PWM 停止后 `Busy -> Normal`、对象 1 不复位重建为对象 2；
+- PA6/D5 的 1 kHz/50%、1 kHz/12.34%、100 kHz/50%、100 kHz/25% 波形，
+  以及生命周期修复固件上的 100 kHz/25% 重复采集。
 
 以下内容不能提升为实体波形或整体成熟度证据：
 
 - 72/72 测试和六目标交叉编译；
 - PA0/PA4 返回 `incomplete` 的采集，以及尚未复测的其他运动/同步输出；
+- 资源级 UART/PWM/TimedBitstream 基础状态对完整 MCU 健康遥测的外推；
 - 尚未确认的公共 GND；
 - 单节点结果对多节点同步、其他两类 MCU 或 RemoteBSP/Klipper 对照性能的外推。
 

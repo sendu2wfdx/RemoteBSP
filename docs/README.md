@@ -69,16 +69,16 @@ flowchart LR
 | 发现、心跳、请求 | 已实现、已测试 | UUID发现、节点分配、500 ms心跳、2 s离线、重试和副作用去重 |
 | 本地 IPC / C++ API / CLI | 已实现、已测试 | 应用不直接访问CAN；覆盖节点、资源、GPIO、UART、运动、波形和升级，并含受信本机 Runtime GPIO 租约/写入竖切 |
 | 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护 |
-| GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致；G431 的静态资源枚举、描述、状态、合同已在真机补齐并贯通 RuntimeSnapshot |
-| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM对象命令已实测，实体WS2812波形待验收 |
+| GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致；G431 静态资源四个只读命令已贯通 RuntimeSnapshot，UART ResourceStatus 已接真实环形缓冲水位/溢出 |
+| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM 已实测 Busy -> Normal、停止后不复位重建对象和最高 100 kHz 两种占空比 0 毛刺；TimedBitstream 仅有忙/后端失败基础状态，实体WS2812波形待验收 |
 | 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入主机与STM32公共Core；可靠启动代次双页日志已通过故障注入，但尚未绑定实体Flash区，三板继续安全禁用跨板入口 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
-| Studio | 构建阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料、`.config`与GPIO/UART/PWM/定时位流静态表生成；构建归档纳入源码/依赖/工具链身份并拒绝构建期漂移，自动烧录回读待实现 |
+| Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料、`.config`与GPIO/UART/PWM/定时位流静态表生成；构建归档纳入源码/依赖/工具链身份并拒绝构建期漂移。部署作业模块可校验固件、生成安全 ST-Link 计划、重试并核对四类身份，但实际烧录器执行和实体回读适配器尚未接入 Studio |
 | I2C / SPI | 协议、Mock、Studio、主机运行时及嵌入式公共Core竖切已实现 | `toolbusd`已增加合同首访单飞、父总线仲裁和节点代次失效；默认关闭的STM32公共Core固定端点合同、设备级租约和原子事务边界；三板真实HAL与实板验收待完成 |
 | 高速 Stream | H2N/N2H Mock会话已实现、已测试 | 连续序号、精确ACK信用、两阶段交付、背压、故障与旧缓冲隔离已覆盖；双向及USB/Ethernet真实数据面待实现 |
 | Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误与统一单调期限已贯通；持久控制审计以 HMAC 链和同步 intent/terminal/unknown 失败关闭 mutation，16 项日志内核及 6 项集成测试已覆盖。TLS、主动推送、跨重启事件历史及实体失效安全验收待实现 |
-| 遥测健康契约 | toolbusd 软件生产链已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd 已贯通生产者、只读 IPC、CLI 与 Runtime 可信投影，MCU/Remote Core 与实体采样仍待实现 |
-| 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；2026-09-10 新增 G431 CAN-FD 压力、恢复、资源枚举及 PA6 1 kHz/50% PWM 原始采集。PA0/PA4 仍不完整、公共 GND 待确认，单路 PWM 不构成 STEP/跨板时序通过。对照 v1 仍硬拒绝 executed/胜出 |
+| 遥测健康契约 | toolbusd 软件生产链已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd 已贯通生产者、只读 IPC、CLI 与 Runtime 可信投影。G431 UART 水位/溢出和 PWM/TimedBitstream 基础状态已接入，但不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列和硬件时间戳仍待实现 |
+| 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；2026-09-10 G431 证据已含 CAN-FD 压力/恢复、资源枚举、PWM 生命周期及 PA6 1 kHz/100 kHz 多占空比原始采集。PA0/PA4 仍不完整、公共 GND 待确认，单路 PWM 不构成 STEP/跨板时序通过。对照 v1 仍硬拒绝 executed/胜出 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
 ## 正式板卡
@@ -87,7 +87,7 @@ flowchart LR
 |---|---|
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴和五路TMC2209已实测；双模式Katapult切换待验收 |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发实板验证通过；五轴/TMC待实板验收 |
-| STM32G431CBU6 / WeAct Core | 外部8 MHz HSE、32.768 kHz LSE资源、CAN-FD、USART1/2/3、PC6 PWM、PC13 GPIO；三路UART、Studio专用固件及单轴空载调度已实测，五轴持续负载/USB/双模式Katapult待继续验收 |
+| STM32G431CBU6 / WeAct Core | 外部8 MHz HSE、32.768 kHz LSE资源、CAN-FD、USART1/2/3、PC6 PWM、PC13 GPIO；三路UART、Studio专用固件、单轴空载调度、PWM停止/重建生命周期及 PA6 最高100 kHz波形已实测，五轴持续负载/USB/双模式Katapult待继续验收 |
 
 ## 严格分层
 

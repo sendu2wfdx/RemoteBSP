@@ -109,12 +109,23 @@ TimedBitstream0 共 5 项；`RuntimeSnapshot v2` 返回 1 节点、5 资源。�
 主机测试和 F072、F103、F103/BluePill Plus、F072/FLY-D5、G431、G431/WeAct Core
 六目标交叉编译均通过，但它们仍属于软件证据。
 
+同轮继续把 G431 `ResourceStatus` 的 UART 字段接到真实 RX/TX 环形缓冲水位和溢出，
+并为 PWM/TimedBitstream 接入对象/后端忙和后端失败基础状态。实板操作还暴露
+`pwm-stop` 成功后未释放对象槽：对象 1 停止后再次创建返回状态 8（`ResourceBusy`）。
+修复后，实体 `ResourceStatus` 从运行时 `Busy` 回到停止后的 `Normal`，且无需复位即可
+在同一通道把对象 1 重建为对象 2。这里的资源级状态不是 CPU、ISR、栈、运动队列或
+硬件时间戳等完整 MCU 遥测。
+
 ALIENTEK DL16 已被采集工具识别为真正的 `dl16`。关闭官方上位机后，`atk-logic`
 成功采集 D5/PA6 的 1 kHz、50.00% 测试 PWM：10 MHz、20 ms、200000 样本、20 个
 上升沿和 20 个下降沿、最短脉宽 499.9 µs、0 毛刺。原始 CSV 和报告保存在 Git 忽略的
-`hardware-backups/round21/`。此前 `incomplete` 只发生在 PA0/PA4，不能泛化成任一高电平
-通道失败；这两路与公共 GND 仍待确认/复测。单路 PA6 PWM 不能据此关闭 STEP、
-TimedBitstream 或跨板确定性时序 blocker。通道映射、失败现象和完整证据分层见
+`hardware-backups/round21/`。之后同一通道完成 1 kHz/12.34%（10 MHz、20 ms、
+40 边沿、最短 123.3 µs）、100 kHz/50%（50 MHz、2 ms、400 边沿、最短 5.0 µs）
+和 100 kHz/25%（50 MHz、2 ms、400 边沿、最短 2.5 µs）采集，均为 0 毛刺；最终
+生命周期修复固件再次通过 100 kHz/25%，原始附件位于忽略的 `round22/`。
+此前 `incomplete` 只发生在 PA0/PA4，不能泛化成任一高电平通道失败；这两路与公共
+GND 仍待确认/复测。单路 PA6 PWM 不能据此关闭 STEP、TimedBitstream 或跨板确定性
+时序 blocker。通道映射、失败现象和完整证据分层见
 [本轮实体验收记录](hardware-evidence-g431-2026-09-10.md)。
 
 ## 构建
