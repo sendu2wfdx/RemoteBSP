@@ -539,6 +539,7 @@ public:
                    remotebsp::toolbusd::MotionGroupServiceConfig
                        motion_group_config,
                   std::string operation_ledger_directory,
+                  std::uint32_t maximum_ipc_clients,
                    const ToolbusDaemonTestOptions& test_options,
                    std::unique_ptr<remotebsp::toolbusd::LinkRecordingController>
                        recording)
@@ -551,6 +552,7 @@ public:
           operation_ledger_(operation_ledger_options(
               operation_ledger_directory, test_options)),
           recording_(std::move(recording)),
+          maximum_ipc_clients_(maximum_ipc_clients),
 #ifdef REMOTEBSP_TEST_HOOKS
           gpio_post_lookup_barrier_(
               test_options.gpio_post_lookup_barrier_participants == 0U
@@ -605,17 +607,34 @@ public:
                          sizeof(timeout));
             {
                 std::lock_guard<std::mutex> lock(client_mutex_);
+                // 在创建线程之前执行准入。超限连接立即关闭；已接纳的慢
+                // 客户端仍受 2 秒收发期限约束，不能无限持有配额。
+                if (active_clients_ >= maximum_ipc_clients_) {
+                    ::close(client);
+                    continue;
+                }
                 ++active_clients_;
             }
-            std::thread([this, client] {
-                handle_client(client);
+            try {
+                std::thread([this, client] {
+                    handle_client(client);
+                    ::close(client);
+                    {
+                        std::lock_guard<std::mutex> lock(client_mutex_);
+                        --active_clients_;
+                    }
+                    clients_finished_.notify_all();
+                }).detach();
+            } catch (...) {
+                // 系统线程资源瞬时耗尽时撤销已记账的准入并关闭 fd，
+                // 守护进程继续服务已有客户端，不因一个 accept 结果退出。
                 ::close(client);
                 {
                     std::lock_guard<std::mutex> lock(client_mutex_);
                     --active_clients_;
                 }
                 clients_finished_.notify_all();
-            }).detach();
+            }
         }
         stop();
         std::cout << "toolbusd 已退出\n";
@@ -3651,6 +3670,7 @@ private:
     remotebsp::toolbusd::MotionGroupService motion_group_;
     remotebsp::toolbusd::OperationLedger operation_ledger_;
     std::unique_ptr<remotebsp::toolbusd::LinkRecordingController> recording_;
+    const std::size_t maximum_ipc_clients_;
 #ifdef REMOTEBSP_TEST_HOOKS
     std::unique_ptr<OneShotTestBarrier> gpio_post_lookup_barrier_;
     const std::uint32_t drop_stream_credit_ipc_response_ordinal_{};
@@ -3718,6 +3738,7 @@ int main(int argc, char** argv) {
                      "[--data-bitrate bit/s] "
                      "[--max-utilization-permille 1..1000] "
                      "[--burst-window-ms 毫秒] "
+                     "[--max-ipc-clients 1..1024] "
                      "[--motion-max-clock-error-ns 纳秒] "
                      "[--logical-recording-dir 固定目录 "
                      "--record-logical-link 文件名.rbsplog] "
@@ -3749,6 +3770,8 @@ int main(int argc, char** argv) {
         std::optional<std::string> logical_recording_directory;
         std::optional<std::string> logical_recording_name;
         ToolbusDaemonTestOptions test_options;
+        std::uint32_t maximum_ipc_clients =
+            remotebsp::toolbusd::kDefaultMaximumConcurrentIpcClients;
         traffic_config.mode = (mock_usb || usb)
                                   ? remotebsp::toolbusd::TrafficBusMode::Usb
                                   : mode == remotebsp::transport::CanMode::Classical
@@ -3819,6 +3842,13 @@ int main(int argc, char** argv) {
                 }
                 traffic_config.burst_window =
                     std::chrono::milliseconds(value);
+            } else if (option == "--max-ipc-clients") {
+                if (value > remotebsp::toolbusd::
+                                kMaximumConfigurableConcurrentIpcClients) {
+                    throw std::invalid_argument(
+                        "IPC 并发客户端上限必须位于 1～1024");
+                }
+                maximum_ipc_clients = value;
             } else if (option == "--motion-max-clock-error-ns") {
                 if (value > 10000000U) {
                     throw std::invalid_argument(
@@ -3916,6 +3946,7 @@ int main(int argc, char** argv) {
                              traffic_config, clock_sync_config,
                              motion_group_config,
                              std::move(*operation_ledger_directory),
+                             maximum_ipc_clients,
                              test_options, std::move(recording));
         daemon.run();
     } catch (const std::exception& error) {

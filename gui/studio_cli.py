@@ -53,9 +53,14 @@ from production_history import (
 )
 from production_signing import (
     MAX_SIGNATURE_BYTES,
+    MAX_TRUST_POLICY_BYTES,
+    add_trusted_key,
+    create_trust_policy,
     generate_key_pair,
+    revoke_trusted_key,
     sign_evidence,
-    verify_evidence,
+    validate_trust_policy,
+    verify_evidence_with_policy,
 )
 from project_compare import MAX_PROJECT_BYTES
 from project_config import ProjectConfigError, validate_project
@@ -593,10 +598,54 @@ def _run_evidence_verify(args) -> dict:
     evidence = _validated_signable(args.evidence)
     envelope = _read_json(args.signature, "Ed25519签名信封",
                           MAX_SIGNATURE_BYTES)
-    verification = verify_evidence(
-        evidence, envelope, _bounded_path(args.public_key, "Ed25519公钥"))
+    policy = _read_json(args.trust_policy, "签名者信任策略",
+                        MAX_TRUST_POLICY_BYTES)
+    verification = verify_evidence_with_policy(evidence, envelope, policy)
     return {"ok": True, "format": "STUDIO_CLI_EVIDENCE_VERIFY_V1",
             "verification": verification}
+
+
+def _policy_content(policy: object) -> bytes:
+    validated = validate_trust_policy(policy)
+    return (json.dumps(validated, ensure_ascii=False, allow_nan=False,
+                       sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _run_signing_policy_create(args) -> dict:
+    policy = create_trust_policy(
+        [_bounded_path(path, "Ed25519公钥") for path in args.public_key],
+        authorized_kinds=tuple(args.authorized_kind or (
+            "production_batch_manifest", "deployment_record")))
+    written = _atomic_output(args.policy_output, _policy_content(policy),
+                             force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_SIGNING_POLICY_V1",
+            "operation": "create", "policy_output": str(written),
+            "key_count": len(policy["keys"]), "time_authority": "none"}
+
+
+def _run_signing_policy_add(args) -> dict:
+    policy = _read_json(args.policy, "签名者信任策略",
+                        MAX_TRUST_POLICY_BYTES)
+    updated = add_trusted_key(
+        policy, _bounded_path(args.public_key, "Ed25519公钥"),
+        authorized_kinds=tuple(args.authorized_kind or (
+            "production_batch_manifest", "deployment_record")))
+    written = _atomic_output(args.policy_output, _policy_content(updated),
+                             force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_SIGNING_POLICY_V1",
+            "operation": "add", "policy_output": str(written),
+            "key_count": len(updated["keys"]), "time_authority": "none"}
+
+
+def _run_signing_policy_revoke(args) -> dict:
+    policy = _read_json(args.policy, "签名者信任策略",
+                        MAX_TRUST_POLICY_BYTES)
+    updated = revoke_trusted_key(policy, args.key_id)
+    written = _atomic_output(args.policy_output, _policy_content(updated),
+                             force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_SIGNING_POLICY_V1",
+            "operation": "revoke", "policy_output": str(written),
+            "key_id": args.key_id, "time_authority": "none"}
 
 
 def _run_history_save(args) -> dict:
@@ -769,11 +818,39 @@ def _parser() -> StrictParser:
     evidence_sign.add_argument("--force", action="store_true")
     evidence_sign.set_defaults(handler=_run_evidence_sign)
 
+    policy_kinds = ("production_batch_manifest", "deployment_record")
+    policy_create = sub.add_parser(
+        "signing-policy-create", help="创建版本化生产签名者信任策略")
+    policy_create.add_argument("--public-key", action="append", required=True)
+    policy_create.add_argument("--authorized-kind", action="append",
+                               choices=policy_kinds)
+    policy_create.add_argument("--policy-output", required=True)
+    policy_create.add_argument("--force", action="store_true")
+    policy_create.set_defaults(handler=_run_signing_policy_create)
+
+    policy_add = sub.add_parser(
+        "signing-policy-add", help="向信任策略加入轮换公钥")
+    policy_add.add_argument("--policy", required=True)
+    policy_add.add_argument("--public-key", required=True)
+    policy_add.add_argument("--authorized-kind", action="append",
+                            choices=policy_kinds)
+    policy_add.add_argument("--policy-output", required=True)
+    policy_add.add_argument("--force", action="store_true")
+    policy_add.set_defaults(handler=_run_signing_policy_add)
+
+    policy_revoke = sub.add_parser(
+        "signing-policy-revoke", help="在信任策略中明确撤销公钥")
+    policy_revoke.add_argument("--policy", required=True)
+    policy_revoke.add_argument("--key-id", required=True)
+    policy_revoke.add_argument("--policy-output", required=True)
+    policy_revoke.add_argument("--force", action="store_true")
+    policy_revoke.set_defaults(handler=_run_signing_policy_revoke)
+
     evidence_verify = sub.add_parser(
-        "evidence-verify", help="验证生产证据的离线Ed25519签名")
+        "evidence-verify", help="按签名者信任策略验证生产证据")
     evidence_verify.add_argument("--evidence", required=True)
     evidence_verify.add_argument("--signature", required=True)
-    evidence_verify.add_argument("--public-key", required=True)
+    evidence_verify.add_argument("--trust-policy", required=True)
     evidence_verify.set_defaults(handler=_run_evidence_verify)
 
     save = sub.add_parser("history-save", help="保存已校验批次到本地历史")

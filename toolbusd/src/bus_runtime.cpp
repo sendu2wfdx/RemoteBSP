@@ -3,6 +3,7 @@
 #include "remotebsp/protocol/resource.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -48,6 +49,13 @@ bool resource_namespace_matches(
 }
 
 }  // namespace
+
+std::uint64_t monotonic_microseconds() noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 BusRuntime::ContractLoadReservation::ContractLoadReservation(
     BusRuntime* owner, std::uint32_t node_id,
@@ -121,8 +129,9 @@ void BusRuntime::Reservation::release() noexcept {
     }
 }
 
-BusRuntime::BusRuntime(std::size_t maximum_contracts)
-    : maximum_contracts_(maximum_contracts) {
+BusRuntime::BusRuntime(std::size_t maximum_contracts, MonotonicClock clock)
+    : maximum_contracts_(maximum_contracts),
+      clock_(clock ? std::move(clock) : MonotonicClock(monotonic_microseconds)) {
     if (maximum_contracts_ == 0U) {
         throw std::invalid_argument("总线合同缓存容量必须大于零");
     }
@@ -173,6 +182,8 @@ BusContractUpdate BusRuntime::remember_contract(
         return BusContractUpdate::Invalid;
     }
     found->second = contract;
+    // 合同版本或限额改变后从一个干净窗口重新开始，旧限制不会污染新合同。
+    rate_states_.erase(key);
     return BusContractUpdate::Replaced;
 }
 
@@ -205,6 +216,7 @@ void BusRuntime::invalidate_node(std::uint32_t node_id) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto entry = contracts_.begin(); entry != contracts_.end();) {
         if (entry->first.node_id == node_id) {
+            rate_states_.erase(entry->first);
             entry = contracts_.erase(entry);
         } else {
             ++entry;
@@ -252,7 +264,7 @@ BusRuntime::Admission BusRuntime::admit(
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = contracts_.find({node_id, resource_id});
     if (found == contracts_.end()) {
-        return {BusAdmissionStatus::ContractMissing, {}};
+        return {BusAdmissionStatus::ContractMissing, {}, 0U};
     }
     const auto& contract = found->second;
     if (contract.kind != expected_kind || timeout_us < contract.minimum_timeout_us ||
@@ -260,15 +272,34 @@ BusRuntime::Admission BusRuntime::admit(
         transfer_bytes > contract.maximum_transfer_bytes ||
         (required_contract_flags &
          static_cast<std::uint8_t>(~contract.flags)) != 0U) {
-        return {BusAdmissionStatus::ContractMismatch, {}};
+        return {BusAdmissionStatus::ContractMismatch, {}, 0U};
+    }
+    const DeviceKey device_key{node_id, resource_id};
+    const auto now_us = clock_();
+    const auto rate = contract.maximum_operations_per_second;
+    if (rate != 0U) {
+        const auto state = rate_states_.find(device_key);
+        if (state != rate_states_.end() && now_us < state->second.next_eligible_us) {
+            return {BusAdmissionStatus::RateLimited, {},
+                    state->second.next_eligible_us - now_us};
+        }
     }
     const auto bus_key = make_bus_key(node_id,
                                       contract.parent_bus_resource_id);
     if (!active_buses_.insert(bus_key).second) {
-        return {BusAdmissionStatus::ResourceBusy, {}};
+        return {BusAdmissionStatus::ResourceBusy, {}, 0U};
+    }
+    // 只有真正获得父总线的请求才消耗设备配额；总线竞争失败不会误伤该设备。
+    if (rate != 0U) {
+        const auto interval_us = std::max<std::uint64_t>(
+            1U, (1000000ULL + rate - 1ULL) / rate);
+        rate_states_[device_key].next_eligible_us =
+            now_us > std::numeric_limits<std::uint64_t>::max() - interval_us
+                ? std::numeric_limits<std::uint64_t>::max()
+                : now_us + interval_us;
     }
     return {BusAdmissionStatus::Accepted,
-            Reservation(this, bus_key)};
+            Reservation(this, bus_key), 0U};
 }
 
 void BusRuntime::release(std::uint64_t bus_key) noexcept {

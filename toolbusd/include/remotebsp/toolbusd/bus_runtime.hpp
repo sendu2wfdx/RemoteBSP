@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -24,6 +25,7 @@ enum class BusAdmissionStatus : std::uint8_t {
     ContractMissing,
     ResourceBusy,
     ContractMismatch,
+    RateLimited,
 };
 
 /*
@@ -79,9 +81,14 @@ public:
     struct Admission {
         BusAdmissionStatus status{BusAdmissionStatus::ContractMissing};
         Reservation reservation;
+        // 非零时表示该设备最早可重试的主机单调时钟间隔。
+        std::uint64_t retry_after_us{};
     };
 
-    explicit BusRuntime(std::size_t maximum_contracts = 4096U);
+    using MonotonicClock = std::function<std::uint64_t()>;
+
+    explicit BusRuntime(std::size_t maximum_contracts = 4096U,
+                        MonotonicClock clock = {});
 
     BusContractUpdate remember_contract(
         std::uint32_t node_id,
@@ -116,6 +123,10 @@ private:
         std::size_t operator()(const DeviceKey& key) const noexcept;
     };
 
+    struct RateState {
+        std::uint64_t next_eligible_us{};
+    };
+
     Admission admit(std::uint32_t node_id, std::uint32_t resource_id,
                     protocol::BusResourceKind expected_kind,
                     std::uint32_t timeout_us, std::size_t transfer_bytes,
@@ -127,10 +138,13 @@ private:
                                       std::uint32_t parent_bus_id) noexcept;
 
     const std::size_t maximum_contracts_;
+    const MonotonicClock clock_;
     mutable std::mutex mutex_;
     std::unordered_map<DeviceKey, protocol::BusResourceContract,
                        DeviceKeyHash>
         contracts_;
+    // 每份合同只占一个定长状态，不随请求速率或运行时间增长。
+    std::unordered_map<DeviceKey, RateState, DeviceKeyHash> rate_states_;
     std::unordered_set<std::uint64_t> active_buses_;
     std::unordered_set<DeviceKey, DeviceKeyHash> loading_contracts_;
 };

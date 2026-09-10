@@ -143,7 +143,9 @@ target_compile_options(bus_runtime_tests PRIVATE
 add_test(NAME bus_runtime_tests COMMAND bus_runtime_tests)
 
 add_executable(bus_manifest_tests bus_manifest_tests.cpp)
-target_link_libraries(bus_manifest_tests PRIVATE remotebsp_remote_core)
+target_link_libraries(bus_manifest_tests PRIVATE
+    remotebsp_remote_core
+    remotebsp_request_manager)
 target_compile_definitions(bus_manifest_tests PRIVATE
     TEST_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json"
     TEST_BUS_FAULT_SCENARIO="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_fault_scenario.json"
@@ -523,6 +525,15 @@ add_test(NAME toolbusd_operation_ledger_process_tests
     COMMAND toolbusd_operation_ledger_process_tests
             $<TARGET_FILE:toolbusd>
             $<TARGET_FILE:mock_mcu>)
+
+add_executable(toolbusd_ipc_capacity_process_tests
+    toolbusd_ipc_capacity_process_tests.cpp)
+target_link_libraries(toolbusd_ipc_capacity_process_tests PRIVATE remotebsp)
+add_dependencies(toolbusd_ipc_capacity_process_tests toolbusd)
+target_compile_options(toolbusd_ipc_capacity_process_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME toolbusd_ipc_capacity_process_tests
+    COMMAND toolbusd_ipc_capacity_process_tests $<TARGET_FILE:toolbusd>)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE

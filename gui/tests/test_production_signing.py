@@ -17,7 +17,9 @@ sys.path.insert(0, str(GUI_ROOT))
 from production_batch import export_production_batch  # noqa: E402
 from production_record import generate_production_record  # noqa: E402
 from production_signing import (  # noqa: E402
-    generate_key_pair, sign_evidence, verify_evidence)
+    add_trusted_key, create_trust_policy, generate_key_pair,
+    revoke_trusted_key, sign_evidence, validate_trust_policy,
+    verify_evidence_with_policy)
 from project_config import ProjectConfigError  # noqa: E402
 
 
@@ -46,34 +48,41 @@ class ProductionSigningTest(unittest.TestCase):
             self.manifest, self.private,
             clock=lambda: datetime(2026, 9, 11, tzinfo=timezone.utc))
         self.assertFalse(envelope["recorded_time"]["trusted"])
-        verified = verify_evidence(self.manifest, envelope, self.public)
+        verified = verify_evidence_with_policy(
+            self.manifest, envelope, create_trust_policy([self.public]))
         self.assertTrue(verified["valid"])
         self.assertFalse(verified["time_trusted"])
 
         changed = copy.deepcopy(self.manifest)
         changed["batch"]["note"] = "已被修改"
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(changed, envelope, self.public)
+            verify_evidence_with_policy(
+                changed, envelope, create_trust_policy([self.public]))
 
         forged_time = copy.deepcopy(envelope)
         forged_time["recorded_time"]["trusted"] = True
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(self.manifest, forged_time, self.public)
+            verify_evidence_with_policy(
+                self.manifest, forged_time, create_trust_policy([self.public]))
 
         changed_time = copy.deepcopy(envelope)
         changed_time["recorded_time"]["value_utc"] = "2026-09-12T00:00:00Z"
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(self.manifest, changed_time, self.public)
+            verify_evidence_with_policy(
+                self.manifest, changed_time, create_trust_policy([self.public]))
 
         changed_note = copy.deepcopy(envelope)
         changed_note["recorded_time"]["note"] = "仍声明非可信，但说明已被改写。"
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(self.manifest, changed_note, self.public)
+            verify_evidence_with_policy(
+                self.manifest, changed_note, create_trust_policy([self.public]))
 
         extra_time_field = copy.deepcopy(envelope)
         extra_time_field["recorded_time"]["authority"] = "none"
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(self.manifest, extra_time_field, self.public)
+            verify_evidence_with_policy(
+                self.manifest, extra_time_field,
+                create_trust_policy([self.public]))
 
     def test_wrong_key_and_existing_key_outputs_fail_closed(self):
         envelope = sign_evidence(self.manifest, self.private)
@@ -81,9 +90,57 @@ class ProductionSigningTest(unittest.TestCase):
         other_public = self.root / "other-public.pem"
         generate_key_pair(other_private, other_public)
         with self.assertRaises(ProjectConfigError):
-            verify_evidence(self.manifest, envelope, other_public)
+            verify_evidence_with_policy(
+                self.manifest, envelope, create_trust_policy([other_public]))
         with self.assertRaises(ProjectConfigError):
             generate_key_pair(self.private, self.root / "third-public.pem")
+
+    def test_policy_authorization_rotation_and_revocation(self):
+        first_signature = sign_evidence(self.manifest, self.private)
+        policy = create_trust_policy([self.public])
+        verified = verify_evidence_with_policy(
+            self.manifest, first_signature, policy)
+        self.assertTrue(verified["trust_authorized"])
+
+        second_private = self.root / "rotated-private.pem"
+        second_public = self.root / "rotated-public.pem"
+        second = generate_key_pair(second_private, second_public)
+        rotated = add_trusted_key(policy, second_public)
+        self.assertTrue(verify_evidence_with_policy(
+            self.manifest, first_signature, rotated)["valid"])
+        second_signature = sign_evidence(self.manifest, second_private)
+        self.assertTrue(verify_evidence_with_policy(
+            self.manifest, second_signature, rotated)["valid"])
+
+        revoked = revoke_trusted_key(rotated, second["key_id"])
+        with self.assertRaisesRegex(ProjectConfigError, "撤销"):
+            verify_evidence_with_policy(
+                self.manifest, second_signature, revoked)
+        self.assertTrue(verify_evidence_with_policy(
+            self.manifest, first_signature, revoked)["valid"])
+
+    def test_policy_rejects_unknown_scope_and_malformed_keyring(self):
+        signature = sign_evidence(self.manifest, self.private)
+        other_private = self.root / "unknown-private.pem"
+        other_public = self.root / "unknown-public.pem"
+        generate_key_pair(other_private, other_public)
+        with self.assertRaisesRegex(ProjectConfigError, "未被"):
+            verify_evidence_with_policy(
+                self.manifest, signature, create_trust_policy([other_public]))
+        scoped = create_trust_policy(
+            [self.public], authorized_kinds=("deployment_record",))
+        with self.assertRaisesRegex(ProjectConfigError, "无权"):
+            verify_evidence_with_policy(self.manifest, signature, scoped)
+        malformed = create_trust_policy([self.public])
+        malformed["keys"][0]["key_id"] = "ed25519:" + "0" * 64
+        with self.assertRaisesRegex(ProjectConfigError, "身份"):
+            validate_trust_policy(malformed)
+        unknown_field = create_trust_policy([self.public])
+        unknown_field["keys"][0]["activated_at"] = "2026-09-11T00:00:00Z"
+        with self.assertRaisesRegex(ProjectConfigError, "字段集合"):
+            validate_trust_policy(unknown_field)
+        with self.assertRaisesRegex(ProjectConfigError, "1到16"):
+            create_trust_policy([self.public] * 17)
 
     def test_concurrent_keygen_has_one_winner_without_overwrite(self):
         private = self.root / "race-private.pem"
@@ -101,8 +158,8 @@ class ProductionSigningTest(unittest.TestCase):
             outcomes = list(pool.map(lambda _: generate(), range(2)))
         self.assertEqual(sum(item is not None for item in outcomes), 1)
         envelope = sign_evidence(self.manifest, private)
-        self.assertTrue(verify_evidence(
-            self.manifest, envelope, public)["valid"])
+        self.assertTrue(verify_evidence_with_policy(
+            self.manifest, envelope, create_trust_policy([public]))["valid"])
         self.assertEqual(list(self.root.glob(".remotebsp-key-*.tmp")), [])
 
     def test_second_publish_failure_cleans_pair_and_staging(self):

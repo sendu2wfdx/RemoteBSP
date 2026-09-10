@@ -62,6 +62,10 @@ constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
 constexpr std::uint16_t kMaximumIpcMotionGroupMembers = 32U;
 constexpr std::uint16_t kIpcErrorEnvelopeVersion = 1U;
 constexpr std::size_t kMaximumIpcErrorMessageBytes = 256U;
+// 每个客户端当前占用一个短生命周期工作线程。该上限必须先于线程创建
+// 生效，避免只建立连接而不发送完整帧的本地进程耗尽线程和地址空间。
+constexpr std::uint32_t kDefaultMaximumConcurrentIpcClients = 64U;
+constexpr std::uint32_t kMaximumConfigurableConcurrentIpcClients = 1024U;
 constexpr std::uint16_t kRuntimeOperationIpcVersion = 1U;
 constexpr std::size_t kRuntimeOperationIdBytes = 32U;
 

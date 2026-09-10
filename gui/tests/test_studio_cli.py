@@ -413,6 +413,7 @@ class StudioCliTest(unittest.TestCase):
         private = self.directory / "signing-private.pem"
         public = self.directory / "signing-public.pem"
         signature = self.directory / "batch-signature.json"
+        policy = self.directory / "signing-policy.json"
         code, generated, _, _ = self._call([
             "signing-keygen", "--private-key-output", str(private),
             "--public-key-output", str(public)])
@@ -424,11 +425,17 @@ class StudioCliTest(unittest.TestCase):
             "--private-key", str(private), "--signature-output", str(signature)])
         self.assertEqual(code, EXIT_OK)
         self.assertFalse(signed["time_trusted"])
+        code, created, _, _ = self._call([
+            "signing-policy-create", "--public-key", str(public),
+            "--policy-output", str(policy)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(created["key_count"], 1)
         code, verified, _, _ = self._call([
             "evidence-verify", "--evidence", str(self.manifest_path),
-            "--signature", str(signature), "--public-key", str(public)])
+            "--signature", str(signature), "--trust-policy", str(policy)])
         self.assertEqual(code, EXIT_OK)
         self.assertTrue(verified["verification"]["valid"])
+        self.assertTrue(verified["verification"]["trust_authorized"])
 
         changed = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         changed["batch"]["name"] = "篡改批次"
@@ -436,9 +443,30 @@ class StudioCliTest(unittest.TestCase):
         changed_path.write_text(json.dumps(changed), encoding="utf-8")
         code, error, _, _ = self._call([
             "evidence-verify", "--evidence", str(changed_path),
-            "--signature", str(signature), "--public-key", str(public)])
+            "--signature", str(signature), "--trust-policy", str(policy)])
         self.assertEqual(code, EXIT_INPUT)
         self.assertFalse(error["ok"])
+
+        rotated_private = self.directory / "rotated-private.pem"
+        rotated_public = self.directory / "rotated-public.pem"
+        rotated_policy = self.directory / "rotated-policy.json"
+        revoked_policy = self.directory / "revoked-policy.json"
+        code, rotated_key, _, _ = self._call([
+            "signing-keygen", "--private-key-output", str(rotated_private),
+            "--public-key-output", str(rotated_public)])
+        self.assertEqual(code, EXIT_OK)
+        code, added, _, _ = self._call([
+            "signing-policy-add", "--policy", str(policy),
+            "--public-key", str(rotated_public),
+            "--policy-output", str(rotated_policy)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(added["key_count"], 2)
+        code, revoked, _, _ = self._call([
+            "signing-policy-revoke", "--policy", str(rotated_policy),
+            "--key-id", rotated_key["key_id"],
+            "--policy-output", str(revoked_policy)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(revoked["operation"], "revoke")
 
     def test_history_save_dry_run_save_and_search(self):
         history = self.directory / "history"

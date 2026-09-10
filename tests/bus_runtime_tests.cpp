@@ -10,21 +10,25 @@ namespace {
 using namespace remotebsp;
 
 protocol::BusResourceContract i2c_contract(
-    std::uint32_t device, std::uint32_t parent) {
+    std::uint32_t device, std::uint32_t parent,
+    std::uint32_t maximum_operations_per_second = 1000U) {
     return {device, protocol::kBusResourceContractVersion,
             protocol::BusResourceKind::I2cDevice,
             static_cast<std::uint8_t>(protocol::kBusContractRepeatedStart |
                                       protocol::kBusContractRecovery),
-            parent, 400000U, 32U, 2U, 100U, 10000U, 1000U};
+            parent, 400000U, 32U, 2U, 100U, 10000U,
+            maximum_operations_per_second};
 }
 
 protocol::BusResourceContract spi_contract(
-    std::uint32_t device, std::uint32_t parent) {
+    std::uint32_t device, std::uint32_t parent,
+    std::uint32_t maximum_operations_per_second = 1000U) {
     return {device, protocol::kBusResourceContractVersion,
             protocol::BusResourceKind::SpiDevice,
             static_cast<std::uint8_t>(protocol::kBusContractFullDuplex |
                                       protocol::kBusContractKeepChipSelect),
-            parent, 12000000U, 32U, 2U, 100U, 10000U, 1000U};
+            parent, 12000000U, 32U, 2U, 100U, 10000U,
+            maximum_operations_per_second};
 }
 
 void check_contract_cache_bounds() {
@@ -196,6 +200,102 @@ void check_invalidation_keeps_inflight_bus_reserved() {
            toolbusd::BusAdmissionStatus::Accepted);
 }
 
+void check_device_rate_shaping_and_isolation() {
+    std::uint64_t now_us = 1000000U;
+    toolbusd::BusRuntime runtime(
+        8U, [&now_us] { return now_us; });
+    const auto limited =
+        i2c_contract(0x0C000001U, 0x0B000000U, 2U);
+    const auto peer =
+        i2c_contract(0x0C000002U, 0x0B000000U, 2U);
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::I2cDevice, limited) ==
+           toolbusd::BusContractUpdate::Added);
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::I2cDevice, peer) ==
+           toolbusd::BusContractUpdate::Added);
+
+    auto first = runtime.admit_i2c(
+        1U, {limited.resource_id, 1000U, 0U, 1U, {0U}});
+    assert(first.status == toolbusd::BusAdmissionStatus::Accepted);
+    first.reservation = {};
+
+    // 2 ops/s 被整形成 500 ms 的设备级间隔，准入非阻塞并给出确定重试时间。
+    auto throttled = runtime.admit_i2c(
+        1U, {limited.resource_id, 1000U, 0U, 1U, {0U}});
+    assert(throttled.status == toolbusd::BusAdmissionStatus::RateLimited);
+    assert(throttled.retry_after_us == 500000U);
+
+    // 同父总线的另一设备有独立窗口；一个设备被限速不形成队首阻塞。
+    auto peer_admission = runtime.admit_i2c(
+        1U, {peer.resource_id, 1000U, 0U, 1U, {0U}});
+    assert(peer_admission.status == toolbusd::BusAdmissionStatus::Accepted);
+    peer_admission.reservation = {};
+
+    now_us += 499999U;
+    throttled = runtime.admit_i2c(
+        1U, {limited.resource_id, 1000U, 0U, 1U, {0U}});
+    assert(throttled.status == toolbusd::BusAdmissionStatus::RateLimited);
+    assert(throttled.retry_after_us == 1U);
+    ++now_us;
+    assert(runtime.admit_i2c(
+               1U, {limited.resource_id, 1000U, 0U, 1U, {0U}}).status ==
+           toolbusd::BusAdmissionStatus::Accepted);
+}
+
+void check_bus_contention_does_not_consume_device_quota() {
+    std::uint64_t now_us = 2000000U;
+    toolbusd::BusRuntime runtime(
+        8U, [&now_us] { return now_us; });
+    const auto holder =
+        i2c_contract(0x0C000001U, 0x0B000000U, 1U);
+    const auto contender =
+        i2c_contract(0x0C000002U, 0x0B000000U, 1U);
+    for (const auto& contract : {holder, contender}) {
+        assert(runtime.remember_contract(
+                   1U, protocol::BusResourceKind::I2cDevice, contract) ==
+               toolbusd::BusContractUpdate::Added);
+    }
+    auto held = runtime.admit_i2c(
+        1U, {holder.resource_id, 1000U, 0U, 1U, {0U}});
+    assert(held.status == toolbusd::BusAdmissionStatus::Accepted);
+    assert(runtime.admit_i2c(
+               1U, {contender.resource_id, 1000U, 0U, 1U, {0U}}).status ==
+           toolbusd::BusAdmissionStatus::ResourceBusy);
+    held.reservation = {};
+    assert(runtime.admit_i2c(
+               1U, {contender.resource_id, 1000U, 0U, 1U, {0U}}).status ==
+           toolbusd::BusAdmissionStatus::Accepted);
+}
+
+void check_spi_rate_shaping_and_contract_refresh() {
+    std::uint64_t now_us = 3000000U;
+    toolbusd::BusRuntime runtime(
+        4U, [&now_us] { return now_us; });
+    auto contract = spi_contract(0x0E000001U, 0x0D000000U, 4U);
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::SpiDevice, contract) ==
+           toolbusd::BusContractUpdate::Added);
+    auto first = runtime.admit_spi(
+        1U, {contract.resource_id, 1000U, 0U, 0U, 0xFFU, {0x55U}});
+    assert(first.status == toolbusd::BusAdmissionStatus::Accepted);
+    first.reservation = {};
+    auto limited = runtime.admit_spi(
+        1U, {contract.resource_id, 1000U, 0U, 0U, 0xFFU, {0x55U}});
+    assert(limited.status == toolbusd::BusAdmissionStatus::RateLimited);
+    assert(limited.retry_after_us == 250000U);
+
+    // 新合同替换旧限额时清空旧窗口，避免旧设备状态跨合同版本泄漏。
+    contract.maximum_operations_per_second = 8U;
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::SpiDevice, contract) ==
+           toolbusd::BusContractUpdate::Replaced);
+    assert(runtime.admit_spi(
+               1U, {contract.resource_id, 1000U, 0U, 0U, 0xFFU,
+                    {0x55U}}).status ==
+           toolbusd::BusAdmissionStatus::Accepted);
+}
+
 }  // namespace
 
 int main() {
@@ -204,4 +304,7 @@ int main() {
     check_contract_preflight();
     check_contract_load_single_flight_and_raii();
     check_invalidation_keeps_inflight_bus_reserved();
+    check_device_rate_shaping_and_isolation();
+    check_bus_contention_does_not_consume_device_quota();
+    check_spi_rate_shaping_and_contract_refresh();
 }

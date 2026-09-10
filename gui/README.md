@@ -420,8 +420,10 @@ python3 gui/studio_cli.py signing-keygen \
   --public-key-output ./offline-public.pem
 python3 gui/studio_cli.py evidence-sign --evidence ./pilot-001-manifest.json \
   --private-key ./offline-private.pem --signature-output ./pilot-001.signature.json
+python3 gui/studio_cli.py signing-policy-create \
+  --public-key ./offline-public.pem --policy-output ./signer-policy.json
 python3 gui/studio_cli.py evidence-verify --evidence ./pilot-001-manifest.json \
-  --signature ./pilot-001.signature.json --public-key ./offline-public.pem
+  --signature ./pilot-001.signature.json --trust-policy ./signer-policy.json
 ```
 
 私钥应离线保管，不能放入生产历史、工程归档或部署资料包。`key_id` 是原始 Ed25519 公钥
@@ -429,6 +431,26 @@ python3 gui/studio_cli.py evidence-verify --evidence ./pilot-001-manifest.json \
 `source=host_system_clock,trusted=false`：它只便于人工排序，Ed25519 只证明持钥者签署了
 指定内容，不证明签署时刻。当前没有 TSA、硬件安全时钟或其他外部可信时间源，因此 CLI
 不会提供“可信时间”成功状态；后续接入外部时间证明时必须作为独立、可验证的证据层。
+
+生产验证不再把“拿到一份公钥”等同于授权。`signer-policy.json` 是版本化、自包含且最多
+16 把 Ed25519 公钥的信任策略；每项绑定完整公钥指纹、`active`/`revoked` 状态和允许签署
+的证据类型。验证按信封 `key_id` 精确选钥，随后依次检查策略授权、撤销状态、证据类型和
+密码学签名，任何未知字段、重复钥匙、指纹不符或损坏公钥均失败关闭。
+
+轮换时先加入新公钥，确认新签名链路后再明确撤销旧公钥；轮换窗口内两把活动钥匙均可
+验证，撤销条目会保留在策略里，不能被自动重新激活：
+
+```bash
+python3 gui/studio_cli.py signing-policy-add --policy ./signer-policy.json \
+  --public-key ./next-public.pem --policy-output ./signer-policy.next.json
+python3 gui/studio_cli.py signing-policy-revoke --policy ./signer-policy.next.json \
+  --key-id ed25519:<完整SHA-256指纹> \
+  --policy-output ./signer-policy.revoked.json
+```
+
+策略变更本身不声明生效时刻，也不依据签名信封里的本机时间自动启用或撤销钥匙。应将每次
+策略文件作为受审查、版本控制的生产配置发布；若只允许签署一种证据，可在创建或加钥时用
+`--authorized-kind production_batch_manifest` 或 `deployment_record` 收窄权限。
 
 纯资料命令的响应都带有“未烧录、未访问硬件”的执行状态。烧录及设备参数修改必须
 继续保持独立、显式命令，不能暗中附加到 `build`、`batch-create` 或 `history-save`。

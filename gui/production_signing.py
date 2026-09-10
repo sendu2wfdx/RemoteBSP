@@ -27,6 +27,9 @@ except ImportError:  # pragma: no cover - 由调用入口转换为明确错误
 
 SIGNATURE_SCHEMA_VERSION = 1
 MAX_SIGNATURE_BYTES = 16 * 1024
+MAX_TRUST_POLICY_BYTES = 64 * 1024
+MAX_TRUSTED_KEYS = 16
+TRUST_POLICY_FORMAT = "REMOTEBSP_SIGNER_TRUST_POLICY_V1"
 _FORMATS = {
     "REMOTEBSP_PRODUCTION_BATCH_V1": "production_batch_manifest",
     "REMOTEBSP_DEPLOYMENT_RECORD_V1": "deployment_record",
@@ -188,7 +191,9 @@ def sign_evidence(value: object, private_path: Path, *,
     }
 
 
-def verify_evidence(value: object, envelope: object, public_path: Path) -> dict:
+def _verify_evidence_with_public_key(value: object, envelope: object,
+                                     public_path: Path) -> dict:
+    """仅供底层密码学测试；生产入口必须使用信任策略。"""
     kind, content = canonical_evidence(value)
     if not isinstance(envelope, dict) or set(envelope) != {
             "schema_version", "format", "algorithm", "key_id", "subject",
@@ -211,3 +216,134 @@ def verify_evidence(value: object, envelope: object, public_path: Path) -> dict:
         raise ProjectConfigError("Ed25519签名验证失败") from error
     return {"valid": True, "algorithm": "Ed25519", "key_id": expected_key,
             "subject": subject, "time_trusted": False}
+
+
+def _public_pem(key) -> str:
+    return key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
+
+
+def _policy_key(public_path: Path, authorized_kinds: tuple[str, ...]) -> dict:
+    public = _load_public(public_path)
+    kinds = sorted(set(authorized_kinds))
+    if not kinds or any(kind not in _FORMATS.values() for kind in kinds):
+        raise ProjectConfigError("签名者授权证据类型无效")
+    return {"key_id": public_key_id(public), "status": "active",
+            "authorized_kinds": kinds, "public_key_pem": _public_pem(public)}
+
+
+def validate_trust_policy(value: object) -> dict:
+    """严格校验自包含公钥环；策略不使用本机时间决定授权。"""
+    if not isinstance(value, dict) or set(value) != {
+            "schema_version", "format", "keys"} or \
+            value.get("schema_version") != 1 or \
+            value.get("format") != TRUST_POLICY_FORMAT:
+        raise ProjectConfigError("签名者信任策略版本或字段集合无效")
+    keys = value.get("keys")
+    if not isinstance(keys, list) or not 1 <= len(keys) <= MAX_TRUSTED_KEYS:
+        raise ProjectConfigError("签名者信任策略必须包含1到16个公钥")
+    seen: set[str] = set()
+    normalized = []
+    for entry in keys:
+        if not isinstance(entry, dict) or set(entry) != {
+                "key_id", "status", "authorized_kinds", "public_key_pem"}:
+            raise ProjectConfigError("签名者公钥条目字段集合无效")
+        if entry.get("status") not in {"active", "revoked"}:
+            raise ProjectConfigError("签名者公钥状态无效")
+        kinds = entry.get("authorized_kinds")
+        if not isinstance(kinds, list) or kinds != sorted(set(kinds)) or \
+                not kinds or any(kind not in _FORMATS.values() for kind in kinds):
+            raise ProjectConfigError("签名者授权证据类型无效")
+        pem = entry.get("public_key_pem")
+        if not isinstance(pem, str) or not 1 <= len(pem) <= 4096:
+            raise ProjectConfigError("签名者公钥内容无效")
+        _require_backend()
+        try:
+            public = serialization.load_pem_public_key(pem.encode("ascii"))
+        except (UnicodeEncodeError, ValueError, TypeError) as error:
+            raise ProjectConfigError("签名者公钥内容无法读取") from error
+        if not isinstance(public, Ed25519PublicKey) or \
+                entry.get("key_id") != public_key_id(public):
+            raise ProjectConfigError("签名者公钥身份不匹配")
+        if entry["key_id"] in seen:
+            raise ProjectConfigError("签名者信任策略包含重复公钥")
+        seen.add(entry["key_id"])
+        normalized.append(entry)
+    return {"schema_version": 1, "format": TRUST_POLICY_FORMAT,
+            "keys": normalized}
+
+
+def create_trust_policy(public_paths: list[Path], *,
+                        authorized_kinds: tuple[str, ...] = tuple(_FORMATS.values())) -> dict:
+    if not 1 <= len(public_paths) <= MAX_TRUSTED_KEYS:
+        raise ProjectConfigError("创建信任策略需要1到16个公钥")
+    return validate_trust_policy({
+        "schema_version": 1, "format": TRUST_POLICY_FORMAT,
+        "keys": [_policy_key(path, authorized_kinds) for path in public_paths]})
+
+
+def add_trusted_key(policy: object, public_path: Path, *,
+                    authorized_kinds: tuple[str, ...] = tuple(_FORMATS.values())) -> dict:
+    current = validate_trust_policy(policy)
+    if len(current["keys"]) >= MAX_TRUSTED_KEYS:
+        raise ProjectConfigError("签名者信任策略已达到16个公钥上限")
+    entry = _policy_key(public_path, authorized_kinds)
+    if any(item["key_id"] == entry["key_id"] for item in current["keys"]):
+        raise ProjectConfigError("签名者公钥已存在，拒绝重复添加")
+    return validate_trust_policy({**current, "keys": current["keys"] + [entry]})
+
+
+def revoke_trusted_key(policy: object, key_id: str) -> dict:
+    current = validate_trust_policy(policy)
+    if not isinstance(key_id, str) or not key_id.startswith("ed25519:") or \
+            len(key_id) != 72 or any(character not in "0123456789abcdef"
+                                     for character in key_id[8:]):
+        raise ProjectConfigError("待撤销的签名者key_id格式无效")
+    matches = [item for item in current["keys"] if item["key_id"] == key_id]
+    if not matches:
+        raise ProjectConfigError("待撤销的签名者公钥不存在")
+    if matches[0]["status"] == "revoked":
+        raise ProjectConfigError("签名者公钥已经撤销")
+    keys = [{**item, "status": "revoked"} if item["key_id"] == key_id else item
+            for item in current["keys"]]
+    return validate_trust_policy({**current, "keys": keys})
+
+
+def verify_evidence_with_policy(value: object, envelope: object,
+                                policy: object) -> dict:
+    kind, _ = canonical_evidence(value)
+    trusted = validate_trust_policy(policy)
+    if not isinstance(envelope, dict) or set(envelope) != {
+            "schema_version", "format", "algorithm", "key_id", "subject",
+            "signature_base64", "recorded_time"} or \
+            not isinstance(envelope.get("key_id"), str):
+        raise ProjectConfigError("签名信封缺少有效公钥身份")
+    candidates = [item for item in trusted["keys"]
+                  if item["key_id"] == envelope["key_id"]]
+    if not candidates:
+        raise ProjectConfigError("签名公钥未被当前信任策略授权")
+    entry = candidates[0]
+    if entry["status"] != "active":
+        raise ProjectConfigError("签名公钥已被明确撤销")
+    if kind not in entry["authorized_kinds"]:
+        raise ProjectConfigError("签名公钥无权签署此类生产证据")
+    _require_backend()
+    public = serialization.load_pem_public_key(entry["public_key_pem"].encode("ascii"))
+    # 策略已校验公钥类型和指纹；使用临时PEM文件会扩大竞态面，因此在内存中完成验证。
+    _, content = canonical_evidence(value)
+    subject = envelope.get("subject")
+    recorded = _validate_recorded_time(envelope.get("recorded_time"))
+    if envelope.get("schema_version") != 1 or \
+            envelope.get("format") != "REMOTEBSP_OFFLINE_SIGNATURE_V1" or \
+            envelope.get("algorithm") != "Ed25519" or \
+            subject != {"kind": kind, "sha256": hashlib.sha256(content).hexdigest()}:
+        raise ProjectConfigError("签名信封版本、算法或证据绑定无效")
+    try:
+        signature = base64.b64decode(envelope["signature_base64"], validate=True)
+        public.verify(signature, _signature_input(subject, recorded, content))
+    except (ValueError, TypeError, InvalidSignature) as error:
+        raise ProjectConfigError("Ed25519签名验证失败") from error
+    return {"valid": True, "algorithm": "Ed25519", "key_id": entry["key_id"],
+            "subject": subject, "trust_authorized": True,
+            "key_status": "active", "time_trusted": False}

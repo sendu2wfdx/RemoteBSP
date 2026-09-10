@@ -1,6 +1,7 @@
 #include "remotebsp/mock_mcu/board_manifest.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/resource.hpp"
+#include "remotebsp/toolbusd/bus_runtime.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -65,6 +66,33 @@ void test_v2_manifest_instantiates_bus_backend() {
     assert(manifest.bus_resources[3].spi_mode == 3);
     assert(manifest.bus_resources[3].bits_per_word == 8);
     assert(manifest.bus_resources[3].spi_chip_select == 5);
+
+    // 主机整形直接消费 Mock 对外公布的同一份设备合同，而非测试私造的限额。
+    std::uint64_t now_us = 1000000U;
+    toolbusd::BusRuntime host_runtime(
+        8U, [&now_us] { return now_us; });
+    assert(host_runtime.remember_contract(
+               1U, protocol::BusResourceKind::I2cDevice,
+               manifest.bus_resources[1].contract) ==
+           toolbusd::BusContractUpdate::Added);
+    assert(host_runtime.remember_contract(
+               1U, protocol::BusResourceKind::SpiDevice,
+               manifest.bus_resources[3].contract) ==
+           toolbusd::BusContractUpdate::Added);
+    auto host_i2c = host_runtime.admit_i2c(
+        1U, {201326593U, 1000U, 0U, 1U, {0U}});
+    assert(host_i2c.status == toolbusd::BusAdmissionStatus::Accepted);
+    host_i2c.reservation = {};
+    const auto limited_i2c = host_runtime.admit_i2c(
+        1U, {201326593U, 1000U, 0U, 1U, {0U}});
+    assert(limited_i2c.status ==
+           toolbusd::BusAdmissionStatus::RateLimited);
+    assert(limited_i2c.retry_after_us == 1000U);
+    // I2C 配额耗尽不污染 Mock 中另一 SPI 设备的主机准入。
+    assert(host_runtime.admit_spi(
+               1U, {234881025U, 1000U, 0U, 0U, 0xFFU,
+                    {0x80U}}).status ==
+           toolbusd::BusAdmissionStatus::Accepted);
 
     auto scenario = mock_mcu::load_fault_scenario(TEST_BUS_FAULT_SCENARIO);
     mock_mcu::DigitalTwin twin(std::move(manifest), std::move(scenario));
