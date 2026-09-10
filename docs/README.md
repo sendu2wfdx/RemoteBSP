@@ -6,6 +6,7 @@
 
 - [系统分层与通信设计](architecture.md)
 - [固件配置与 RemoteBSP Studio](configuration-and-studio.md)
+- [Studio 受控 Web ST-Link 部署](studio-web-deployment.md)
 - [智能运动与资源模型](intelligent-motion-resources.md)
 - [板卡描述与数字孪生](board-manifest-and-digital-twin.md)
 - [数字孪生确定性记录与回放](digital-twin-replay.md)
@@ -21,6 +22,7 @@
 - [产品定位与上位机配套架构](product-positioning-and-host-stack.md)
 - [Studio 与上位机运行时边界](studio-runtime-design.md)
 - [总线设备与高速流资源设计](bus-and-stream-resources.md)
+- [STM32F072/F103 I2C/SPI HAL](f0-f1-i2c-spi-hal.md)
 - [运动可靠性与跨板同步验证计划](motion-reliability-plan.md)
 - [主机时钟同步模型](clock-synchronization.md)
 - [STM32 跨板运动组参与者](embedded-motion-groups.md)
@@ -68,16 +70,16 @@ flowchart LR
 | 传输抽象 | 已实现、已测试 | SocketCAN、libusb和Mock USB共用`LinkTransport` |
 | 发现、心跳、请求 | 已实现、已测试 | UUID发现、节点分配、500 ms心跳、2 s离线、重试和副作用去重 |
 | 本地 IPC / C++ API / CLI | 已实现、已测试 | 应用不直接访问CAN；覆盖节点、资源、GPIO、UART、运动、波形和升级，并含受信本机 Runtime GPIO 租约/写入竖切 |
-| 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护；Studio Web 只读快照/备份及 UUID+generation CAS 的显式 CLI 写入/恢复已接入，实体掉电验收仍待完成 |
-| GPIO / UART | 已实现、已测试 | Mock完整；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致；G431 静态资源四个只读命令已贯通 RuntimeSnapshot，UART ResourceStatus 已接真实环形缓冲水位/溢出 |
+| 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护；Studio Web 只读快照、v2完整性备份及 UUID+generation CAS 的显式 CLI 写入/恢复已接入，写操作具备本地 HMAC 审计，实体掉电验收仍待完成 |
+| GPIO / UART | 已实现、已测试 | Mock完整；三款 STM32 已交叉编译 GPIO 输入周期采样、去抖、有界事件队列和溢出统计，尚未实测输入时延；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致 |
 | PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM 已实测 Busy -> Normal、停止后不复位重建对象和最高 100 kHz 两种占空比 0 毛刺；TimedBitstream 仅有忙/后端失败基础状态，实体WS2812波形待验收 |
 | 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入主机与STM32公共Core；可靠启动代次双页日志已通过故障注入，但尚未绑定实体Flash区，三板继续安全禁用跨板入口 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
-| Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、构建归档及显式 ST-Link 部署编排已实现。版本化 `FirmwareIdentity` 已贯通固件到 Studio，Studio 构建注入三项 SHA-256，非 Studio 固件逐字段 unavailable；`inspect-runtime-identity` 只读且 `deployment_verified` 始终为 false，尚不构成部署核验闭环 |
-| I2C / SPI | 公共竖切已实现，G431 板级 HAL 已编译并做主机桩测试 | `toolbusd`合同缓存/父总线仲裁、公共 Core 静态合同/租约/原子事务已测；G431 生产板级代码由 HAL 桩覆盖 flags、超时、恢复和 SPI CS，仍未烧录或电气实测；F072/F103 板级 HAL 待完成 |
+| Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、构建归档、显式 CLI 和默认关闭的两阶段 Web ST-Link 部署已实现；完整核验后生成自哈希部署记录。版本化 `FirmwareIdentity` 已贯通固件到 Studio；当前 Web 烧录只有假执行器测试，尚无本轮实体闭环证据 |
+| I2C / SPI | 三板 HAL 已交叉编译并做生产代码主机桩测试 | `toolbusd`合同缓存/父总线仲裁、公共 Core 静态合同/租约/原子事务已测；F072/F103/G431 共用 STM32 事务与恢复模块，各板保留静态端点。flags、统一超时、恢复和 SPI CS 已测，仍未烧录或电气实测 |
 | 高速 Stream | H2N/N2H Mock会话已实现、已测试 | 连续序号、精确ACK信用、两阶段交付、背压、故障与旧缓冲隔离已覆盖；双向及USB/Ethernet真实数据面待实现 |
 | Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误与统一单调期限已贯通；持久控制审计以 HMAC 链和同步 intent/terminal/unknown 失败关闭 mutation，16 项日志内核及 6 项集成测试已覆盖。TLS、主动推送、跨重启事件历史及实体失效安全验收待实现 |
-| 遥测健康契约 | toolbusd 软件生产链已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd 已贯通生产者、只读 IPC、CLI 与 Runtime 可信投影。G431 UART 水位/溢出和 PWM/TimedBitstream 基础状态已接入，但不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列和硬件时间戳仍待实现 |
+| 遥测健康契约 | 主机、Mock 与公共 MCU Core 已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd、Remote Core、API、CLI 与 Runtime 可信投影已贯通。公共 MCU Core 可报告运动队列、租约、故障和 uptime，并按 HAL 位图接收 CPU/ISR/栈样本；三款实体板尚无可靠采样 HAL，因此不会伪报实体数据 |
 | 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；2026-09-10 G431 证据已含 CAN-FD 压力/恢复、资源枚举、PWM 生命周期及 PA6 1 kHz/100 kHz 多占空比原始采集。PA0/PA4 仍不完整、公共 GND 待确认，单路 PWM 不构成 STEP/跨板时序通过。对照 v1 仍硬拒绝 executed/胜出 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
 
