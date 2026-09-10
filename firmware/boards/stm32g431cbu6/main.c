@@ -6,6 +6,7 @@
 #endif
 #include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
+#include "stm32_health_hal.h"
 #ifdef CONFIG_REMOTEBSP_BUS
 #include "board_bus.h"
 #endif
@@ -1905,6 +1906,7 @@ int main(void) {
         fatal_error();
     }
 #endif
+    (void)rbsp_stm32_health_init();
     rbsp_node_info_t info;
     make_node_info(&info);
     const rbsp_hal_t hal = {
@@ -1914,6 +1916,7 @@ int main(void) {
         .can_send = board_can_send,
 #endif
         .milliseconds = HAL_GetTick,
+        .health_sample = rbsp_stm32_health_sample,
         .microseconds = board_monotonic_microseconds,
         .gpio_configure = board_gpio_configure,
         .gpio_configure_pull = board_gpio_configure_pull,

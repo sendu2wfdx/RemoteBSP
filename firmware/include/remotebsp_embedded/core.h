@@ -425,7 +425,7 @@ typedef struct {
     uint32_t bootloader_request_ms;
     rbsp_bootloader_mode_t bootloader_request_mode;
     bool bootloader_request_pending;
-    uint32_t health_started_ms;
+    uint64_t health_started_ms;
     uint32_t gpio_clock_last_ms;
     uint64_t gpio_clock_epoch_ms;
     uint64_t health_producer_generation;

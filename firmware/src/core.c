@@ -2198,8 +2198,10 @@ static bool process_request(rbsp_core_t* core,
             core->health_producer_generation = sample.producer_generation;
             const uint64_t faults = resource_fault_count(core);
             const uint16_t metric_count = 11U;
-            const uint32_t uptime_ms =
-                core->hal.milliseconds() - core->health_started_ms;
+            const uint64_t uptime_ms =
+                gpio_monotonic_us(core, core->hal.milliseconds()) /
+                    UINT64_C(1000) -
+                core->health_started_ms;
             uint8_t* data = payload + 1U;
             memset(data, 0, RBSP_HEALTH_HEADER_SIZE +
                             metric_count * RBSP_HEALTH_METRIC_SIZE);
@@ -4202,7 +4204,8 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
     core->last_heartbeat_ms = hal->milliseconds();
     core->gpio_clock_last_ms = core->last_heartbeat_ms;
     core->gpio_clock_epoch_ms = 0U;
-    core->health_started_ms = core->last_heartbeat_ms;
+    core->health_started_ms =
+        gpio_monotonic_us(core, core->last_heartbeat_ms) / UINT64_C(1000);
     return true;
 }
 

@@ -39,6 +39,8 @@ file(STRINGS "${RBSP_CONFIG}" RBSP_TMC_UART_LINES
      REGEX "^CONFIG_(REMOTEBSP_TMC2209_UART|MOTION_SLOT[0-4]_DRIVER_TMC2209_UART)=y$")
 set(RBSP_OPTIONAL_CORE_SOURCES)
 set(RBSP_OPTIONAL_BOARD_SOURCES)
+list(APPEND RBSP_OPTIONAL_CORE_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/boot_epoch.c")
 file(STRINGS "${RBSP_CONFIG}" RBSP_DEVICE_PARAM_DISABLED_LINES
      REGEX "^# CONFIG_REMOTEBSP_DEVICE_PARAMS is not set$")
 file(STRINGS "${RBSP_CONFIG}" RBSP_F103_BOARD_LINES
@@ -65,8 +67,7 @@ file(STRINGS "${RBSP_CONFIG}" RBSP_BUS_LINES
 if(RBSP_MOTION_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES
          src/motion.c
-         src/motion_group.c
-         "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/boot_epoch.c")
+         src/motion_group.c)
 endif()
 if(RBSP_TMC_UART_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES src/soft_half_duplex_uart.c)
@@ -157,6 +158,7 @@ function(rbsp_common_target target cpu linker_script)
         -T${linker_script}
         -Wl,--defsym=RBSP_APP_FLASH_OFFSET=${RBSP_APP_FLASH_OFFSET}
         -Wl,--defsym=RBSP_DEVICE_PARAM_FLASH_SIZE=${RBSP_DEVICE_PARAM_FLASH_SIZE}
+        -Wl,--defsym=RBSP_HEALTH_EPOCH_FLASH_SIZE=${RBSP_HEALTH_EPOCH_FLASH_SIZE}
         --specs=nano.specs --specs=nosys.specs
         -Wl,--gc-sections
         -Wl,-Map=${target}.map
@@ -174,6 +176,8 @@ function(rbsp_common_target target cpu linker_script)
 endfunction()
 
 if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
+    # F072页为2KiB，代际日志固定使用双页。
+    set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x1000)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32f072rbt6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-f0")
     set(HAL_DIR "${VENDOR_DIR}/stm32f0xx-hal-driver")
@@ -207,6 +211,7 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
         "${HAL_DIR}/Src/stm32f0xx_hal_uart.c"
         src/startup_gpio.c
         src/static_resources.c
+        boards/common/stm32_health_hal.c
         ${RBSP_F072_BUS_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32f072rbt6 PRIVATE
@@ -218,11 +223,14 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
     target_compile_options(remotebsp_embedded_core PRIVATE
         -mcpu=cortex-m0 -mthumb)
     target_include_directories(remotebsp-stm32f072rbt6 PRIVATE
-        "${BOARD_DIR}" "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
+        "${BOARD_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/boards/common"
+        "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
         "${VENDOR_DIR}/cmsis-core/Core/Include")
     rbsp_common_target(remotebsp-stm32f072rbt6 cortex-m0
         "${BOARD_DIR}/STM32F072RBTx_FLASH.ld")
 elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
+    # F103中密度器件页为1KiB，代际日志固定使用双页。
+    set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x800)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32f103cbt6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-f1")
     set(HAL_DIR "${VENDOR_DIR}/stm32f1xx-hal-driver")
@@ -234,6 +242,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
     endif()
     add_executable(remotebsp-stm32f103cbt6
         "${BOARD_DIR}/main.c"
+        boards/common/stm32_health_hal.c
         ${RBSP_OPTIONAL_BOARD_SOURCES}
         "${DEVICE_DIR}/Source/Templates/system_stm32f1xx.c"
         "${DEVICE_DIR}/Source/Templates/gcc/startup_stm32f103xb.s"
@@ -261,11 +270,14 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
     target_compile_options(remotebsp_embedded_core PRIVATE
         -mcpu=cortex-m3 -mthumb)
     target_include_directories(remotebsp-stm32f103cbt6 PRIVATE
-        "${BOARD_DIR}" "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
+        "${BOARD_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/boards/common"
+        "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
         "${VENDOR_DIR}/cmsis-core/Core/Include")
     rbsp_common_target(remotebsp-stm32f103cbt6 cortex-m3
         "${BOARD_DIR}/STM32F103CBTx_FLASH.ld")
 elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
+    # G431页为2KiB，代际日志固定使用双页。
+    set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x1000)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32g431cbu6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-g4")
     set(HAL_DIR "${VENDOR_DIR}/stm32g4xx-hal-driver")
@@ -295,6 +307,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     endif()
     add_executable(remotebsp-stm32g431cbu6
         "${BOARD_DIR}/main.c"
+        boards/common/stm32_health_hal.c
         ${RBSP_OPTIONAL_BOARD_SOURCES}
         src/startup_gpio.c
         src/static_resources.c
@@ -330,7 +343,8 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     target_link_options(remotebsp-stm32g431cbu6 PRIVATE
         -mfpu=fpv4-sp-d16 -mfloat-abi=hard)
     target_include_directories(remotebsp-stm32g431cbu6 PRIVATE
-        "${BOARD_DIR}" "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
+        "${BOARD_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/boards/common"
+        "${HAL_DIR}/Inc" "${DEVICE_DIR}/Include"
         "${VENDOR_DIR}/cmsis-core/Core/Include")
     if(RBSP_USB_LINK_LINES)
         target_include_directories(remotebsp-stm32g431cbu6 PRIVATE

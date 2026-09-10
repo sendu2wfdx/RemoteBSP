@@ -10,7 +10,14 @@ MEMORY
   FLASH (rx)  : ORIGIN = 0x08000000 + RBSP_APP_FLASH_OFFSET,
                 LENGTH = 128K - RBSP_APP_FLASH_OFFSET
                          - RBSP_DEVICE_PARAM_FLASH_SIZE
+                         - RBSP_HEALTH_EPOCH_FLASH_SIZE
 }
+
+PROVIDE(__rbsp_health_epoch_flash_start__ =
+        0x08000000 + 128K - RBSP_DEVICE_PARAM_FLASH_SIZE
+        - RBSP_HEALTH_EPOCH_FLASH_SIZE);
+PROVIDE(__rbsp_health_epoch_flash_end__ =
+        0x08000000 + 128K - RBSP_DEVICE_PARAM_FLASH_SIZE);
 
 PROVIDE(__rbsp_device_param_flash_start__ =
         0x08000000 + 128K - RBSP_DEVICE_PARAM_FLASH_SIZE);
