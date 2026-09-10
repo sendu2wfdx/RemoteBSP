@@ -60,12 +60,18 @@ enum {
     RBSP_COMMAND_SPI_TRANSFER = 0x0401,
     RBSP_COMMAND_ADC_CONTRACT = 0x0500,
     RBSP_COMMAND_ADC_SAMPLE = 0x0501,
+    RBSP_COMMAND_TIMER_CONTRACT = 0x0B00,
+    RBSP_COMMAND_TIMER_EXECUTE = 0x0B01,
     RBSP_COMMAND_PWM_CREATE = 0x0600,
     RBSP_COMMAND_PWM_WRITE = 0x0601,
     RBSP_COMMAND_PWM_STOP = 0x0602,
     RBSP_COMMAND_TIMED_BITSTREAM_CREATE = 0x0700,
     RBSP_COMMAND_TIMED_BITSTREAM_WRITE = 0x0701,
     RBSP_COMMAND_TIMED_BITSTREAM_ABORT = 0x0702,
+    RBSP_COMMAND_STORAGE_CONTRACT = 0x0800,
+    RBSP_COMMAND_STORAGE_READ = 0x0801,
+    RBSP_COMMAND_STORAGE_ERASE = 0x0802,
+    RBSP_COMMAND_STORAGE_PROGRAM = 0x0803,
     RBSP_COMMAND_MOTION_ENQUEUE = 0x0900,
     RBSP_COMMAND_MOTION_STATUS = 0x0901,
     RBSP_COMMAND_MOTION_ABORT = 0x0902,
@@ -90,7 +96,9 @@ enum {
     RBSP_RESOURCE_FLAG_NATIVE = 1U << 0,
     RBSP_RESOURCE_TYPE_UART = 2,
     RBSP_RESOURCE_TYPE_ADC = 5,
+    RBSP_RESOURCE_TYPE_TIMER = 7,
     RBSP_RESOURCE_TYPE_PWM = 6,
+    RBSP_RESOURCE_TYPE_STORAGE = 8,
     RBSP_RESOURCE_TYPE_STEPGEN_AXIS = 9,
     RBSP_RESOURCE_TYPE_TIMED_BITSTREAM = 10,
     RBSP_RESOURCE_TYPE_I2C_BUS = 11,
@@ -126,9 +134,11 @@ enum {
     RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE = 1U << 3,
     RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED = 1U << 4,
     RBSP_RESOURCE_ACCESS_LEASE_REQUIRED = 1U << 5,
-#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS) || \
+    defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
     RBSP_RESOURCE_LEASE_MINIMUM_MS = 100,
     RBSP_RESOURCE_LEASE_MAXIMUM_MS = 60000,
+    RBSP_RESOURCE_LEASE_SHARED = 1,
     RBSP_RESOURCE_LEASE_EXCLUSIVE = 2,
 #endif
 };
@@ -280,6 +290,14 @@ static uint64_t active_lease_count(const rbsp_core_t* core) {
         if (core->stepgen_leases[index].active) ++count;
     }
 #endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    for (size_t index = 0U; index < CONFIG_TIMER_RESOURCE_COUNT; ++index)
+        if (core->timer_leases[index].active) ++count;
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    for (size_t index = 0U; index < CONFIG_STORAGE_RESOURCE_COUNT; ++index)
+        if (core->storage_leases[index].active) ++count;
+#endif
     return count;
 }
 
@@ -347,7 +365,8 @@ static void encode_device_param_status(const rbsp_core_t* core,
 }
 #endif
 
-#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS) || \
+    defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
 static uint64_t get_u64(const uint8_t* input) {
     uint64_t value = 0U;
     for (unsigned index = 0U; index < 8U; ++index) {
@@ -1491,6 +1510,12 @@ typedef struct {
 #if defined(CONFIG_REMOTEBSP_ADC)
 static bool adc_configuration_valid(const rbsp_hal_t* hal);
 #endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+static bool timer_configuration_valid(const rbsp_hal_t* hal);
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+static bool storage_configuration_valid(const rbsp_hal_t* hal);
+#endif
 
 #if defined(CONFIG_REMOTEBSP_BUS)
 static uint8_t bus_resource_type(uint8_t kind) {
@@ -1602,6 +1627,38 @@ static bool next_static_resource(
                 iterator->index = 0U;
                 break;
             case 5U:
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+                if (storage_configuration_valid(&core->hal) &&
+                    iterator->index < core->hal.storage_resource_count) {
+                    const rbsp_storage_resource_config_t* item =
+                        &core->hal.storage_resources[iterator->index++];
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        item->resource_id, RBSP_RESOURCE_TYPE_STORAGE,
+                        item->instance, RBSP_RESOURCE_FLAG_NATIVE,
+                        item->maximum_transfer_bytes,
+                        item->maximum_transfer_bytes};
+                    return true;
+                }
+#endif
+                iterator->phase = 6U;
+                iterator->index = 0U;
+                break;
+            case 6U:
+#if defined(CONFIG_REMOTEBSP_TIMER)
+                if (timer_configuration_valid(&core->hal) &&
+                    iterator->index < core->hal.timer_resource_count) {
+                    const rbsp_timer_resource_config_t* item =
+                        &core->hal.timer_resources[iterator->index++];
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        item->resource_id, RBSP_RESOURCE_TYPE_TIMER,
+                        item->instance, RBSP_RESOURCE_FLAG_NATIVE, 0U, 0U};
+                    return true;
+                }
+#endif
+                iterator->phase = 7U;
+                iterator->index = 0U;
+                break;
+            case 7U:
 #if defined(CONFIG_REMOTEBSP_BUS)
                 if (iterator->index < core->hal.bus_resource_count) {
                     const rbsp_bus_resource_config_t* item =
@@ -1620,7 +1677,7 @@ static bool next_static_resource(
                     return true;
                 }
 #endif
-                iterator->phase = 6U;
+                iterator->phase = 8U;
                 iterator->index = 0U;
                 break;
             default:
@@ -1692,6 +1749,234 @@ static const rbsp_adc_resource_config_t* find_adc_resource(
 }
 #endif
 
+#if defined(CONFIG_REMOTEBSP_TIMER)
+static bool timer_configuration_valid(const rbsp_hal_t* hal) {
+    const uint16_t known_capabilities = 0x0007U;
+    if (hal->timer_resources == NULL || hal->timer_execute == NULL ||
+        hal->timer_resource_count == 0U ||
+        hal->timer_resource_count > CONFIG_TIMER_RESOURCE_COUNT) return false;
+    for (size_t index = 0U; index < hal->timer_resource_count; ++index) {
+        const rbsp_timer_resource_config_t* item = &hal->timer_resources[index];
+        if ((item->resource_id >> 24U) != RBSP_RESOURCE_TYPE_TIMER ||
+            item->tick_hz == 0U || item->maximum_operation_us == 0U ||
+            item->maximum_operation_us > 1000000U || item->capabilities == 0U ||
+            (item->capabilities & (uint16_t)~known_capabilities) != 0U) return false;
+        for (size_t previous = 0U; previous < index; ++previous) {
+            if (hal->timer_resources[previous].resource_id == item->resource_id ||
+                hal->timer_resources[previous].instance == item->instance) return false;
+        }
+    }
+    return true;
+}
+
+static const rbsp_timer_resource_config_t* find_timer_resource(
+    const rbsp_core_t* core, uint32_t resource_id, size_t* index_out) {
+    if (!timer_configuration_valid(&core->hal)) return NULL;
+    for (size_t index = 0U; index < core->hal.timer_resource_count; ++index) {
+        if (core->hal.timer_resources[index].resource_id == resource_id) {
+            if (index_out != NULL) *index_out = index;
+            return &core->hal.timer_resources[index];
+        }
+    }
+    return NULL;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+static bool storage_configuration_valid(const rbsp_hal_t* hal) {
+    if (hal->storage_resources == NULL || hal->storage_read == NULL ||
+        hal->storage_erase == NULL || hal->storage_program == NULL ||
+        hal->storage_resource_count == 0U ||
+        hal->storage_resource_count > CONFIG_STORAGE_RESOURCE_COUNT) {
+        return false;
+    }
+    for (size_t index = 0U; index < hal->storage_resource_count; ++index) {
+        const rbsp_storage_resource_config_t* item =
+            &hal->storage_resources[index];
+        if ((item->resource_id >> 24U) != RBSP_RESOURCE_TYPE_STORAGE ||
+            item->capacity_bytes == 0U || item->erase_block_bytes == 0U ||
+            item->write_alignment_bytes == 0U ||
+            item->maximum_transfer_bytes == 0U ||
+            item->maximum_transfer_bytes > 1024U ||
+            item->maximum_transfer_bytes >
+                CONFIG_REMOTE_MAX_PACKET_SIZE - RBSP_HEADER_SIZE - 16U ||
+            item->maximum_transfer_bytes < item->erase_block_bytes ||
+            item->capacity_bytes % item->erase_block_bytes != 0U ||
+            item->erase_block_bytes % item->write_alignment_bytes != 0U ||
+            (item->flags & ~1U) != 0U) {
+            return false;
+        }
+        for (size_t previous = 0U; previous < index; ++previous) {
+            if (hal->storage_resources[previous].resource_id ==
+                    item->resource_id ||
+                hal->storage_resources[previous].instance == item->instance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static const rbsp_storage_resource_config_t* find_storage_resource(
+    const rbsp_core_t* core, uint32_t resource_id, size_t* index_out) {
+    if (!storage_configuration_valid(&core->hal)) return NULL;
+    for (size_t index = 0U; index < core->hal.storage_resource_count; ++index) {
+        if (core->hal.storage_resources[index].resource_id == resource_id) {
+            if (index_out != NULL) *index_out = index;
+            return &core->hal.storage_resources[index];
+        }
+    }
+    return NULL;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+static rbsp_static_resource_lease_t* find_static_resource_lease(
+    rbsp_core_t* core, uint32_t resource_id, uint16_t* access_out) {
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    size_t timer_index = 0U;
+    if (find_timer_resource(core, resource_id, &timer_index) != NULL) {
+        if (access_out != NULL) {
+            *access_out = RBSP_RESOURCE_ACCESS_READABLE |
+                          RBSP_RESOURCE_ACCESS_WRITABLE |
+                          RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE |
+                          RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED |
+                          RBSP_RESOURCE_ACCESS_LEASE_REQUIRED;
+        }
+        return &core->timer_leases[timer_index];
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    size_t storage_index = 0U;
+    if (find_storage_resource(core, resource_id, &storage_index) != NULL) {
+        if (access_out != NULL) {
+            *access_out = RBSP_RESOURCE_ACCESS_READABLE |
+                          RBSP_RESOURCE_ACCESS_WRITABLE |
+                          RBSP_RESOURCE_ACCESS_SHARED_READ |
+                          RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE |
+                          RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED |
+                          RBSP_RESOURCE_ACCESS_LEASE_REQUIRED;
+        }
+        return &core->storage_leases[storage_index];
+    }
+#endif
+    return NULL;
+}
+
+static uint32_t static_lease_remaining_ms(
+    const rbsp_static_resource_lease_t* lease, uint32_t now_ms) {
+    return lease->active && (int32_t)(lease->expires_at_ms - now_ms) > 0
+               ? lease->expires_at_ms - now_ms : 0U;
+}
+
+static void expire_static_resource_leases(rbsp_core_t* core, uint32_t now_ms) {
+#define RBSP_EXPIRE_STATIC_LEASES(array, count)                               \
+    do {                                                                      \
+        for (size_t i = 0U; i < (count); ++i) {                              \
+            if ((array)[i].active &&                                          \
+                (int32_t)(now_ms - (array)[i].expires_at_ms) >= 0)            \
+                memset(&(array)[i], 0, sizeof((array)[i]));                   \
+        }                                                                     \
+    } while (0)
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    RBSP_EXPIRE_STATIC_LEASES(core->timer_leases, core->hal.timer_resource_count);
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    RBSP_EXPIRE_STATIC_LEASES(core->storage_leases, core->hal.storage_resource_count);
+#endif
+#undef RBSP_EXPIRE_STATIC_LEASES
+}
+
+static bool static_resource_lease_allows(
+    rbsp_core_t* core, uint32_t resource_id, uint32_t session_id,
+    uint8_t required_mode) {
+    expire_static_resource_leases(core, core->hal.milliseconds());
+    rbsp_static_resource_lease_t* lease =
+        find_static_resource_lease(core, resource_id, NULL);
+    return lease != NULL && lease->active && session_id != 0U &&
+           lease->owner_session_id == session_id &&
+           (required_mode == RBSP_RESOURCE_LEASE_SHARED ||
+            lease->access_mode == RBSP_RESOURCE_LEASE_EXCLUSIVE);
+}
+
+static void encode_static_lease_info(
+    uint8_t output[27U], uint32_t resource_id,
+    const rbsp_static_resource_lease_t* lease, uint32_t requester,
+    uint32_t now_ms, bool include_token) {
+    memset(output, 0, 27U); put_u32(output, resource_id);
+    if (!lease->active) return;
+    if (include_token && lease->owner_session_id == requester)
+        put_u64(output + 4U, lease->lease_id);
+    put_u32(output + 12U, lease->owner_session_id);
+    put_u32(output + 16U, lease->granted_duration_ms);
+    put_u32(output + 20U, static_lease_remaining_ms(lease, now_ms));
+    output[24U] = lease->access_mode;
+    put_u16(output + 25U, 1U);
+}
+
+static bool handle_static_resource_lease_command(
+    rbsp_core_t* core, const rbsp_request_t* request, uint16_t* response_size) {
+    uint16_t length = request->command == RBSP_COMMAND_RESOURCE_ACQUIRE ? 9U :
+        (request->command == RBSP_COMMAND_RESOURCE_RENEW ||
+         request->command == RBSP_COMMAND_RESOURCE_RELEASE) ? 16U : 4U;
+    if (request->payload_length != length) return false;
+    const uint32_t resource_id = get_u32(request->payload);
+    uint16_t access = 0U;
+    rbsp_static_resource_lease_t* lease =
+        find_static_resource_lease(core, resource_id, &access);
+    if (lease == NULL) return false;
+    if (request->object_id != 0U) {
+        *response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U); return true;
+    }
+    const uint32_t now_ms = core->hal.milliseconds();
+    expire_static_resource_leases(core, now_ms);
+    if (request->command == RBSP_COMMAND_RESOURCE_CONTRACT) {
+        uint8_t data[32U] = {0U}; put_u32(data, resource_id);
+        put_u16(data + 4U, 1U); put_u16(data + 6U, access);
+        *response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data)); return true;
+    }
+    if (request->command == RBSP_COMMAND_RESOURCE_LEASE_STATUS) {
+        uint8_t data[27U]; encode_static_lease_info(data, resource_id, lease, request->session_id, now_ms, false);
+        *response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data)); return true;
+    }
+    if (request->session_id == 0U) {
+        *response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U); return true;
+    }
+    if (request->command == RBSP_COMMAND_RESOURCE_ACQUIRE) {
+        const uint32_t duration = get_u32(request->payload + 4U);
+        const uint8_t mode = request->payload[8U];
+        const bool shared_allowed = (access & RBSP_RESOURCE_ACCESS_SHARED_READ) != 0U;
+        if (duration < RBSP_RESOURCE_LEASE_MINIMUM_MS || duration > RBSP_RESOURCE_LEASE_MAXIMUM_MS ||
+            (mode != RBSP_RESOURCE_LEASE_EXCLUSIVE && !(mode == RBSP_RESOURCE_LEASE_SHARED && shared_allowed))) {
+            *response_size = make_status_response(core, request,
+                mode != RBSP_RESOURCE_LEASE_SHARED && mode != RBSP_RESOURCE_LEASE_EXCLUSIVE ? RBSP_STATUS_INVALID_PAYLOAD : RBSP_STATUS_ACCESS_DENIED,
+                0U, NULL, 0U); return true;
+        }
+        if (lease->active) {
+            *response_size = make_status_response(core, request, RBSP_STATUS_RESOURCE_BUSY, 0U, NULL, 0U); return true;
+        }
+        lease->active = true; lease->lease_id = core->next_static_resource_lease_id++;
+        if (core->next_static_resource_lease_id == 0U) core->next_static_resource_lease_id = 1U;
+        lease->owner_session_id = request->session_id; lease->granted_duration_ms = duration;
+        lease->expires_at_ms = now_ms + duration; lease->access_mode = mode;
+        uint8_t data[27U]; encode_static_lease_info(data, resource_id, lease, request->session_id, now_ms, true);
+        *response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data)); return true;
+    }
+    const uint64_t lease_id = get_u64(request->payload + 4U);
+    const uint32_t duration = get_u32(request->payload + 12U);
+    const bool release = request->command == RBSP_COMMAND_RESOURCE_RELEASE;
+    if (lease_id == 0U || (release ? duration != 0U : duration < RBSP_RESOURCE_LEASE_MINIMUM_MS || duration > RBSP_RESOURCE_LEASE_MAXIMUM_MS))
+        *response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+    else if (!lease->active || lease->lease_id != lease_id || lease->owner_session_id != request->session_id)
+        *response_size = make_status_response(core, request, RBSP_STATUS_ACCESS_DENIED, 0U, NULL, 0U);
+    else if (release) { memset(lease, 0, sizeof(*lease)); *response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, NULL, 0U); }
+    else { lease->granted_duration_ms = duration; lease->expires_at_ms = now_ms + duration;
+        uint8_t data[27U]; encode_static_lease_info(data, resource_id, lease, request->session_id, now_ms, true);
+        *response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data)); }
+    return true;
+}
+#endif
+
 static uint32_t saturating_add_u32(uint32_t left, uint32_t right) {
     return UINT32_MAX - left < right ? UINT32_MAX : left + right;
 }
@@ -1738,6 +2023,26 @@ static rbsp_core_resource_counters_t* resource_counters(
             if (core->hal.adc_resources[index].resource_id ==
                 descriptor->resource_id && index < CONFIG_ADC_RESOURCE_COUNT) {
                 return &core->adc_status[index];
+            }
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_TIMER) {
+        for (size_t index = 0U; index < core->hal.timer_resource_count; ++index) {
+            if (core->hal.timer_resources[index].resource_id == descriptor->resource_id &&
+                index < CONFIG_TIMER_RESOURCE_COUNT) return &core->timer_status[index];
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_STORAGE) {
+        for (size_t index = 0U; index < core->hal.storage_resource_count;
+             ++index) {
+            if (core->hal.storage_resources[index].resource_id ==
+                    descriptor->resource_id &&
+                index < CONFIG_STORAGE_RESOURCE_COUNT) {
+                return &core->storage_status[index];
             }
         }
     }
@@ -1793,6 +2098,14 @@ static void encode_resource_runtime_status(
             core->hal.timed_bitstream_busy((uint8_t)descriptor->instance)) {
             status.busy = true;
         }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_TIMER ||
+        descriptor->type == RBSP_RESOURCE_TYPE_STORAGE) {
+        rbsp_static_resource_lease_t* lease = find_static_resource_lease(
+            core, descriptor->resource_id, NULL);
+        if (lease != NULL && lease->active) status.busy = true;
     }
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
@@ -1861,6 +2174,12 @@ static bool basic_resource_contract(
         access = RBSP_RESOURCE_ACCESS_READABLE |
                  RBSP_RESOURCE_ACCESS_SHARED_READ |
                  RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED;
+    } else if (descriptor.type == RBSP_RESOURCE_TYPE_STORAGE) {
+        access = RBSP_RESOURCE_ACCESS_READABLE |
+                 RBSP_RESOURCE_ACCESS_WRITABLE |
+                 RBSP_RESOURCE_ACCESS_SHARED_READ |
+                 RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE |
+                 RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED;
     } else {
         access = RBSP_RESOURCE_ACCESS_WRITABLE |
                  RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE;
@@ -1883,6 +2202,9 @@ static bool process_request(rbsp_core_t* core,
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     (void)expire_bus_leases(core, core->hal.milliseconds());
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+    expire_static_resource_leases(core, core->hal.milliseconds());
 #endif
     rbsp_request_cache_entry_t* cached =
         find_cache(core, request);
@@ -2207,6 +2529,16 @@ static bool process_request(rbsp_core_t* core,
 #if defined(CONFIG_REMOTEBSP_ADC)
             if (adc_configuration_valid(&core->hal)) {
                 capabilities |= 1ULL << 4U;
+            }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+            if (timer_configuration_valid(&core->hal)) {
+                capabilities |= 1ULL << 6U;
+            }
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+            if (storage_configuration_valid(&core->hal)) {
+                capabilities |= 1ULL << 7U;
             }
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)
@@ -2669,6 +3001,9 @@ static bool process_request(rbsp_core_t* core,
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_RESOURCE_CONTRACT: {
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+            if (handle_static_resource_lease_command(core, request, &response_size)) break;
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
             if (handle_bus_resource_command(
                     core, request, &response_size)) {
@@ -2720,6 +3055,9 @@ static bool process_request(rbsp_core_t* core,
         }
 
         case RBSP_COMMAND_RESOURCE_ACQUIRE: {
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+            if (handle_static_resource_lease_command(core, request, &response_size)) break;
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
             if (handle_bus_resource_command(
                     core, request, &response_size)) {
@@ -2787,6 +3125,9 @@ static bool process_request(rbsp_core_t* core,
 
         case RBSP_COMMAND_RESOURCE_RENEW:
         case RBSP_COMMAND_RESOURCE_RELEASE: {
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+            if (handle_static_resource_lease_command(core, request, &response_size)) break;
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
             if (handle_bus_resource_command(
                     core, request, &response_size)) {
@@ -2858,6 +3199,9 @@ static bool process_request(rbsp_core_t* core,
         }
 
         case RBSP_COMMAND_RESOURCE_LEASE_STATUS: {
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+            if (handle_static_resource_lease_command(core, request, &response_size)) break;
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
             if (handle_bus_resource_command(
                     core, request, &response_size)) {
@@ -2981,14 +3325,225 @@ static bool process_request(rbsp_core_t* core,
         }
 #endif
 
-#if defined(CONFIG_REMOTEBSP_BUS) && !defined(CONFIG_REMOTEBSP_MOTION)
+#if defined(CONFIG_REMOTEBSP_TIMER)
+        case RBSP_COMMAND_TIMER_CONTRACT: {
+            const rbsp_timer_resource_config_t* resource = NULL;
+            if (request->object_id == 0U && request->payload_length == 4U)
+                resource = find_timer_resource(core, get_u32(request->payload), NULL);
+            if (request->object_id != 0U || request->payload_length != 4U)
+                response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+            else if (resource == NULL)
+                response_size = make_status_response(core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+            else {
+                uint8_t data[16U];
+                put_u16(data, 1U); put_u16(data + 2U, resource->capabilities);
+                put_u32(data + 4U, resource->resource_id);
+                put_u32(data + 8U, resource->tick_hz);
+                put_u32(data + 12U, resource->maximum_operation_us);
+                response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            }
+            break;
+        }
+        case RBSP_COMMAND_TIMER_EXECUTE: {
+            const uint32_t resource_id = request->payload_length >= 4U ? get_u32(request->payload) : 0U;
+            size_t resource_index = 0U;
+            const rbsp_timer_resource_config_t* resource = find_timer_resource(core, resource_id, &resource_index);
+            if (request->object_id != 0U || request->payload_length != 16U || get_u16(request->payload + 6U) != 0U) {
+                response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U); break;
+            }
+            if (resource == NULL) {
+                response_size = make_status_response(core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U); break;
+            }
+            const uint16_t operation = get_u16(request->payload + 4U);
+            const uint32_t parameter_us = get_u32(request->payload + 8U);
+            const uint32_t timeout_us = get_u32(request->payload + 12U);
+            const uint16_t operation_bit = operation >= 1U && operation <= 3U ? (uint16_t)(1U << (operation - 1U)) : 0U;
+            if (operation_bit == 0U || (resource->capabilities & operation_bit) == 0U ||
+                parameter_us == 0U || timeout_us == 0U || parameter_us > timeout_us ||
+                timeout_us > resource->maximum_operation_us) {
+                response_size = make_status_response(core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U); break;
+            }
+            if (!static_resource_lease_allows(core, resource_id,
+                    request->session_id, RBSP_RESOURCE_LEASE_EXCLUSIVE)) {
+                response_size = make_status_response(core, request, RBSP_STATUS_ACCESS_DENIED, 0U, NULL, 0U); break;
+            }
+            uint64_t value = 0U; uint32_t elapsed_us = 0U;
+            if (!core->hal.timer_execute(resource, operation, parameter_us, timeout_us, &value, &elapsed_us) || elapsed_us > timeout_us) {
+                core->timer_status[resource_index].backend_failed = true;
+                response_size = make_status_response(core, request, RBSP_STATUS_RESOURCE_FAILED, 0U, NULL, 0U); break;
+            }
+            uint8_t data[24U] = {0U};
+            put_u32(data, resource_id); put_u16(data + 4U, operation);
+            put_u32(data + 8U, ++core->timer_sequence[resource_index]);
+            put_u64(data + 12U, value); put_u32(data + 20U, elapsed_us);
+            response_size = make_status_response(core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            break;
+        }
+#endif
+
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+        case RBSP_COMMAND_STORAGE_CONTRACT: {
+            const rbsp_storage_resource_config_t* resource = NULL;
+            if (request->object_id == 0U && request->payload_length == 4U) {
+                resource = find_storage_resource(
+                    core, get_u32(request->payload), NULL);
+            }
+            if (request->object_id != 0U || request->payload_length != 4U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+            } else if (resource == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+            } else {
+                uint8_t data[24U] = {0U};
+                put_u16(data, 1U);
+                put_u16(data + 2U, resource->flags);
+                put_u32(data + 4U, resource->resource_id);
+                put_u32(data + 8U, resource->capacity_bytes);
+                put_u32(data + 12U, resource->erase_block_bytes);
+                put_u32(data + 16U, resource->write_alignment_bytes);
+                put_u32(data + 20U, resource->maximum_transfer_bytes);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_STORAGE_READ:
+        case RBSP_COMMAND_STORAGE_ERASE: {
+            const uint32_t resource_id = request->payload_length >= 4U
+                                             ? get_u32(request->payload) : 0U;
+            size_t resource_index = 0U;
+            const rbsp_storage_resource_config_t* resource =
+                find_storage_resource(core, resource_id, &resource_index);
+            if (request->object_id != 0U || request->payload_length != 16U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            if (resource == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+                break;
+            }
+            const uint32_t offset = get_u32(request->payload + 4U);
+            const uint32_t length = get_u32(request->payload + 8U);
+            const uint32_t timeout_us = get_u32(request->payload + 12U);
+            const bool erase = request->command == RBSP_COMMAND_STORAGE_ERASE;
+            if (!static_resource_lease_allows(
+                    core, resource_id, request->session_id,
+                    erase ? RBSP_RESOURCE_LEASE_EXCLUSIVE
+                          : RBSP_RESOURCE_LEASE_SHARED)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED, 0U, NULL, 0U);
+                break;
+            }
+            if (length == 0U || length > resource->maximum_transfer_bytes ||
+                timeout_us == 0U || timeout_us > 1000000U ||
+                offset > resource->capacity_bytes ||
+                length > resource->capacity_bytes - offset ||
+                (erase && (offset % resource->erase_block_bytes != 0U ||
+                           length % resource->erase_block_bytes != 0U)) ||
+                (!erase && (uint32_t)RBSP_HEADER_SIZE + 13U + length >
+                               CONFIG_REMOTE_MAX_PACKET_SIZE)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            bool ok = false;
+            if (erase) {
+                ok = core->hal.storage_erase(
+                    resource, offset, length, timeout_us);
+            } else {
+                uint8_t* data = payload + 13U;
+                ok = core->hal.storage_read(
+                    resource, offset, data, length, timeout_us);
+                if (ok) {
+                    put_u32(payload + 1U, resource_id);
+                    put_u32(payload + 5U, offset);
+                    put_u32(payload + 9U, length);
+                }
+            }
+            if (!ok) {
+                core->storage_status[resource_index].backend_failed = true;
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED, 0U, NULL, 0U);
+            } else if (erase) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    payload + 1U, (uint16_t)(12U + length));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_STORAGE_PROGRAM: {
+            const uint32_t resource_id = request->payload_length >= 4U
+                                             ? get_u32(request->payload) : 0U;
+            size_t resource_index = 0U;
+            const rbsp_storage_resource_config_t* resource =
+                find_storage_resource(core, resource_id, &resource_index);
+            if (request->object_id != 0U || request->payload_length < 17U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            if (resource == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+                break;
+            }
+            if (!static_resource_lease_allows(core, resource_id,
+                    request->session_id, RBSP_RESOURCE_LEASE_EXCLUSIVE)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED, 0U, NULL, 0U);
+                break;
+            }
+            const uint32_t offset = get_u32(request->payload + 4U);
+            const uint32_t timeout_us = get_u32(request->payload + 8U);
+            const uint32_t length = get_u32(request->payload + 12U);
+            if (length == 0U || length > resource->maximum_transfer_bytes ||
+                request->payload_length != 16U + length ||
+                timeout_us == 0U || timeout_us > 1000000U ||
+                offset > resource->capacity_bytes ||
+                length > resource->capacity_bytes - offset ||
+                offset % resource->write_alignment_bytes != 0U ||
+                length % resource->write_alignment_bytes != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            if (!core->hal.storage_program(
+                    resource, offset, request->payload + 16U,
+                    length, timeout_us)) {
+                core->storage_status[resource_index].backend_failed = true;
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED, 0U, NULL, 0U);
+            } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, NULL, 0U);
+            }
+            break;
+        }
+#endif
+
+#if (defined(CONFIG_REMOTEBSP_BUS) || defined(CONFIG_REMOTEBSP_TIMER) || \
+     defined(CONFIG_REMOTEBSP_STORAGE)) && !defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_RESOURCE_CONTRACT:
         case RBSP_COMMAND_RESOURCE_ACQUIRE:
         case RBSP_COMMAND_RESOURCE_RENEW:
         case RBSP_COMMAND_RESOURCE_RELEASE:
         case RBSP_COMMAND_RESOURCE_LEASE_STATUS:
-            if (!handle_bus_resource_command(
-                    core, request, &response_size)) {
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+            if (handle_static_resource_lease_command(core, request, &response_size)) break;
+#endif
+#if defined(CONFIG_REMOTEBSP_BUS)
+            if (!handle_bus_resource_command(core, request, &response_size)) {
+#else
+            {
+#endif
                 if (request->command == RBSP_COMMAND_RESOURCE_CONTRACT &&
                     basic_resource_contract(
                         core, request, &response_size)) {
@@ -3012,7 +3567,8 @@ static bool process_request(rbsp_core_t* core,
             break;
 #endif
 
-#if !defined(CONFIG_REMOTEBSP_BUS) && !defined(CONFIG_REMOTEBSP_MOTION)
+#if !defined(CONFIG_REMOTEBSP_BUS) && !defined(CONFIG_REMOTEBSP_MOTION) && \
+    !defined(CONFIG_REMOTEBSP_TIMER) && !defined(CONFIG_REMOTEBSP_STORAGE)
         case RBSP_COMMAND_RESOURCE_CONTRACT:
             if (!basic_resource_contract(core, request, &response_size)) {
                 response_size = make_status_response(
@@ -4398,6 +4954,9 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
     }
 #endif
     core->next_object_id = 1U;
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+    core->next_static_resource_lease_id = 1U;
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     if (!bus_configuration_valid(hal)) {
         return false;
@@ -4682,7 +5241,8 @@ bool rbsp_core_motion_tick(rbsp_core_t* core) {
 #if CONFIG_GPIO_RESOURCE_COUNT > 0 || CONFIG_UART_RESOURCE_COUNT > 0 || \
     defined(CONFIG_REMOTEBSP_PWM) || \
     defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM) || \
-    defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+    defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS) || \
+    defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
 size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
     if (core == NULL || session_id == 0U) {
         return 0U;
@@ -4791,6 +5351,22 @@ size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
         if (lease->active && lease->owner_session_id == session_id) {
             memset(lease, 0, sizeof(*lease));
             ++released;
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    for (size_t index = 0U; index < core->hal.timer_resource_count; ++index) {
+        rbsp_static_resource_lease_t* lease = &core->timer_leases[index];
+        if (lease->active && lease->owner_session_id == session_id) {
+            memset(lease, 0, sizeof(*lease)); ++released;
+        }
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    for (size_t index = 0U; index < core->hal.storage_resource_count; ++index) {
+        rbsp_static_resource_lease_t* lease = &core->storage_leases[index];
+        if (lease->active && lease->owner_session_id == session_id) {
+            memset(lease, 0, sizeof(*lease)); ++released;
         }
     }
 #endif

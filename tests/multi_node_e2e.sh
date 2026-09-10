@@ -125,7 +125,7 @@ done
 clock_ready=0
 for _ in $(seq 1 150); do
     snapshot="$("$remote_cli_bin" --json --socket "$socket_path" \
-        runtime-snapshot 64 2000 2>/dev/null || true)"
+        runtime-snapshot 128 2000 2>/dev/null || true)"
     if python3 -c '
 import json, sys
 value = json.load(sys.stdin)["data"]

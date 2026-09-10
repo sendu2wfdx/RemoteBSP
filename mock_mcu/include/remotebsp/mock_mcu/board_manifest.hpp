@@ -4,6 +4,7 @@
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/remote_core.hpp"
 #include "remotebsp/mock_mcu/stream_bsp.hpp"
+#include "remotebsp/mock_mcu/timer_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 
@@ -126,6 +127,8 @@ public:
     const std::shared_ptr<MockBusBsp>& bus() const noexcept;
     const std::shared_ptr<MockStreamBsp>& stream() const noexcept;
     const std::shared_ptr<AdcBsp>& adc() const noexcept;
+    const std::shared_ptr<TimerBsp>& timer() const noexcept;
+    const std::shared_ptr<StorageBsp>& storage() const noexcept;
     bool online() const noexcept;
     std::optional<std::uint64_t> next_event_ms() const noexcept;
     std::size_t advance_to(std::uint64_t elapsed_ms);
@@ -145,6 +148,8 @@ private:
     std::shared_ptr<MockBusBsp> bus_;
     std::shared_ptr<MockStreamBsp> stream_;
     std::shared_ptr<AdcBsp> adc_;
+    std::shared_ptr<TimerBsp> timer_;
+    std::shared_ptr<StorageBsp> storage_;
     std::vector<MotionEdge> pending_motion_edges_;
     std::size_t next_event_index_{};
     bool online_{true};

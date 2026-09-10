@@ -641,6 +641,45 @@ config ADC_RESOURCE_COUNT
 
 endmenu
 
+menu "Storage（可选实验骨架）"
+
+config REMOTEBSP_STORAGE
+    bool "编译通用块 Storage 核心"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      仅编译静态资源枚举、协议处理和 BSP 回调边界。板级代码必须提供与
+      设备参数双页完全分离、边界已确认的专用块区域；没有完整资源表及
+      Read/Erase/Program 回调时不会公布 Storage 能力或资源。Studio 当前
+      不提供 Storage 候选。
+
+config STORAGE_RESOURCE_COUNT
+    int "Storage 静态端点编译期上限"
+    range 1 4
+    default 1
+    depends on REMOTEBSP_STORAGE
+
+endmenu
+
+menu "Timer（可选实验骨架）"
+
+config REMOTEBSP_TIMER
+    bool "编译通用 Timer 测量与单次等待核心"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      仅编译静态资源枚举、协议处理和 BSP 回调边界。板级代码必须提供已经
+      确认 AF、时钟、溢出行为和输入电气链路的完整端点；缺少资源表或执行
+      回调时不会公布 Timer 能力或资源。Studio 当前不提供 Timer 候选。
+
+config TIMER_RESOURCE_COUNT
+    int "Timer 静态端点编译期上限"
+    range 1 8
+    default 1
+    depends on REMOTEBSP_TIMER
+
+endmenu
+
 menu "PWM 与定时位流（可选）"
 
 config REMOTEBSP_PWM

@@ -47,6 +47,83 @@ static uint32_t golden_crc_update(uint32_t crc, const uint8_t* data,
     return crc;
 }
 
+static void finish_adc_crc(uint8_t* value) {
+    put_u32(value + 60U, ~golden_crc_update(UINT32_MAX, value, 60U));
+}
+
+static void test_adc_calibration_formats(void) {
+    uint8_t value[RBSP_DEVICE_PARAM_ADC_CALIBRATION_V1_SIZE] = {0U};
+    rbsp_device_param_adc_calibration legacy = {65536, -100, 3300000U};
+    uint32_t crc;
+    memcpy(value, "ADCC", 4U);
+    value[4] = 1U; /* 格式版本 */
+    value[5] = 1U; /* 增益偏移模式 */
+    value[6] = 2U; /* 通道 */
+    value[7] = 12U;
+    put_u32(value + 8U, 0x05000003U);
+    put_u32(value + 12U, 0U);
+    put_u32(value + 16U, 3300000U);
+    put_u32(value + 20U, 3300000U);
+    put_u32(value + 24U, 65536U);
+    put_u32(value + 28U, (uint32_t)-100);
+    crc = ~golden_crc_update(UINT32_MAX, value, 60U);
+    put_u32(value + 60U, crc);
+    assert(rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+    assert(!rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 1U,
+        value, sizeof(value)));
+    value[12] ^= 1U;
+    assert(!rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+    assert(rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE,
+        (const uint8_t*)&legacy, sizeof(legacy)));
+
+    /* 参考电压必须落在声明量程内，即使重新计算CRC也不能放行。 */
+    memset(value, 0, sizeof(value));
+    memcpy(value, "ADCC", 4U);
+    value[4] = 1U; value[5] = 1U; value[6] = 2U; value[7] = 12U;
+    put_u32(value + 8U, 0x05000003U);
+    put_u32(value + 12U, 4000000U);
+    put_u32(value + 16U, 5000000U);
+    put_u32(value + 20U, 3300000U);
+    put_u32(value + 24U, 65536U);
+    finish_adc_crc(value);
+    assert(!rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+
+    /* 两点模式锁定16位以内原始码、严格递增点和全零保留区。 */
+    memset(value, 0, sizeof(value));
+    memcpy(value, "ADCC", 4U);
+    value[4] = 1U; value[5] = 2U; value[6] = 2U; value[7] = 12U;
+    value[32] = 2U;
+    put_u32(value + 8U, 0x05000003U);
+    put_u32(value + 12U, 0U);
+    put_u32(value + 16U, 3300000U);
+    put_u32(value + 20U, 3300000U);
+    put_u16(value + 36U, 10U); put_u32(value + 38U, 10000U);
+    put_u16(value + 42U, 4090U); put_u32(value + 44U, 3290000U);
+    finish_adc_crc(value);
+    assert(rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+    value[33] = 1U;
+    finish_adc_crc(value);
+    assert(!rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+    value[33] = 0U;
+    put_u16(value + 42U, 4096U);
+    finish_adc_crc(value);
+    assert(!rbsp_device_param_validate_value(
+        RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE + 2U,
+        value, sizeof(value)));
+}
+
 static size_t make_golden_image(uint8_t* page, uint16_t version,
                                 uint32_t generation,
                                 const golden_record* records,
@@ -260,6 +337,7 @@ int main(void) {
         0x18U, 0x19U, 0x1AU, 0x1BU, 0x1CU, 0x1DU, 0x1EU, 0x1FU};
 
     test_compatibility_golden_images();
+    test_adc_calibration_formats();
 
     memset(&flash, 0xFF, sizeof(flash));
     flash.fail_next_program = false;

@@ -147,6 +147,26 @@ void write_visual_state(const DigitalTwin& twin, std::uint64_t elapsed_ms,
     }
     output << "]},\n";
 
+    output << "  \"timer\": {\"supported\": "
+           << (twin.timer() ? "true" : "false") << ", \"resources\": [";
+    bool first_timer = true;
+    for (const auto& resource : twin.manifest().resources) {
+        if (resource.type != protocol::ResourceType::Timer) continue;
+        output << (first_timer ? "" : ", ") << resource.resource_id;
+        first_timer = false;
+    }
+    output << "]},\n";
+
+    output << "  \"storage\": {\"supported\": "
+           << (twin.storage() ? "true" : "false") << ", \"resources\": [";
+    bool first_storage = true;
+    for (const auto& resource : twin.manifest().resources) {
+        if (resource.type != protocol::ResourceType::Storage) continue;
+        output << (first_storage ? "" : ", ") << resource.resource_id;
+        first_storage = false;
+    }
+    output << "]},\n";
+
     const auto streams = twin.waveform()
                              ? twin.waveform()->bitstream_snapshot()
                              : std::vector<TimedBitstreamSnapshot>{};

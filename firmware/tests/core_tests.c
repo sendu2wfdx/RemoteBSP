@@ -385,6 +385,68 @@ static bool fake_adc_sample(const rbsp_adc_resource_config_t* resource,
 }
 #endif
 
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+static const rbsp_storage_resource_config_t test_storage_resources[] = {
+    {0x08000000U, 4096U, 256U, 4U, 256U, 1U, 0U},
+    {0x08000001U, 4096U, 256U, 4U, 256U, 1U, 1U},
+};
+static uint8_t storage_bytes[2U][4096U];
+static bool storage_backend_must_fail[2U];
+
+static bool fake_storage_read(
+    const rbsp_storage_resource_config_t* resource, uint32_t offset,
+    uint8_t* data, uint32_t length, uint32_t timeout_us) {
+    if (resource == NULL || resource->instance >= 2U || data == NULL ||
+        timeout_us == 0U || storage_backend_must_fail[resource->instance]) {
+        return false;
+    }
+    memcpy(data, storage_bytes[resource->instance] + offset, length);
+    return true;
+}
+
+static bool fake_storage_erase(
+    const rbsp_storage_resource_config_t* resource, uint32_t offset,
+    uint32_t length, uint32_t timeout_us) {
+    if (resource == NULL || resource->instance >= 2U || timeout_us == 0U ||
+        storage_backend_must_fail[resource->instance]) {
+        return false;
+    }
+    memset(storage_bytes[resource->instance] + offset, 0xFF, length);
+    return true;
+}
+
+static bool fake_storage_program(
+    const rbsp_storage_resource_config_t* resource, uint32_t offset,
+    const uint8_t* data, uint32_t length, uint32_t timeout_us) {
+    if (resource == NULL || resource->instance >= 2U || data == NULL ||
+        timeout_us == 0U || storage_backend_must_fail[resource->instance]) {
+        return false;
+    }
+    memcpy(storage_bytes[resource->instance] + offset, data, length);
+    return true;
+}
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMER)
+static const rbsp_timer_resource_config_t test_timer_resources[] = {
+    {0x07000000U, 1000000U, 1000000U, 0x0007U, 0U},
+};
+static bool timer_backend_must_fail;
+
+static bool fake_timer_execute(const rbsp_timer_resource_config_t* resource,
+                               uint16_t operation, uint32_t parameter_us,
+                               uint32_t timeout_us, uint64_t* value,
+                               uint32_t* elapsed_us) {
+    (void)timeout_us;
+    if (resource == NULL || operation < 1U || operation > 3U ||
+        timer_backend_must_fail ||
+        value == NULL || elapsed_us == NULL) return false;
+    *value = operation == 2U ? 1000U : parameter_us;
+    *elapsed_us = parameter_us;
+    return true;
+}
+#endif
+
 static bool fake_resource_status(
     uint8_t resource_type, uint16_t instance,
     rbsp_resource_runtime_status_t* status) {
@@ -742,6 +804,9 @@ static void test_byte_ring(void) {
 
 int main(void) {
     test_byte_ring();
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    memset(storage_bytes, 0xFF, sizeof(storage_bytes));
+#endif
 
     rbsp_core_t core;
     const rbsp_hal_t hal = {
@@ -761,6 +826,18 @@ int main(void) {
         .adc_resources = test_adc_resources,
         .adc_resource_count = 1U,
         .adc_sample = fake_adc_sample,
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+        .storage_resources = test_storage_resources,
+        .storage_resource_count = 2U,
+        .storage_read = fake_storage_read,
+        .storage_erase = fake_storage_erase,
+        .storage_program = fake_storage_program,
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+        .timer_resources = test_timer_resources,
+        .timer_resource_count = 1U,
+        .timer_execute = fake_timer_execute,
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
         .bus_resources = test_bus_resources,
@@ -928,13 +1005,14 @@ int main(void) {
 
     /*
      * 静态资源目录来自编译期能力，不得把 GPIO 对象池容量误当成固定端点。
-     * config_all 依次公开 2 UART、2 PWM、2 STEPGEN、1 定时位流、1 ADC 和 2 BUS 项。
+     * config_all 依次公开 2 UART、2 PWM、2 STEPGEN、1 定时位流、1 ADC、
+     * 2 Storage、1 Timer 和 2 BUS 项。
      */
     clear_sent();
     request_size = make_request(request, 0x0030U, 201U, 0U, NULL, 0U);
     feed_packet(&core, 0x619U, 201U, request, request_size);
-    assert(reassemble_sent(response, 0x599U) == 197U);
-    assert(response[24U] == 0U && get_u16(response + 25U) == 10U);
+    assert(reassemble_sent(response, 0x599U) == 248U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 13U);
     const uint8_t* descriptor = response + 27U;
     assert(get_u32(descriptor) == 0x02000000U && descriptor[4U] == 2U);
     assert(get_u16(descriptor + 5U) == 0U &&
@@ -956,6 +1034,14 @@ int main(void) {
     descriptor += 17U;
     assert(get_u32(descriptor) == 0x05000000U && descriptor[4U] == 5U &&
            get_u32(descriptor + 9U) == 64U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x08000000U && descriptor[4U] == 8U &&
+           get_u32(descriptor + 9U) == 256U &&
+           get_u32(descriptor + 13U) == 256U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x08000001U && descriptor[4U] == 8U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x07000000U && descriptor[4U] == 7U);
     descriptor += 17U;
     assert(get_u32(descriptor) == TEST_I2C_BUS_ID && descriptor[4U] == 11U);
     descriptor += 17U;
@@ -988,6 +1074,244 @@ int main(void) {
            get_u32(response + 29U) == 1U && get_u32(response + 33U) == 200U &&
            get_u16(response + 37U) == 3U && get_u16(response + 41U) == 1000U &&
            get_u16(response + 45U) == 1002U);
+
+    uint8_t timer_id[4U];
+    put_u32(timer_id, 0x07000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0B00U, 210U, 0U,
+                                timer_id, sizeof(timer_id));
+    feed_packet(&core, 0x619U, 210U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 41U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 1U &&
+           get_u16(response + 27U) == 7U &&
+           get_u32(response + 29U) == 0x07000000U);
+    uint8_t timer_execute[16U] = {0U};
+    put_u32(timer_execute, 0x07000000U);
+    put_u16(timer_execute + 4U, 1U);
+    put_u32(timer_execute + 8U, 500U);
+    put_u32(timer_execute + 12U, 1000U);
+    /* Timer 是独占执行资源：没有会话绑定租约时不得触碰 BSP。 */
+    clear_sent();
+    request_size = make_request(request, 0x0B01U, 400U, 0U,
+                                timer_execute, sizeof(timer_execute));
+    feed_packet(&core, 0x619U, 400U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 4U);
+    uint8_t static_lease_request[9U] = {0U};
+    put_u32(static_lease_request, 0x07000000U);
+    put_u32(static_lease_request + 4U, 1000U);
+    static_lease_request[8U] = 2U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 221U, 0U,
+                                static_lease_request,
+                                sizeof(static_lease_request));
+    feed_packet(&core, 0x619U, 221U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U && get_u64(response + 29U) != 0U);
+    const uint64_t timer_lease_id = get_u64(response + 29U);
+    uint8_t static_lease_update[16U] = {0U};
+    put_u32(static_lease_update, 0x07000000U);
+    put_u64(static_lease_update + 4U, timer_lease_id);
+    put_u32(static_lease_update + 12U, 2000U);
+    clear_sent();
+    request_size = make_request(request, 0x0036U, 401U, 0U,
+                                static_lease_update,
+                                sizeof(static_lease_update));
+    feed_packet(&core, 0x619U, 401U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U && response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0B01U, 211U, 0U,
+                                timer_execute, sizeof(timer_execute));
+    feed_packet(&core, 0x619U, 211U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 49U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x07000000U &&
+           get_u16(response + 29U) == 1U && get_u32(response + 33U) == 1U &&
+           get_u32(response + 37U) == 500U && get_u32(response + 45U) == 500U);
+    put_u32(static_lease_update + 12U, 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0037U, 402U, 0U,
+                                static_lease_update,
+                                sizeof(static_lease_update));
+    feed_packet(&core, 0x619U, 402U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U && response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0B01U, 403U, 0U,
+                                timer_execute, sizeof(timer_execute));
+    feed_packet(&core, 0x619U, 403U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U && response[24U] == 4U);
+    put_u32(static_lease_request, 0x07000000U);
+    put_u32(static_lease_request + 4U, 1000U);
+    static_lease_request[8U] = 2U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 407U, 0U,
+                                static_lease_request,
+                                sizeof(static_lease_request));
+    feed_packet(&core, 0x619U, 407U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U && response[24U] == 0U);
+
+    /* 不支持的 Timer 操作在调用 HAL 前拒绝；HAL 失败锁存到资源状态。 */
+    put_u16(timer_execute + 4U, 4U);
+    clear_sent();
+    request_size = make_request(request, 0x0B01U, 224U, 0U,
+                                timer_execute, sizeof(timer_execute));
+    feed_packet(&core, 0x619U, 224U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 2U && !core.timer_status[0U].backend_failed);
+    put_u16(timer_execute + 4U, 1U);
+    timer_backend_must_fail = true;
+    clear_sent();
+    request_size = make_request(request, 0x0B01U, 225U, 0U,
+                                timer_execute, sizeof(timer_execute));
+    feed_packet(&core, 0x619U, 225U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 7U && core.timer_status[0U].backend_failed);
+    put_u32(timer_id, 0x07000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 226U, 0U,
+                                timer_id, sizeof(timer_id));
+    feed_packet(&core, 0x619U, 226U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 3U &&
+           (get_u32(response + 30U) & 4U) != 0U);
+    timer_backend_must_fail = false;
+
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    uint8_t storage_id[4U];
+    put_u32(storage_id, 0x08000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0800U, 212U, 0U,
+                                storage_id, sizeof(storage_id));
+    feed_packet(&core, 0x619U, 212U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 49U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 1U &&
+           get_u16(response + 27U) == 1U &&
+           get_u32(response + 29U) == 0x08000000U &&
+           get_u32(response + 33U) == 4096U &&
+           get_u32(response + 37U) == 256U &&
+           get_u32(response + 41U) == 4U &&
+           get_u32(response + 45U) == 256U);
+
+    /* 越界资源与错误命令必须确定性拒绝，不能调用板级后端。 */
+    put_u32(storage_id, 0x08000002U);
+    clear_sent();
+    request_size = make_request(request, 0x0800U, 213U, 0U,
+                                storage_id, sizeof(storage_id));
+    feed_packet(&core, 0x619U, 213U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 3U);
+    clear_sent();
+    request_size = make_request(request, 0x0804U, 214U, 0U,
+                                NULL, 0U);
+    feed_packet(&core, 0x619U, 214U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 1U);
+
+    uint8_t storage_range[16U] = {0U};
+    put_u32(storage_range, 0x08000000U);
+    put_u32(storage_range + 4U, 0U);
+    put_u32(storage_range + 8U, 256U);
+    put_u32(storage_range + 12U, 1000U);
+    put_u32(static_lease_request, 0x08000000U);
+    static_lease_request[8U] = 2U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 222U, 0U,
+                                static_lease_request,
+                                sizeof(static_lease_request));
+    feed_packet(&core, 0x619U, 222U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0802U, 215U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 215U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && storage_bytes[0U][0U] == 0xFFU);
+
+    const uint8_t storage_program[] = {
+        0x00U, 0x00U, 0x00U, 0x08U, 0U, 0U, 0U, 0U,
+        0xE8U, 0x03U, 0U, 0U, 4U, 0U, 0U, 0U,
+        0xF0U, 0x0FU, 0xAAU, 0x55U};
+    clear_sent();
+    request_size = make_request(request, 0x0803U, 216U, 0U,
+                                storage_program, sizeof(storage_program));
+    feed_packet(&core, 0x619U, 216U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && storage_bytes[0U][0U] == 0xF0U &&
+           storage_bytes[0U][3U] == 0x55U);
+
+    put_u32(storage_range + 8U, 4U);
+    clear_sent();
+    request_size = make_request(request, 0x0801U, 217U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 217U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 41U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x08000000U &&
+           get_u32(response + 29U) == 0U && get_u32(response + 33U) == 4U &&
+           response[37U] == 0xF0U && response[40U] == 0x55U);
+
+    /* 端点0失败后锁存状态；端点1仍可正常读取。 */
+    storage_backend_must_fail[0U] = true;
+    clear_sent();
+    request_size = make_request(request, 0x0801U, 218U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 218U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 7U && core.storage_status[0U].backend_failed);
+    put_u32(storage_range, 0x08000001U);
+    put_u32(static_lease_request, 0x08000001U);
+    static_lease_request[8U] = 1U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 223U, 0U,
+                                static_lease_request,
+                                sizeof(static_lease_request));
+    feed_packet(&core, 0x619U, 223U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U);
+    assert(response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0801U, 219U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 219U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 41U);
+    assert(response[24U] == 0U && !core.storage_status[1U].backend_failed);
+    /* 共享读租约不得升级成擦除权限，且不影响端点0的独立租约状态。 */
+    put_u32(storage_range + 8U, 256U);
+    clear_sent();
+    request_size = make_request(request, 0x0802U, 404U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 404U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U && response[24U] == 4U);
+    assert(core.storage_leases[0U].active && core.storage_leases[1U].active);
+    const uint32_t now_before_static_expiry = now_ms;
+    now_ms += 1001U;
+    put_u32(storage_range + 8U, 4U);
+    clear_sent();
+    request_size = make_request(request, 0x0801U, 405U, 0U,
+                                storage_range, sizeof(storage_range));
+    feed_packet(&core, 0x619U, 405U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U && response[24U] == 4U);
+    assert(!core.storage_leases[0U].active && !core.storage_leases[1U].active);
+    now_ms = now_before_static_expiry;
+    put_u32(static_lease_request, 0x08000001U);
+    put_u32(static_lease_request + 4U, 1000U);
+    static_lease_request[8U] = 1U;
+    clear_sent();
+    request_size = make_request(request, 0x0035U, 406U, 0U,
+                                static_lease_request,
+                                sizeof(static_lease_request));
+    feed_packet(&core, 0x619U, 406U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 52U && response[24U] == 0U);
+    assert(rbsp_core_release_session(&core, 0x12345678U) == 1U);
+    assert(!core.storage_leases[1U].active);
+    put_u32(storage_id, 0x08000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 220U, 0U,
+                                storage_id, sizeof(storage_id));
+    feed_packet(&core, 0x619U, 220U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && response[29U] == 3U &&
+           (get_u32(response + 30U) & 4U) != 0U);
+    storage_backend_must_fail[0U] = false;
+#endif
 
     uint8_t static_resource_id[4U];
     put_u32(static_resource_id, 0x06000000U);

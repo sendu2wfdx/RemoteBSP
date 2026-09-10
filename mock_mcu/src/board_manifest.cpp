@@ -1619,6 +1619,12 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
     if ((manifest_.capabilities & capability_mask(Capability::Adc)) != 0U) {
         adc_ = std::make_shared<DeterministicAdcBsp>();
     }
+    if ((manifest_.capabilities & capability_mask(Capability::Storage)) != 0U) {
+        storage_ = std::make_shared<DeterministicStorageBsp>();
+    }
+    if ((manifest_.capabilities & capability_mask(Capability::Timer)) != 0U) {
+        timer_ = std::make_shared<DeterministicTimerBsp>();
+    }
     for (const auto& event : scenario_.events) {
         if (event.action == FaultAction::SetUartFailed) {
             require_resource(event.resource_id,
@@ -1685,6 +1691,14 @@ const std::shared_ptr<MockStreamBsp>& DigitalTwin::stream() const noexcept {
 
 const std::shared_ptr<AdcBsp>& DigitalTwin::adc() const noexcept {
     return adc_;
+}
+
+const std::shared_ptr<StorageBsp>& DigitalTwin::storage() const noexcept {
+    return storage_;
+}
+
+const std::shared_ptr<TimerBsp>& DigitalTwin::timer() const noexcept {
+    return timer_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1770,6 +1784,8 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
                        twin.motion(), twin.waveform(), device_parameters,
                        twin.bus(), nullptr, twin.stream());
     core.set_adc_bsp(twin.adc());
+    core.set_storage_bsp(twin.storage());
+    core.set_timer_bsp(twin.timer());
     return core;
 }
 

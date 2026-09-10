@@ -36,6 +36,10 @@ from device_parameters import (
     MAX_BACKUP_BYTES,
     WRITE_CONFIRMATION,
 )
+from adc_calibration import (
+    create_adc_calibration, preflight_adc_calibration,
+    validate_adc_calibration,
+)
 from parameter_audit import ParameterAuditStore, parameter_evidence
 from production_batch import (
     MAX_BATCH_COMPARISONS,
@@ -71,6 +75,7 @@ DEFAULT_CATALOG_PATH = GUI_ROOT / "data" / "pin_catalog.json"
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_COMPARISON_INPUT_BYTES = 128 * 1024
 MAX_CLI_PATH_CHARS = 512
+MAX_ADC_CALIBRATION_BYTES = 16 * 1024
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -504,6 +509,39 @@ def _run_parameter_restore(args) -> dict:
     }
 
 
+def _run_adc_calibration_create(args) -> dict:
+    specification = _read_json(
+        args.specification, "ADC校准规格", MAX_ADC_CALIBRATION_BYTES)
+    artifact = create_adc_calibration(specification)
+    content = (json.dumps(artifact, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    written = _atomic_output(args.output, content, force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_ADC_CALIBRATION_CREATE_V1",
+            "artifact": artifact, "output": str(written),
+            "hardware_access": False, "sampling_performed": False}
+
+
+def _run_adc_calibration_validate(args) -> dict:
+    artifact = validate_adc_calibration(_read_json(
+        args.calibration, "ADC校准工件", MAX_ADC_CALIBRATION_BYTES))
+    return {"ok": True, "format": "STUDIO_CLI_ADC_CALIBRATION_VALIDATE_V1",
+            "parameter_id": artifact["parameter_id"],
+            "value_crc32": artifact["value_crc32"],
+            "artifact_sha256": artifact["sha256"],
+            "hardware_access": False, "sampling_performed": False}
+
+
+def _run_adc_calibration_preflight(args) -> dict:
+    artifact = _read_json(
+        args.calibration, "ADC校准工件", MAX_ADC_CALIBRATION_BYTES)
+    backup = _read_json(args.backup, "设备参数备份", MAX_BACKUP_BYTES)
+    evidence = (_read_json(args.resource_evidence, "ADC资源合同证据",
+                           MAX_ADC_CALIBRATION_BYTES)
+                if args.resource_evidence else None)
+    return {"ok": True, **preflight_adc_calibration(
+        artifact, backup, evidence)}
+
+
 def _run_batch_create(args) -> dict:
     record_paths = args.production_record or []
     comparison_paths = args.comparison or []
@@ -788,6 +826,28 @@ def _parser() -> StrictParser:
     add_parameter_target(parameter_restore)
     parameter_restore.add_argument("--backup", required=True)
     parameter_restore.set_defaults(handler=_run_parameter_restore)
+
+    calibration_create = sub.add_parser(
+        "adc-calibration-create", help="从生产规格生成ADC校准数据工件（不采样）")
+    calibration_create.add_argument("--specification", required=True)
+    calibration_create.add_argument("--output", required=True)
+    calibration_create.add_argument("--force", action="store_true")
+    calibration_create.set_defaults(handler=_run_adc_calibration_create)
+
+    calibration_validate = sub.add_parser(
+        "adc-calibration-validate", help="离线验证ADC校准工件")
+    calibration_validate.add_argument("--calibration", required=True)
+    calibration_validate.set_defaults(handler=_run_adc_calibration_validate)
+
+    calibration_preflight = sub.add_parser(
+        "adc-calibration-preflight",
+        help="将ADC校准工件与参数备份绑定并生成写入前预检")
+    calibration_preflight.add_argument("--calibration", required=True)
+    calibration_preflight.add_argument("--backup", required=True)
+    calibration_preflight.add_argument(
+        "--resource-evidence",
+        help="可选：已由上游核验并绑定运行节点UUID的ADC资源合同证据")
+    calibration_preflight.set_defaults(handler=_run_adc_calibration_preflight)
 
     create = sub.add_parser("batch-create", help="生成确定性生产批次")
     create.add_argument("--batch-id", required=True)

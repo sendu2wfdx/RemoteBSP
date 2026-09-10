@@ -381,6 +381,53 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(response["format"],
                          "STUDIO_CLI_DEVICE_PARAMETER_RESTORE_V1")
 
+    def test_adc_calibration_create_validate_and_preflight_are_offline(self):
+        specification = self.directory / "adc-spec.json"
+        calibration = self.directory / "adc-calibration.json"
+        specification.write_text(json.dumps({
+            "channel": 0, "resource_id": 0x05000001, "adc_bits": 12,
+            "range_min_uv": 0, "range_max_uv": 3300000,
+            "reference_uv": 3300000, "mode": "gain_offset",
+            "gain_q16_16": 65536, "offset_uv": 0, "points": []}),
+            encoding="utf-8")
+        code, created, _, _ = self._call([
+            "adc-calibration-create", "--specification", str(specification),
+            "--output", str(calibration)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(created["hardware_access"])
+        self.assertFalse(created["sampling_performed"])
+        code, validated, _, _ = self._call([
+            "adc-calibration-validate", "--calibration", str(calibration)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(validated["parameter_id"], 0x1000)
+
+        backup = self.directory / "parameters.json"
+        backup_value = {"format": "REMOTEBSP_DEVICE_PARAMETERS",
+                        "schema_version": 2, "node_uuid": "ab" * 16,
+                        "status": {"generation": 7},
+                        "parameters": [{"id": 0x1000, "type": 5,
+                                        "byte_count": 0}]}
+        from device_parameters import DeviceParameterManager
+        backup_value["sha256"] = DeviceParameterManager._backup_digest(
+            backup_value)
+        backup.write_text(json.dumps(backup_value), encoding="utf-8")
+        resource_evidence = self.directory / "adc-resource.json"
+        resource_evidence.write_text(json.dumps({
+            "format": "REMOTEBSP_ADC_RESOURCE_EVIDENCE_V1",
+            "schema_version": 1, "verified": True,
+            "node_uuid": "ab" * 16, "resource_id": 0x05000001,
+            "channel": 0, "resolution_bits": 12,
+            "reference_uv": 3300000}), encoding="utf-8")
+        code, preflight, _, _ = self._call([
+            "adc-calibration-preflight", "--calibration", str(calibration),
+            "--backup", str(backup),
+            "--resource-evidence", str(resource_evidence)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertTrue(preflight["ready_to_write"])
+        self.assertEqual(preflight["expected_generation"], 7)
+        self.assertFalse(preflight["hardware_access"])
+        self.assertTrue(preflight["resource_contract_verified"])
+
     def test_batch_create_validate_and_atomic_archive_output(self):
         archive = self.directory / "batch.zip"
         arguments = [

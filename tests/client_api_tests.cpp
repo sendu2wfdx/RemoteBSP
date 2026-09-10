@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
            remotebsp::protocol::MetricAvailability::Unavailable);
 
     const auto resources = client.list_resources();
-    assert(resources.size() == 32);
+    assert(resources.size() == 35);
     const auto descriptor = client.describe_resource(0x02000007);
     assert(descriptor.type ==
            remotebsp::protocol::ResourceType::Uart);

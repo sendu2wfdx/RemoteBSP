@@ -11,6 +11,7 @@ extern "C" {
 #define RBSP_DEVICE_PARAM_SCHEMA_VERSION 1U
 #define RBSP_DEVICE_PARAM_MAX_VALUE_SIZE 64U
 #define RBSP_DEVICE_PARAM_ADC_CHANNEL_COUNT 16U
+#define RBSP_DEVICE_PARAM_ADC_CALIBRATION_V1_SIZE 64U
 
 typedef enum {
     RBSP_DEVICE_PARAM_TYPE_BYTES = 1,
@@ -38,7 +39,7 @@ typedef enum {
     RBSP_DEVICE_PARAM_ADC_CALIBRATION_BASE = 0x1000,
 } rbsp_device_param_id;
 
-/* ADC校准值全部使用定点整数，避免不同工具链的浮点二进制差异。 */
+/* 旧版12字节增益偏移值；只为已部署参数页保留读取/恢复兼容。 */
 typedef struct {
     int32_t gain_q16_16;
     int32_t offset_uv;

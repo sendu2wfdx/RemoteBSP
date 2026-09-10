@@ -180,6 +180,32 @@ typedef struct {
 } rbsp_adc_resource_config_t;
 #endif
 
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+/*
+ * 通用块存储与设备参数区是两个完全独立的后端。板级资源表必须只指向专门
+ * 留给应用的块区域，禁止把设备参数双页或其擦除单元包装成 Storage 资源。
+ */
+typedef struct {
+    uint32_t resource_id;
+    uint32_t capacity_bytes;
+    uint32_t erase_block_bytes;
+    uint32_t write_alignment_bytes;
+    uint32_t maximum_transfer_bytes;
+    uint16_t flags;
+    uint8_t instance;
+} rbsp_storage_resource_config_t;
+#endif
+
+#if defined(CONFIG_REMOTEBSP_TIMER)
+typedef struct {
+    uint32_t resource_id;
+    uint32_t tick_hz;
+    uint32_t maximum_operation_us;
+    uint16_t capabilities;
+    uint8_t instance;
+} rbsp_timer_resource_config_t;
+#endif
+
 enum {
     RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE = 1U << 0,
     RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE = 1U << 1,
@@ -291,6 +317,28 @@ typedef struct {
                        uint32_t timeout_us, uint32_t interval_us,
                        uint16_t* samples, uint16_t sample_count,
                        uint32_t* elapsed_us);
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    const rbsp_storage_resource_config_t* storage_resources;
+    uint8_t storage_resource_count;
+    bool (*storage_read)(const rbsp_storage_resource_config_t* resource,
+                         uint32_t offset, uint8_t* data, uint32_t length,
+                         uint32_t timeout_us);
+    bool (*storage_erase)(const rbsp_storage_resource_config_t* resource,
+                          uint32_t offset, uint32_t length,
+                          uint32_t timeout_us);
+    bool (*storage_program)(const rbsp_storage_resource_config_t* resource,
+                            uint32_t offset, const uint8_t* data,
+                            uint32_t length, uint32_t timeout_us);
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    /* 板级代码只可公布已经确认完整硬件组合和溢出边界的 Timer 端点。 */
+    const rbsp_timer_resource_config_t* timer_resources;
+    uint8_t timer_resource_count;
+    bool (*timer_execute)(const rbsp_timer_resource_config_t* resource,
+                          uint16_t operation, uint32_t parameter_us,
+                          uint32_t timeout_us, uint64_t* value,
+                          uint32_t* elapsed_us);
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     const rbsp_bus_resource_config_t* bus_resources;
@@ -435,6 +483,17 @@ typedef struct {
     bool backend_failed;
 } rbsp_core_resource_counters_t;
 
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+typedef struct {
+    bool active;
+    uint64_t lease_id;
+    uint32_t owner_session_id;
+    uint32_t granted_duration_ms;
+    uint32_t expires_at_ms;
+    uint8_t access_mode;
+} rbsp_static_resource_lease_t;
+#endif
+
 typedef struct {
     rbsp_hal_t hal;
     rbsp_link_mode_t link_mode;
@@ -478,6 +537,18 @@ typedef struct {
 #if defined(CONFIG_REMOTEBSP_ADC)
     rbsp_core_resource_counters_t adc_status[CONFIG_ADC_RESOURCE_COUNT];
     uint32_t adc_sequence[CONFIG_ADC_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER)
+    rbsp_core_resource_counters_t timer_status[CONFIG_TIMER_RESOURCE_COUNT];
+    uint32_t timer_sequence[CONFIG_TIMER_RESOURCE_COUNT];
+    rbsp_static_resource_lease_t timer_leases[CONFIG_TIMER_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_STORAGE)
+    rbsp_core_resource_counters_t storage_status[CONFIG_STORAGE_RESOURCE_COUNT];
+    rbsp_static_resource_lease_t storage_leases[CONFIG_STORAGE_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_TIMER) || defined(CONFIG_REMOTEBSP_STORAGE)
+    uint64_t next_static_resource_lease_id;
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;

@@ -28,3 +28,31 @@ STM32 公共 Remote Core 已提供条件编译的 ADC 资源表、合同、采�
 以上仍只证明软件纵切和三类 MCU 的编译兼容，不代表 STM32 实体 ADC 已采样。
 实体实现必须在 BSP 层接入经过 AF、参考电压和校准确认的静态通道；在确认前
 Studio 不开放 ADC 候选，具体传感器业务也不能下沉到 MCU。
+
+## 生产校准数据
+
+生产校准工具只生成和核对数据，不读取 ADC，也不宣称板卡已经完成校准。新工件使用
+`REMOTEBSP_ADC_CALIBRATION_V1`，其设备参数值为固定 64 字节小端格式：`ADCC`
+魔数、格式版本、模式、通道、ADC 位宽、资源 ID、量程、参考电压、定点增益/整数
+微伏偏移或 2～4 个严格递增校准点，以及覆盖前 60 字节的 CRC32。参数 ID 固定为
+`0x1000 + channel`；工件 SHA 防止在生成后替换通道或资源，但仅凭工件不能证明该资源
+就是目标板上的实体端点。
+
+工件 JSON 使用规范化 SHA-256 绑定上述规格和编码值。写入前预检还必须读取现有设备
+参数备份，验证 v2 备份 SHA-256，确认目标 UUID、generation、参数类型和长度兼容，
+从未写入的 ADC 参数以 `type=5`、零字节 `ABSENT` 表示，预检明确允许该状态完成首次
+写入；其他非 12/64 字节旧值仍拒绝。预检可通过 `--resource-evidence` 接收已经由上游
+核验、绑定同一节点 UUID 的 `REMOTEBSP_ADC_RESOURCE_EVIDENCE_V1`，并逐项核对资源 ID、
+通道、分辨率和参考电压。未提供时结果明确标记 `artifact_only`，不得作为实体合同证据。
+通过后才输出可交给既有 `device-parameter-write` 的 Base64 值。真正写入仍要求显式
+`WRITE_DEVICE_PARAMETERS`、运行节点 UUID、CAS generation 和 HMAC 审计。
+
+```text
+studio_cli.py adc-calibration-create --specification adc-spec.json --output adc-cal.json
+studio_cli.py adc-calibration-validate --calibration adc-cal.json
+studio_cli.py adc-calibration-preflight --calibration adc-cal.json --backup parameters.json
+studio_cli.py adc-calibration-preflight --calibration adc-cal.json --backup parameters.json --resource-evidence adc-resource.json
+```
+
+旧版 12 字节增益/偏移/参考电压值继续允许读取、备份和恢复；新工具不会生成旧格式。
+未知版本、额外字段、浮点数、越界量程、乱序点、CRC/SHA 不匹配或不完整备份均失败关闭。
