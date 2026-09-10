@@ -51,6 +51,21 @@ def resource_health(base: str, secret: str, node_id: str,
     return resource["state"]["health"]
 
 
+def wait_resource_health(base: str, secret: str, node_id: str,
+                         resource_id: str, expected: str,
+                         timeout_seconds: float = 2.0) -> None:
+    """等待异步资源状态传播完成，但保持明确的有界期限。"""
+    deadline = time.monotonic() + timeout_seconds
+    observed = None
+    while time.monotonic() < deadline:
+        observed = resource_health(base, secret, node_id, resource_id)
+        if observed == expected:
+            return
+        time.sleep(0.02)
+    raise AssertionError(
+        f"资源健康状态未在期限内变为{expected}，最后状态={observed}")
+
+
 def main() -> int:
     if len(sys.argv) not in (3, 4):
         raise SystemExit("用法: pwm_runtime_process_e2e.py <socket> <remote-cli> [lease-required]")
@@ -173,7 +188,7 @@ def main() -> int:
                             operator, method="DELETE")[1]["operation"]
         assert released["operation_kind"] == "control_release"
         assert released["state"] == "committed"
-        assert resource_health(base, operator, node_id, resource_id) == "normal"
+        wait_resource_health(base, operator, node_id, resource_id, "normal")
     finally:
         server.shutdown()
         server.server_close()
