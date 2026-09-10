@@ -549,6 +549,7 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["production_record_enabled"])
                 self.assertTrue(target["production_batch_enabled"])
                 self.assertTrue(target["production_history_enabled"])
+                self.assertFalse(target["stlink_deployment_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
                 self.assertFalse(target["runtime_control_enabled"])
@@ -781,6 +782,13 @@ class GuiTest(unittest.TestCase):
                                b"historyField", b"historyStatus",
                                b"historyResults"):
                     self.assertIn(marker, page)
+                for marker in (b"deployBuildId", b"deployUuid",
+                               b"deployConfirmation", b"deployPreflight",
+                               b"deployExecute", b"deployResult"):
+                    self.assertIn(marker, page)
+                script = urlopen(base + "/app.js").read()
+                self.assertIn(b"/api/deployment/preflight", script)
+                self.assertIn(b"/api/deployment/execute", script)
                 self.assertNotIn(b"deployConfig", page)
             finally:
                 server.shutdown()

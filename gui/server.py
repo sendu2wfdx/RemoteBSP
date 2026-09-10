@@ -48,6 +48,8 @@ from production_history import (
     ProductionHistoryStore,
 )
 from device_parameters import DeviceParameterError, DeviceParameterManager
+from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
+from web_deployment import WebDeploymentController
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -116,6 +118,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         return getattr(self.server, "production_history")
 
     @property
+    def deployment_controller(self) -> WebDeploymentController | None:
+        return getattr(self.server, "deployment_controller")
+
+    @property
     def device_parameter_manager(self) -> DeviceParameterManager | None:
         return getattr(self.server, "device_parameter_manager", None)
 
@@ -176,6 +182,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "production_record_enabled": True,
                 "production_batch_enabled": True,
                 "production_history_enabled": True,
+                "stlink_deployment_enabled": self.deployment_controller is not None,
                 "device_parameters_enabled":
                     self.device_parameter_manager is not None,
                 "parallel_jobs": self.build_jobs,
@@ -263,6 +270,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/production-history/save",
                         "/api/device-parameters/read",
                         "/api/device-parameters/backup",
+                        "/api/deployment/preflight",
+                        "/api/deployment/execute",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -273,10 +282,29 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = None if path.startswith((
                 "/api/production-batch/", "/api/production-history/",
-                "/api/device-parameters/")) else \
+                "/api/device-parameters/", "/api/deployment/")) else \
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path.startswith("/api/device-parameters/"):
+            if path.startswith("/api/deployment/"):
+                controller = self.deployment_controller
+                if controller is None:
+                    self._send_json(
+                        {"ok": False, "error": "Studio未配置受控ST-Link部署入口"},
+                        HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                if path.endswith("/preflight"):
+                    if set(request) != {"build_id", "expected_uuid"}:
+                        raise FirmwareDeploymentError("Web部署预检字段集合无效")
+                    response = controller.preflight(
+                        build_id=request.get("build_id"),
+                        expected_uuid=request.get("expected_uuid"))
+                else:
+                    if set(request) != {"confirmation_token", "confirmation",
+                                       "flash_timeout", "reconnect_timeout",
+                                       "poll_interval"}:
+                        raise FirmwareDeploymentError("Web部署执行字段集合无效")
+                    response = controller.execute(**request)
+            elif path.startswith("/api/device-parameters/"):
                 manager = self.device_parameter_manager
                 if manager is None:
                     self._send_json(
@@ -476,7 +504,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                             HTTPStatus.UNPROCESSABLE_ENTITY)
         except (OSError, AttributeError, json.JSONDecodeError,
                 UnicodeDecodeError, TypeError, ValueError,
-                ProjectConfigError, DeviceParameterError) as error:
+                ProjectConfigError, DeviceParameterError,
+                FirmwareDeploymentError) as error:
             self._send_json({"ok": False, "error": str(error)},
                             HTTPStatus.BAD_REQUEST)
 
@@ -490,7 +519,8 @@ def make_server(host: str, port: int,
                 state_path: Path | None, *, build_jobs: int = 32,
                 build_output_root: Path = DEFAULT_OUTPUT_ROOT,
                 history_root: Path = DEFAULT_HISTORY_ROOT,
-                device_parameter_manager: DeviceParameterManager | None = None
+                device_parameter_manager: DeviceParameterManager | None = None,
+                deployment_controller: WebDeploymentController | None = None,
                 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
@@ -499,6 +529,7 @@ def make_server(host: str, port: int,
     server.production_history = ProductionHistoryStore(  # type: ignore[attr-defined]
         history_root)
     server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
+    server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
     return server
 
 
@@ -518,6 +549,11 @@ def main() -> int:
                         help="设备参数管理的单节点ID，默认1")
     parser.add_argument("--remote-cli", default="remote-cli",
                         help="remote-cli可执行文件")
+    parser.add_argument("--enable-stlink-deployment", action="store_true",
+                        help="显式启用本地Web两阶段ST-Link部署入口")
+    parser.add_argument("--deployment-record-root", type=Path,
+                        default=GUI_ROOT / "deployment-records",
+                        help="已核验部署记录目录")
     args = parser.parse_args()
     if args.build_jobs < 1 or args.build_jobs > 64:
         parser.error("--build-jobs必须位于1～64")
@@ -530,10 +566,25 @@ def main() -> int:
                 remote_cli=args.remote_cli)
         except DeviceParameterError as error:
             parser.error(str(error))
+    deployment_controller = None
+    if args.enable_stlink_deployment:
+        if not args.toolbusd_socket:
+            parser.error("启用Web部署必须同时配置--toolbusd-socket")
+        try:
+            deployment_controller = WebDeploymentController(
+                output_root=DEFAULT_OUTPUT_ROOT,
+                record_root=args.deployment_record_root,
+                reader_factory=lambda expected_uuid: ToolbusdIdentityReader(
+                    args.toolbusd_socket, args.node_id,
+                    expected_uuid=expected_uuid,
+                    remote_cli=args.remote_cli))
+        except FirmwareDeploymentError as error:
+            parser.error(str(error))
     server = make_server(
         args.host, args.port, args.state, build_jobs=args.build_jobs,
         history_root=args.history_root,
-        device_parameter_manager=parameter_manager)
+        device_parameter_manager=parameter_manager,
+        deployment_controller=deployment_controller)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
     print(f"固件构建使用{args.build_jobs}个并行任务。")
