@@ -90,6 +90,12 @@ from .dashboard import RuntimeDashboard
 
 
 API_VERSION = "v1"
+_DASHBOARD_ASSETS = {
+    "/": ("dashboard.html", "text/html; charset=utf-8"),
+    "/dashboard": ("dashboard.html", "text/html; charset=utf-8"),
+    "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+    "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+}
 GPIO_WRITE_COMMAND_GROUP = "gpio.write"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
 _OPERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -817,6 +823,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             ]
         except (UnicodeDecodeError, ValueError):
             return "unknown"
+        if not parts or parts in (["dashboard"], ["dashboard.css"],
+                                  ["dashboard.js"]):
+            return "dashboard"
         if parts == ["api", API_VERSION]:
             return "root"
         if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
@@ -917,6 +926,36 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
+
+    def _send_dashboard_asset(self, path: str) -> bool:
+        asset = _DASHBOARD_ASSETS.get(path)
+        if asset is None:
+            return False
+        filename, content_type = asset
+        try:
+            encoded = (Path(__file__).resolve().parent / "static" /
+                       filename).read_bytes()
+        except OSError:
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "dashboard_unavailable", "仪表盘资源暂不可用")
+            return True
+        self._emit_audit("allowed")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; script-src 'self'; "
+                         "style-src 'self'; connect-src 'self'; "
+                         "img-src 'self'; base-uri 'none'; "
+                         "form-action 'none'; frame-ancestors 'none'")
+        self.send_header("X-Request-ID", self._audit_request_id)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
+        return True
 
     def _parse_request_target(self, *,
                               allow_event_query: bool = False
@@ -2147,6 +2186,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         parts = self._path_parts(parsed.path)
         if parts is None:
+            return
+
+        if self._send_dashboard_asset(parsed.path):
             return
 
         api_path = len(parts) >= 2 and parts[:2] == ["api", API_VERSION]

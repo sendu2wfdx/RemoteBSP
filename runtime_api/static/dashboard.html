@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RemoteBSP 运行状态</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">RemoteBSP Runtime</p><h1>运行状态</h1></div>
+    <div class="toolbar">
+      <label>API 密钥 <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="仅认证开启时填写"></label>
+      <button id="refresh" type="button">立即刷新</button>
+    </div>
+  </header>
+  <main>
+    <section id="connection" class="connection" role="status" aria-live="polite">正在读取…</section>
+    <section class="summary" aria-label="状态摘要">
+      <article><span>节点</span><strong id="node-count">—</strong></article>
+      <article><span>可用资源</span><strong id="available-count">—</strong></article>
+      <article><span>不可用资源</span><strong id="unavailable-count">—</strong></article>
+      <article><span>未知资源</span><strong id="unknown-count">—</strong></article>
+      <article><span>活动告警</span><strong id="alert-count">—</strong></article>
+    </section>
+    <section id="daemon" class="panel"></section>
+    <section><h2>节点与资源</h2><div id="nodes" class="nodes"></div></section>
+  </main>
+  <template id="empty-template"><p class="empty">当前没有可展示的数据。</p></template>
+  <script src="/dashboard.js" defer></script>
+</body>
+</html>

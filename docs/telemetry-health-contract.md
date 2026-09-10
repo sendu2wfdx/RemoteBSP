@@ -6,8 +6,11 @@
 为 `HealthSnapshot (0x0021)`。toolbusd 已接入仅汇总自身可证明软件状态的生产者，并经
 版本化只读 IPC、`libremotebsp`、`remote-cli --json` 和 Runtime 可信投影贯通到认证读取
 接口。公共嵌入式 Remote Core 和 Mock Remote Core 已实现单节点 `HealthSnapshot` 应答，
-`libremotebsp` 与 `remote-cli node-health-snapshot` 可读取原始节点快照；Runtime 提供按可信
-来源、节点 ID 和生产者代际绑定的严格投影器。实体板尚未提供可保证跨重启变化的健康生产者
+`libremotebsp` 与 `remote-cli node-health-snapshot` 可读取原始节点快照；Runtime 已按可信
+节点 UUID、当前路由 ID、来源和生产者代际接入节点投影。节点自身 `sample_time_ms` 属于节点
+时间基，Runtime 不与主机时钟直接相减；主机单调时钟只计算同一采样序号持续未更新的年龄。
+读取失败、离线、来源或路由不符、陈旧样本和已退休代际显式表示为 `unavailable` 或
+`unknown`，且单节点失败不阻断其他节点。实体板尚未提供可保证跨重启变化的健康生产者
 代际和 CPU/ISR/栈采样后端，因此当前板级 HAL 会诚实返回不支持，不能据此声称已有实体遥测。
 
 这是一份软件状态契约，不是物理测量合同。Mock 环境不能真实测得 MCU CPU/ISR 占用、

@@ -25,6 +25,7 @@ from .deadline import (
 from .models import normalize_snapshot
 from .health_projection import (
     HealthProjectionError,
+    TrustedNodeHealthProjection,
     TrustedToolbusdHealthProjection,
 )
 from .provider import (
@@ -242,6 +243,8 @@ class ToolbusIpcClient(Protocol):
     def runtime_snapshot(self, maximum_resources: int) -> dict: ...
 
     def health_snapshot(self) -> dict: ...
+
+    def node_health_snapshot(self, node_id: int) -> dict: ...
 
 
 CommandRunner = Callable[[Sequence[str], float, int], str]
@@ -1051,6 +1054,73 @@ class RemoteCliIpcClient:
             "wire": wire,
         }
 
+    @staticmethod
+    def _json_node_health_snapshot(output: str, expected_node_id: int) -> dict:
+        data = RemoteCliIpcClient._document(output, "node-health-snapshot")
+        _exact_fields(data, {"health"}, "node-health-snapshot.data")
+        health = _json_object(data["health"], "node-health-snapshot.health")
+        _exact_fields(health, {
+            "contract_version", "source", "overall", "sample_sequence",
+            "sample_time_ms", "node_id", "producer_generation", "metrics",
+        }, "node-health-snapshot.health")
+        version = _json_integer(health["contract_version"],
+                                "node-health-snapshot.contract_version",
+                                minimum=1, maximum=0xFFFF)
+        source = _json_integer(health["source"],
+                               "node-health-snapshot.source",
+                               minimum=1, maximum=0xFF)
+        overall = _json_integer(health["overall"],
+                                "node-health-snapshot.overall", maximum=0xFF)
+        sequence = _json_integer(health["sample_sequence"],
+                                 "node-health-snapshot.sample_sequence",
+                                 minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+        sample_time_ms = _json_integer(health["sample_time_ms"],
+                                       "node-health-snapshot.sample_time_ms",
+                                       maximum=0xFFFFFFFFFFFFFFFF)
+        node_id = _json_integer(health["node_id"],
+                                "node-health-snapshot.node_id",
+                                minimum=1, maximum=127)
+        generation = _json_integer(health["producer_generation"],
+                                   "node-health-snapshot.producer_generation",
+                                   minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+        if node_id != expected_node_id:
+            raise ToolbusIpcProtocolError(
+                "node-health-snapshot返回了错误的节点ID")
+        if source not in {1, 2}:
+            raise ToolbusIpcProtocolError(
+                "node-health-snapshot来源必须是MCU或Remote Core")
+        raw_metrics = _json_array(health["metrics"],
+                                  "node-health-snapshot.metrics")
+        if not 1 <= len(raw_metrics) <= 48:
+            raise ToolbusIpcProtocolError(
+                "node-health-snapshot指标数量必须位于1～48")
+        encoded_metrics = bytearray()
+        for index, raw in enumerate(raw_metrics):
+            item = _json_object(raw, f"node-health-snapshot.metrics[{index}]")
+            _exact_fields(item, {"metric_id", "availability", "unit", "value"},
+                          f"node-health-snapshot.metrics[{index}]")
+            encoded_metrics.extend(struct.pack(
+                "<HBBQ",
+                _json_integer(item["metric_id"], "node-health-snapshot.metric_id",
+                              minimum=1, maximum=0xFFFF),
+                _json_integer(item["availability"],
+                              "node-health-snapshot.availability",
+                              minimum=1, maximum=0xFF),
+                _json_integer(item["unit"], "node-health-snapshot.unit",
+                              minimum=1, maximum=0xFF),
+                _json_integer(item["value"], "node-health-snapshot.value",
+                              maximum=0xFFFFFFFFFFFFFFFF)))
+        wire = struct.pack("<HBBQQIQHH", version, source, overall, sequence,
+                           sample_time_ms, node_id, generation,
+                           len(raw_metrics), 0) + bytes(encoded_metrics)
+        try:
+            TrustedNodeHealthProjection(source, node_id, generation).ingest(wire)
+        except HealthProjectionError as error:
+            raise ToolbusIpcProtocolError(
+                f"node-health-snapshot语义无效：{error}") from error
+        return {"source": source, "node_id": node_id,
+                "producer_generation": generation, "wire": wire}
+
     def traffic_status(self) -> dict:
         output = self._run("traffic-status")
         if self.structured_output:
@@ -1394,6 +1464,15 @@ class RemoteCliIpcClient:
         return self._json_health_snapshot(
             self._run("health-snapshot", deadline=deadline))
 
+    def node_health_snapshot(
+            self, node_id: int, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("节点健康快照要求结构化remote-cli输出")
+        return self._json_node_health_snapshot(
+            self._run("node-health-snapshot", node_id=node_id,
+                      deadline=deadline), node_id)
+
 
 class _RuntimeSnapshotView:
     """把单次 IPC 结果适配为既有快照组装接口，不再启动子进程。"""
@@ -1442,7 +1521,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                  maximum_concurrent_status_queries: int = 8,
                  refresh_wait_timeout_ms: int = 5000,
                  maximum_clock_error_bound_ns: int = 250_000,
-                 maximum_clock_sample_age_ms: int = 1_000):
+                 maximum_clock_sample_age_ms: int = 1_000,
+                 maximum_node_health_sample_age_ms: int = 5_000):
         if maximum_resources_per_snapshot < 1:
             raise ValueError("每次快照资源查询上限必须大于0")
         if cache_ttl_ms < 0 or cache_ttl_ms > 60_000:
@@ -1458,6 +1538,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         if maximum_clock_sample_age_ms < 1 or \
                 maximum_clock_sample_age_ms > 60_000:
             raise ValueError("时钟样本年龄告警阈值必须位于1～60000毫秒")
+        if maximum_node_health_sample_age_ms < 1 or \
+                maximum_node_health_sample_age_ms > 60_000:
+            raise ValueError("节点健康样本年龄上限必须位于1～60000毫秒")
         self.client = client
         self.clock_ms = clock_ms or (lambda: time.monotonic_ns() // 1_000_000)
         self.maximum_resources_per_snapshot = maximum_resources_per_snapshot
@@ -1467,6 +1550,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self.refresh_wait_timeout_ms = refresh_wait_timeout_ms
         self.maximum_clock_error_bound_ns = maximum_clock_error_bound_ns
         self.maximum_clock_sample_age_ms = maximum_clock_sample_age_ms
+        self.maximum_node_health_sample_age_ms = \
+            maximum_node_health_sample_age_ms
         # 旧版逐资源查询无法把 deadline 传入回调，因此执行线程只能在回调
         # 自己返回后回收。整个 Provider 共用一个有界执行器和一个活动代次，
         # 防止连续超时为仍在运行的旧调用不断创建新线程池。
@@ -1485,6 +1570,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self._health_daemon_instance_id: str | None = None
         self._health_generation: int | None = None
         self._health_projection: TrustedToolbusdHealthProjection | None = None
+        self._node_health_lock = threading.Lock()
+        self._node_health_routes: dict[str, dict] = {}
         self._operation_lock = threading.Lock()
         self._operation_inflight: dict[tuple[str, ...], Future] = {}
         self._operation_inflight_capacity = 128
@@ -1517,7 +1604,77 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "contract_version": 1,
                 "source": "local_toolbusd_ipc",
             },
+            "node_health_snapshot": {
+                "available": structured_output and callable(
+                    getattr(self.client, "node_health_snapshot", None)),
+                "contract_version": 1,
+                "sources": ["mcu", "remote_core"],
+                "maximum_unchanged_sample_age_ms":
+                    self.maximum_node_health_sample_age_ms,
+            },
         }
+
+    def _node_health(self, uuid: str, numeric_id: int, captured_at_ms: int,
+                     *, deadline: MonotonicDeadline | None) -> dict:
+        reader = getattr(self.client, "node_health_snapshot", None)
+        if not bool(getattr(self.client, "structured_output", True)) or \
+                not callable(reader):
+            return {"availability": "unknown", "reason":
+                    "node_health_ipc_unavailable", "snapshot": None,
+                    "sample_age_ms": None}
+        try:
+            source = call_with_deadline(reader, numeric_id, deadline=deadline)
+        except (ToolbusIpcError, NotImplementedError, StopIteration) as error:
+            # 测试/嵌入式适配器可用 NotImplementedError（旧的有限命令
+            # runner 可能以 StopIteration）明确表示尚未提供该可选只读命令。
+            return {"availability": "unavailable", "reason":
+                    "node_health_read_failed", "snapshot": None,
+                    "sample_age_ms": None, "detail": str(error)}
+        with self._node_health_lock:
+            route = self._node_health_routes.get(uuid)
+            generation = int(source["producer_generation"])
+            source_kind = int(source["source"])
+            if route is None:
+                route = {
+                    "node_id": numeric_id, "source": source_kind,
+                    "generation": generation, "retired": set(),
+                    "projection": TrustedNodeHealthProjection(
+                        source_kind, numeric_id, generation),
+                    "sequence": 0, "observed_at_ms": captured_at_ms,
+                }
+                self._node_health_routes[uuid] = route
+            elif route["node_id"] != numeric_id or route["source"] != source_kind:
+                return {"availability": "unavailable", "reason":
+                        "node_health_route_changed", "snapshot": None,
+                        "sample_age_ms": None}
+            elif generation != route["generation"]:
+                if generation in route["retired"]:
+                    return {"availability": "unavailable", "reason":
+                            "node_health_retired_generation", "snapshot": None,
+                            "sample_age_ms": None}
+                route["retired"].add(route["generation"])
+                route["generation"] = generation
+                route["projection"] = TrustedNodeHealthProjection(
+                    source_kind, numeric_id, generation)
+                route["sequence"] = 0
+                route["observed_at_ms"] = captured_at_ms
+            try:
+                projected = route["projection"].ingest(source["wire"])
+            except HealthProjectionError as error:
+                return {"availability": "unavailable", "reason":
+                        "node_health_sample_rejected", "snapshot": None,
+                        "sample_age_ms": None, "detail": str(error)}
+            sequence = int(projected["sample_sequence"])
+            if sequence != route["sequence"]:
+                route["sequence"] = sequence
+                route["observed_at_ms"] = captured_at_ms
+            age_ms = max(0, captured_at_ms - int(route["observed_at_ms"]))
+            if age_ms > self.maximum_node_health_sample_age_ms:
+                return {"availability": "unavailable", "reason":
+                        "node_health_sample_stale", "snapshot": None,
+                        "sample_age_ms": age_ms}
+            return {"availability": "available", "reason": None,
+                    "snapshot": projected, "sample_age_ms": age_ms}
 
     def health_snapshot(
             self, *, deadline: MonotonicDeadline | None = None) -> dict:
@@ -2188,6 +2345,32 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             resources: list[dict] = []
             runtime_error: str | None = None
             if online and ready:
+                node_health = self._node_health(
+                    uuid, numeric_id, captured_at_ms, deadline=deadline)
+                health_snapshot = node_health.get("snapshot")
+                if node_health["availability"] == "available" and \
+                        isinstance(health_snapshot, dict) and \
+                        health_snapshot.get("overall") in {"degraded", "fault"}:
+                    state = "degraded"
+                    alerts.append(self._alert(
+                        node_id, f"node-health-{numeric_id}",
+                        "node_health_degraded",
+                        "节点健康快照报告降级或故障", captured_at_ms,
+                        severity=("error" if health_snapshot["overall"] ==
+                                  "fault" else "warning")))
+                elif node_health["availability"] == "unavailable":
+                    alerts.append(self._alert(
+                        node_id, f"node-health-unavailable-{numeric_id}",
+                        "node_health_unavailable",
+                        "节点健康快照不可用，不能据缺失数据判断节点健康",
+                        captured_at_ms, severity="warning"))
+            else:
+                node_health = {
+                    "availability": "unavailable" if online else "unknown",
+                    "reason": "node_not_ready" if online else "node_offline",
+                    "snapshot": None, "sample_age_ms": None,
+                }
+            if online and ready:
                 try:
                     descriptors = call_with_deadline(
                         source_client.list_resources, numeric_id,
@@ -2317,6 +2500,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                                                  for part in firmware),
                     "protocol_version": int(source_node["protocol_version"]),
                     "resource_inventory_error": runtime_error,
+                    "health_snapshot": node_health,
                     "clock_sync": clock_runtime,
                     "traffic": traffic,
                 },

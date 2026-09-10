@@ -5,6 +5,19 @@ from runtime_api.provider import mock_snapshot
 
 
 class RuntimeDashboardTests(unittest.TestCase):
+    def test_node_health_preserves_unavailable_instead_of_zero(self):
+        snapshot = mock_snapshot()
+        snapshot["nodes"][0]["runtime"]["health_snapshot"] = {
+            "availability": "unavailable", "reason": "sample_stale",
+            "sample_age_ms": 6000, "snapshot": None,
+        }
+        view = RuntimeDashboard().observe(snapshot)
+        health = view["nodes"][0]["health"]
+        self.assertEqual(health["availability"], "unavailable")
+        self.assertEqual(health["overall"], "unknown")
+        self.assertEqual(health["metrics"], [])
+        self.assertEqual(health["sample_age_ms"], 6000)
+
     def test_resource_availability_and_missing_health_are_explicit(self):
         snapshot = mock_snapshot()
         snapshot["nodes"][0]["resources"][1]["available"] = False

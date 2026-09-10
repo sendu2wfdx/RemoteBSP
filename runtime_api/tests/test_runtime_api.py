@@ -191,6 +191,42 @@ class RuntimeHttpTest(unittest.TestCase):
     def _get(self, path):
         return json.loads(urlopen(self.base + path).read())
 
+    def test_dashboard_assets_are_read_only_bounded_and_hardened(self):
+        with urlopen(self.base + "/dashboard") as response:
+            page = response.read().decode("utf-8")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.headers["X-Content-Type-Options"],
+                             "nosniff")
+            self.assertIn("default-src 'none'", response.headers[
+                "Content-Security-Policy"])
+            self.assertIn("RemoteBSP 运行状态", page)
+            self.assertNotIn("onclick=", page)
+        with urlopen(self.base + "/dashboard.js") as response:
+            script = response.read().decode("utf-8")
+            self.assertIn("MAX_NODES = 128", script)
+            self.assertIn("MAX_RESOURCES = 256", script)
+            self.assertIn("已保留上次成功数据", script)
+            self.assertNotIn("localStorage", script)
+            self.assertNotIn("innerHTML", script)
+        request = Request(self.base + "/dashboard.css", method="HEAD")
+        with urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"")
+
+    def test_dashboard_shell_does_not_bypass_overview_authentication(self):
+        self.server.authenticator = make_authenticator(
+            "dashboard-reader", "d" * 32)  # type: ignore[attr-defined]
+        # 静态外壳不包含数据或凭据；数据请求仍复用 runtime.read 鉴权。
+        with urlopen(self.base + "/dashboard") as response:
+            self.assertEqual(response.status, 200)
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/api/v1/overview")
+        self.assertEqual(caught.exception.code, 401)
+        request = Request(self.base + "/api/v1/overview",
+                          headers={"X-API-Key": "d" * 32})
+        with urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+
     def test_versioned_read_endpoints(self):
         root = self._get("/api/v1")
         self.assertTrue(root["ok"])

@@ -174,6 +174,7 @@ class UnifiedControlBudgetTest(unittest.TestCase):
             timeouts.append(timeout_seconds)
             operation = next(item for item in (
                 "daemon-identity", "runtime-snapshot",
+                "node-health-snapshot",
                 "runtime-operation-status",
                 "runtime-control-acquire") if item in command)
             clock.advance_ms(100)
@@ -181,6 +182,14 @@ class UnifiedControlBudgetTest(unittest.TestCase):
                 data = {"ipc_version": 1, "instance_id": "1" * 32}
             elif operation == "runtime-snapshot":
                 return json.dumps(document)
+            elif operation == "node-health-snapshot":
+                data = {"health": {
+                    "contract_version": 1, "source": 2, "overall": 1,
+                    "sample_sequence": 1, "sample_time_ms": 100,
+                    "node_id": 1, "producer_generation": 9,
+                    "metrics": [{"metric_id": 1, "availability": 1,
+                                 "unit": 3, "value": 100}],
+                }}
             elif operation == "runtime-operation-status":
                 data = {
                     "operation_id": "f" * 64, "lease_id": None,
@@ -218,7 +227,8 @@ class UnifiedControlBudgetTest(unittest.TestCase):
                 lease.lease_id, requester_key_id="operator",
                 deadline=deadline),
             deadline=deadline)
-        self.assertEqual(len(timeouts), 5)
+        # 身份、原子快照、节点健康与控制预检共享同一个递减预算。
+        self.assertEqual(len(timeouts), 6)
         self.assertTrue(all(earlier > later for earlier, later in zip(
             timeouts, timeouts[1:])))
         self.assertLessEqual(timeouts[0], 1.0)

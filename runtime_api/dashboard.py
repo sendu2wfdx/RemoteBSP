@@ -83,6 +83,30 @@ class RuntimeDashboard:
         return {"availability": "available", "overall": overall,
                 "metrics": metrics, "threshold_alerts": threshold_alerts}
 
+    @classmethod
+    def _node_health(cls, value: object) -> dict:
+        if not isinstance(value, dict):
+            return {"availability": "unknown", "reason":
+                    "node_health_missing", "sample_age_ms": None,
+                    "overall": "unknown", "metrics": []}
+        availability = value.get("availability")
+        if availability not in {"available", "unavailable", "unknown"}:
+            availability = "unknown"
+        projected = cls._toolbusd_health({
+            "available": availability == "available",
+            "snapshot": value.get("snapshot"),
+        })
+        return {
+            "availability": availability,
+            "reason": value.get("reason") if isinstance(
+                value.get("reason"), str) else None,
+            "sample_age_ms": value.get("sample_age_ms") if type(
+                value.get("sample_age_ms")) is int else None,
+            "overall": projected["overall"],
+            "metrics": projected["metrics"],
+            "threshold_alerts": projected.get("threshold_alerts", []),
+        }
+
     def observe(self, snapshot: dict, toolbusd_health: dict | None = None) -> dict:
         snapshot_id = snapshot["snapshot_id"]
         projected_health = self._toolbusd_health(toolbusd_health)
@@ -136,6 +160,8 @@ class RuntimeDashboard:
                     "state": node["state"],
                     "links": copy.deepcopy(node["links"]),
                     "runtime": copy.deepcopy(node["runtime"]),
+                    "health": self._node_health(
+                        node["runtime"].get("health_snapshot")),
                     "resources": [self._resource(item, node_alerts)
                                   for item in node["resources"]],
                     "active_alerts": [copy.deepcopy(item) for item in node_alerts

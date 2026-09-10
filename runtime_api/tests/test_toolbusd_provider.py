@@ -70,6 +70,21 @@ class FakeToolbusClient:
         }
 
 
+def node_health_source(node_id, generation=10, sequence=1, sample_time_ms=100,
+                       source=2, overall=1, value=125):
+    health = {
+        "contract_version": 1, "source": source, "overall": overall,
+        "sample_sequence": sequence, "sample_time_ms": sample_time_ms,
+        "node_id": node_id, "producer_generation": generation,
+        "metrics": [{"metric_id": 1, "availability": 1,
+                     "unit": 3, "value": value}],
+    }
+    document = json.dumps({"schema_version": 1,
+                           "command": "node-health-snapshot",
+                           "data": {"health": health}})
+    return RemoteCliIpcClient._json_node_health_snapshot(document, node_id)
+
+
 class RemoteCliIpcClientTest(unittest.TestCase):
     @staticmethod
     def _runtime_snapshot_document():
@@ -459,6 +474,79 @@ class RemoteCliIpcClientTest(unittest.TestCase):
 
 
 class ToolbusdSnapshotProviderTest(unittest.TestCase):
+    def test_node_health_is_bound_to_route_and_source(self):
+        valid = node_health_source(1)
+        self.assertEqual(valid["source"], 2)
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "错误的节点ID"):
+            RemoteCliIpcClient._json_node_health_snapshot(json.dumps({
+                "schema_version": 1, "command": "node-health-snapshot",
+                "data": {"health": {
+                    "contract_version": 1, "source": 2, "overall": 1,
+                    "sample_sequence": 1, "sample_time_ms": 1,
+                    "node_id": 2, "producer_generation": 1,
+                    "metrics": [{"metric_id": 1, "availability": 1,
+                                 "unit": 3, "value": 1}],
+                }}}), 1)
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "来源"):
+            node_health_source(1, source=3)
+
+    def test_node_health_isolated_stale_and_retired_generation(self):
+        now = [100]
+
+        class HealthClient(FakeToolbusClient):
+            def __init__(self):
+                self.generation = 10
+                self.sequence = 1
+                self.fail_node = None
+
+            def node_health_snapshot(self, node_id):
+                if node_id == self.fail_node:
+                    raise ToolbusIpcError("节点局部读取失败")
+                return node_health_source(
+                    node_id, self.generation, self.sequence,
+                    sample_time_ms=self.sequence * 10)
+
+        client = HealthClient()
+        provider = ToolbusdSnapshotProvider(
+            client, clock_ms=lambda: now[0], cache_ttl_ms=0,
+            maximum_node_health_sample_age_ms=50)
+        first = provider.get_snapshot()
+        online = next(node for node in first["nodes"]
+                      if node["runtime"]["bus_node_id"] == 1)
+        self.assertEqual(online["runtime"]["health_snapshot"]["availability"],
+                         "available")
+        self.assertEqual(online["runtime"]["health_snapshot"]["snapshot"]
+                         ["metrics"][0]["value"], 125)
+        offline = next(node for node in first["nodes"]
+                       if node["runtime"]["bus_node_id"] == 2)
+        self.assertEqual(offline["runtime"]["health_snapshot"]["availability"],
+                         "unknown")
+
+        now[0] = 151
+        stale = provider.get_snapshot()["nodes"][0]
+        self.assertEqual(stale["runtime"]["health_snapshot"]["reason"],
+                         "node_health_sample_stale")
+        self.assertIsNone(stale["runtime"]["health_snapshot"]["snapshot"])
+
+        now[0] = 160
+        client.generation = 11
+        restarted = provider.get_snapshot()["nodes"][0]
+        self.assertEqual(restarted["runtime"]["health_snapshot"]["availability"],
+                         "available")
+        client.generation = 10
+        rejected = provider.get_snapshot()["nodes"][0]
+        self.assertEqual(rejected["runtime"]["health_snapshot"]["reason"],
+                         "node_health_retired_generation")
+
+        client.generation = 11
+        client.sequence = 2
+        client.fail_node = 1
+        isolated = provider.get_snapshot()
+        self.assertEqual(len(isolated["nodes"]), 2)
+        bad = next(node for node in isolated["nodes"]
+                   if node["runtime"]["bus_node_id"] == 1)
+        self.assertEqual(bad["runtime"]["health_snapshot"]["reason"],
+                         "node_health_read_failed")
     def test_explicit_legacy_client_keeps_existing_fanout_path(self):
         class LegacyCapableClient(FakeToolbusClient):
             structured_output = False
