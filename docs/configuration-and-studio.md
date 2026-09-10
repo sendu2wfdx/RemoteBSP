@@ -243,6 +243,15 @@ studio_cli.py deployment-execute --plan stlink-plan.json \
 
 当前自动测试只使用假工具和 Mock 回读适配器，没有连接或烧录实体板。
 
+Studio 构建记录页使用 `StudioDeploymentWorkflow` 视图模型统一三类后端。页面初始及预检
+状态均明确显示 execution/readback 为 `absent`，并展示计划 SHA-256 和不可伪造提示；预检
+只解析受保护构建记录、工具摘要和固定目标，不创建运行时身份读取器。危险执行必须使用
+一次性令牌、勾选执行并再次精确填写确认短语。终态页面只投影严格校验后的 attempt，显示
+execution/readback 三态与有界错误类型；不能由页面参数直接填入 `verified`。
+现有 `/api/deployment/preflight`、`/api/deployment/can-katapult/preflight` 和
+`/api/deployment/usb-katapult/preflight` 及其 execute 配对接口已桥接该模型；服务端启用
+新工作流后优先使用版本化计划和 attempt，浏览器不接收命令、工具路径或可自填的终态。
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

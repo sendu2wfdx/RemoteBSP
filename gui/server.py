@@ -53,6 +53,7 @@ from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
 from web_deployment import (
     WebCanKatapultDeploymentController, WebDeploymentController,
     WebUsbKatapultDeploymentController)
+from studio_deployment_workflow import StudioDeploymentWorkflow
 from parameter_audit import ParameterAuditStore
 from web_device_parameters import WebDeviceParameterController
 from runtime_pwm_proxy import RuntimePwmProxy, RuntimePwmProxyError
@@ -136,6 +137,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def usb_katapult_deployment_controller(self) -> \
             WebUsbKatapultDeploymentController | None:
         return getattr(self.server, "usb_katapult_deployment_controller", None)
+
+    @property
+    def studio_deployment_workflow(self) -> StudioDeploymentWorkflow | None:
+        return getattr(self.server, "studio_deployment_workflow", None)
 
     @property
     def parameter_write_controller(self) -> WebDeviceParameterController | None:
@@ -473,10 +478,11 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             if path.startswith("/api/deployment/"):
                 can_katapult = path.startswith("/api/deployment/can-katapult/")
                 usb_katapult = path.startswith("/api/deployment/usb-katapult/")
+                workflow = self.studio_deployment_workflow
                 controller = (self.can_katapult_deployment_controller if
                               can_katapult else self.usb_katapult_deployment_controller
                               if usb_katapult else self.deployment_controller)
-                if controller is None:
+                if controller is None and workflow is None:
                     self._send_json(
                         {"ok": False, "error": ("Studio未配置受控CAN Katapult部署入口"
                          if can_katapult else "Studio未配置受控USB Katapult部署入口"
@@ -489,13 +495,31 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                                        {"build_id", "expected_uuid"})
                     if set(request) != expected_fields:
                         raise FirmwareDeploymentError("Web部署预检字段集合无效")
-                    response = controller.preflight(**request)
+                    if workflow is not None:
+                        backend = ("can-katapult" if can_katapult else
+                                   "usb-katapult" if usb_katapult else
+                                   "stlink-openocd")
+                        target = ({"katapult_uuid": request["katapult_uuid"]}
+                                  if can_katapult else None)
+                        response = workflow.preflight(
+                            backend=backend, build_id=request["build_id"],
+                            expected_uuid=request["expected_uuid"], target=target)
+                    else:
+                        response = controller.preflight(**request)
                 else:
                     if set(request) != {"confirmation_token", "confirmation",
                                        "flash_timeout", "reconnect_timeout",
                                        "poll_interval"}:
                         raise FirmwareDeploymentError("Web部署执行字段集合无效")
-                    response = controller.execute(**request)
+                    if workflow is not None:
+                        response = workflow.execute(
+                            confirmation_token=request["confirmation_token"],
+                            execute=True, confirmation=request["confirmation"],
+                            flash_timeout=request["flash_timeout"],
+                            reconnect_timeout=request["reconnect_timeout"],
+                            poll_interval=request["poll_interval"])
+                    else:
+                        response = controller.execute(**request)
             elif path.startswith("/api/device-parameters/"):
                 manager = self.device_parameter_manager
                 if manager is None:
@@ -739,6 +763,8 @@ def make_server(host: str, port: int,
                     WebCanKatapultDeploymentController | None = None,
                 usb_katapult_deployment_controller:
                     WebUsbKatapultDeploymentController | None = None,
+                studio_deployment_workflow:
+                    StudioDeploymentWorkflow | None = None,
                 parameter_write_controller:
                     WebDeviceParameterController | None = None,
                 runtime_pwm_proxy: RuntimePwmProxy | None = None,
@@ -759,6 +785,7 @@ def make_server(host: str, port: int,
     server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
     server.can_katapult_deployment_controller = can_katapult_deployment_controller  # type: ignore[attr-defined]
     server.usb_katapult_deployment_controller = usb_katapult_deployment_controller  # type: ignore[attr-defined]
+    server.studio_deployment_workflow = studio_deployment_workflow  # type: ignore[attr-defined]
     server.parameter_write_controller = parameter_write_controller  # type: ignore[attr-defined]
     server.runtime_pwm_proxy = runtime_pwm_proxy  # type: ignore[attr-defined]
     return server
@@ -889,6 +916,29 @@ def main() -> int:
                 timeout_seconds=args.runtime_proxy_timeout_ms / 1000.0)
         except ValueError as error:
             parser.error(str(error))
+    studio_deployment_workflow = None
+    backend_config = {}
+    if deployment_controller is not None:
+        backend_config["stlink-openocd"] = {"probe_serial": None}
+    if can_katapult_controller is not None:
+        backend_config["can-katapult"] = {
+            "can_interface": args.can_katapult_interface,
+            "flashtool": str(args.katapult_flashtool)}
+    if usb_katapult_controller is not None:
+        backend_config["usb-katapult"] = {
+            "usb_device": args.usb_katapult_device,
+            "flashtool": str(args.katapult_flashtool)}
+    if backend_config:
+        try:
+            studio_deployment_workflow = StudioDeploymentWorkflow(
+                output_root=DEFAULT_OUTPUT_ROOT,
+                attempt_root=args.deployment_record_root / "attempts",
+                reader_factory=lambda expected_uuid: ToolbusdIdentityReader(
+                    args.toolbusd_socket, args.node_id,
+                    expected_uuid=expected_uuid, remote_cli=args.remote_cli),
+                backend_config=backend_config)
+        except FirmwareDeploymentError as error:
+            parser.error(str(error))
     server = make_server(
         args.host, args.port, args.state, build_jobs=args.build_jobs,
         history_root=args.history_root,
@@ -896,6 +946,7 @@ def main() -> int:
         deployment_controller=deployment_controller,
         can_katapult_deployment_controller=can_katapult_controller,
         usb_katapult_deployment_controller=usb_katapult_controller,
+        studio_deployment_workflow=studio_deployment_workflow,
         parameter_write_controller=parameter_write_controller,
         runtime_pwm_proxy=runtime_pwm_proxy)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")

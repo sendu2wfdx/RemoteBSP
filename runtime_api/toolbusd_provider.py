@@ -249,6 +249,15 @@ class ToolbusIpcClient(Protocol):
             lease_id: str, expected_node_uuid: str, owner_key_id: str,
             node_id: int, resource_id: int, idempotency_key: str) -> dict: ...
 
+    def runtime_bus_reset_acquire(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, ttl_ms: int) -> None: ...
+
+    def runtime_bus_resource_reset_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int,
+            idempotency_key: str) -> dict: ...
+
     def runtime_operation_status(
             self, daemon_instance_id: str, owner_key_id: str,
             operation_id: str) -> dict: ...
@@ -1424,6 +1433,31 @@ class RemoteCliIpcClient:
         return self._json_operation_outcome(output, "runtime-pwm-stop-operation",
                                             expected_kind="pwm_stop")
 
+    def runtime_bus_reset_acquire(self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, ttl_ms: int, *,
+            deadline: MonotonicDeadline | None = None) -> None:
+        output = self._run("runtime-bus-reset-acquire", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), str(ttl_ms)), deadline=deadline)
+        data = self._document(output, "runtime-bus-reset-acquire")
+        _exact_fields(data, set(), "runtime-bus-reset-acquire.data")
+
+    def runtime_bus_resource_reset_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, idempotency_key: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        output = self._run("runtime-bus-resource-reset-operation", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), idempotency_key), deadline=deadline)
+        return self._json_operation_outcome(
+            output, "runtime-bus-resource-reset-operation",
+            expected_kind="bus_resource_reset")
+
     def runtime_timed_bitstream_acquire(self, daemon_instance_id: str,
             lease_id: str, expected_node_uuid: str, owner_key_id: str,
             node_id: int, resource_id: int, ttl_ms: int, *,
@@ -2002,6 +2036,14 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "runtime_timed_bitstream_stop_operation",
                 "runtime_operation_status","runtime_operation_lookup"))
 
+    @property
+    def bus_reset_control_available(self) -> bool:
+        return bool(getattr(self.client, "structured_output", True)) and all(
+            callable(getattr(self.client, name, None)) for name in (
+                "runtime_bus_reset_acquire",
+                "runtime_bus_resource_reset_operation",
+                "runtime_operation_status", "runtime_operation_lookup"))
+
     def _operation_singleflight(
             self, key: tuple[str, ...], operation: Callable[[], dict], *,
             deadline: MonotonicDeadline | None) -> dict:
@@ -2139,6 +2181,29 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         if type(numeric) is not int or not 1<=numeric<=127 or rm is None or nm is None:
             raise RuntimeProviderOperationError("protocol_incompatible",category="protocol",retryable=False,possibly_committed=False)
         return nm.group(1),numeric,int(rm.group(1),16)
+
+    def _resolve_bus_reset_target(self, node_id: str, resource_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> tuple[str, int, int]:
+        with self._cache_condition:
+            snapshot = copy.deepcopy(self._cached_snapshot)
+        if snapshot is None:
+            snapshot = self.read_snapshot(deadline=deadline).snapshot
+        node = next((item for item in snapshot["nodes"]
+                     if item["node_id"] == node_id), None)
+        resource = None if node is None else next((item for item in node["resources"]
+            if item["resource_id"] == resource_id), None)
+        if node is None or node["state"] != "online" or resource is None or \
+                resource["kind"] not in {"i2c_device", "spi_device"} or \
+                not resource["available"]:
+            raise RuntimeProviderOperationError("target_rejected", category="target",
+                retryable=False, possibly_committed=False)
+        numeric = node["runtime"].get("bus_node_id")
+        rm = re.fullmatch(r"resource-([0-9a-f]{8})", resource_id)
+        nm = re.fullmatch(r"node-([0-9a-f]{32})", node_id)
+        if type(numeric) is not int or not 1 <= numeric <= 127 or rm is None or nm is None:
+            raise RuntimeProviderOperationError("protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False)
+        return nm.group(1), numeric, int(rm.group(1), 16)
 
     def _invalidate_snapshot_cache(self) -> None:
         with self._cache_condition:
@@ -2341,6 +2406,44 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             self._invalidate_snapshot_cache(); return outcome
         except RequestDeadlineExceeded: raise
         except ToolbusIpcError as error: raise _provider_operation_error(error) from error
+
+    def bus_reset_control_acquire(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            remaining_ttl_ms: Callable[[], int], *, deadline=None) -> None:
+        if not self.bus_reset_control_available:
+            raise RuntimeProviderError("toolbusd总线复位控制IPC不可用")
+        try:
+            uuid, node, resource = self._resolve_bus_reset_target(
+                node_id, resource_id, deadline=deadline)
+            ttl_ms = call_with_deadline(remaining_ttl_ms, deadline=deadline)
+            call_with_deadline(self.client.runtime_operation_status,
+                daemon_instance_id, owner_key_id, "f" * 64, deadline=deadline)
+            call_with_deadline(self.client.runtime_bus_reset_acquire,
+                daemon_instance_id, lease_id, uuid, owner_key_id, node,
+                resource, ttl_ms, deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
+        except ToolbusIpcError as error:
+            raise _provider_operation_error(error) from error
+
+    def bus_reset_control_execute(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            idempotency_key: str, *, deadline=None) -> dict:
+        if not self.bus_reset_control_available:
+            raise RuntimeProviderError("toolbusd总线复位控制IPC不可用")
+        try:
+            uuid, node, resource = self._resolve_bus_reset_target(
+                node_id, resource_id, deadline=deadline)
+            outcome = call_with_deadline(
+                self.client.runtime_bus_resource_reset_operation,
+                daemon_instance_id, lease_id, uuid, owner_key_id, node,
+                resource, idempotency_key, deadline=deadline)
+            self._invalidate_snapshot_cache()
+            return outcome
+        except RequestDeadlineExceeded:
+            raise
+        except ToolbusIpcError as error:
+            raise _provider_operation_error(error) from error
 
     def operation_status(
             self, daemon_instance_id: str, owner_key_id: str,

@@ -543,6 +543,34 @@ class RemoteCliIpcClientTest(unittest.TestCase):
                 "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x06000000,
                 "bad", 0, 10001, False)
 
+    def test_bus_reset_control_commands_and_strict_outcome(self):
+        calls = []
+        def runner(command, _timeout, _maximum):
+            calls.append(list(command))
+            if "runtime-bus-reset-acquire" in command:
+                operation, data = "runtime-bus-reset-acquire", {}
+            else:
+                operation = "runtime-bus-resource-reset-operation"
+                data = {"operation_id": "d" * 64, "lease_id": "2" * 32,
+                    "expected_node_uuid": "3" * 32,
+                    "resource_id": 0x0c000001,
+                    "kind": "bus_resource_reset", "state": "unknown",
+                    "replayed": False, "recovery": "scope_blocked",
+                    "object_id": None, "value": None,
+                    "frequency_hz": None, "duty": None,
+                    "active_low": None, "error_code": "deadline"}
+            return json.dumps({"schema_version": 1, "command": operation,
+                               "data": data})
+        client = RemoteCliIpcClient("/tmp/test.sock", runner=runner)
+        client.runtime_bus_reset_acquire(
+            "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x0c000001, 900)
+        outcome = client.runtime_bus_resource_reset_operation(
+            "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x0c000001,
+            "reset-1")
+        self.assertEqual(outcome["state"], "unknown")
+        self.assertEqual(outcome["recovery"], "scope_blocked")
+        self.assertTrue(any("runtime-bus-reset-acquire" in call for call in calls))
+
 
 class ToolbusdSnapshotProviderTest(unittest.TestCase):
     def test_pwm_target_resolution_reuses_verified_structure_cache(self):

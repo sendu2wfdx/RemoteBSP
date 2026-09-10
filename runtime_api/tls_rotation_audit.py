@@ -61,9 +61,9 @@ class TlsRotationAuditJournal:
             "new_certificate_sha256": new_fingerprint,
         }
         with self._lock:
-            self._records = (self._records + [record])[-self.capacity:]
+            new_records = (self._records + [record])[-self.capacity:]
             payload = {"schema_version": self.SCHEMA_VERSION,
-                       "records": self._records}
+                       "records": new_records}
             document = {**payload, "checksum": self._digest(payload)}
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(
@@ -81,6 +81,7 @@ class TlsRotationAuditJournal:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
+                self._records = new_records
             finally:
                 try:
                     os.unlink(temporary)

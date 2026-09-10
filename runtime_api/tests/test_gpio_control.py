@@ -15,6 +15,7 @@ from runtime_api.auth import (
     GPIO_WRITE_PERMISSION,
     PWM_WRITE_PERMISSION,
     TIMED_BITSTREAM_WRITE_PERMISSION,
+    BUS_RESET_PERMISSION,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
     ApiKeyCredential,
@@ -42,6 +43,7 @@ class FakeGpioProvider(MockSnapshotProvider):
     gpio_control_available = True
     pwm_control_available = True
     timed_bitstream_control_available = True
+    bus_reset_control_available = True
 
     def __init__(self):
         super().__init__()
@@ -118,7 +120,7 @@ class FakeGpioProvider(MockSnapshotProvider):
         self._operation_owners[(
             "control_release", arguments[1], "release:v1")] = arguments[2]
         self._operation_owners[outcome["operation_id"]] = arguments[2]
-        self._operations[outcome["operation_id"]] = outcome
+        self._operations[outcome["operation_id"]] = {**outcome, "replayed": True}
         if self.after_release is not None:
             self.after_release()
         return outcome
@@ -147,6 +149,20 @@ class FakeGpioProvider(MockSnapshotProvider):
         return outcome
 
     timed_bitstream_control_acquire = gpio_control_acquire
+    bus_reset_control_acquire = gpio_control_acquire
+
+    def bus_reset_control_execute(self, _daemon, lease, owner, _node,
+                                  _resource, idem):
+        outcome = {"operation_id": "e" * 64, "lease_id": lease,
+            "expected_node_uuid": "a" * 32, "resource_id": 0x0c000001,
+            "kind": "bus_resource_reset", "state": "committed",
+            "replayed": False, "recovery": "safe_closed",
+            "object_id": None, "value": None, "error_code": None}
+        self._operations[("bus_resource_reset", lease, idem)] = outcome
+        self._operations[outcome["operation_id"]] = {**outcome, "replayed": True}
+        self._operation_owners[("bus_resource_reset", lease, idem)] = owner
+        self._operation_owners[outcome["operation_id"]] = owner
+        return outcome
 
     def _timed_outcome(self, lease, idem, kind, recovery="none"):
         digit={"timed_bitstream_configure":"4","timed_bitstream_frame":"5",
@@ -383,7 +399,8 @@ def _authenticator():
                        CONTROL_LEASE_ACQUIRE_PERMISSION,
                        CONTROL_LEASE_RELEASE_PERMISSION,
                        GPIO_WRITE_PERMISSION, PWM_WRITE_PERMISSION,
-                       TIMED_BITSTREAM_WRITE_PERMISSION})),
+                       TIMED_BITSTREAM_WRITE_PERMISSION,
+                       BUS_RESET_PERMISSION})),
         ApiKeyCredential(
             "other", "b" * 32,
             frozenset({CONTROL_LEASE_ACQUIRE_PERMISSION,
@@ -505,6 +522,32 @@ class GpioControlHttpTest(unittest.TestCase):
         self.assertTrue(recovered["replayed"])
         self.assertIn(("pwm_configure", lease_id, "pwm-recover-1"),
                       self.provider.lookup_calls)
+
+    def test_bus_reset_http_lease_scope_commit_and_query(self):
+        lease_body = {"node_id": "mock-node-1", "resource_id": "i2c-1",
+            "command_group": "bus.reset", "ttl_ms": 1000,
+            "idempotency_key": "bus-lease-1"}
+        code, _ = self._error(self._request(
+            "POST", "/api/v1/control-leases", "d" * 32, lease_body))
+        self.assertEqual(code, 403)
+        with urlopen(self._request("POST", "/api/v1/control-leases",
+                                  "a" * 32, lease_body)) as response:
+            lease = json.loads(response.read())["data"]["lease"]["lease_id"]
+        body = {"lease_id": lease, "node_id": "mock-node-1",
+                "resource_id": "i2c-1", "idempotency_key": "reset-1"}
+        with urlopen(self._request("POST", "/api/v1/control/bus/reset",
+                                  "a" * 32, body)) as response:
+            operation = json.loads(response.read())["data"]["operation"]
+            location = response.headers["Location"]
+        self.assertEqual(operation["operation_kind"], "bus_resource_reset")
+        self.assertEqual(operation["state"], "committed")
+        self.assertEqual(operation["recovery"], "safe_closed")
+        self.assertIsNone(operation["result"])
+        self.assertEqual(self.server.control_leases.active_count(), 0)  # type: ignore[attr-defined]
+        with urlopen(self._request("GET", location, "a" * 32)) as response:
+            queried = json.loads(response.read())["data"]["operation"]
+        self.assertEqual(queried["operation_id"], operation["operation_id"])
+        self.assertTrue(queried["replayed"])
 
     def test_timed_bitstream_http_configure_frame_stop(self):
         lease_body={"node_id":"mock-node-1","resource_id":"bits-0",

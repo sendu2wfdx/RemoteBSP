@@ -56,6 +56,8 @@
   受控执行器已接入三类既有 deploy 路径，执行前重验计划，分别有界摘要 stdout/stderr，
   任何工具/回读异常原子保存 failed；CLI 默认不执行且要求双重显式确认。当前只完成假工具
   与 Mock 回读验证，不构成实体烧录结论；
+  Studio 构建记录页已增加统一部署工作流模型，默认离线预检并展示计划哈希、执行/回读三态、
+  错误类型和不可伪造提示；危险执行需一次性令牌、执行勾选及二次确认，自动测试仍仅用 Mock；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，

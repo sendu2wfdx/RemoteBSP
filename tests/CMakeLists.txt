@@ -546,6 +546,19 @@ add_test(NAME toolbusd_operation_ledger_process_tests
             $<TARGET_FILE:mock_mcu>
             ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json)
 
+add_test(NAME bus_reset_runtime_http_process_tests
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/bus_reset_runtime_http_process.py
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:remote-cli>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json)
+set_tests_properties(bus_reset_runtime_http_process_tests PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}"
+    TIMEOUT 30
+    RUN_SERIAL TRUE)
+
 add_executable(toolbusd_ipc_capacity_process_tests
     toolbusd_ipc_capacity_process_tests.cpp)
 target_link_libraries(toolbusd_ipc_capacity_process_tests PRIVATE remotebsp)

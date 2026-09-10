@@ -30,6 +30,7 @@ from .auth import (
     GPIO_WRITE_PERMISSION,
     PWM_WRITE_PERMISSION,
     TIMED_BITSTREAM_WRITE_PERMISSION,
+    BUS_RESET_PERMISSION,
     MAXIMUM_API_KEY_BYTES,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
@@ -119,11 +120,12 @@ _DASHBOARD_ASSETS = {
 GPIO_WRITE_COMMAND_GROUP = "gpio.write"
 PWM_WRITE_COMMAND_GROUP = "pwm.write"
 TIMED_BITSTREAM_WRITE_COMMAND_GROUP = "timed-bitstream.write"
+BUS_RESET_COMMAND_GROUP = "bus.reset"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
 _OPERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 _OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop",
                     "timed_bitstream_configure", "timed_bitstream_frame",
-                    "timed_bitstream_stop"}
+                    "timed_bitstream_stop", "bus_resource_reset"}
 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
 MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
 MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS = 30.0
@@ -1631,6 +1633,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.FORBIDDEN,"permission_denied",
                             "当前API密钥没有定时位流写权限")
                 return
+            if command_group == BUS_RESET_COMMAND_GROUP and \
+                    BUS_RESET_PERMISSION not in principal.permissions:
+                self._error(HTTPStatus.FORBIDDEN, "permission_denied",
+                            "当前API密钥没有总线复位权限")
+                return
             if command_group == GPIO_WRITE_COMMAND_GROUP and \
                     not self.gpio_control_configured:
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1703,6 +1710,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         lease.lease_id,requester_key_id=principal.key_id,deadline=self.request_deadline),
                     deadline=self.request_deadline)
                 downstream_registered=True
+            elif command_group == BUS_RESET_COMMAND_GROUP:
+                daemon_id = getattr(self.control_leases, "daemon_instance_id", None)
+                if not isinstance(daemon_id, str):
+                    raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                downstream_started = True
+                call_with_deadline(self.provider.bus_reset_control_acquire,
+                    daemon_id, lease.lease_id, principal.key_id, node_id,
+                    resource_id, lambda: call_with_deadline(
+                        self.control_leases.remaining_ttl_ms, lease.lease_id,
+                        requester_key_id=principal.key_id,
+                        deadline=self.request_deadline), deadline=self.request_deadline)
+                downstream_registered = True
         except ValueError as error:
             if audit_intent is not None and not self._complete_control_audit(
                     audit_intent, result="rejected",
@@ -1909,7 +1928,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             operation_owner_key_id = lease.owner_key_id
             if lease.command_group in {GPIO_WRITE_COMMAND_GROUP,
                                        PWM_WRITE_COMMAND_GROUP,
-                                       TIMED_BITSTREAM_WRITE_COMMAND_GROUP}:
+                                       TIMED_BITSTREAM_WRITE_COMMAND_GROUP,
+                                       BUS_RESET_COMMAND_GROUP}:
                 if not self.gpio_control_configured:
                     raise ControlLeaseError("Runtime控制后端不可用")
                 daemon_id = getattr(
@@ -2594,6 +2614,72 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if audit_intent is not None and not self._complete_operation_audit(audit_intent,outcome,action=kind): return
         self._send_operation(outcome,audit_result=kind,principal=principal)
 
+    def _handle_bus_resource_reset(self, principal: AuthenticatedPrincipal) -> None:
+        value = self._read_control_json()
+        if value is None:
+            return
+        if set(value) != {"lease_id", "node_id", "resource_id",
+                          "idempotency_key"}:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "总线复位请求字段不完整或包含未知字段")
+            return
+        kind = "bus_resource_reset"
+        audit_intent = None
+        downstream_started = False
+        try:
+            lease_id = validate_lease_id(value["lease_id"])
+            node_id = validate_control_id(value["node_id"], "node_id")
+            resource_id = validate_control_id(value["resource_id"], "resource_id")
+            idempotency_key = validate_idempotency_key(value["idempotency_key"])
+            audit_intent = self._begin_control_audit(
+                principal, action=kind, lease_id=lease_id, fields=dict(value))
+            if audit_intent is None:
+                return
+            lease = call_with_deadline(self.control_leases.authorize, lease_id,
+                requester_key_id=principal.key_id, deadline=self.request_deadline)
+            if lease.command_group != BUS_RESET_COMMAND_GROUP or \
+                    lease.node_id != node_id or lease.resource_id != resource_id:
+                raise ControlLeaseConflict("控制租约范围与总线复位请求不匹配")
+            daemon_id = getattr(self.control_leases, "daemon_instance_id", None)
+            if not isinstance(daemon_id, str):
+                raise ControlLeaseError("toolbusd实例身份尚未绑定")
+            downstream_started = True
+            outcome = call_with_deadline(self.provider.bus_reset_control_execute,
+                daemon_id, lease_id, principal.key_id, node_id, resource_id,
+                idempotency_key, deadline=self.request_deadline)
+        except ValueError as error:
+            if audit_intent is not None:
+                self._complete_control_audit(audit_intent, result="rejected",
+                                             possibly_committed=False)
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid", str(error)); return
+        except ControlLeaseNotFound as error:
+            self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found", str(error)); return
+        except ControlLeaseOwnershipError as error:
+            self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner", str(error)); return
+        except ControlLeaseConflict as error:
+            self._error(HTTPStatus.CONFLICT, "control_lease_conflict", str(error)); return
+        except (RequestDeadlineExceeded, RuntimeProviderOperationError) as error:
+            uncertain = isinstance(error, RequestDeadlineExceeded) or error.possibly_committed
+            recovered = self._try_operation_lookup(
+                principal.key_id, kind=kind, lease_id=lease_id,
+                idempotency_key=idempotency_key) if downstream_started and uncertain else None
+            if recovered is not None:
+                self._send_operation(recovered, audit_result=kind + "_recovered",
+                                     principal=principal)
+            elif uncertain:
+                self._operation_uncertain(kind=kind, lease_id=lease_id,
+                                          idempotency_key=idempotency_key)
+            else:
+                self._structured_provider_error(error)
+            return
+        if audit_intent is not None and not self._complete_operation_audit(
+                audit_intent, outcome, action=kind):
+            return
+        if outcome.get("state") == "committed":
+            self.control_leases.rollback_acquire(
+                lease_id, owner_key_id=principal.key_id)
+        self._send_operation(outcome, audit_result=kind, principal=principal)
+
     def _snapshot(self) -> SnapshotRead | None:
         try:
             read = call_with_deadline(
@@ -3009,6 +3095,19 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                       required_permission=TIMED_BITSTREAM_WRITE_PERMISSION)
             if not isinstance(principal,AuthenticatedPrincipal): return
             self._handle_timed_bitstream_operation(principal,parts[4]); return
+        if self.command == "POST" and parts == [
+                "api", API_VERSION, "control", "bus", "reset"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "总线复位要求启用API密钥认证")
+                return
+            principal = self._authorize(parsed.path, public_health=False,
+                                        required_permission=BUS_RESET_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_bus_resource_reset(principal)
+            return
         if self.command == "POST" and parts == [
                 "api", API_VERSION, "control", "operation-lookups"]:
             if self.authenticator is None:

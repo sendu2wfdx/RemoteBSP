@@ -774,6 +774,20 @@ POST /api/v1/control/timed-bitstream/stop
 恢复为 `unknown/scope_blocked`，不自动重放。成功 stop 为 `safe_closed`，远端
 `LeaseRequired` 资源仍在释放控制租约后才执行 `ResourceRelease`。
 
+I2C/SPI 设备的软件恢复使用 `bus.reset` 租约组和独立权限
+`runtime.bus.reset`，固定入口为：
+
+```text
+POST /api/v1/control/bus/reset
+```
+
+请求体必须且只能包含 `lease_id`、`node_id`、`resource_id` 和
+`idempotency_key`。Runtime 把本地租约剩余期限传给 toolbusd，最终仍由节点 UUID、节点
+代次、设备资源合同和远端独占租约共同准入。成功结果为
+`committed/safe_closed` 并结束本地租约；发送后丢失响应则返回
+`unknown/scope_blocked`，只能通过既有 operation status/lookup 查询，不能盲目再次复位。
+阻断键精确到单个节点资源，不影响同节点其他 I2C/SPI 设备。
+
 控制请求现在从读取请求行之前建立一次不可续期的单调绝对期限。头部、请求体、daemon
 身份单飞、目标快照、资源状态 fanout、`remote-cli` 子进程、租约登记、GPIO 写入与释放
 都消费同一份剩余预算；旧接口即使不识别 deadline，也会在调用前后校验，且兼容 fanout
@@ -865,6 +879,18 @@ API 已有本地租约状态写入口，不能据此推断设备可写；是否�
 慢客户端相互隔离；浏览器断线后回退到轮询。SSE 携带快照身份/修订语义，客户端不能
 凭丢失的事件猜测当前设备状态。增量短轮询已经支持显式、本地、有界的跨重启历史恢复；
 SSE 仍是进程内完整状态流，重连必须以新进程首条完整投影建立基线。
+
+### 资源耗尽软件演练边界
+
+Runtime 的工作线程、SSE 连接数、每连接最新值队列、请求体和持久日志均有明确上限或失败
+关闭路径。无 root 的进程测试会同时保持一个残缺 HTTP 头部和一个不消费响应的 SSE 客户端，
+确认其他读取仍可完成；还验证超大 `Content-Length` 在读取主体前返回 413，之后健康读取继续
+可用。持久审计通过注入原子替换失败验证内存状态不前移，单次日志写失败不会发布未经审计
+的 TLS 上下文。
+
+这些是临时目录和有限连接下的确定性软件故障注入，只证明应用层配额、超时和隔离合同；
+不等同于真实 SYN 洪泛、进程文件描述符硬上限耗尽、内核内存压力或生产级容量测试。上述
+真实系统压力仍需在隔离测试主机上按部署的 `ulimit`、代理和内核参数单独执行。
 
 ## 构建接入
 
