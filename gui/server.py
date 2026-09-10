@@ -50,6 +50,8 @@ from production_history import (
 from device_parameters import DeviceParameterError, DeviceParameterManager
 from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
 from web_deployment import WebDeploymentController
+from parameter_audit import ParameterAuditStore
+from web_device_parameters import WebDeviceParameterController
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -122,6 +124,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         return getattr(self.server, "deployment_controller")
 
     @property
+    def parameter_write_controller(self) -> WebDeviceParameterController | None:
+        return getattr(self.server, "parameter_write_controller")
+
+    @property
     def device_parameter_manager(self) -> DeviceParameterManager | None:
         return getattr(self.server, "device_parameter_manager", None)
 
@@ -183,6 +189,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "production_batch_enabled": True,
                 "production_history_enabled": True,
                 "stlink_deployment_enabled": self.deployment_controller is not None,
+                "device_parameter_write_enabled":
+                    self.parameter_write_controller is not None,
                 "device_parameters_enabled":
                     self.device_parameter_manager is not None,
                 "parallel_jobs": self.build_jobs,
@@ -272,6 +280,9 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/device-parameters/backup",
                         "/api/deployment/preflight",
                         "/api/deployment/execute",
+                        "/api/device-parameters/write-preflight",
+                        "/api/device-parameters/restore-preflight",
+                        "/api/device-parameters/execute",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -330,7 +341,29 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "snapshot": snapshot,
                     }
                 else:
-                    raise AssertionError("未处理的设备参数只读路径")
+                    controller = self.parameter_write_controller
+                    if controller is None:
+                        self._send_json(
+                            {"ok": False,
+                             "error": "Studio未显式启用受控设备参数写入"},
+                            HTTPStatus.SERVICE_UNAVAILABLE)
+                        return
+                    if path.endswith("/write-preflight"):
+                        if set(request) != {"expected_uuid",
+                                           "expected_generation",
+                                           "parameter_id", "value_base64"}:
+                            raise DeviceParameterError("Web参数写入预检字段无效")
+                        response = controller.preflight_write(**request)
+                    elif path.endswith("/restore-preflight"):
+                        if set(request) != {"expected_uuid",
+                                           "expected_generation", "backup"}:
+                            raise DeviceParameterError("Web参数恢复预检字段无效")
+                        response = controller.preflight_restore(**request)
+                    else:
+                        if set(request) != {"confirmation_token",
+                                           "confirmation"}:
+                            raise DeviceParameterError("Web参数执行字段无效")
+                        response = controller.execute(**request)
             elif path == "/api/production-history/save":
                 saved = self.production_history.save(request.get("manifest"))
                 response = {
@@ -521,6 +554,8 @@ def make_server(host: str, port: int,
                 history_root: Path = DEFAULT_HISTORY_ROOT,
                 device_parameter_manager: DeviceParameterManager | None = None,
                 deployment_controller: WebDeploymentController | None = None,
+                parameter_write_controller:
+                    WebDeviceParameterController | None = None,
                 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
@@ -530,6 +565,7 @@ def make_server(host: str, port: int,
         history_root)
     server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
     server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
+    server.parameter_write_controller = parameter_write_controller  # type: ignore[attr-defined]
     return server
 
 
@@ -554,6 +590,12 @@ def main() -> int:
     parser.add_argument("--deployment-record-root", type=Path,
                         default=GUI_ROOT / "deployment-records",
                         help="已核验部署记录目录")
+    parser.add_argument("--enable-device-parameter-write", action="store_true",
+                        help="显式启用本地Web设备参数写入与恢复")
+    parser.add_argument("--parameter-audit-dir", type=Path,
+                        help="设备参数写入审计目录")
+    parser.add_argument("--parameter-audit-key-file", type=Path,
+                        help="设备参数写入审计HMAC密钥文件")
     args = parser.parse_args()
     if args.build_jobs < 1 or args.build_jobs > 64:
         parser.error("--build-jobs必须位于1～64")
@@ -580,11 +622,24 @@ def main() -> int:
                     remote_cli=args.remote_cli))
         except FirmwareDeploymentError as error:
             parser.error(str(error))
+    parameter_write_controller = None
+    if args.enable_device_parameter_write:
+        if parameter_manager is None or args.parameter_audit_dir is None or \
+                args.parameter_audit_key_file is None:
+            parser.error("启用Web参数写入必须配置toolbusd、audit-dir和audit-key-file")
+        try:
+            parameter_write_controller = WebDeviceParameterController(
+                parameter_manager,
+                ParameterAuditStore(args.parameter_audit_dir,
+                                    args.parameter_audit_key_file))
+        except DeviceParameterError as error:
+            parser.error(str(error))
     server = make_server(
         args.host, args.port, args.state, build_jobs=args.build_jobs,
         history_root=args.history_root,
         device_parameter_manager=parameter_manager,
-        deployment_controller=deployment_controller)
+        deployment_controller=deployment_controller,
+        parameter_write_controller=parameter_write_controller)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
     print(f"固件构建使用{args.build_jobs}个并行任务。")

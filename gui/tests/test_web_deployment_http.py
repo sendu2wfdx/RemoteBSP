@@ -64,6 +64,46 @@ class WebDeploymentHttpTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_parameter_web_endpoints_are_disabled_by_default_and_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = Mock()
+            controller = Mock()
+            controller.preflight_write.return_value = {
+                "ok": True, "format": "STUDIO_WEB_PARAMETER_PREFLIGHT_V1"}
+            controller.execute.return_value = {
+                "ok": True, "format": "STUDIO_WEB_PARAMETER_RESULT_V1"}
+            server = make_server(
+                "127.0.0.1", 0, None, history_root=root / "history",
+                device_parameter_manager=manager,
+                parameter_write_controller=controller)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                target = json.loads(urlopen(
+                    base + "/api/project/target").read())
+                self.assertTrue(target["device_parameter_write_enabled"])
+                self._post(base, "/api/device-parameters/write-preflight", {
+                    "expected_uuid": "ab" * 16, "expected_generation": 4,
+                    "parameter_id": 0x100, "value_base64": "bmV3"})
+                controller.preflight_write.assert_called_once()
+                self._post(base, "/api/device-parameters/execute", {
+                    "confirmation_token": "token",
+                    "confirmation": "WRITE_DEVICE_PARAMETERS"})
+                controller.execute.assert_called_once()
+                with self.assertRaises(HTTPError) as caught:
+                    self._post(base, "/api/device-parameters/write-preflight", {
+                        "expected_uuid": "ab" * 16,
+                        "expected_generation": 4, "parameter_id": 0x100,
+                        "value_base64": "bmV3", "path": "C:/secret"})
+                self.assertEqual(caught.exception.code, 400)
+                self.assertEqual(controller.preflight_write.call_count, 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()
