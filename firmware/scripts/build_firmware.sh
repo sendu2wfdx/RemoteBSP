@@ -150,9 +150,11 @@ case "${target}" in
             remotebsp-stm32g431-weact-core
         ;;
     ci)
-        "$0" all
-        "$0" weact-stm32g431cbu6-core-bus-hal
-        "$0" weact-stm32g431cbu6-core-studio-identity
+        # Git 默认不会保留 Windows 工作区脚本的可执行位；始终显式交给 bash，
+        # 保证本地与 GitHub 干净检出行为一致。
+        bash "$0" all
+        bash "$0" weact-stm32g431cbu6-core-bus-hal
+        bash "$0" weact-stm32g431cbu6-core-studio-identity
         python3 "${root_dir}/scripts/verify_ci_firmware_matrix.py"
         ;;
     *)
