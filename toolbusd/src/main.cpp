@@ -4,6 +4,7 @@
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/health_producer.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
+#include "remotebsp/toolbusd/link_recording.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
 #include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
@@ -2860,6 +2861,8 @@ int main(int argc, char** argv) {
                      "[--max-utilization-permille 1..1000] "
                      "[--burst-window-ms 毫秒] "
                      "[--motion-max-clock-error-ns 纳秒] "
+                     "[--logical-recording-dir 固定目录 "
+                     "--record-logical-link 文件名.rbsplog] "
                      "--runtime-operation-ledger-dir 账本目录"
 #ifdef REMOTEBSP_TEST_HOOKS
                      " [--test-operation-ledger-fail-terminal-sync 序号]"
@@ -2882,6 +2885,8 @@ int main(int argc, char** argv) {
         remotebsp::toolbusd::ClockSyncManagerConfig clock_sync_config;
         remotebsp::toolbusd::MotionGroupServiceConfig motion_group_config;
         std::optional<std::string> operation_ledger_directory;
+        std::optional<std::string> logical_recording_directory;
+        std::optional<std::string> logical_recording_name;
         ToolbusDaemonTestOptions test_options;
         traffic_config.mode = (mock_usb || usb)
                                   ? remotebsp::toolbusd::TrafficBusMode::Usb
@@ -2917,6 +2922,20 @@ int main(int argc, char** argv) {
                         "Runtime 操作账本目录必须显式且只能指定一次");
                 }
                 operation_ledger_directory = directory;
+                continue;
+            }
+            if (option == "--logical-recording-dir") {
+                if (logical_recording_directory.has_value()) {
+                    throw std::invalid_argument("逻辑链路录制目录只能指定一次");
+                }
+                logical_recording_directory = argv[index++];
+                continue;
+            }
+            if (option == "--record-logical-link") {
+                if (logical_recording_name.has_value()) {
+                    throw std::invalid_argument("逻辑链路录制文件只能指定一次");
+                }
+                logical_recording_name = argv[index++];
                 continue;
             }
             const std::uint32_t value =
@@ -2977,6 +2996,11 @@ int main(int argc, char** argv) {
             throw std::invalid_argument(
                 "必须显式指定 --runtime-operation-ledger-dir");
         }
+        if (logical_recording_directory.has_value() !=
+            logical_recording_name.has_value()) {
+            throw std::invalid_argument(
+                "逻辑链路录制必须同时指定固定目录和输出文件名");
+        }
         if (!mock_usb && !usb &&
             mode == remotebsp::transport::CanMode::Classical) {
             traffic_config.data_bits_per_second =
@@ -2997,12 +3021,25 @@ int main(int argc, char** argv) {
                 std::make_unique<remotebsp::transport::SocketCanTransport>(
                     argv[1], mode);
         }
+        std::unique_ptr<remotebsp::toolbusd::LinkRecordingController>
+            recording;
+        if (logical_recording_directory.has_value()) {
+            recording = std::make_unique<
+                remotebsp::toolbusd::LinkRecordingController>(
+                    *logical_recording_directory);
+            transport = recording->start(
+                std::move(transport), *logical_recording_name);
+        }
         ToolbusDaemon daemon(std::move(transport), std::move(socket_path),
                              traffic_config, clock_sync_config,
                              motion_group_config,
                              std::move(*operation_ledger_directory),
                              test_options);
         daemon.run();
+        if (recording) {
+            std::cout << "逻辑链路证据已原子保存: "
+                      << recording->stop() << '\n';
+        }
     } catch (const std::exception& error) {
         std::cerr << "toolbusd 启动失败: " << error.what() << '\n';
         return 1;

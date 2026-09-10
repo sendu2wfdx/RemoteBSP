@@ -767,6 +767,13 @@ add_test(NAME embedded_tmc2209_uart_backend_tests
          COMMAND embedded_tmc2209_uart_backend_tests)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(link_recording_control_tests link_recording_control_tests.cpp)
+target_link_libraries(link_recording_control_tests PRIVATE
+    remotebsp_link_recording_control)
+target_compile_options(link_recording_control_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME link_recording_control_tests COMMAND link_recording_control_tests)
+
 add_test(
     NAME firmware_config_tests
     COMMAND "${Python3_EXECUTABLE}"

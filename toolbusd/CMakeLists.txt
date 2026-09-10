@@ -13,6 +13,16 @@ add_library(remotebsp_request_manager
     src/traffic_control.cpp
 )
 
+add_library(remotebsp_link_recording_control
+    src/link_recording.cpp
+)
+target_include_directories(remotebsp_link_recording_control PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(remotebsp_link_recording_control PUBLIC
+    remotebsp_remote_core remotebsp_transport)
+target_compile_options(remotebsp_link_recording_control PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+
 target_include_directories(remotebsp_request_manager
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -30,6 +40,7 @@ target_compile_options(remotebsp_request_manager PRIVATE
 add_executable(toolbusd src/main.cpp)
 target_link_libraries(toolbusd PRIVATE
     remotebsp_request_manager
+    remotebsp_link_recording_control
     remotebsp_transport
 )
 
