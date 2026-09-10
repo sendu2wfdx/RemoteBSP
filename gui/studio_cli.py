@@ -28,7 +28,7 @@ from firmware_deployment import (
     deploy_can_katapult,
     deploy_stlink,
 )
-from deployment_record import create_deployment_record
+from deployment_record import create_deployment_record, validate_deployment_record
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -49,6 +49,12 @@ from production_history import (
     MAX_HISTORY_QUERY_CHARS,
     MAX_HISTORY_RESULTS,
     ProductionHistoryStore,
+)
+from production_signing import (
+    MAX_SIGNATURE_BYTES,
+    generate_key_pair,
+    sign_evidence,
+    verify_evidence,
 )
 from project_compare import MAX_PROJECT_BYTES
 from project_config import ProjectConfigError, validate_project
@@ -513,6 +519,52 @@ def _run_batch_validate(args) -> dict:
     }
 
 
+def _validated_signable(path: object) -> dict:
+    value = _read_json(path, "待签名生产证据", MAX_BATCH_MANIFEST_BYTES)
+    if value.get("format") == "REMOTEBSP_PRODUCTION_BATCH_V1":
+        validation = validate_production_batch_manifest(value)
+        if not validation["valid"]:
+            raise ProjectConfigError(validation["status_text"])
+    elif value.get("format") == "REMOTEBSP_DEPLOYMENT_RECORD_V1":
+        validate_deployment_record(value)
+    else:
+        raise ProjectConfigError("只允许签名生产批次清单或部署记录")
+    return value
+
+
+def _run_signing_keygen(args) -> dict:
+    private_path = _bounded_path(args.private_key_output, "Ed25519私钥输出")
+    public_path = _bounded_path(args.public_key_output, "Ed25519公钥输出")
+    if private_path.resolve() == public_path.resolve():
+        raise ProjectConfigError("公钥与私钥输出不能是同一路径")
+    result = generate_key_pair(private_path, public_path)
+    return {"ok": True, "format": "STUDIO_CLI_SIGNING_KEYGEN_V1", **result,
+            "time_authority": "none"}
+
+
+def _run_evidence_sign(args) -> dict:
+    evidence = _validated_signable(args.evidence)
+    envelope = sign_evidence(
+        evidence, _bounded_path(args.private_key, "Ed25519私钥"))
+    content = (json.dumps(envelope, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    output = _prepare_output(args.signature_output, force=args.force)
+    written = _atomic_output(output, content, force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_EVIDENCE_SIGN_V1",
+            "signature": envelope, "signature_output": str(written),
+            "time_trusted": False}
+
+
+def _run_evidence_verify(args) -> dict:
+    evidence = _validated_signable(args.evidence)
+    envelope = _read_json(args.signature, "Ed25519签名信封",
+                          MAX_SIGNATURE_BYTES)
+    verification = verify_evidence(
+        evidence, envelope, _bounded_path(args.public_key, "Ed25519公钥"))
+    return {"ok": True, "format": "STUDIO_CLI_EVIDENCE_VERIFY_V1",
+            "verification": verification}
+
+
 def _run_history_save(args) -> dict:
     manifest = _read_json(
         args.manifest, "生产批次清单", MAX_BATCH_MANIFEST_BYTES)
@@ -652,6 +704,27 @@ def _parser() -> StrictParser:
     batch_validate = sub.add_parser("batch-validate", help="校验现有生产批次")
     batch_validate.add_argument("--manifest", required=True)
     batch_validate.set_defaults(handler=_run_batch_validate)
+
+    keygen = sub.add_parser(
+        "signing-keygen", help="生成离线Ed25519签名密钥对")
+    keygen.add_argument("--private-key-output", required=True)
+    keygen.add_argument("--public-key-output", required=True)
+    keygen.set_defaults(handler=_run_signing_keygen)
+
+    evidence_sign = sub.add_parser(
+        "evidence-sign", help="离线签名生产批次清单或部署记录")
+    evidence_sign.add_argument("--evidence", required=True)
+    evidence_sign.add_argument("--private-key", required=True)
+    evidence_sign.add_argument("--signature-output", required=True)
+    evidence_sign.add_argument("--force", action="store_true")
+    evidence_sign.set_defaults(handler=_run_evidence_sign)
+
+    evidence_verify = sub.add_parser(
+        "evidence-verify", help="验证生产证据的离线Ed25519签名")
+    evidence_verify.add_argument("--evidence", required=True)
+    evidence_verify.add_argument("--signature", required=True)
+    evidence_verify.add_argument("--public-key", required=True)
+    evidence_verify.set_defaults(handler=_run_evidence_verify)
 
     save = sub.add_parser("history-save", help="保存已校验批次到本地历史")
     save.add_argument("--manifest", required=True)

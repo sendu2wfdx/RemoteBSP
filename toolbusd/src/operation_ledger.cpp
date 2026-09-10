@@ -1,6 +1,7 @@
 #include "remotebsp/toolbusd/operation_ledger.hpp"
 
 #include "remotebsp/protocol/crc32.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
 
 #include <sys/file.h>
@@ -29,6 +30,7 @@ constexpr std::size_t kRecordTrailerBytes = 12U;
 constexpr std::size_t kMaximumRecordBytes = 1024U;
 constexpr std::size_t kManifestBytes = 152U;
 constexpr std::uint16_t kLedgerFormatVersion = 2U;
+constexpr std::uint16_t kRecordFormatVersion = 3U;
 constexpr std::uint64_t kCommitMarker = 0x314D4F434C4F4252ULL;
 constexpr char kRecordMagic[8] = {'R', 'B', 'O', 'P', 'L', 'G', '1', '\0'};
 constexpr char kManifestMagic[8] = {'R', 'B', 'O', 'L', 'M', 'F', '1', '\0'};
@@ -301,7 +303,10 @@ bool valid_kind(std::uint8_t value) noexcept {
            value == static_cast<std::uint8_t>(
                OperationKind::RuntimeControlRelease) ||
            value == static_cast<std::uint8_t>(OperationKind::RuntimePwmConfigure) ||
-           value == static_cast<std::uint8_t>(OperationKind::RuntimePwmStop);
+           value == static_cast<std::uint8_t>(OperationKind::RuntimePwmStop) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamConfigure) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamFrame) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamStop);
 }
 
 bool parse_segment_name(const std::string& name,
@@ -344,7 +349,8 @@ bool valid_state_recovery(OperationKind kind, OperationState state,
     if (state == OperationState::Committed) {
         const bool closes_scope =
             kind == OperationKind::RuntimeControlRelease ||
-            kind == OperationKind::RuntimePwmStop;
+            kind == OperationKind::RuntimePwmStop ||
+            kind == OperationKind::RuntimeTimedBitstreamStop;
         return recovery == (closes_scope ? OperationRecovery::SafeClosed
                                          : OperationRecovery::None);
     }
@@ -378,6 +384,13 @@ bool valid_terminal_result(const OperationRecord& existing,
                    result.active_low == existing.requested_active_low;
         }
         if (existing.kind == OperationKind::RuntimePwmStop) {
+            return result.object_id.has_value() && *result.object_id != 0U &&
+                   !result.value.has_value() && !result.frequency_hz.has_value() &&
+                   !result.duty.has_value() && !result.active_low.has_value();
+        }
+        if (existing.kind == OperationKind::RuntimeTimedBitstreamConfigure ||
+            existing.kind == OperationKind::RuntimeTimedBitstreamFrame ||
+            existing.kind == OperationKind::RuntimeTimedBitstreamStop) {
             return result.object_id.has_value() && *result.object_id != 0U &&
                    !result.value.has_value() && !result.frequency_hz.has_value() &&
                    !result.duty.has_value() && !result.active_low.has_value();
@@ -428,6 +441,13 @@ OperationDigest business_key_hash(OperationKind kind,
     append_text(canonical, idempotency);
     return sha256(canonical);
 }
+
+OperationDigest timed_request_digest(
+    const OperationDigest& operation_id, const OperationIdentity& daemon_origin,
+    const OperationIdentity& lease_id, const OperationIdentity& node_uuid,
+    const std::string& owner, std::uint16_t permissions, std::uint32_t node_id,
+    std::uint32_t resource_id, std::uint8_t domain,
+    const OperationDigest* payload_digest);
 
 }  // namespace
 
@@ -552,6 +572,99 @@ public:
         record.operation_id = OperationLedger::derive_operation_id(operation);
         record.request_digest = OperationLedger::derive_request_digest(operation);
         record.kind = OperationKind::RuntimePwmStop;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.scope = {operation.expected_node_uuid, operation.resource_id};
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.node_id = operation.node_id;
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_timed_bitstream_configure(
+        const RuntimeTimedBitstreamConfigureOperation& operation) {
+        validate_common(operation.daemon_origin, operation.lease_id,
+                        operation.owner_key_id);
+        const protocol::TimedBitstreamCreatePayload payload{
+            0U, operation.bit_period_ns, operation.zero_high_ns,
+            operation.one_high_ns, operation.reset_time_us};
+        try { static_cast<void>(protocol::encode_timed_bitstream_create(payload)); }
+        catch (const protocol::WaveformPayloadException&) {
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "定时位流配置参数不符合账本合同");
+        }
+        if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+            operation.node_id > 127U || operation.resource_id == 0U ||
+            operation.permissions == 0U || !valid_text(operation.idempotency_key))
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "定时位流配置身份不符合账本合同");
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = OperationLedger::derive_request_digest(operation);
+        record.kind = OperationKind::RuntimeTimedBitstreamConfigure;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.scope = {operation.expected_node_uuid, operation.resource_id};
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.node_id = operation.node_id;
+        std::vector<std::uint8_t> canonical;
+        put_u32(canonical, operation.bit_period_ns);
+        put_u32(canonical, operation.zero_high_ns);
+        put_u32(canonical, operation.one_high_ns);
+        put_u32(canonical, operation.reset_time_us);
+        record.requested_payload_digest = sha256(canonical);
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_timed_bitstream_frame(
+        const RuntimeTimedBitstreamFrameOperation& operation) {
+        validate_common(operation.daemon_origin, operation.lease_id,
+                        operation.owner_key_id);
+        try { static_cast<void>(protocol::encode_timed_bitstream_write(
+                  {operation.bit_count, operation.data})); }
+        catch (const protocol::WaveformPayloadException&) {
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "定时位流帧不符合账本合同");
+        }
+        if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+            operation.node_id > 127U || operation.resource_id == 0U ||
+            operation.permissions == 0U || !valid_text(operation.idempotency_key))
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "定时位流帧身份不符合账本合同");
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = OperationLedger::derive_request_digest(operation);
+        record.kind = OperationKind::RuntimeTimedBitstreamFrame;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.scope = {operation.expected_node_uuid, operation.resource_id};
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.node_id = operation.node_id;
+        std::vector<std::uint8_t> canonical;
+        put_u16(canonical, operation.bit_count);
+        canonical.insert(canonical.end(), operation.data.begin(), operation.data.end());
+        record.requested_payload_digest = sha256(canonical);
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_timed_bitstream_stop(
+        const RuntimeTimedBitstreamStopOperation& operation) {
+        validate_common(operation.daemon_origin, operation.lease_id,
+                        operation.owner_key_id);
+        if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+            operation.node_id > 127U || operation.resource_id == 0U ||
+            operation.permissions == 0U || !valid_text(operation.idempotency_key))
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "定时位流停止参数不符合账本合同");
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = OperationLedger::derive_request_digest(operation);
+        record.kind = OperationKind::RuntimeTimedBitstreamStop;
         record.daemon_origin = operation.daemon_origin;
         record.lease_id = operation.lease_id;
         record.scope = {operation.expected_node_uuid, operation.resource_id};
@@ -1287,6 +1400,10 @@ private:
         put_u16(payload, record.result.duty.value_or(0U));
         payload.push_back(record.requested_active_low.value_or(false) ? 1U : 0U);
         payload.push_back(record.result.active_low.value_or(false) ? 1U : 0U);
+        payload.push_back(record.requested_payload_digest.has_value() ? 1U : 0U);
+        payload.push_back(0U);
+        put_u16(payload, 0U);
+        put_array(payload, record.requested_payload_digest.value_or(OperationDigest{}));
         append_text(payload, record.owner_key_id);
         append_text(payload, record.idempotency_key);
         return payload;
@@ -1326,7 +1443,7 @@ private:
         std::vector<std::uint8_t> out;
         out.reserve(total);
         out.insert(out.end(), kRecordMagic, kRecordMagic + 8U);
-        put_u16(out, kLedgerFormatVersion);
+        put_u16(out, kRecordFormatVersion);
         out.push_back(static_cast<std::uint8_t>(type));
         out.push_back(static_cast<std::uint8_t>(record.state));
         out.push_back(static_cast<std::uint8_t>(record.recovery));
@@ -1360,7 +1477,7 @@ private:
         const auto type_value = data[10U];
         const auto format_version = get_u16(data + 8U);
         if (std::memcmp(data, kRecordMagic, 8U) != 0 ||
-            (format_version != 1U && format_version != kLedgerFormatVersion) ||
+            (format_version < 1U || format_version > kRecordFormatVersion) ||
             (type_value < 1U || type_value > 3U) ||
             !valid_state(data[11U]) || !valid_recovery(data[12U]) ||
             data[13U] != 0U || get_u16(data + 14U) != kRecordHeaderBytes ||
@@ -1437,10 +1554,11 @@ private:
 
     void decode_full_payload(DecodedRecord& decoded, const std::uint8_t* data,
                              std::size_t size, std::uint16_t format_version) const {
-        const std::size_t fixed = format_version == 1U ? 78U : 92U;
+        const std::size_t fixed = format_version == 1U ? 78U :
+                                  (format_version == 2U ? 92U : 128U);
         if (size < fixed || !valid_kind(data[0]) ||
             (format_version == 1U && (data[1] & 0xf8U) != 0U) ||
-            (format_version == 2U && (data[1] & 0x80U) != 0U) ||
+            (format_version >= 2U && (data[1] & 0x80U) != 0U) ||
             get_u16(data + 62U) != 0U) {
             throw_corrupt("OperationLedger完整载荷固定字段无效");
         }
@@ -1495,6 +1613,23 @@ private:
             }
         } else if (data[90U] != 0U || data[91U] != 0U) {
             throw_corrupt("OperationLedger非PWM记录包含极性");
+        }
+        if (format_version >= 3U) {
+            if (data[92U] > 1U || data[93U] != 0U ||
+                get_u16(data + 94U) != 0U) {
+                throw_corrupt("OperationLedger定时位流摘要标志无效");
+            }
+            const auto digest = get_array<32U>(data + 96U);
+            if (data[92U] != 0U) {
+                if (std::all_of(digest.begin(), digest.end(),
+                                [](std::uint8_t value) { return value == 0U; }))
+                    throw_corrupt("OperationLedger定时位流摘要为零");
+                record.requested_payload_digest = digest;
+            } else if (!std::all_of(
+                           digest.begin(), digest.end(),
+                           [](std::uint8_t value) { return value == 0U; })) {
+                throw_corrupt("OperationLedger缺失定时位流摘要标志");
+            }
         }
         }
         std::size_t cursor = fixed;
@@ -1584,6 +1719,55 @@ private:
                     OperationLedger::derive_request_digest(operation) != record.request_digest) {
                     throw_corrupt("PWM停止记录身份摘要不匹配");
                 }
+            } else if (record.kind == OperationKind::RuntimeTimedBitstreamConfigure ||
+                       record.kind == OperationKind::RuntimeTimedBitstreamFrame) {
+                if (!record.requested_payload_digest.has_value() ||
+                    record.requested_value.has_value() ||
+                    record.requested_frequency_hz.has_value() ||
+                    record.requested_duty.has_value() ||
+                    record.requested_active_low.has_value() ||
+                    record.admission_id != 0U) {
+                    throw_corrupt("定时位流记录字段组合无效");
+                }
+                OperationDigest operation_id;
+                std::uint8_t domain;
+                if (record.kind == OperationKind::RuntimeTimedBitstreamConfigure) {
+                    RuntimeTimedBitstreamConfigureOperation operation{
+                        record.daemon_origin, record.lease_id,
+                        record.scope.expected_node_uuid, record.owner_key_id,
+                        record.idempotency_key, record.permissions, record.node_id,
+                        record.scope.resource_id, 0U, 0U, 0U, 0U};
+                    operation_id = OperationLedger::derive_operation_id(operation);
+                    domain = 0x85U;
+                } else {
+                    RuntimeTimedBitstreamFrameOperation operation{
+                        record.daemon_origin, record.lease_id,
+                        record.scope.expected_node_uuid, record.owner_key_id,
+                        record.idempotency_key, record.permissions, record.node_id,
+                        record.scope.resource_id, 0U, {}};
+                    operation_id = OperationLedger::derive_operation_id(operation);
+                    domain = 0x86U;
+                }
+                if (operation_id != record.operation_id ||
+                    timed_request_digest(operation_id, record.daemon_origin,
+                        record.lease_id, record.scope.expected_node_uuid,
+                        record.owner_key_id, record.permissions, record.node_id,
+                        record.scope.resource_id, domain,
+                        &*record.requested_payload_digest) != record.request_digest) {
+                    throw_corrupt("定时位流记录身份摘要不匹配");
+                }
+            } else if (record.kind == OperationKind::RuntimeTimedBitstreamStop) {
+                if (record.requested_payload_digest.has_value() ||
+                    record.requested_value.has_value() || record.admission_id != 0U)
+                    throw_corrupt("定时位流停止记录字段组合无效");
+                RuntimeTimedBitstreamStopOperation operation{
+                    record.daemon_origin, record.lease_id,
+                    record.scope.expected_node_uuid, record.owner_key_id,
+                    record.idempotency_key, record.permissions, record.node_id,
+                    record.scope.resource_id};
+                if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
+                    OperationLedger::derive_request_digest(operation) != record.request_digest)
+                    throw_corrupt("定时位流停止记录身份摘要不匹配");
             } else {
                 if (record.requested_value.has_value() ||
                     record.idempotency_key != "release:v1") {
@@ -2271,6 +2455,110 @@ OperationDigest OperationLedger::derive_operation_id(
     return sha256(canonical);
 }
 
+#define DEFINE_TIMED_OPERATION_ID(TYPE, KIND, LABEL)                         \
+OperationDigest OperationLedger::derive_operation_id(const TYPE& operation) {\
+    validate_common(operation.daemon_origin, operation.lease_id,             \
+                    operation.owner_key_id);                                 \
+    if (!valid_text(operation.idempotency_key))                              \
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest, \
+                                       LABEL "幂等键无效");                  \
+    std::vector<std::uint8_t> canonical;                                     \
+    append_domain(canonical);                                                 \
+    canonical.push_back(static_cast<std::uint8_t>(KIND));                    \
+    put_array(canonical, operation.lease_id);                                \
+    append_text(canonical, operation.owner_key_id);                          \
+    append_text(canonical, operation.idempotency_key);                       \
+    return sha256(canonical);                                                 \
+}
+
+DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamConfigureOperation,
+                          OperationKind::RuntimeTimedBitstreamConfigure,
+                          "定时位流配置")
+DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamFrameOperation,
+                          OperationKind::RuntimeTimedBitstreamFrame,
+                          "定时位流帧")
+DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamStopOperation,
+                          OperationKind::RuntimeTimedBitstreamStop,
+                          "定时位流停止")
+#undef DEFINE_TIMED_OPERATION_ID
+
+namespace {
+OperationDigest timed_request_digest(
+    const OperationDigest& operation_id, const OperationIdentity& daemon_origin,
+    const OperationIdentity& lease_id, const OperationIdentity& node_uuid,
+    const std::string& owner, std::uint16_t permissions, std::uint32_t node_id,
+    std::uint32_t resource_id, std::uint8_t domain,
+    const OperationDigest* payload_digest) {
+    if (is_zero(node_uuid) || node_id == 0U || node_id > 127U ||
+        resource_id == 0U || permissions == 0U)
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "定时位流请求摘要字段无效");
+    std::vector<std::uint8_t> canonical;
+    append_domain(canonical);
+    canonical.push_back(domain);
+    put_array(canonical, operation_id);
+    put_array(canonical, daemon_origin);
+    put_array(canonical, lease_id);
+    append_text(canonical, owner);
+    put_u16(canonical, permissions);
+    put_array(canonical, node_uuid);
+    put_u32(canonical, node_id);
+    put_u32(canonical, resource_id);
+    if (payload_digest != nullptr) put_array(canonical, *payload_digest);
+    return sha256(canonical);
+}
+}  // namespace
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimeTimedBitstreamConfigureOperation& operation) {
+    const auto operation_id = derive_operation_id(operation);
+    const protocol::TimedBitstreamCreatePayload checked{
+        0U, operation.bit_period_ns, operation.zero_high_ns,
+        operation.one_high_ns, operation.reset_time_us};
+    try { static_cast<void>(protocol::encode_timed_bitstream_create(checked)); }
+    catch (const protocol::WaveformPayloadException&) {
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "定时位流配置请求摘要字段无效");
+    }
+    std::vector<std::uint8_t> parameters;
+    put_u32(parameters, operation.bit_period_ns);
+    put_u32(parameters, operation.zero_high_ns);
+    put_u32(parameters, operation.one_high_ns);
+    put_u32(parameters, operation.reset_time_us);
+    const auto digest = sha256(parameters);
+    return timed_request_digest(operation_id, operation.daemon_origin,
+        operation.lease_id, operation.expected_node_uuid, operation.owner_key_id,
+        operation.permissions, operation.node_id, operation.resource_id, 0x85U,
+        &digest);
+}
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimeTimedBitstreamFrameOperation& operation) {
+    const auto operation_id = derive_operation_id(operation);
+    try { static_cast<void>(protocol::encode_timed_bitstream_write(
+              {operation.bit_count, operation.data})); }
+    catch (const protocol::WaveformPayloadException&) {
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "定时位流帧摘要字段无效");
+    }
+    std::vector<std::uint8_t> parameters;
+    put_u16(parameters, operation.bit_count);
+    parameters.insert(parameters.end(), operation.data.begin(), operation.data.end());
+    const auto digest = sha256(parameters);
+    return timed_request_digest(operation_id, operation.daemon_origin,
+        operation.lease_id, operation.expected_node_uuid, operation.owner_key_id,
+        operation.permissions, operation.node_id, operation.resource_id, 0x86U,
+        &digest);
+}
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimeTimedBitstreamStopOperation& operation) {
+    return timed_request_digest(derive_operation_id(operation),
+        operation.daemon_origin, operation.lease_id, operation.expected_node_uuid,
+        operation.owner_key_id, operation.permissions, operation.node_id,
+        operation.resource_id, 0x87U, nullptr);
+}
+
 OperationDigest OperationLedger::derive_request_digest(
     const RuntimePwmConfigureOperation& operation) {
     const auto operation_id = derive_operation_id(operation);
@@ -2394,6 +2682,21 @@ OperationBeginResult OperationLedger::begin_pwm_configure(
 OperationBeginResult OperationLedger::begin_pwm_stop(
     const RuntimePwmStopOperation& operation) {
     return impl_->begin_pwm_stop(operation);
+}
+
+OperationBeginResult OperationLedger::begin_timed_bitstream_configure(
+    const RuntimeTimedBitstreamConfigureOperation& operation) {
+    return impl_->begin_timed_bitstream_configure(operation);
+}
+
+OperationBeginResult OperationLedger::begin_timed_bitstream_frame(
+    const RuntimeTimedBitstreamFrameOperation& operation) {
+    return impl_->begin_timed_bitstream_frame(operation);
+}
+
+OperationBeginResult OperationLedger::begin_timed_bitstream_stop(
+    const RuntimeTimedBitstreamStopOperation& operation) {
+    return impl_->begin_timed_bitstream_stop(operation);
 }
 
 OperationRecord OperationLedger::finish(

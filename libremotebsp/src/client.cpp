@@ -565,6 +565,60 @@ RuntimeOperationOutcome Client::runtime_pwm_stop_operation(
         toolbusd::decode_ipc_runtime_operation_outcome(response.body));
 }
 
+RuntimeOperationOutcome Client::runtime_timed_bitstream_configure_operation(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key, std::uint32_t bit_period_ns,
+    std::uint32_t zero_high_ns, std::uint32_t one_high_ns,
+    std::uint32_t reset_time_us) const {
+    toolbusd::RuntimeTimedBitstreamConfigureRequest request;
+    request.daemon_instance_id=daemon_instance_id; request.lease_id=lease_id;
+    request.expected_node_uuid=expected_node_uuid; request.owner_key_id=owner_key_id;
+    request.node_id=node_id_; request.resource_id=resource_id;
+    request.idempotency_key=idempotency_key; request.bit_period_ns=bit_period_ns;
+    request.zero_high_ns=zero_high_ns; request.one_high_ns=one_high_ns;
+    request.reset_time_us=reset_time_us;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_timed_bitstream_configure_operation_request(socket.get(),request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if(response.status!=toolbusd::IpcStatus::Ok) throw_structured_ipc_error(response,"Runtime 定时位流配置操作失败");
+    return public_operation_outcome(toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_timed_bitstream_frame_operation(
+    const std::array<std::uint8_t,16>& daemon_instance_id,const std::array<std::uint8_t,16>& lease_id,
+    const std::array<std::uint8_t,16>& expected_node_uuid,const std::string& owner_key_id,
+    std::uint32_t resource_id,const std::string& idempotency_key,std::uint16_t bit_count,
+    const std::vector<std::uint8_t>& data) const {
+    toolbusd::RuntimeTimedBitstreamFrameRequest request;
+    request.daemon_instance_id=daemon_instance_id; request.lease_id=lease_id;
+    request.expected_node_uuid=expected_node_uuid; request.owner_key_id=owner_key_id;
+    request.node_id=node_id_; request.resource_id=resource_id; request.idempotency_key=idempotency_key;
+    request.bit_count=bit_count; request.data=data;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_timed_bitstream_frame_operation_request(socket.get(),request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if(response.status!=toolbusd::IpcStatus::Ok) throw_structured_ipc_error(response,"Runtime 定时位流帧操作失败");
+    return public_operation_outcome(toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_timed_bitstream_stop_operation(
+    const std::array<std::uint8_t,16>& daemon_instance_id,const std::array<std::uint8_t,16>& lease_id,
+    const std::array<std::uint8_t,16>& expected_node_uuid,const std::string& owner_key_id,
+    std::uint32_t resource_id,const std::string& idempotency_key) const {
+    toolbusd::RuntimeTimedBitstreamStopRequest request;
+    request.daemon_instance_id=daemon_instance_id; request.lease_id=lease_id;
+    request.expected_node_uuid=expected_node_uuid; request.owner_key_id=owner_key_id;
+    request.node_id=node_id_; request.resource_id=resource_id; request.idempotency_key=idempotency_key;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_timed_bitstream_stop_operation_request(socket.get(),request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if(response.status!=toolbusd::IpcStatus::Ok) throw_structured_ipc_error(response,"Runtime 定时位流停止操作失败");
+    return public_operation_outcome(toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
 RuntimeOperationOutcome Client::runtime_operation_status(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::string& owner_key_id,

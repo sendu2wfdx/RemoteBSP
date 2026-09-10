@@ -37,7 +37,9 @@ _SEGMENT_RE = re.compile(r"segment-([0-9]{16})\.rcaj")
 _HEX_32_RE = re.compile(r"[0-9a-f]{32}")
 _HEX_64_RE = re.compile(r"[0-9a-f]{64}")
 _KEY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_ACTIONS = frozenset({"acquire", "gpio_write", "pwm_configure", "pwm_stop", "release"})
+_ACTIONS = frozenset({"acquire", "gpio_write", "pwm_configure", "pwm_stop",
+                      "timed_bitstream_configure", "timed_bitstream_frame",
+                      "timed_bitstream_stop", "release"})
 _TERMINAL_RESULTS = frozenset({"committed", "rejected", "released", "failed"})
 _UNKNOWN_REASONS = frozenset({
     "audit_sync_failed",

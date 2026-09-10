@@ -14,6 +14,7 @@ from runtime_api.auth import (
     CONTROL_LEASE_REVOKE_PERMISSION,
     GPIO_WRITE_PERMISSION,
     PWM_WRITE_PERMISSION,
+    TIMED_BITSTREAM_WRITE_PERMISSION,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
     ApiKeyCredential,
@@ -40,6 +41,7 @@ from runtime_api.toolbusd_provider import (
 class FakeGpioProvider(MockSnapshotProvider):
     gpio_control_available = True
     pwm_control_available = True
+    timed_bitstream_control_available = True
 
     def __init__(self):
         super().__init__()
@@ -143,6 +145,27 @@ class FakeGpioProvider(MockSnapshotProvider):
             "error_code": None}
         self._operations[("pwm_stop", lease, idem)] = outcome
         return outcome
+
+    timed_bitstream_control_acquire = gpio_control_acquire
+
+    def _timed_outcome(self, lease, idem, kind, recovery="none"):
+        digit={"timed_bitstream_configure":"4","timed_bitstream_frame":"5",
+               "timed_bitstream_stop":"6"}[kind]
+        outcome={"operation_id":digit*64,"lease_id":lease,
+            "expected_node_uuid":"a"*32,"resource_id":0x0a000000,
+            "kind":kind,"state":"committed","replayed":False,
+            "recovery":recovery,"object_id":91,"value":None,"error_code":None}
+        self._operations[(kind,lease,idem)]=outcome
+        return outcome
+
+    def timed_bitstream_control_configure(self,_d,lease,_o,_n,_r,idem,*_timing):
+        return self._timed_outcome(lease,idem,"timed_bitstream_configure")
+
+    def timed_bitstream_control_frame(self,_d,lease,_o,_n,_r,idem,_bits,_data):
+        return self._timed_outcome(lease,idem,"timed_bitstream_frame")
+
+    def timed_bitstream_control_stop(self,_d,lease,_o,_n,_r,idem):
+        return self._timed_outcome(lease,idem,"timed_bitstream_stop","safe_closed")
 
     def operation_status(self, daemon_id, owner, operation_id):
         self.status_daemons.append(daemon_id)
@@ -359,7 +382,8 @@ def _authenticator():
                        CONTROL_OPERATION_READ_PERMISSION,
                        CONTROL_LEASE_ACQUIRE_PERMISSION,
                        CONTROL_LEASE_RELEASE_PERMISSION,
-                       GPIO_WRITE_PERMISSION, PWM_WRITE_PERMISSION})),
+                       GPIO_WRITE_PERMISSION, PWM_WRITE_PERMISSION,
+                       TIMED_BITSTREAM_WRITE_PERMISSION})),
         ApiKeyCredential(
             "other", "b" * 32,
             frozenset({CONTROL_LEASE_ACQUIRE_PERMISSION,
@@ -481,6 +505,29 @@ class GpioControlHttpTest(unittest.TestCase):
         self.assertTrue(recovered["replayed"])
         self.assertIn(("pwm_configure", lease_id, "pwm-recover-1"),
                       self.provider.lookup_calls)
+
+    def test_timed_bitstream_http_configure_frame_stop(self):
+        lease_body={"node_id":"mock-node-1","resource_id":"bits-0",
+            "command_group":"timed-bitstream.write","ttl_ms":1000,
+            "idempotency_key":"bits-lease-1"}
+        with urlopen(self._request("POST","/api/v1/control-leases","a"*32,lease_body)) as response:
+            lease=json.loads(response.read())["data"]["lease"]["lease_id"]
+        common={"lease_id":lease,"node_id":"mock-node-1","resource_id":"bits-0"}
+        configure={**common,"idempotency_key":"bits-config-1","bit_period_ns":1250,
+            "zero_high_ns":350,"one_high_ns":700,"reset_time_us":80}
+        with urlopen(self._request("POST","/api/v1/control/timed-bitstream/configure","a"*32,configure)) as response:
+            self.assertEqual(json.loads(response.read())["data"]["operation"]["operation_kind"],
+                             "timed_bitstream_configure")
+        bad={**common,"idempotency_key":"bits-bad-1","bit_count":9,"data":"80"}
+        code,_=self._error(self._request("POST","/api/v1/control/timed-bitstream/frame","a"*32,bad))
+        self.assertEqual(code,400)
+        frame={**common,"idempotency_key":"bits-frame-1","bit_count":9,"data":"8000"}
+        with urlopen(self._request("POST","/api/v1/control/timed-bitstream/frame","a"*32,frame)) as response:
+            self.assertEqual(json.loads(response.read())["data"]["operation"]["result"],{"object_id":91})
+        stop={**common,"idempotency_key":"bits-stop-1"}
+        with urlopen(self._request("POST","/api/v1/control/timed-bitstream/stop","a"*32,stop)) as response:
+            self.assertEqual(json.loads(response.read())["data"]["operation"]["result"],
+                             {"object_id":91,"stopped":True})
 
     def test_request_deadline_returns_sanitized_gateway_timeout(self):
         self.server.request_io_timeout_seconds = 0.1  # type: ignore[attr-defined]

@@ -21,6 +21,7 @@ namespace remotebsp::toolbusd {
 constexpr std::uint16_t kRuntimeControlIpcVersion = 2U;
 constexpr std::uint16_t kRuntimePermissionGpioWrite = 0x0001U;
 constexpr std::uint16_t kRuntimePermissionPwmWrite = 0x0002U;
+constexpr std::uint16_t kRuntimePermissionTimedBitstreamWrite = 0x0004U;
 constexpr std::size_t kMaximumRuntimeControlIdentityBytes = 64U;
 constexpr std::size_t kMaximumRuntimeControlIdempotencyBytes = 64U;
 constexpr std::uint32_t kMaximumRuntimeControlTtlMs = 30000U;
@@ -67,6 +68,48 @@ struct RuntimePwmConfigureRequest {
 
 struct RuntimePwmStopRequest : RuntimePwmConfigureRequest {};
 
+struct RuntimeTimedBitstreamConfigureRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionTimedBitstreamWrite};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::string idempotency_key;
+    std::uint32_t bit_period_ns{};
+    std::uint32_t zero_high_ns{};
+    std::uint32_t one_high_ns{};
+    std::uint32_t reset_time_us{};
+};
+
+struct RuntimeTimedBitstreamFrameRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionTimedBitstreamWrite};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::string idempotency_key;
+    std::uint16_t bit_count{};
+    std::vector<std::uint8_t> data;
+};
+
+struct RuntimeTimedBitstreamStopRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionTimedBitstreamWrite};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::string idempotency_key;
+};
+
 struct RuntimeControlReleaseRequest {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
@@ -87,6 +130,12 @@ struct RuntimePwmResult {
     std::uint32_t frequency_hz{};
     std::uint16_t duty{};
     bool active_low{};
+    bool replayed{};
+};
+
+struct RuntimeTimedBitstreamResult {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::uint32_t object_id{};
     bool replayed{};
 };
 
@@ -172,6 +221,20 @@ public:
         std::function<void(const RuntimePwmResult&)> committed;
         DurableFailure failed;
     };
+    using TimedBitstreamCreator = std::function<std::uint32_t(
+        std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t)>;
+    using TimedBitstreamWriter = std::function<void(
+        std::uint32_t, std::uint16_t, const std::vector<std::uint8_t>&)>;
+    struct TimedBitstreamIo {
+        TimedBitstreamCreator create;
+        TimedBitstreamWriter write;
+        PwmStopper stop;
+    };
+    struct TimedBitstreamDurability {
+        std::function<void()> pending;
+        std::function<void(const RuntimeTimedBitstreamResult&)> committed;
+        DurableFailure failed;
+    };
 
     struct ResolvedReleaseLease {
         std::array<std::uint8_t, 16> expected_node_uuid{};
@@ -226,6 +289,30 @@ public:
         const protocol::ResourceDescriptor& descriptor,
         const protocol::ResourceContract& contract, const PwmIo& io,
         const PwmDurability& durability = {});
+    RuntimeTimedBitstreamResult timed_bitstream_configure(
+        const RuntimeTimedBitstreamConfigureRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        std::uint64_t node_generation,
+        const protocol::ResourceDescriptor& descriptor,
+        const protocol::ResourceContract& contract,
+        const TimedBitstreamIo& io,
+        const TimedBitstreamDurability& durability = {});
+    RuntimeTimedBitstreamResult timed_bitstream_frame(
+        const RuntimeTimedBitstreamFrameRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        std::uint64_t node_generation,
+        const protocol::ResourceDescriptor& descriptor,
+        const protocol::ResourceContract& contract,
+        const TimedBitstreamIo& io,
+        const TimedBitstreamDurability& durability = {});
+    RuntimeTimedBitstreamResult timed_bitstream_stop(
+        const RuntimeTimedBitstreamStopRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        std::uint64_t node_generation,
+        const protocol::ResourceDescriptor& descriptor,
+        const protocol::ResourceContract& contract,
+        const TimedBitstreamIo& io,
+        const TimedBitstreamDurability& durability = {});
 
     // 只读解析当前活动租约，供持久账本在历史回放前核对服务端范围。
     // 返回空值只表示当前 Gate 中没有该租约；身份不匹配仍严格拒绝。
@@ -307,6 +394,22 @@ private:
         std::uint64_t retain_until_ns{};
     };
 
+    struct CompletedTimedBitstreamCommand {
+        std::array<std::uint8_t, 16> lease_id{};
+        std::string owner_key_id;
+        std::uint32_t node_id{};
+        std::uint32_t resource_id{};
+        std::uint8_t kind{};
+        std::uint32_t bit_period_ns{};
+        std::uint32_t zero_high_ns{};
+        std::uint32_t one_high_ns{};
+        std::uint32_t reset_time_us{};
+        std::uint16_t bit_count{};
+        std::vector<std::uint8_t> data;
+        RuntimeTimedBitstreamResult result;
+        std::uint64_t retain_until_ns{};
+    };
+
     struct CleanupTask {
         std::uint64_t scope{};
         std::string lease_key;
@@ -352,6 +455,8 @@ private:
     std::unordered_map<std::uint64_t, std::string> leases_by_scope_;
     std::unordered_map<std::string, CompletedCommand> completed_;
     std::unordered_map<std::string, CompletedPwmCommand> pwm_completed_;
+    std::unordered_map<std::string, CompletedTimedBitstreamCommand>
+        timed_bitstream_completed_;
     std::unordered_map<std::uint64_t, GpioObject> gpio_objects_;
     std::unordered_map<std::uint64_t, PwmObject> pwm_objects_;
     std::unordered_set<std::uint64_t> in_flight_scopes_;

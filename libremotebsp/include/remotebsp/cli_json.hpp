@@ -105,6 +105,12 @@ inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
         case RuntimeOperationKind::ControlRelease: return "control_release";
         case RuntimeOperationKind::PwmConfigure: return "pwm_configure";
         case RuntimeOperationKind::PwmStop: return "pwm_stop";
+        case RuntimeOperationKind::TimedBitstreamConfigure:
+            return "timed_bitstream_configure";
+        case RuntimeOperationKind::TimedBitstreamFrame:
+            return "timed_bitstream_frame";
+        case RuntimeOperationKind::TimedBitstreamStop:
+            return "timed_bitstream_stop";
     }
     return "unknown";
 }

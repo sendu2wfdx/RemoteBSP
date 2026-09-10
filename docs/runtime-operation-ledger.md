@@ -7,8 +7,9 @@
 
 ## 1. 目标与边界
 
-当前 GPIO 控制链已经具备短租约、节点 UUID/代次核对、首次低电平创建、安全写低和
-`GPIO_CLOSE`。`toolbusd` 操作账本现把 GPIO 写入和释放的 pending/终态持久化；当远端
+当前 GPIO、PWM 与通用定时位流控制链已经具备短租约、节点 UUID/代次核对和各自的
+安全关闭语义。`toolbusd` 操作账本把 GPIO 写入、PWM configure/stop、定时位流
+configure/frame/stop 和释放的 pending/终态持久化；当远端
 命令可能已经执行但响应未到达时，系统会返回可查询的 operation 状态，或保守恢复为
 `unknown`/`expired_unknown`，不会把未知结果伪装成未执行。
 
@@ -21,10 +22,13 @@ v1 账本的软件实现覆盖以下问题：
 - 从历史记录恢复资源作用域阻断，避免新 daemon 接管旧会话遗留对象；
 - 对记录数、磁盘大小、保留期和轮转行为给出可自动验证的硬边界。
 
-v1 至少覆盖以下两类操作：
+当前操作集合覆盖：
 
 1. `RuntimeGpioWrite`；
-2. `RuntimeControlRelease`，包括安全写低和 `GPIO_CLOSE`。
+2. `RuntimePwmConfigure` / `RuntimePwmStop`；
+3. `RuntimeTimedBitstreamConfigure` / `RuntimeTimedBitstreamFrame` /
+   `RuntimeTimedBitstreamStop`；
+4. `RuntimeControlRelease`，按资源类型执行安全关闭并释放远端租约。
 
 `RuntimeControlAcquire` 只登记 daemon 内存租约，daemon 换代后本来就必须失效，v1
 不要求把它作为硬件操作写入结果账本。账本不承诺在 daemon 崩溃后恢复旧租约，也不替代
@@ -78,7 +82,13 @@ SHA-256(
 - 预期节点 UUID、节点 ID、资源 ID；
 - Release 使用的服务端单调租约 admission 序号，用于区分同一 lease ID 的不同登记生命周期；
 - GPIO 目标值；
+- PWM 的频率、万分比占空比和极性；
+- 定时位流的四个时序参数，或覆盖 `bit_count` 与完整帧正文的 SHA-256 摘要；
 - Release 所针对的原租约身份。
+
+定时位流正文最大 2022 字节，不能塞入单条 1 KiB 账本记录；正文只存在于当前请求内存，
+账本持久化完整请求摘要和独立帧正文摘要。恢复时不需要正文即可保守判定 pending 为
+`unknown/scope_blocked`，也不会尝试自动重放帧。
 
 同一 `operation_id` 或同一“owner + idempotency”出现不同摘要时必须返回
 `IdempotencyConflict`，不得覆盖旧记录或执行硬件 I/O。
@@ -141,7 +151,7 @@ stateDiagram-v2
 ## 5. RuntimeControlGate 接入点
 
 当前 `ToolbusDaemon` 以 durability 回调把 `OperationLedger` 接入
-`RuntimeControlGate::gpio_write()` 和 `release()`：Gate 内存占位负责同作用域串行与异常
+`RuntimeControlGate` 的 GPIO、PWM、定时位流与 `release()` 路径：Gate 内存占位负责同作用域串行与异常
 回滚，持久索引负责跨进程查询和恢复，两者用途不混淆。
 
 当前执行顺序如下：
@@ -178,7 +188,7 @@ Release 采用相同的 pending/terminal 边界。Close 不确定时，可以由
 
 ### 6.1 文件与记录
 
-v1 使用版本化、追加式分段日志。每条记录包含：
+账本 manifest 保持 schema v2；追加记录格式当前为 v3，并兼容读取 v1/v2。每条记录包含：
 
 - magic、格式版本、记录类型和精确长度；
 - 单调递增的 journal sequence；
@@ -259,7 +269,9 @@ instance ID、owner key ID 和 operation ID；后者用 kind、lease ID 和幂�
 
 ### 8.2 CLI
 
-已提供四个结构化命令：
+已提供结构化的写入、停止、查询与定位命令；operation lookup 的 kind 可为
+`gpio_write`、`pwm_configure`、`pwm_stop`、`timed_bitstream_configure`、
+`timed_bitstream_frame`、`timed_bitstream_stop` 或 `control_release`。基础示例如下：
 
 ```text
 remote-cli --json runtime-gpio-write-operation \
@@ -270,7 +282,7 @@ remote-cli --json runtime-control-release-operation \
 remote-cli --json runtime-operation-status \
   <daemon实例ID> <owner-key-id> <operation-id>
 remote-cli --json runtime-operation-lookup \
-  <daemon实例ID> <owner-key-id> <gpio_write|control_release> \
+  <daemon实例ID> <owner-key-id> <operation-kind> \
   <lease ID> <idempotency-key>
 ```
 

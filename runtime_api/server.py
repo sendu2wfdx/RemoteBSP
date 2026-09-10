@@ -28,6 +28,7 @@ from .auth import (
     CONTROL_LEASE_REVOKE_PERMISSION,
     GPIO_WRITE_PERMISSION,
     PWM_WRITE_PERMISSION,
+    TIMED_BITSTREAM_WRITE_PERMISSION,
     MAXIMUM_API_KEY_BYTES,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
@@ -109,9 +110,12 @@ _DASHBOARD_ASSETS = {
 }
 GPIO_WRITE_COMMAND_GROUP = "gpio.write"
 PWM_WRITE_COMMAND_GROUP = "pwm.write"
+TIMED_BITSTREAM_WRITE_COMMAND_GROUP = "timed-bitstream.write"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
 _OPERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
-_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop"}
+_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop",
+                    "timed_bitstream_configure", "timed_bitstream_frame",
+                    "timed_bitstream_stop"}
 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
 MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
 MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS = 30.0
@@ -736,9 +740,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 "object_id": outcome["object_id"], "stopped": True,
             } if outcome["state"] == "committed" and
                 outcome["kind"] == "pwm_stop" else ({
+                "object_id": outcome["object_id"],
+            } if outcome["state"] == "committed" and outcome["kind"] in {
+                "timed_bitstream_configure", "timed_bitstream_frame"} else ({
+                "object_id": outcome["object_id"], "stopped": True,
+            } if outcome["state"] == "committed" and
+                outcome["kind"] == "timed_bitstream_stop" else ({
                     "released": True,
                 } if outcome["state"] == "committed" and
-                    outcome["kind"] == "control_release" else None)))),
+                    outcome["kind"] == "control_release" else None)))))),
             "error": error,
         }
 
@@ -1499,6 +1509,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
                             "当前API密钥没有PWM写权限")
                 return
+            if command_group == TIMED_BITSTREAM_WRITE_COMMAND_GROUP and \
+                    TIMED_BITSTREAM_WRITE_PERMISSION not in principal.permissions:
+                self._error(HTTPStatus.FORBIDDEN,"permission_denied",
+                            "当前API密钥没有定时位流写权限")
+                return
             if command_group == GPIO_WRITE_COMMAND_GROUP and \
                     not self.gpio_control_configured:
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1561,6 +1576,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         requester_key_id=principal.key_id,
                         deadline=self.request_deadline), deadline=self.request_deadline)
                 downstream_registered = True
+            elif command_group == TIMED_BITSTREAM_WRITE_COMMAND_GROUP:
+                daemon_id=getattr(self.control_leases,"daemon_instance_id",None)
+                if not isinstance(daemon_id,str): raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                downstream_started=True
+                call_with_deadline(self.provider.timed_bitstream_control_acquire,
+                    daemon_id,lease.lease_id,principal.key_id,node_id,resource_id,
+                    lambda: call_with_deadline(self.control_leases.remaining_ttl_ms,
+                        lease.lease_id,requester_key_id=principal.key_id,deadline=self.request_deadline),
+                    deadline=self.request_deadline)
+                downstream_registered=True
         except ValueError as error:
             if audit_intent is not None and not self._complete_control_audit(
                     audit_intent, result="rejected",
@@ -1766,7 +1791,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             # 管理员身份派生出另一个 locator。
             operation_owner_key_id = lease.owner_key_id
             if lease.command_group in {GPIO_WRITE_COMMAND_GROUP,
-                                       PWM_WRITE_COMMAND_GROUP}:
+                                       PWM_WRITE_COMMAND_GROUP,
+                                       TIMED_BITSTREAM_WRITE_COMMAND_GROUP}:
                 if not self.gpio_control_configured:
                     raise ControlLeaseError("Runtime控制后端不可用")
                 daemon_id = getattr(
@@ -2393,6 +2419,64 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_operation(outcome, audit_result=kind, principal=principal)
 
+    def _handle_timed_bitstream_operation(self, principal: AuthenticatedPrincipal,
+                                          operation: str) -> None:
+        value=self._read_control_json()
+        if value is None: return
+        common={"lease_id","node_id","resource_id","idempotency_key"}
+        extra={"configure":{"bit_period_ns","zero_high_ns","one_high_ns","reset_time_us"},
+               "frame":{"bit_count","data"},"stop":set()}[operation]
+        if set(value)!=common|extra:
+            self._error(HTTPStatus.BAD_REQUEST,"request_body_invalid","定时位流控制请求字段不合法"); return
+        kind="timed_bitstream_"+operation; audit_intent=None; downstream_started=False
+        try:
+            lease_id=validate_lease_id(value["lease_id"]); node_id=validate_control_id(value["node_id"],"node_id")
+            resource_id=validate_control_id(value["resource_id"],"resource_id")
+            idempotency_key=validate_idempotency_key(value["idempotency_key"])
+            fields=dict(value)
+            if operation=="frame": fields["data"]="<已按摘要审计>"
+            audit_intent=self._begin_control_audit(principal,action=kind,lease_id=lease_id,fields=fields)
+            if audit_intent is None: return
+            lease=call_with_deadline(self.control_leases.authorize,lease_id,
+                requester_key_id=principal.key_id,deadline=self.request_deadline)
+            if lease.command_group!=TIMED_BITSTREAM_WRITE_COMMAND_GROUP or lease.node_id!=node_id or lease.resource_id!=resource_id:
+                raise ControlLeaseConflict("控制租约范围与定时位流请求不匹配")
+            daemon_id=getattr(self.control_leases,"daemon_instance_id",None)
+            if not isinstance(daemon_id,str): raise ControlLeaseError("toolbusd实例身份尚未绑定")
+            downstream_started=True
+            if operation=="configure":
+                parameters=[value[name] for name in ("bit_period_ns","zero_high_ns","one_high_ns","reset_time_us")]
+                if any(type(item) is not int or not 1<=item<=0xffffffff for item in parameters): raise ValueError("定时位流配置参数必须是1～4294967295的整数")
+                outcome=call_with_deadline(self.provider.timed_bitstream_control_configure,
+                    daemon_id,lease_id,principal.key_id,node_id,resource_id,idempotency_key,*parameters,deadline=self.request_deadline)
+            elif operation=="frame":
+                bit_count=value["bit_count"]; encoded=value["data"]
+                if type(bit_count) is not int or not 1<=bit_count<=16176: raise ValueError("bit_count必须位于1～16176")
+                if not isinstance(encoded,str) or re.fullmatch(r"[0-9a-fA-F]*",encoded) is None or len(encoded)%2: raise ValueError("data必须是偶数长度十六进制字符串")
+                data=bytes.fromhex(encoded)
+                if len(data)!=(bit_count+7)//8: raise ValueError("data长度与bit_count不匹配")
+                outcome=call_with_deadline(self.provider.timed_bitstream_control_frame,
+                    daemon_id,lease_id,principal.key_id,node_id,resource_id,idempotency_key,bit_count,data,deadline=self.request_deadline)
+            else:
+                outcome=call_with_deadline(self.provider.timed_bitstream_control_stop,
+                    daemon_id,lease_id,principal.key_id,node_id,resource_id,idempotency_key,deadline=self.request_deadline)
+        except ValueError as error:
+            if audit_intent is not None: self._complete_control_audit(audit_intent,result="rejected",possibly_committed=False)
+            self._error(HTTPStatus.BAD_REQUEST,"request_body_invalid",str(error)); return
+        except ControlLeaseNotFound as error: self._error(HTTPStatus.NOT_FOUND,"control_lease_not_found",str(error)); return
+        except ControlLeaseOwnershipError as error: self._error(HTTPStatus.FORBIDDEN,"control_lease_not_owner",str(error)); return
+        except ControlLeaseConflict as error: self._error(HTTPStatus.CONFLICT,"control_lease_conflict",str(error)); return
+        except (RequestDeadlineExceeded,RuntimeProviderOperationError) as error:
+            uncertain=isinstance(error,RequestDeadlineExceeded) or error.possibly_committed
+            recovered=self._try_operation_lookup(principal.key_id,kind=kind,lease_id=lease_id,
+                idempotency_key=idempotency_key) if downstream_started and uncertain else None
+            if recovered is not None: self._send_operation(recovered,audit_result=kind+"_recovered",principal=principal)
+            elif uncertain: self._operation_uncertain(kind=kind,lease_id=lease_id,idempotency_key=idempotency_key)
+            else: self._structured_provider_error(error)
+            return
+        if audit_intent is not None and not self._complete_operation_audit(audit_intent,outcome,action=kind): return
+        self._send_operation(outcome,audit_result=kind,principal=principal)
+
     def _snapshot(self) -> SnapshotRead | None:
         try:
             read = call_with_deadline(
@@ -2796,6 +2880,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return
             self._handle_pwm_operation(principal, stop=parts[4] == "stop")
             return
+        if self.command == "POST" and len(parts) == 5 and \
+                parts[:4] == ["api",API_VERSION,"control","timed-bitstream"] and \
+                parts[4] in {"configure","frame","stop"}:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,"control_authentication_disabled",
+                            "定时位流控制要求启用API密钥认证"); return
+            principal=self._authorize(parsed.path,public_health=False,
+                                      required_permission=TIMED_BITSTREAM_WRITE_PERMISSION)
+            if not isinstance(principal,AuthenticatedPrincipal): return
+            self._handle_timed_bitstream_operation(principal,parts[4]); return
         if self.command == "POST" and parts == [
                 "api", API_VERSION, "control", "operation-lookups"]:
             if self.authenticator is None:

@@ -1,0 +1,2 @@
+# Studio 生产证据 Ed25519 离线签名；版本与 Ubuntu WSL/CI 验证环境一致。
+cryptography==41.0.7

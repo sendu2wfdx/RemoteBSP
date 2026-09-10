@@ -181,6 +181,9 @@ remotebsp::RuntimeOperationKind parse_runtime_operation_kind(
     }
     if (text == "pwm_configure") return remotebsp::RuntimeOperationKind::PwmConfigure;
     if (text == "pwm_stop") return remotebsp::RuntimeOperationKind::PwmStop;
+    if (text == "timed_bitstream_configure") return remotebsp::RuntimeOperationKind::TimedBitstreamConfigure;
+    if (text == "timed_bitstream_frame") return remotebsp::RuntimeOperationKind::TimedBitstreamFrame;
+    if (text == "timed_bitstream_stop") return remotebsp::RuntimeOperationKind::TimedBitstreamStop;
     throw std::invalid_argument(
         "Runtime 操作类型必须是 gpio_write、control_release、pwm_configure 或 pwm_stop");
 }
@@ -435,6 +438,10 @@ void print_usage() {
            "<预期节点UUID> <调用者ID> <PWM资源ID> <幂等键> <频率Hz> <duty0..10000> <active-low:0|1>\n"
         << "  runtime-pwm-stop-operation <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <PWM资源ID> <幂等键>\n"
+        << "  runtime-timed-bitstream-acquire <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <租约ms>\n"
+        << "  runtime-timed-bitstream-configure-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键> <位周期ns> <0高电平ns> <1高电平ns> <复位us>\n"
+        << "  runtime-timed-bitstream-frame-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键> <位数> <hex数据>\n"
+        << "  runtime-timed-bitstream-stop-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键>\n"
         << "  runtime-operation-status <daemon实例ID> <调用者ID> "
            "<operation ID>\n"
         << "  runtime-operation-lookup <daemon实例ID> <调用者ID> "
@@ -627,6 +634,14 @@ int run(const std::vector<std::string>& arguments,
         std::cout << (json_output ? "{\"schema_version\":1,\"command\":\"runtime-pwm-acquire\",\"data\":{}}\n" : "ok\n");
         return 0;
     }
+    if (name == "runtime-timed-bitstream-acquire" && arguments.size() == 7) {
+        client.runtime_control_acquire(parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), parse_hex_id(arguments[3], "预期节点UUID"),
+            arguments[4], parse_u32(arguments[5], "定时位流资源ID"),
+            parse_u32(arguments[6], "租约毫秒"), 0x0004U);
+        std::cout << (json_output ? "{\"schema_version\":1,\"command\":\"runtime-timed-bitstream-acquire\",\"data\":{}}\n" : "ok\n");
+        return 0;
+    }
 
     if (name == "runtime-gpio-write" && arguments.size() == 8) {
         const auto value = parse_u32(arguments[7], "GPIO 电平");
@@ -723,6 +738,31 @@ int run(const std::vector<std::string>& arguments,
             parse_hex_id(arguments[3], "预期节点UUID"), arguments[4], parse_u32(arguments[5], "PWM资源ID"), arguments[6]);
         remotebsp::cli_json::write_runtime_operation_outcome(std::cout, name, outcome);
         return 0;
+    }
+    if (name == "runtime-timed-bitstream-configure-operation" && arguments.size() == 11) {
+        if (!json_output) throw std::invalid_argument("runtime-timed-bitstream-configure-operation 必须与 --json 一起使用");
+        const auto outcome=client.runtime_timed_bitstream_configure_operation(
+            parse_hex_id(arguments[1],"daemon实例ID"),parse_hex_id(arguments[2],"控制租约ID"),
+            parse_hex_id(arguments[3],"预期节点UUID"),arguments[4],parse_u32(arguments[5],"定时位流资源ID"),arguments[6],
+            parse_u32(arguments[7],"位周期"),parse_u32(arguments[8],"0高电平"),parse_u32(arguments[9],"1高电平"),parse_u32(arguments[10],"复位时间"));
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout,name,outcome); return 0;
+    }
+    if (name == "runtime-timed-bitstream-frame-operation" && arguments.size() == 9) {
+        if (!json_output) throw std::invalid_argument("runtime-timed-bitstream-frame-operation 必须与 --json 一起使用");
+        const auto bits=parse_u32(arguments[7],"位数");
+        if(bits>std::numeric_limits<std::uint16_t>::max()) throw std::invalid_argument("位数超过16位范围");
+        const auto outcome=client.runtime_timed_bitstream_frame_operation(
+            parse_hex_id(arguments[1],"daemon实例ID"),parse_hex_id(arguments[2],"控制租约ID"),
+            parse_hex_id(arguments[3],"预期节点UUID"),arguments[4],parse_u32(arguments[5],"定时位流资源ID"),arguments[6],
+            static_cast<std::uint16_t>(bits),parse_hex(arguments[8]));
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout,name,outcome); return 0;
+    }
+    if (name == "runtime-timed-bitstream-stop-operation" && arguments.size() == 7) {
+        if (!json_output) throw std::invalid_argument("runtime-timed-bitstream-stop-operation 必须与 --json 一起使用");
+        const auto outcome=client.runtime_timed_bitstream_stop_operation(
+            parse_hex_id(arguments[1],"daemon实例ID"),parse_hex_id(arguments[2],"控制租约ID"),
+            parse_hex_id(arguments[3],"预期节点UUID"),arguments[4],parse_u32(arguments[5],"定时位流资源ID"),arguments[6]);
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout,name,outcome); return 0;
     }
 
     if (name == "runtime-operation-status" && arguments.size() == 4) {
@@ -1688,6 +1728,10 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-pwm-acquire" &&
              arguments[0] != "runtime-pwm-configure-operation" &&
              arguments[0] != "runtime-pwm-stop-operation" &&
+             arguments[0] != "runtime-timed-bitstream-acquire" &&
+             arguments[0] != "runtime-timed-bitstream-configure-operation" &&
+             arguments[0] != "runtime-timed-bitstream-frame-operation" &&
+             arguments[0] != "runtime-timed-bitstream-stop-operation" &&
              arguments[0] != "runtime-operation-status" &&
              arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&

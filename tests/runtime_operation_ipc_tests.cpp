@@ -787,6 +787,40 @@ void test_pwm_request_roundtrip_and_strict_decode() {
     expect_failure([&] { static_cast<void>(toolbusd::encode_ipc_runtime_pwm_stop_request(stop)); });
 }
 
+void test_timed_bitstream_request_roundtrip_and_bounds() {
+    toolbusd::RuntimeTimedBitstreamConfigureRequest configure;
+    configure.daemon_instance_id=filled<16>(1U);configure.lease_id=filled<16>(2U);
+    configure.expected_node_uuid=filled<16>(3U);configure.owner_key_id="owner";
+    configure.node_id=7U;configure.resource_id=0x0A000000U;configure.idempotency_key="cfg";
+    configure.bit_period_ns=1250U;configure.zero_high_ns=350U;
+    configure.one_high_ns=700U;configure.reset_time_us=80U;
+    auto encoded=toolbusd::encode_ipc_runtime_timed_bitstream_configure(configure);
+    auto decoded=toolbusd::decode_ipc_runtime_timed_bitstream_configure(encoded);
+    CHECK(decoded.bit_period_ns==1250U&&decoded.owner_key_id=="owner");
+    auto malformed=encoded;malformed[78U]=1U;
+    expect_failure([&]{static_cast<void>(toolbusd::decode_ipc_runtime_timed_bitstream_configure(malformed));});
+
+    toolbusd::RuntimeTimedBitstreamFrameRequest frame;
+    frame.daemon_instance_id=configure.daemon_instance_id;frame.lease_id=configure.lease_id;
+    frame.expected_node_uuid=configure.expected_node_uuid;frame.owner_key_id="owner";
+    frame.node_id=7U;frame.resource_id=0x0A000000U;frame.idempotency_key="frame";
+    frame.bit_count=16176U;frame.data.assign(2022U,0xA5U);
+    encoded=toolbusd::encode_ipc_runtime_timed_bitstream_frame(frame);
+    const auto frame_decoded=toolbusd::decode_ipc_runtime_timed_bitstream_frame(encoded);
+    CHECK(frame_decoded.data==frame.data&&frame_decoded.bit_count==frame.bit_count);
+    malformed=encoded;malformed[66U]=1U;
+    expect_failure([&]{static_cast<void>(toolbusd::decode_ipc_runtime_timed_bitstream_frame(malformed));});
+    frame.bit_count=16177U;frame.data.push_back(0U);
+    expect_failure([&]{static_cast<void>(toolbusd::encode_ipc_runtime_timed_bitstream_frame(frame));});
+
+    toolbusd::RuntimeTimedBitstreamStopRequest stop;
+    stop.daemon_instance_id=configure.daemon_instance_id;stop.lease_id=configure.lease_id;
+    stop.expected_node_uuid=configure.expected_node_uuid;stop.owner_key_id="owner";
+    stop.node_id=7U;stop.resource_id=0x0A000000U;stop.idempotency_key="stop";
+    encoded=toolbusd::encode_ipc_runtime_timed_bitstream_stop(stop);
+    CHECK(toolbusd::decode_ipc_runtime_timed_bitstream_stop(encoded).idempotency_key=="stop");
+}
+
 }  // namespace
 
 int main() {
@@ -797,6 +831,7 @@ int main() {
     test_json_is_exact();
     test_client_api_and_query_replay_contract();
     test_pwm_request_roundtrip_and_strict_decode();
+    test_timed_bitstream_request_roundtrip_and_bounds();
     if (failures != 0) {
         std::cerr << failures << " 项 Runtime operation IPC 测试失败\n";
         return 1;

@@ -1012,6 +1012,52 @@ void check_mid_log_corruption_fails_closed() {
     });
 }
 
+void check_timed_bitstream_v3_digest_only_and_recovery() {
+    TestDirectory directory;
+    const RuntimeTimedBitstreamFrameOperation frame{
+        identity(0x11U), identity(0x71U), identity(0x33U), "owner",
+        "frame-idem", 2U, 7U, 0x0A000000U, 16176U,
+        std::vector<std::uint8_t>(2022U, 0xA5U)};
+    OperationDigest operation_id{};
+    {
+        OperationLedger ledger(options(directory));
+        const auto begun = ledger.begin_timed_bitstream_frame(frame);
+        operation_id = begun.record.operation_id;
+        CHECK(begun.record.requested_payload_digest.has_value());
+        CHECK(!begun.record.requested_value.has_value());
+        CHECK(std::filesystem::file_size(
+                  directory.path() / "segment-0000000000000001.rbol") < 1024U);
+        auto changed = frame;
+        changed.data.back() ^= 1U;
+        CHECK(OperationLedger::derive_operation_id(changed) == operation_id);
+        CHECK(OperationLedger::derive_request_digest(changed) !=
+              begun.record.request_digest);
+        check_error(OperationLedgerError::IdempotencyConflict, [&] {
+            static_cast<void>(ledger.begin_timed_bitstream_frame(changed));
+        });
+    }
+    OperationLedger recovered(options(directory));
+    CHECK(recovered.mutation_available());
+    const auto found = recovered.lookup(operation_id, "owner");
+    CHECK(found.record->state == OperationState::Unknown);
+    CHECK(found.record->recovery == OperationRecovery::ScopeBlocked);
+    CHECK(found.record->requested_payload_digest.has_value());
+
+    TestDirectory stop_directory;
+    RuntimeTimedBitstreamStopOperation stop{
+        identity(0x11U), identity(0x72U), identity(0x33U), "owner",
+        "stop-idem", 2U, 7U, 0x0A000000U};
+    OperationLedger stop_ledger(options(stop_directory));
+    const auto begun = stop_ledger.begin_timed_bitstream_stop(stop);
+    OperationTerminalResult result;
+    result.object_id = 42U;
+    const auto terminal = stop_ledger.finish(
+        begun.record.operation_id, begun.record.request_digest,
+        OperationState::Committed, OperationRecovery::SafeClosed, result);
+    CHECK(terminal.state == OperationState::Committed);
+    CHECK(stop_ledger.blocked_scopes().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -1041,5 +1087,6 @@ int main() {
     check_unsafe_permissions_and_symlink_are_rejected();
     check_recovery_sync_failure_hides_partial_index();
     check_mid_log_corruption_fails_closed();
+    check_timed_bitstream_v3_digest_only_and_recovery();
     return 0;
 }

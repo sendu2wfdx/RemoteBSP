@@ -707,8 +707,8 @@ HMAC 请求摘要关联规范请求，但同样不保存幂等键原文或请求
 Mock/文件 Provider 仍使用 `runtime_process` 进程世代。能力字段
 `control_leases.backend_binding` 分别报告 `toolbusd_instance` 或 `runtime_process`。
 
-这个 HTTP 绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`。当前只有 GPIO 输出
-完成受信本地纵向控制竖切，其顺序、最终准入和本地信任边界见
+这个 HTTP 绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`。GPIO、PWM 和通用
+定时位流已经完成受信本地纵向控制竖切；GPIO 的顺序、最终准入和本地信任边界见
 [Runtime 到 toolbusd 的 GPIO 写控制边界](runtime-gpio-control.md)。
 GPIO 写竖切已经把实例标识、稳定节点 UUID、节点代次和租约校验带入 toolbusd 最终
 准入点，而不是只在 HTTP 入口预检。因此能力声明仅在
@@ -718,9 +718,26 @@ GPIO 写竖切已经把实例标识、稳定节点 UUID、节点代次和租约�
 还绑定 daemon 身份和单调 revision，旧并发结果不能复活已经撤销的能力证明，并始终保持
 `control_leases.loopback_only=true`。`operation_ledger` 同样公开
 `configured/operational/schema_version=1`，但不把仅存在本地适配代码误报为已通过 daemon
-准入。后续写命令入口
+准入。PWM 使用 `pwm.write`，通用定时位流使用 `timed-bitstream.write` 租约组；后续写命令入口
 必须在同一原子决策中校验身份、租约所有权和命令范围，并由 toolbusd 重新执行最终准入；
 不能仅凭客户端持有一个字符串 `lease_id` 就认为已获准执行。
+
+通用定时位流控制使用以下固定入口：
+
+```text
+POST /api/v1/control/timed-bitstream/configure
+POST /api/v1/control/timed-bitstream/frame
+POST /api/v1/control/timed-bitstream/stop
+```
+
+它要求 `runtime.timed_bitstream.write`，并复用同一租约、节点 UUID/代次、operation lookup、
+统一期限和持久审计边界。`configure` 只接受 `bit_period_ns`、`zero_high_ns`、
+`one_high_ns`、`reset_time_us` 四个时序字段；`frame` 接受 `bit_count` 和偶数长度十六进制
+`data`，正文必须精确等于 `ceil(bit_count/8)`，上限为 16176 bit/2022 字节；`stop` 不接受
+额外操作字段。MCU 仍只理解确定性位流，WS2812 色序、亮度、像素和动画由 Linux 生成。
+账本记录 configure 参数或 frame 的完整请求摘要，不保存最多 2022 字节正文；pending 重启
+恢复为 `unknown/scope_blocked`，不自动重放。成功 stop 为 `safe_closed`，远端
+`LeaseRequired` 资源仍在释放控制租约后才执行 `ResourceRelease`。
 
 控制请求现在从读取请求行之前建立一次不可续期的单调绝对期限。头部、请求体、daemon
 身份单飞、目标快照、资源状态 fanout、`remote-cli` 子进程、租约登记、GPIO 写入与释放

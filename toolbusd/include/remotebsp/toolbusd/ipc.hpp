@@ -47,6 +47,9 @@ enum class IpcRequestKind : std::uint8_t {
     LogicalRecordingStatus = 21,
     RuntimePwmConfigureOperation = 22,
     RuntimePwmStopOperation = 23,
+    RuntimeTimedBitstreamConfigureOperation = 24,
+    RuntimeTimedBitstreamFrameOperation = 25,
+    RuntimeTimedBitstreamStopOperation = 26,
 };
 constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
@@ -107,6 +110,9 @@ enum class RuntimeOperationKind : std::uint8_t {
     ControlRelease = 2U,
     PwmConfigure = 3U,
     PwmStop = 4U,
+    TimedBitstreamConfigure = 5U,
+    TimedBitstreamFrame = 6U,
+    TimedBitstreamStop = 7U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -206,6 +212,9 @@ struct IpcRequest {
     RuntimeControlReleaseRequest runtime_control_release;
     RuntimePwmConfigureRequest runtime_pwm_configure;
     RuntimePwmStopRequest runtime_pwm_stop;
+    RuntimeTimedBitstreamConfigureRequest runtime_timed_bitstream_configure;
+    RuntimeTimedBitstreamFrameRequest runtime_timed_bitstream_frame;
+    RuntimeTimedBitstreamStopRequest runtime_timed_bitstream_stop;
     RuntimeOperationQuery runtime_operation_query;
     RuntimeOperationLookup runtime_operation_lookup;
     std::string logical_recording_name;
@@ -333,6 +342,12 @@ void write_ipc_runtime_pwm_configure_operation_request(
     int socket, const RuntimePwmConfigureRequest& request);
 void write_ipc_runtime_pwm_stop_operation_request(
     int socket, const RuntimePwmStopRequest& request);
+void write_ipc_runtime_timed_bitstream_configure_operation_request(
+    int socket, const RuntimeTimedBitstreamConfigureRequest& request);
+void write_ipc_runtime_timed_bitstream_frame_operation_request(
+    int socket, const RuntimeTimedBitstreamFrameRequest& request);
+void write_ipc_runtime_timed_bitstream_stop_operation_request(
+    int socket, const RuntimeTimedBitstreamStopRequest& request);
 void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request);
 void write_ipc_runtime_operation_lookup_request(
@@ -398,6 +413,18 @@ RuntimePwmConfigureRequest decode_ipc_runtime_pwm_request(
 std::vector<std::uint8_t> encode_ipc_runtime_pwm_stop_request(
     const RuntimePwmStopRequest& request);
 RuntimePwmStopRequest decode_ipc_runtime_pwm_stop_request(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_configure(
+    const RuntimeTimedBitstreamConfigureRequest& request);
+RuntimeTimedBitstreamConfigureRequest decode_ipc_runtime_timed_bitstream_configure(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_frame(
+    const RuntimeTimedBitstreamFrameRequest& request);
+RuntimeTimedBitstreamFrameRequest decode_ipc_runtime_timed_bitstream_frame(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_stop(
+    const RuntimeTimedBitstreamStopRequest& request);
+RuntimeTimedBitstreamStopRequest decode_ipc_runtime_timed_bitstream_stop(
     const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
     const RuntimeOperationQuery& query);

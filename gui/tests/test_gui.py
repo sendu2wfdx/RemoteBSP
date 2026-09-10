@@ -550,6 +550,10 @@ class GuiTest(unittest.TestCase):
                 self.assertTrue(target["production_batch_enabled"])
                 self.assertTrue(target["production_history_enabled"])
                 self.assertFalse(target["stlink_deployment_enabled"])
+                self.assertFalse(target["can_katapult_deployment_enabled"])
+                self.assertFalse(target["can_katapult_deployment"]["available"])
+                self.assertIsNone(
+                    target["can_katapult_deployment"]["can_interface"])
                 self.assertFalse(target["device_parameter_write_enabled"])
                 self.assertEqual(target["parallel_jobs"], 32)
                 self.assertEqual(target["project_schema_version"], 2)
@@ -785,7 +789,9 @@ class GuiTest(unittest.TestCase):
                     self.assertIn(marker, page)
                 for marker in (b"deployBuildId", b"deployUuid",
                                b"deployConfirmation", b"deployPreflight",
-                               b"deployExecute", b"deployResult"):
+                               b"deployExecute", b"deployResult",
+                               b"deployBackend", b"deployCanInterface",
+                               b"deployKatapultUuid"):
                     self.assertIn(marker, page)
                 for marker in (b"parameterUuid", b"parameterGeneration",
                                b"parameterId", b"parameterValue",
@@ -814,6 +820,10 @@ class GuiTest(unittest.TestCase):
                 })
                 script = urlopen(base + "/app.js").read()
                 self.assertIn(b"/api/deployment/preflight", script)
+                self.assertIn(
+                    b"/api/deployment/can-katapult/preflight", script)
+                self.assertIn(
+                    b"/api/deployment/can-katapult/execute", script)
                 self.assertIn(b"/api/deployment/execute", script)
                 self.assertIn(
                     b"/api/device-parameters/write-preflight", script)

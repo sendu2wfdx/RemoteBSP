@@ -50,7 +50,7 @@ from production_history import (
 )
 from device_parameters import DeviceParameterError, DeviceParameterManager
 from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
-from web_deployment import WebDeploymentController
+from web_deployment import WebCanKatapultDeploymentController, WebDeploymentController
 from parameter_audit import ParameterAuditStore
 from web_device_parameters import WebDeviceParameterController
 from runtime_pwm_proxy import RuntimePwmProxy, RuntimePwmProxyError
@@ -123,7 +123,12 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
 
     @property
     def deployment_controller(self) -> WebDeploymentController | None:
-        return getattr(self.server, "deployment_controller")
+        return getattr(self.server, "deployment_controller", None)
+
+    @property
+    def can_katapult_deployment_controller(self) -> \
+            WebCanKatapultDeploymentController | None:
+        return getattr(self.server, "can_katapult_deployment_controller", None)
 
     @property
     def parameter_write_controller(self) -> WebDeviceParameterController | None:
@@ -197,6 +202,14 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "production_batch_enabled": True,
                 "production_history_enabled": True,
                 "stlink_deployment_enabled": self.deployment_controller is not None,
+                "can_katapult_deployment_enabled":
+                    self.can_katapult_deployment_controller is not None,
+                "can_katapult_deployment": {
+                    "available": self.can_katapult_deployment_controller is not None,
+                    "can_interface": (self.can_katapult_deployment_controller.can_interface
+                                      if self.can_katapult_deployment_controller is not None
+                                      else None),
+                },
                 "device_parameter_write_enabled":
                     self.parameter_write_controller is not None,
                 "device_parameters_enabled":
@@ -344,6 +357,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/device-parameters/backup",
                         "/api/deployment/preflight",
                         "/api/deployment/execute",
+                        "/api/deployment/can-katapult/preflight",
+                        "/api/deployment/can-katapult/execute",
                         "/api/device-parameters/write-preflight",
                         "/api/device-parameters/restore-preflight",
                         "/api/device-parameters/execute",
@@ -361,18 +376,22 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
             if path.startswith("/api/deployment/"):
-                controller = self.deployment_controller
+                can_katapult = path.startswith("/api/deployment/can-katapult/")
+                controller = (self.can_katapult_deployment_controller if
+                              can_katapult else self.deployment_controller)
                 if controller is None:
                     self._send_json(
-                        {"ok": False, "error": "Studio未配置受控ST-Link部署入口"},
+                        {"ok": False, "error": ("Studio未配置受控CAN Katapult部署入口"
+                         if can_katapult else "Studio未配置受控ST-Link部署入口")},
                         HTTPStatus.SERVICE_UNAVAILABLE)
                     return
                 if path.endswith("/preflight"):
-                    if set(request) != {"build_id", "expected_uuid"}:
+                    expected_fields = ({"build_id", "expected_uuid", "can_interface",
+                                        "katapult_uuid"} if can_katapult else
+                                       {"build_id", "expected_uuid"})
+                    if set(request) != expected_fields:
                         raise FirmwareDeploymentError("Web部署预检字段集合无效")
-                    response = controller.preflight(
-                        build_id=request.get("build_id"),
-                        expected_uuid=request.get("expected_uuid"))
+                    response = controller.preflight(**request)
                 else:
                     if set(request) != {"confirmation_token", "confirmation",
                                        "flash_timeout", "reconnect_timeout",
@@ -618,6 +637,8 @@ def make_server(host: str, port: int,
                 history_root: Path = DEFAULT_HISTORY_ROOT,
                 device_parameter_manager: DeviceParameterManager | None = None,
                 deployment_controller: WebDeploymentController | None = None,
+                can_katapult_deployment_controller:
+                    WebCanKatapultDeploymentController | None = None,
                 parameter_write_controller:
                     WebDeviceParameterController | None = None,
                 runtime_pwm_proxy: RuntimePwmProxy | None = None,
@@ -636,6 +657,7 @@ def make_server(host: str, port: int,
         history_root)
     server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
     server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
+    server.can_katapult_deployment_controller = can_katapult_deployment_controller  # type: ignore[attr-defined]
     server.parameter_write_controller = parameter_write_controller  # type: ignore[attr-defined]
     server.runtime_pwm_proxy = runtime_pwm_proxy  # type: ignore[attr-defined]
     return server
@@ -662,6 +684,12 @@ def main() -> int:
     parser.add_argument("--deployment-record-root", type=Path,
                         default=GUI_ROOT / "deployment-records",
                         help="已核验部署记录目录")
+    parser.add_argument("--enable-can-katapult-deployment", action="store_true",
+                        help="显式启用本地Web两阶段CAN Katapult部署入口")
+    parser.add_argument("--can-katapult-interface",
+                        help="Web CAN Katapult唯一允许使用的CAN接口")
+    parser.add_argument("--katapult-flashtool", type=Path,
+                        help="服务端固定的Katapult flashtool.py路径")
     parser.add_argument("--enable-device-parameter-write", action="store_true",
                         help="显式启用本地Web设备参数写入与恢复")
     parser.add_argument("--parameter-audit-dir", type=Path,
@@ -702,6 +730,22 @@ def main() -> int:
                     remote_cli=args.remote_cli))
         except FirmwareDeploymentError as error:
             parser.error(str(error))
+    can_katapult_controller = None
+    if args.enable_can_katapult_deployment:
+        if not args.toolbusd_socket or not args.can_katapult_interface or \
+                args.katapult_flashtool is None:
+            parser.error("启用Web CAN Katapult部署必须配置toolbusd、CAN接口和flashtool")
+        try:
+            can_katapult_controller = WebCanKatapultDeploymentController(
+                output_root=DEFAULT_OUTPUT_ROOT,
+                record_root=args.deployment_record_root,
+                can_interface=args.can_katapult_interface,
+                flashtool=args.katapult_flashtool,
+                reader_factory=lambda expected_uuid: ToolbusdIdentityReader(
+                    args.toolbusd_socket, args.node_id,
+                    expected_uuid=expected_uuid, remote_cli=args.remote_cli))
+        except FirmwareDeploymentError as error:
+            parser.error(str(error))
     parameter_write_controller = None
     if args.enable_device_parameter_write:
         if parameter_manager is None or args.parameter_audit_dir is None or \
@@ -729,6 +773,7 @@ def main() -> int:
         history_root=args.history_root,
         device_parameter_manager=parameter_manager,
         deployment_controller=deployment_controller,
+        can_katapult_deployment_controller=can_katapult_controller,
         parameter_write_controller=parameter_write_controller,
         runtime_pwm_proxy=runtime_pwm_proxy)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")

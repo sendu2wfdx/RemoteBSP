@@ -374,6 +374,37 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OK)
         self.assertTrue(validated["validation"]["valid"])
 
+    def test_offline_ed25519_signing_cli_and_tamper_failure(self):
+        private = self.directory / "signing-private.pem"
+        public = self.directory / "signing-public.pem"
+        signature = self.directory / "batch-signature.json"
+        code, generated, _, _ = self._call([
+            "signing-keygen", "--private-key-output", str(private),
+            "--public-key-output", str(public)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(generated["time_authority"], "none")
+
+        code, signed, _, _ = self._call([
+            "evidence-sign", "--evidence", str(self.manifest_path),
+            "--private-key", str(private), "--signature-output", str(signature)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(signed["time_trusted"])
+        code, verified, _, _ = self._call([
+            "evidence-verify", "--evidence", str(self.manifest_path),
+            "--signature", str(signature), "--public-key", str(public)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertTrue(verified["verification"]["valid"])
+
+        changed = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        changed["batch"]["name"] = "篡改批次"
+        changed_path = self.directory / "changed.json"
+        changed_path.write_text(json.dumps(changed), encoding="utf-8")
+        code, error, _, _ = self._call([
+            "evidence-verify", "--evidence", str(changed_path),
+            "--signature", str(signature), "--public-key", str(public)])
+        self.assertEqual(code, EXIT_INPUT)
+        self.assertFalse(error["ok"])
+
     def test_history_save_dry_run_save_and_search(self):
         history = self.directory / "history"
         code, error, _, _ = self._call([

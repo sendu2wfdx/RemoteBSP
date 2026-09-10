@@ -1798,6 +1798,70 @@ void check_pwm_old_stop_then_precreate_expiry_is_safe_closed() {
     assert(gate.shutdown() == 0U);
 }
 
+void check_timed_bitstream_configure_frame_stop() {
+    std::uint64_t now = 1000000000ULL;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{}; daemon[0] = 1U;
+    std::array<std::uint8_t, 16> lease{}; lease[0] = 2U;
+    toolbusd::RuntimeTimedBitstreamConfigureRequest configure;
+    configure.daemon_instance_id = daemon; configure.lease_id = lease;
+    configure.expected_node_uuid[0] = 3U; configure.owner_key_id = "lights";
+    configure.node_id = 7U; configure.resource_id = 0x0A000000U;
+    configure.idempotency_key = "configure-1"; configure.bit_period_ns = 1250U;
+    configure.zero_high_ns = 350U; configure.one_high_ns = 700U;
+    configure.reset_time_us = 80U;
+    toolbusd::RuntimeControlAcquireRequest acquire;
+    acquire.daemon_instance_id = daemon; acquire.lease_id = lease;
+    acquire.expected_node_uuid = configure.expected_node_uuid;
+    acquire.owner_key_id = configure.owner_key_id;
+    acquire.permissions = toolbusd::kRuntimePermissionTimedBitstreamWrite;
+    acquire.node_id = configure.node_id; acquire.resource_id = configure.resource_id;
+    acquire.ttl_ms = 1000U;
+    protocol::ResourceDescriptor resource{configure.resource_id,
+        protocol::ResourceType::TimedBitstream, 0U,
+        protocol::kResourceFlagNative, 0U, 0U};
+    auto resource_contract = contract(configure.resource_id);
+    gate.acquire(acquire, daemon, 9U, resource, resource_contract);
+    std::uint32_t create_calls = 0U, write_calls = 0U, stop_calls = 0U;
+    toolbusd::RuntimeControlGate::TimedBitstreamIo io{
+        [&](std::uint32_t period, std::uint32_t, std::uint32_t, std::uint32_t) {
+            assert(period == 1250U); ++create_calls; return 77U;
+        },
+        [&](std::uint32_t object, std::uint16_t bits,
+            const std::vector<std::uint8_t>& data) {
+            assert(object == 77U && bits == 24U && data.size() == 3U); ++write_calls;
+        },
+        [&](std::uint32_t, std::uint64_t,
+            const std::array<std::uint8_t, 16>&, std::uint32_t object) {
+            assert(object == 77U); ++stop_calls;
+        }};
+    assert(gate.timed_bitstream_configure(configure, daemon, 9U, resource,
+                                          resource_contract, io).object_id == 77U);
+    assert(gate.timed_bitstream_configure(configure, daemon, 9U, resource,
+                                          resource_contract, io).replayed);
+    toolbusd::RuntimeTimedBitstreamFrameRequest frame;
+    frame.daemon_instance_id = daemon; frame.lease_id = lease;
+    frame.expected_node_uuid = configure.expected_node_uuid;
+    frame.owner_key_id = configure.owner_key_id; frame.node_id = configure.node_id;
+    frame.resource_id = configure.resource_id; frame.idempotency_key = "frame-1";
+    frame.bit_count = 24U; frame.data = {0x12U, 0x34U, 0x56U};
+    assert(gate.timed_bitstream_frame(frame, daemon, 9U, resource,
+                                     resource_contract, io).object_id == 77U);
+    toolbusd::RuntimeTimedBitstreamStopRequest stop;
+    stop.daemon_instance_id = daemon; stop.lease_id = lease;
+    stop.expected_node_uuid = configure.expected_node_uuid;
+    stop.owner_key_id = configure.owner_key_id; stop.node_id = configure.node_id;
+    stop.resource_id = configure.resource_id; stop.idempotency_key = "stop-1";
+    assert(gate.timed_bitstream_stop(stop, daemon, 9U, resource,
+                                    resource_contract, io).object_id == 77U);
+    assert(create_calls == 1U && write_calls == 1U && stop_calls == 1U);
+    expect_error(toolbusd::RuntimeControlError::ObjectRetired, [&] {
+        auto next = frame; next.idempotency_key = "frame-2";
+        static_cast<void>(gate.timed_bitstream_frame(next, daemon, 9U, resource,
+                                                    resource_contract, io));
+    });
+}
+
 }  // namespace
 
 int main() {
@@ -1830,4 +1894,5 @@ int main() {
     check_pwm_configure_stop_and_typed_cleanup();
     check_pwm_failed_stop_retains_retryable_object();
     check_pwm_old_stop_then_precreate_expiry_is_safe_closed();
+    check_timed_bitstream_configure_frame_stop();
 }

@@ -329,6 +329,24 @@ python3 gui/studio_cli.py history-search --history-root ./local-history \
 `deploy-stlink` 复核构建记录和固件哈希后执行 OpenOCD 写入、校验和复位。
 `deploy-can-katapult` 复核同一受保护构建记录中的 `firmware.bin`，拒绝缺少 UUID 的
 广播写入，并在升级后沿用相同的板卡、工程、配置和固件四重身份核验及部署记录。
+
+Web CAN Katapult 入口默认关闭。启用时必须固定 toolbusd、本次服务唯一允许的 CAN
+接口以及普通 flashtool 文件：
+
+```bash
+python3 gui/server.py --toolbusd-socket /run/remotebsp/toolbusd.sock \
+  --enable-can-katapult-deployment --can-katapult-interface can0 \
+  --katapult-flashtool firmware/vendor/katapult/scripts/flashtool.py
+```
+
+预检端点 `/api/deployment/can-katapult/preflight` 只接受 `build_id`、
+`expected_uuid`、`can_interface` 和 `katapult_uuid`；接口必须与服务端固定值完全一致，
+Katapult UUID 必须为定向 UUID。预检复核受保护的 `firmware.bin` 与 8 KiB Katapult
+APP 布局，并读取当前运行节点身份，但不会烧录。执行端点
+`/api/deployment/can-katapult/execute` 只接受一次性确认令牌、固定确认短语和有界超时，
+不接受命令、脚本或文件路径。成功写入后必须等待同一 RemoteBSP UUID 节点重连，
+完成板型、工程、配置、固件四重身份核验，才会原子写入自哈希部署记录；CAN 后端记录
+绑定实际烧录的 `firmware.bin`。实体 CAN 烧录与重连证据仍需在目标板上补充。
 当前 CAN Katapult 路径已完成假执行器单元测试，尚未完成实体升级验收；USB Katapult
 仍未接入 Studio 部署命令。独立版本化
 `FirmwareIdentity` 命令已经贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与
@@ -352,6 +370,37 @@ CLI 单路径最长 512 个字符，工程和差异输入最多 128 KiB，生产
 和 64 份差异资料。输出归档使用同目录临时文件，默认以原子无覆盖方式发布，只有显式
 `--force` 才允许原子替换用户指定的文件。
 `history-search` 只打开已有带标记历史库，不会因查询创建目录。
+
+### 离线签名与时间边界
+
+运行签名 CLI 或 GUI 测试前安装仓库固定的依赖版本：
+
+```bash
+python3 -m pip install -r gui/requirements.txt
+```
+
+CI 的 Ubuntu 主机与 Mock 全量测试 job 使用同一文件安装
+`cryptography==41.0.7`，签名测试不会依赖 runner 偶然预装的软件包。
+
+生产批次清单和完整核验后的部署记录可以使用脱离原记录的 Ed25519 信封签名。签名不会
+改变 v1 清单、部署记录、自哈希或历史文件名；验证必须同时提供原证据、签名信封和明确的
+公钥。先生成离线密钥对，再签名和验证：
+
+```bash
+python3 gui/studio_cli.py signing-keygen \
+  --private-key-output ./offline-private.pem \
+  --public-key-output ./offline-public.pem
+python3 gui/studio_cli.py evidence-sign --evidence ./pilot-001-manifest.json \
+  --private-key ./offline-private.pem --signature-output ./pilot-001.signature.json
+python3 gui/studio_cli.py evidence-verify --evidence ./pilot-001-manifest.json \
+  --signature ./pilot-001.signature.json --public-key ./offline-public.pem
+```
+
+私钥应离线保管，不能放入生产历史、工程归档或部署资料包。`key_id` 是原始 Ed25519 公钥
+的 SHA-256 指纹，不是人员身份或授权证明。签名信封中的本机 UTC 固定声明
+`source=host_system_clock,trusted=false`：它只便于人工排序，Ed25519 只证明持钥者签署了
+指定内容，不证明签署时刻。当前没有 TSA、硬件安全时钟或其他外部可信时间源，因此 CLI
+不会提供“可信时间”成功状态；后续接入外部时间证明时必须作为独立、可验证的证据层。
 
 纯资料命令的响应都带有“未烧录、未访问硬件”的执行状态。烧录及设备参数修改必须
 继续保持独立、显式命令，不能暗中附加到 `build`、`batch-create` 或 `history-save`。

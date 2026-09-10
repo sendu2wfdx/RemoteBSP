@@ -79,6 +79,9 @@ enum class RuntimeOperationKind : std::uint8_t {
     ControlRelease = 2U,
     PwmConfigure = 3U,
     PwmStop = 4U,
+    TimedBitstreamConfigure = 5U,
+    TimedBitstreamFrame = 6U,
+    TimedBitstreamStop = 7U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -369,6 +372,27 @@ public:
         const std::string& idempotency_key, std::uint32_t frequency_hz,
         std::uint16_t duty, bool active_low) const;
     RuntimeOperationOutcome runtime_pwm_stop_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key) const;
+    RuntimeOperationOutcome runtime_timed_bitstream_configure_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key, std::uint32_t bit_period_ns,
+        std::uint32_t zero_high_ns, std::uint32_t one_high_ns,
+        std::uint32_t reset_time_us) const;
+    RuntimeOperationOutcome runtime_timed_bitstream_frame_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key, std::uint16_t bit_count,
+        const std::vector<std::uint8_t>& data) const;
+    RuntimeOperationOutcome runtime_timed_bitstream_stop_operation(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
         const std::array<std::uint8_t, 16>& expected_node_uuid,

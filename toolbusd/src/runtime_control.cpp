@@ -1,4 +1,5 @@
 #include "remotebsp/toolbusd/runtime_control.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -195,6 +196,11 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
         if (iterator->second.retain_until_ns > now_ns) ++iterator;
         else iterator = pwm_completed_.erase(iterator);
     }
+    for (auto iterator = timed_bitstream_completed_.begin();
+         iterator != timed_bitstream_completed_.end();) {
+        if (iterator->second.retain_until_ns > now_ns) ++iterator;
+        else iterator = timed_bitstream_completed_.erase(iterator);
+    }
     return tasks;
 }
 
@@ -341,7 +347,8 @@ void RuntimeControlGate::bind_pwm_remote_lease(
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = leases_.find(binary_id(lease_id));
     if (found == leases_.end() ||
-        found->second.permissions != kRuntimePermissionPwmWrite ||
+        (found->second.permissions != kRuntimePermissionPwmWrite &&
+         found->second.permissions != kRuntimePermissionTimedBitstreamWrite) ||
         found->second.remote_lease_id != 0U)
         reject(RuntimeControlError::LeaseConflict,
                "PWM 远端租约无法绑定到当前本地租约");
@@ -369,13 +376,17 @@ void RuntimeControlGate::acquire(
                "Runtime 控制租约绑定了其他 toolbusd 实例");
     }
     if (request.permissions != kRuntimePermissionGpioWrite &&
-        request.permissions != kRuntimePermissionPwmWrite) {
+        request.permissions != kRuntimePermissionPwmWrite &&
+        request.permissions != kRuntimePermissionTimedBitstreamWrite) {
         reject(RuntimeControlError::PermissionDenied,
                "Runtime 控制租约没有唯一的受支持写权限");
     }
-    const auto expected_type = request.permissions == kRuntimePermissionPwmWrite
-                                   ? protocol::ResourceType::Pwm
-                                   : protocol::ResourceType::Gpio;
+    const auto expected_type =
+        request.permissions == kRuntimePermissionPwmWrite
+            ? protocol::ResourceType::Pwm
+            : (request.permissions == kRuntimePermissionTimedBitstreamWrite
+                   ? protocol::ResourceType::TimedBitstream
+                   : protocol::ResourceType::Gpio);
     if (descriptor.resource_id != request.resource_id ||
         descriptor.type != expected_type ||
         contract.resource_id != request.resource_id ||
@@ -1239,6 +1250,273 @@ RuntimePwmResult RuntimeControlGate::pwm_stop(
     }
 }
 
+RuntimeTimedBitstreamResult RuntimeControlGate::timed_bitstream_configure(
+    const RuntimeTimedBitstreamConfigureRequest& request,
+    const std::array<std::uint8_t, 16>& daemon, std::uint64_t generation,
+    const protocol::ResourceDescriptor& descriptor,
+    const protocol::ResourceContract& contract, const TimedBitstreamIo& io,
+    const TimedBitstreamDurability& durability) {
+    const bool durable = durability.pending || durability.committed || durability.failed;
+    try {
+        static_cast<void>(protocol::encode_timed_bitstream_create({
+            0U, request.bit_period_ns, request.zero_high_ns,
+            request.one_high_ns, request.reset_time_us}));
+    } catch (const protocol::WaveformPayloadException&) {
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流配置参数无效");
+    }
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !nonzero(request.expected_node_uuid) ||
+        !valid_identity(request.owner_key_id) || !valid_idempotency(request.idempotency_key) ||
+        request.node_id == 0U || request.node_id > 127U || request.resource_id == 0U ||
+        !io.create || !io.stop ||
+        (durable && (!durability.pending || !durability.committed || !durability.failed)))
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流配置合同无效");
+    if (request.daemon_instance_id != daemon)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime定时位流配置绑定了其他daemon");
+    if (request.permissions != kRuntimePermissionTimedBitstreamWrite)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime定时位流配置权限不完整或包含未知位");
+    if (descriptor.resource_id != request.resource_id ||
+        descriptor.type != protocol::ResourceType::TimedBitstream ||
+        contract.resource_id != request.resource_id ||
+        (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U)
+        reject(RuntimeControlError::ContractRejected,
+               "目标资源不是允许独占写入的静态定时位流合同");
+    const auto scope = scope_key(request.node_id, request.resource_id);
+    const auto lease_key = binary_id(request.lease_id);
+    std::string key = "timed-configure:" + request.owner_key_id + '\0' + request.idempotency_key;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!scope_available_.wait_for(lock, kSameScopeWait,
+        [&] { return !in_flight_scopes_.count(scope); }))
+        reject(RuntimeControlError::LeaseConflict, "定时位流前序命令尚未结束");
+    const auto lease = leases_.find(lease_key);
+    if (stopping_ || lease == leases_.end() || lease->second.deadline_ns <= monotonic_ns_())
+        reject(RuntimeControlError::LeaseNotFound, "定时位流租约不存在或已过期");
+    if (lease->second.cleanup_failed || lease->second.owner_key_id != request.owner_key_id ||
+        lease->second.expected_node_uuid != request.expected_node_uuid ||
+        lease->second.permissions != request.permissions || lease->second.node_id != request.node_id ||
+        lease->second.resource_id != request.resource_id || lease->second.node_generation != generation)
+        reject(RuntimeControlError::LeaseConflict, "定时位流租约身份、范围或代次不匹配");
+    const auto prior = timed_bitstream_completed_.find(key);
+    if (prior != timed_bitstream_completed_.end()) {
+        const auto& old = prior->second;
+        if (old.kind != 1U || old.lease_id != request.lease_id ||
+            old.bit_period_ns != request.bit_period_ns || old.zero_high_ns != request.zero_high_ns ||
+            old.one_high_ns != request.one_high_ns || old.reset_time_us != request.reset_time_us)
+            reject(RuntimeControlError::IdempotencyConflict, "定时位流配置幂等键冲突");
+        auto result = old.result; result.replayed = true; return result;
+    }
+    if (timed_bitstream_completed_.size() >= history_capacity_)
+        reject(RuntimeControlError::CapacityExceeded, "定时位流幂等历史已满");
+    timed_bitstream_completed_.emplace(key, CompletedTimedBitstreamCommand{
+        request.lease_id, request.owner_key_id, request.node_id, request.resource_id, 1U,
+        request.bit_period_ns, request.zero_high_ns, request.one_high_ns,
+        request.reset_time_us, 0U, {}, {}, std::numeric_limits<std::uint64_t>::max()});
+    const auto old_it = pwm_objects_.find(scope);
+    const auto old = old_it == pwm_objects_.end() ? std::optional<PwmObject>{} : old_it->second;
+    in_flight_scopes_.insert(scope); lock.unlock();
+    bool pending_done = false;
+    bool create_started = false;
+    std::uint32_t object_id = 0U;
+    try {
+        if (durable) { durability.pending(); pending_done = true; }
+        if (old) old->stopper(request.node_id, old->node_generation,
+                              old->expected_node_uuid, old->object_id);
+        lock.lock(); pwm_objects_.erase(scope);
+        pwm_objects_.emplace(scope, PwmObject{0U, generation, request.expected_node_uuid,
+                                              0U, 0U, false, io.stop}); lock.unlock();
+        create_started = true;
+        object_id = io.create(request.bit_period_ns, request.zero_high_ns,
+                              request.one_high_ns, request.reset_time_us);
+        if (object_id == 0U) reject(RuntimeControlError::SafeStopFailed,
+                                    "TIMED_BITSTREAM_CREATE未返回对象ID");
+        lock.lock(); pwm_objects_.at(scope).object_id = object_id; lock.unlock();
+        RuntimeTimedBitstreamResult result{kRuntimeControlIpcVersion, object_id, false};
+        if (durable) durability.committed(result);
+        lock.lock(); auto& saved = timed_bitstream_completed_.at(key);
+        saved.result = result; saved.retain_until_ns = monotonic_ns_() + kIdempotencyRetentionNs;
+        in_flight_scopes_.erase(scope); lock.unlock();
+        scope_available_.notify_all(); expiry_changed_.notify_all(); return result;
+    } catch (...) {
+        bool closed = !create_started;
+        if (object_id != 0U) try { io.stop(request.node_id, generation,
+            request.expected_node_uuid, object_id); closed = true; } catch (...) {}
+        lock.lock(); if (closed) pwm_objects_.erase(scope);
+        else { const auto active = leases_.find(lease_key); if (active != leases_.end()) active->second.cleanup_failed = true; }
+        timed_bitstream_completed_.erase(key); in_flight_scopes_.erase(scope); lock.unlock();
+        scope_available_.notify_all(); expiry_changed_.notify_all();
+        if (durable && pending_done) durability.failed(
+            closed ? DurableRecovery::SafeClosed : DurableRecovery::ScopeBlocked,
+            RuntimeControlError::SafeStopFailed);
+        throw;
+    }
+}
+
+RuntimeTimedBitstreamResult RuntimeControlGate::timed_bitstream_frame(
+    const RuntimeTimedBitstreamFrameRequest& request,
+    const std::array<std::uint8_t, 16>& daemon, std::uint64_t generation,
+    const protocol::ResourceDescriptor& descriptor,
+    const protocol::ResourceContract& contract, const TimedBitstreamIo& io,
+    const TimedBitstreamDurability& durability) {
+    const bool durable = durability.pending || durability.committed || durability.failed;
+    try { static_cast<void>(protocol::encode_timed_bitstream_write({request.bit_count, request.data})); }
+    catch (const protocol::WaveformPayloadException&) {
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流帧载荷无效");
+    }
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !nonzero(request.expected_node_uuid) ||
+        !valid_identity(request.owner_key_id) || !valid_idempotency(request.idempotency_key) ||
+        !io.write ||
+        request.node_id == 0U || request.node_id > 127U || request.resource_id == 0U ||
+        (durable && (!durability.pending || !durability.committed || !durability.failed)))
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流帧合同无效");
+    if (request.daemon_instance_id != daemon)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime定时位流帧绑定了其他daemon");
+    if (request.permissions != kRuntimePermissionTimedBitstreamWrite)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime定时位流帧权限不完整或包含未知位");
+    if (descriptor.type != protocol::ResourceType::TimedBitstream ||
+        descriptor.resource_id != request.resource_id ||
+        contract.resource_id != request.resource_id ||
+        (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U)
+        reject(RuntimeControlError::ContractRejected,
+               "目标资源不是允许独占写入的静态定时位流合同");
+    const auto scope = scope_key(request.node_id, request.resource_id);
+    const auto lease_key = binary_id(request.lease_id);
+    std::string key = "timed-frame:" + request.owner_key_id + '\0' + request.idempotency_key;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!scope_available_.wait_for(lock, kSameScopeWait,
+        [&] { return !in_flight_scopes_.count(scope); }))
+        reject(RuntimeControlError::LeaseConflict, "定时位流前序命令尚未结束");
+    const auto lease = leases_.find(lease_key);
+    if (lease == leases_.end() || lease->second.deadline_ns <= monotonic_ns_() ||
+        lease->second.owner_key_id != request.owner_key_id ||
+        lease->second.expected_node_uuid != request.expected_node_uuid ||
+        lease->second.permissions != request.permissions ||
+        lease->second.node_id != request.node_id ||
+        lease->second.resource_id != request.resource_id ||
+        lease->second.node_generation != generation)
+        reject(RuntimeControlError::LeaseConflict, "定时位流帧租约无效");
+    const auto prior = timed_bitstream_completed_.find(key);
+    if (prior != timed_bitstream_completed_.end()) {
+        if (prior->second.kind != 2U || prior->second.bit_count != request.bit_count ||
+            prior->second.data != request.data || prior->second.lease_id != request.lease_id)
+            reject(RuntimeControlError::IdempotencyConflict, "定时位流帧幂等键冲突");
+        auto result = prior->second.result; result.replayed = true; return result;
+    }
+    const auto object = pwm_objects_.find(scope);
+    if (object == pwm_objects_.end() || object->second.object_id == 0U)
+        reject(RuntimeControlError::ObjectRetired, "定时位流对象尚未配置或已停止");
+    const auto object_id = object->second.object_id;
+    timed_bitstream_completed_.emplace(key, CompletedTimedBitstreamCommand{
+        request.lease_id, request.owner_key_id, request.node_id, request.resource_id, 2U,
+        0U, 0U, 0U, 0U, request.bit_count, request.data, {},
+        std::numeric_limits<std::uint64_t>::max()});
+    in_flight_scopes_.insert(scope); lock.unlock(); bool pending_done = false;
+    try {
+        if (durable) { durability.pending(); pending_done = true; }
+        io.write(object_id, request.bit_count, request.data);
+        RuntimeTimedBitstreamResult result{kRuntimeControlIpcVersion, object_id, false};
+        if (durable) durability.committed(result);
+        lock.lock(); auto& saved = timed_bitstream_completed_.at(key);
+        saved.result = result; saved.retain_until_ns = monotonic_ns_() + kIdempotencyRetentionNs;
+        in_flight_scopes_.erase(scope); lock.unlock(); scope_available_.notify_all(); return result;
+    } catch (...) {
+        lock.lock(); timed_bitstream_completed_.erase(key); in_flight_scopes_.erase(scope);
+        const auto active = leases_.find(lease_key); if (active != leases_.end()) active->second.cleanup_failed = true;
+        lock.unlock(); scope_available_.notify_all();
+        if (durable && pending_done) durability.failed(DurableRecovery::ScopeBlocked,
+                                                       RuntimeControlError::SafeStopFailed);
+        throw;
+    }
+}
+
+RuntimeTimedBitstreamResult RuntimeControlGate::timed_bitstream_stop(
+    const RuntimeTimedBitstreamStopRequest& request,
+    const std::array<std::uint8_t, 16>& daemon, std::uint64_t generation,
+    const protocol::ResourceDescriptor& descriptor,
+    const protocol::ResourceContract& contract, const TimedBitstreamIo& io,
+    const TimedBitstreamDurability& durability) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) ||
+        !nonzero(request.expected_node_uuid) || !valid_identity(request.owner_key_id) ||
+        !valid_idempotency(request.idempotency_key) ||
+        request.node_id == 0U || request.node_id > 127U || request.resource_id == 0U ||
+        !io.stop)
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流停止合同无效");
+    if (request.daemon_instance_id != daemon)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime定时位流停止绑定了其他daemon");
+    if (request.permissions != kRuntimePermissionTimedBitstreamWrite)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime定时位流停止权限不完整或包含未知位");
+    if (descriptor.resource_id != request.resource_id ||
+        descriptor.type != protocol::ResourceType::TimedBitstream ||
+        contract.resource_id != request.resource_id ||
+        (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U)
+        reject(RuntimeControlError::ContractRejected,
+               "目标资源不是允许独占写入的静态定时位流合同");
+    const bool durable = durability.pending || durability.committed || durability.failed;
+    if (durable && (!durability.pending || !durability.committed || !durability.failed))
+        reject(RuntimeControlError::InvalidRequest, "Runtime定时位流停止持久回调不完整");
+    const auto scope = scope_key(request.node_id, request.resource_id);
+    const auto lease_key = binary_id(request.lease_id);
+    std::string key = "timed-stop:" + request.owner_key_id + '\0' + request.idempotency_key;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!scope_available_.wait_for(lock, kSameScopeWait,
+        [&] { return !in_flight_scopes_.count(scope); }))
+        reject(RuntimeControlError::LeaseConflict, "定时位流前序命令尚未结束");
+    const auto lease = leases_.find(lease_key);
+    if (lease == leases_.end() || lease->second.deadline_ns <= monotonic_ns_() ||
+        lease->second.owner_key_id != request.owner_key_id ||
+        lease->second.expected_node_uuid != request.expected_node_uuid ||
+        lease->second.permissions != request.permissions ||
+        lease->second.node_id != request.node_id ||
+        lease->second.resource_id != request.resource_id ||
+        lease->second.node_generation != generation)
+        reject(RuntimeControlError::LeaseConflict, "定时位流停止租约无效");
+    const auto prior = timed_bitstream_completed_.find(key);
+    if (prior != timed_bitstream_completed_.end()) {
+        if (prior->second.kind != 3U || prior->second.lease_id != request.lease_id)
+            reject(RuntimeControlError::IdempotencyConflict, "定时位流停止幂等键冲突");
+        auto result = prior->second.result; result.replayed = true; return result;
+    }
+    const auto object = pwm_objects_.find(scope);
+    if (object == pwm_objects_.end()) reject(RuntimeControlError::ObjectRetired,
+                                             "定时位流对象已停止");
+    const auto saved_object = object->second;
+    timed_bitstream_completed_.emplace(key, CompletedTimedBitstreamCommand{
+        request.lease_id, request.owner_key_id, request.node_id, request.resource_id,
+        3U, 0U, 0U, 0U, 0U, 0U, {}, {}, std::numeric_limits<std::uint64_t>::max()});
+    in_flight_scopes_.insert(scope); lock.unlock(); bool stopped = false;
+    try {
+        if (durable) durability.pending();
+        saved_object.stopper(request.node_id, generation, request.expected_node_uuid,
+                             saved_object.object_id); stopped = true;
+        RuntimeTimedBitstreamResult result{kRuntimeControlIpcVersion, saved_object.object_id, false};
+        if (durable) durability.committed(result);
+        lock.lock(); pwm_objects_.erase(scope); auto& saved = timed_bitstream_completed_.at(key);
+        saved.result = result; saved.retain_until_ns = monotonic_ns_() + kIdempotencyRetentionNs;
+        in_flight_scopes_.erase(scope); lock.unlock(); scope_available_.notify_all(); return result;
+    } catch (...) {
+        lock.lock(); if (stopped) pwm_objects_.erase(scope);
+        else { const auto active = leases_.find(lease_key); if (active != leases_.end()) active->second.cleanup_failed = true; }
+        timed_bitstream_completed_.erase(key); in_flight_scopes_.erase(scope); lock.unlock();
+        scope_available_.notify_all();
+        if (durable) durability.failed(stopped ? DurableRecovery::SafeClosed : DurableRecovery::ScopeBlocked,
+                                       RuntimeControlError::SafeStopFailed);
+        throw;
+    }
+}
+
 std::optional<RuntimeControlGate::ResolvedReleaseLease>
 RuntimeControlGate::resolve_release_lease(
     const RuntimeControlReleaseRequest& request,
@@ -1618,6 +1896,10 @@ void RuntimeControlGate::expiry_loop() {
                                     command.second.retain_until_ns);
             }
             for (const auto& command : pwm_completed_) {
+                earliest = std::min(earliest,
+                                    command.second.retain_until_ns);
+            }
+            for (const auto& command : timed_bitstream_completed_) {
                 earliest = std::min(earliest,
                                     command.second.retain_until_ns);
             }

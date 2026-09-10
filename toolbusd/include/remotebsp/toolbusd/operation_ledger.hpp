@@ -30,6 +30,9 @@ enum class OperationKind : std::uint8_t {
     RuntimeControlRelease = 2U,
     RuntimePwmConfigure = 3U,
     RuntimePwmStop = 4U,
+    RuntimeTimedBitstreamConfigure = 5U,
+    RuntimeTimedBitstreamFrame = 6U,
+    RuntimeTimedBitstreamStop = 7U,
 };
 
 enum class OperationState : std::uint8_t {
@@ -144,6 +147,45 @@ struct RuntimePwmStopOperation {
     std::uint32_t resource_id{};
 };
 
+struct RuntimeTimedBitstreamConfigureOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint32_t bit_period_ns{};
+    std::uint32_t zero_high_ns{};
+    std::uint32_t one_high_ns{};
+    std::uint32_t reset_time_us{};
+};
+
+struct RuntimeTimedBitstreamFrameOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint16_t bit_count{};
+    std::vector<std::uint8_t> data;
+};
+
+struct RuntimeTimedBitstreamStopOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+};
+
 struct OperationTerminalResult {
     OperationTerminalResult() = default;
     OperationTerminalResult(std::optional<std::uint32_t> object,
@@ -177,6 +219,8 @@ struct OperationRecord {
     std::optional<std::uint32_t> requested_frequency_hz;
     std::optional<std::uint16_t> requested_duty;
     std::optional<bool> requested_active_low;
+    // v3仅保存定时位流参数或整帧正文的摘要，不持久化帧正文。
+    std::optional<OperationDigest> requested_payload_digest;
     OperationTerminalResult result;
     std::uint64_t sequence{};
     std::uint64_t recorded_at_ms{};
@@ -237,6 +281,12 @@ public:
         const RuntimePwmConfigureOperation& operation);
     static OperationDigest derive_operation_id(
         const RuntimePwmStopOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimeTimedBitstreamConfigureOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimeTimedBitstreamFrameOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimeTimedBitstreamStopOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_request_digest(
@@ -246,6 +296,12 @@ public:
         const RuntimePwmConfigureOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimePwmStopOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimeTimedBitstreamConfigureOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimeTimedBitstreamFrameOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimeTimedBitstreamStopOperation& operation);
 
     OperationBeginResult begin_gpio_write(
         const RuntimeGpioWriteOperation& operation);
@@ -256,6 +312,12 @@ public:
         const RuntimePwmConfigureOperation& operation);
     OperationBeginResult begin_pwm_stop(
         const RuntimePwmStopOperation& operation);
+    OperationBeginResult begin_timed_bitstream_configure(
+        const RuntimeTimedBitstreamConfigureOperation& operation);
+    OperationBeginResult begin_timed_bitstream_frame(
+        const RuntimeTimedBitstreamFrameOperation& operation);
+    OperationBeginResult begin_timed_bitstream_stop(
+        const RuntimeTimedBitstreamStopOperation& operation);
 
     OperationRecord finish(const OperationDigest& operation_id,
                            const OperationDigest& request_digest,

@@ -165,6 +165,9 @@ bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
            kind == Kind::RuntimeControlReleaseOperation ||
            kind == Kind::RuntimePwmConfigureOperation ||
            kind == Kind::RuntimePwmStopOperation ||
+           kind == Kind::RuntimeTimedBitstreamConfigureOperation ||
+           kind == Kind::RuntimeTimedBitstreamFrameOperation ||
+           kind == Kind::RuntimeTimedBitstreamStopOperation ||
            kind == Kind::RuntimeOperationQuery ||
            kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
@@ -290,6 +293,12 @@ remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
         case LedgerKind::RuntimeControlRelease: outcome.kind = IpcKind::ControlRelease; break;
         case LedgerKind::RuntimePwmConfigure: outcome.kind = IpcKind::PwmConfigure; break;
         case LedgerKind::RuntimePwmStop: outcome.kind = IpcKind::PwmStop; break;
+        case LedgerKind::RuntimeTimedBitstreamConfigure:
+            outcome.kind = IpcKind::TimedBitstreamConfigure; break;
+        case LedgerKind::RuntimeTimedBitstreamFrame:
+            outcome.kind = IpcKind::TimedBitstreamFrame; break;
+        case LedgerKind::RuntimeTimedBitstreamStop:
+            outcome.kind = IpcKind::TimedBitstreamStop; break;
     }
     switch (record.state) {
         case LedgerState::Pending: outcome.state = IpcState::Pending; break;
@@ -406,7 +415,10 @@ remotebsp::toolbusd::IpcErrorEnvelope gate_error_envelope(
         (kind == remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite ||
          kind == remotebsp::toolbusd::IpcRequestKind::RuntimeControlRelease ||
          kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmConfigureOperation ||
-         kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmStopOperation);
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmStopOperation ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamConfigureOperation ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamFrameOperation ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamStopOperation);
     return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion, code, category,
             retryable && !possibly_committed, possibly_committed,
             message};
@@ -1304,8 +1316,10 @@ private:
             runtime_control_.acquire(request, daemon_instance_id_,
                                      node_generation, descriptor, contract);
         }
-        if (request.permissions ==
-                remotebsp::toolbusd::kRuntimePermissionPwmWrite &&
+        if ((request.permissions ==
+                 remotebsp::toolbusd::kRuntimePermissionPwmWrite ||
+             request.permissions ==
+                 remotebsp::toolbusd::kRuntimePermissionTimedBitstreamWrite) &&
             (contract.access_flags &
              remotebsp::protocol::kResourceAccessLeaseRequired) != 0U) {
             const auto remote_ttl = std::min<std::uint32_t>(
@@ -1738,6 +1752,90 @@ private:
             }};
     }
 
+    remotebsp::toolbusd::RuntimeControlGate::TimedBitstreamIo timed_bitstream_io(
+        const remotebsp::toolbusd::RuntimeTimedBitstreamConfigureRequest& request,
+        std::uint64_t generation,
+        const remotebsp::protocol::ResourceDescriptor& descriptor,
+        std::chrono::steady_clock::time_point deadline) {
+        const auto node_id=request.node_id; const auto uuid=request.expected_node_uuid;
+        const auto channel=static_cast<std::uint8_t>(descriptor.instance);
+        return {
+            [this,node_id,uuid,generation,channel,deadline](std::uint32_t period,
+                std::uint32_t zero_high,std::uint32_t one_high,std::uint32_t reset_us) {
+                const auto response=request_runtime_control_packet(node_id,generation,uuid,
+                    remotebsp::protocol::Command::TimedBitstreamCreate,
+                    remotebsp::protocol::encode_timed_bitstream_create(
+                        {channel,period,zero_high,one_high,reset_us}),0U,deadline);
+                if(response.header.object_id==0U) throw RuntimeTargetException(
+                    remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,true,
+                    "TIMED_BITSTREAM_CREATE响应对象ID无效，提交状态未知");
+                return response.header.object_id;
+            },
+            [this,node_id,uuid,generation,deadline](std::uint32_t object_id,
+                std::uint16_t bit_count,const std::vector<std::uint8_t>& data) {
+                static_cast<void>(request_runtime_control_packet(node_id,generation,uuid,
+                    remotebsp::protocol::Command::TimedBitstreamWrite,
+                    remotebsp::protocol::encode_timed_bitstream_write({bit_count,data}),
+                    object_id,deadline));
+            },
+            [this](std::uint32_t node_id,std::uint64_t node_generation,
+                const std::array<std::uint8_t,16>& uuid,std::uint32_t object_id) {
+                static_cast<void>(request_runtime_control_packet(node_id,node_generation,uuid,
+                    remotebsp::protocol::Command::TimedBitstreamAbort,{},object_id,
+                    std::chrono::steady_clock::now()+std::chrono::milliseconds(1800)));
+            }};
+    }
+
+    template <typename Request, typename Operation, typename Begin, typename Invoke>
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_timed_operation(
+        const Request& request, const Operation& operation, Begin begin_operation,
+        Invoke invoke, bool closes_scope) {
+        using namespace remotebsp::toolbusd;
+        const auto operation_id=OperationLedger::derive_operation_id(operation);
+        const auto digest=OperationLedger::derive_request_digest(operation);
+        const auto old=operation_ledger_.lookup(operation_id,request.owner_key_id);
+        if(old.disposition==OperationLookupDisposition::Found) {
+            if(old.record->request_digest!=digest) throw OperationLedgerException(
+                OperationLedgerError::IdempotencyConflict,
+                "相同 timed-bitstream selector绑定了不同请求");
+            return operation_outcome(*old.record,true);
+        }
+        std::optional<OperationBeginResult> begun; std::optional<OperationRecord> terminal;
+        const auto finish=[&](OperationState state,OperationRecovery recovery,
+                              const OperationTerminalResult& result) {
+            try { std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                return operation_ledger_.finish(begun->record.operation_id,
+                    begun->record.request_digest,state,recovery,result);
+            } catch(const OperationLedgerException& error) {
+                throw OperationLedgerAfterPendingException(error.what()); }
+        };
+        try {
+            static_cast<void>(invoke(RuntimeControlGate::TimedBitstreamDurability{
+                [&]{ std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                    begun=begin_operation();
+                    if(begun->disposition!=OperationBeginDisposition::StartedDurablePending)
+                        throw OperationReplayException{}; },
+                [&](const RuntimeTimedBitstreamResult& result){ OperationTerminalResult durable;
+                    durable.object_id=result.object_id; terminal=finish(OperationState::Committed,
+                        closes_scope?OperationRecovery::SafeClosed:OperationRecovery::None,durable); },
+                [&](RuntimeControlGate::DurableRecovery recovery,RuntimeControlError){
+                    terminal=finish(recovery==RuntimeControlGate::DurableRecovery::SafeClosed
+                        ?OperationState::Rejected:OperationState::Unknown,
+                        recovery==RuntimeControlGate::DurableRecovery::SafeClosed
+                        ?OperationRecovery::SafeClosed:OperationRecovery::ScopeBlocked,
+                        {std::nullopt,std::nullopt,static_cast<std::uint16_t>(RuntimeOperationError::Backend)}); }}));
+            if(!terminal) throw std::logic_error("timed-bitstream操作未形成持久终态");
+            return operation_outcome(*terminal,false);
+        } catch(const OperationReplayException&) { return operation_outcome(begun->record,true); }
+        catch(const OperationLedgerAfterPendingException&) { throw; }
+        catch(...) {
+            if(!begun) throw;
+            if(!terminal) terminal=finish(OperationState::Unknown,OperationRecovery::ScopeBlocked,
+                {std::nullopt,std::nullopt,static_cast<std::uint16_t>(RuntimeOperationError::Backend)});
+            return operation_outcome(*terminal,false);
+        }
+    }
+
     remotebsp::toolbusd::RuntimePwmResult runtime_pwm_configure(
         const remotebsp::toolbusd::RuntimePwmConfigureRequest& request,
         const remotebsp::toolbusd::RuntimeControlGate::PwmDurability& durability) {
@@ -1870,6 +1968,62 @@ private:
                 {std::nullopt, std::nullopt, static_cast<std::uint16_t>(RuntimeOperationError::Backend)});
             return operation_outcome(*terminal, false);
         }
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_timed_configure_operation(
+        const remotebsp::toolbusd::RuntimeTimedBitstreamConfigureRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimeTimedBitstreamConfigureOperation operation{
+            request.daemon_instance_id,request.lease_id,request.expected_node_uuid,
+            request.owner_key_id,request.idempotency_key,request.permissions,
+            request.node_id,request.resource_id,request.bit_period_ns,
+            request.zero_high_ns,request.one_high_ns,request.reset_time_us};
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(1800);
+        auto [generation,descriptor,contract]=resolve_runtime_pwm(request,deadline);
+        auto io=timed_bitstream_io(request,generation,descriptor,deadline);
+        return runtime_timed_operation(request,operation,
+            [&]{return operation_ledger_.begin_timed_bitstream_configure(operation);},
+            [&](const RuntimeControlGate::TimedBitstreamDurability& durability){
+                return runtime_control_.timed_bitstream_configure(request,daemon_instance_id_,
+                    generation,descriptor,contract,io,durability);},false);
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_timed_frame_operation(
+        const remotebsp::toolbusd::RuntimeTimedBitstreamFrameRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimeTimedBitstreamFrameOperation operation{
+            request.daemon_instance_id,request.lease_id,request.expected_node_uuid,
+            request.owner_key_id,request.idempotency_key,request.permissions,
+            request.node_id,request.resource_id,request.bit_count,request.data};
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(1800);
+        auto [generation,descriptor,contract]=resolve_runtime_pwm(request,deadline);
+        RuntimeTimedBitstreamConfigureRequest config; config.node_id=request.node_id;
+        config.expected_node_uuid=request.expected_node_uuid;
+        auto io=timed_bitstream_io(config,generation,descriptor,deadline);
+        return runtime_timed_operation(request,operation,
+            [&]{return operation_ledger_.begin_timed_bitstream_frame(operation);},
+            [&](const RuntimeControlGate::TimedBitstreamDurability& durability){
+                return runtime_control_.timed_bitstream_frame(request,daemon_instance_id_,
+                    generation,descriptor,contract,io,durability);},false);
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_timed_stop_operation(
+        const remotebsp::toolbusd::RuntimeTimedBitstreamStopRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimeTimedBitstreamStopOperation operation{
+            request.daemon_instance_id,request.lease_id,request.expected_node_uuid,
+            request.owner_key_id,request.idempotency_key,request.permissions,
+            request.node_id,request.resource_id};
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(1800);
+        auto [generation,descriptor,contract]=resolve_runtime_pwm(request,deadline);
+        RuntimeTimedBitstreamConfigureRequest config; config.node_id=request.node_id;
+        config.expected_node_uuid=request.expected_node_uuid;
+        auto io=timed_bitstream_io(config,generation,descriptor,deadline);
+        return runtime_timed_operation(request,operation,
+            [&]{return operation_ledger_.begin_timed_bitstream_stop(operation);},
+            [&](const RuntimeControlGate::TimedBitstreamDurability& durability){
+                return runtime_control_.timed_bitstream_stop(request,daemon_instance_id_,
+                    generation,descriptor,contract,io,durability);},true);
     }
 
     remotebsp::toolbusd::RuntimeOperationOutcome
@@ -2053,13 +2207,28 @@ private:
             operation.owner_key_id = request.owner_key_id;
             operation.idempotency_key = request.idempotency_key;
             operation_id = OperationLedger::derive_operation_id(operation);
-        } else {
+        } else if (request.kind == RuntimeOperationKind::PwmStop) {
             RuntimePwmStopOperation operation;
             operation.daemon_origin = request.daemon_instance_id;
             operation.lease_id = request.lease_id;
             operation.owner_key_id = request.owner_key_id;
             operation.idempotency_key = request.idempotency_key;
             operation_id = OperationLedger::derive_operation_id(operation);
+        } else if (request.kind == RuntimeOperationKind::TimedBitstreamConfigure) {
+            RuntimeTimedBitstreamConfigureOperation operation;
+            operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
+            operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
+            operation_id=OperationLedger::derive_operation_id(operation);
+        } else if (request.kind == RuntimeOperationKind::TimedBitstreamFrame) {
+            RuntimeTimedBitstreamFrameOperation operation;
+            operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
+            operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
+            operation_id=OperationLedger::derive_operation_id(operation);
+        } else {
+            RuntimeTimedBitstreamStopOperation operation;
+            operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
+            operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
+            operation_id=OperationLedger::derive_operation_id(operation);
         }
         const auto found = operation_ledger_.lookup(
             operation_id, request.owner_key_id);
@@ -2648,6 +2817,33 @@ private:
                     ipc_request.runtime_pwm_stop);
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimeTimedBitstreamConfigureOperation) {
+                const auto outcome=runtime_timed_configure_operation(
+                    ipc_request.runtime_timed_bitstream_configure);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimeTimedBitstreamFrameOperation) {
+                const auto outcome=runtime_timed_frame_operation(
+                    ipc_request.runtime_timed_bitstream_frame);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimeTimedBitstreamStopOperation) {
+                const auto outcome=runtime_timed_stop_operation(
+                    ipc_request.runtime_timed_bitstream_stop);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
                 return;
             }

@@ -1,4 +1,5 @@
 #include "remotebsp/toolbusd/ipc.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 
 #include <sys/socket.h>
 
@@ -30,6 +31,8 @@ constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
 constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimePwmRequestHeaderSize = 70U;
 constexpr std::size_t kRuntimePwmStopRequestHeaderSize = 64U;
+constexpr std::size_t kRuntimeTimedBitstreamConfigureHeaderSize = 80U;
+constexpr std::size_t kRuntimeTimedBitstreamFrameHeaderSize = 68U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
 constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
 constexpr std::size_t kIpcErrorEnvelopeHeaderSize = 12U;
@@ -236,7 +239,10 @@ bool valid_operation_kind(RuntimeOperationKind kind) noexcept {
     return kind == RuntimeOperationKind::GpioWrite ||
            kind == RuntimeOperationKind::ControlRelease ||
            kind == RuntimeOperationKind::PwmConfigure ||
-           kind == RuntimeOperationKind::PwmStop;
+           kind == RuntimeOperationKind::PwmStop ||
+           kind == RuntimeOperationKind::TimedBitstreamConfigure ||
+           kind == RuntimeOperationKind::TimedBitstreamFrame ||
+           kind == RuntimeOperationKind::TimedBitstreamStop;
 }
 
 bool valid_operation_error(RuntimeOperationError error) noexcept {
@@ -275,11 +281,14 @@ bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
                    has_scope && !has_result && !has_error && !outcome.value;
         case RuntimeOperationState::Committed:
             if (outcome.kind == RuntimeOperationKind::GpioWrite ||
-                outcome.kind == RuntimeOperationKind::PwmConfigure) {
+                outcome.kind == RuntimeOperationKind::PwmConfigure ||
+                outcome.kind == RuntimeOperationKind::TimedBitstreamConfigure ||
+                outcome.kind == RuntimeOperationKind::TimedBitstreamFrame) {
                 return outcome.recovery == RuntimeOperationRecovery::None &&
                        has_scope && has_result && !has_error;
             }
-            if (outcome.kind == RuntimeOperationKind::PwmStop) {
+            if (outcome.kind == RuntimeOperationKind::PwmStop ||
+                outcome.kind == RuntimeOperationKind::TimedBitstreamStop) {
                 return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
                        has_scope && has_result && !has_error && !outcome.value;
             }
@@ -420,7 +429,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::RuntimePwmStopOperation)) {
+                      IpcRequestKind::RuntimeTimedBitstreamStopOperation)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -634,6 +643,27 @@ IpcRequest read_ipc_request(int socket) {
         }
         return request;
     }
+    if (kind == IpcRequestKind::RuntimeTimedBitstreamConfigureOperation) {
+        IpcRequest request; request.kind = kind;
+        try { request.runtime_timed_bitstream_configure =
+            decode_ipc_runtime_timed_bitstream_configure({body.begin() + 1U, body.end()}); }
+        catch (const IpcException& error) { throw IpcException(error.what(), kind); }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeTimedBitstreamFrameOperation) {
+        IpcRequest request; request.kind = kind;
+        try { request.runtime_timed_bitstream_frame =
+            decode_ipc_runtime_timed_bitstream_frame({body.begin() + 1U, body.end()}); }
+        catch (const IpcException& error) { throw IpcException(error.what(), kind); }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeTimedBitstreamStopOperation) {
+        IpcRequest request; request.kind = kind;
+        try { request.runtime_timed_bitstream_stop =
+            decode_ipc_runtime_timed_bitstream_stop({body.begin() + 1U, body.end()}); }
+        catch (const IpcException& error) { throw IpcException(error.what(), kind); }
+        return request;
+    }
     if (kind == IpcRequestKind::RuntimeOperationQuery) {
         IpcRequest request;
         request.kind = kind;
@@ -766,6 +796,30 @@ void write_ipc_runtime_pwm_stop_operation_request(
     auto body = encode_ipc_runtime_pwm_stop_request(request);
     body.insert(body.begin(), static_cast<std::uint8_t>(
                                   IpcRequestKind::RuntimePwmStopOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_timed_bitstream_configure_operation_request(
+    int socket, const RuntimeTimedBitstreamConfigureRequest& request) {
+    auto body = encode_ipc_runtime_timed_bitstream_configure(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+        IpcRequestKind::RuntimeTimedBitstreamConfigureOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_timed_bitstream_frame_operation_request(
+    int socket, const RuntimeTimedBitstreamFrameRequest& request) {
+    auto body = encode_ipc_runtime_timed_bitstream_frame(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+        IpcRequestKind::RuntimeTimedBitstreamFrameOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_timed_bitstream_stop_operation_request(
+    int socket, const RuntimeTimedBitstreamStopRequest& request) {
+    auto body = encode_ipc_runtime_timed_bitstream_stop(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+        IpcRequestKind::RuntimeTimedBitstreamStopOperation));
     send_body(socket, body);
 }
 
@@ -1860,6 +1914,123 @@ RuntimePwmStopRequest decode_ipc_runtime_pwm_stop_request(
     return request;
 }
 
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_configure(
+    const RuntimeTimedBitstreamConfigureRequest& request) {
+    try { static_cast<void>(protocol::encode_timed_bitstream_create({0U,
+        request.bit_period_ns, request.zero_high_ns, request.one_high_ns,
+        request.reset_time_us})); }
+    catch (const protocol::WaveformPayloadException&) {
+        throw IpcException("Runtime定时位流配置数值无效");
+    }
+    if (request.version != kRuntimeControlIpcVersion || request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes ||
+        request.idempotency_key.empty() ||
+        request.idempotency_key.size() > kMaximumRuntimeControlIdempotencyBytes)
+        throw IpcException("Runtime定时位流配置IPC字段无效");
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeTimedBitstreamConfigureHeaderSize + request.owner_key_id.size() +
+                 request.idempotency_key.size());
+    append_u16(body, request.version); append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(), request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.expected_node_uuid.begin(), request.expected_node_uuid.end());
+    append_u32(body, request.node_id); append_u32(body, request.resource_id);
+    append_u32(body, request.bit_period_ns); append_u32(body, request.zero_high_ns);
+    append_u32(body, request.one_high_ns); append_u32(body, request.reset_time_us);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(request.idempotency_key.size())); append_u16(body, 0U);
+    body.insert(body.end(), request.owner_key_id.begin(), request.owner_key_id.end());
+    body.insert(body.end(), request.idempotency_key.begin(), request.idempotency_key.end());
+    return body;
+}
+
+RuntimeTimedBitstreamConfigureRequest decode_ipc_runtime_timed_bitstream_configure(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeTimedBitstreamConfigureHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion || get_u16(body.data() + 78U) != 0U)
+        throw IpcException("Runtime定时位流配置IPC版本、长度或保留位无效");
+    const auto owner = body[76U], idem = body[77U];
+    if (owner == 0U || owner > kMaximumRuntimeControlIdentityBytes || idem == 0U ||
+        idem > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != kRuntimeTimedBitstreamConfigureHeaderSize + owner + idem)
+        throw IpcException("Runtime定时位流配置IPC字符串长度无效");
+    RuntimeTimedBitstreamConfigureRequest request;
+    request.version = get_u16(body.data()); request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin()+4U,16U,request.daemon_instance_id.begin());
+    std::copy_n(body.begin()+20U,16U,request.lease_id.begin());
+    std::copy_n(body.begin()+36U,16U,request.expected_node_uuid.begin());
+    request.node_id=get_u32(body.data()+52U); request.resource_id=get_u32(body.data()+56U);
+    request.bit_period_ns=get_u32(body.data()+60U); request.zero_high_ns=get_u32(body.data()+64U);
+    request.one_high_ns=get_u32(body.data()+68U); request.reset_time_us=get_u32(body.data()+72U);
+    request.owner_key_id.assign(body.begin()+80U,body.begin()+80U+owner);
+    request.idempotency_key.assign(body.begin()+80U+owner,body.end());
+    try { static_cast<void>(protocol::encode_timed_bitstream_create({0U,
+        request.bit_period_ns, request.zero_high_ns, request.one_high_ns, request.reset_time_us})); }
+    catch (const protocol::WaveformPayloadException&) { throw IpcException("Runtime定时位流配置数值无效"); }
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_frame(
+    const RuntimeTimedBitstreamFrameRequest& request) {
+    try { static_cast<void>(protocol::encode_timed_bitstream_write({request.bit_count,request.data})); }
+    catch (const protocol::WaveformPayloadException&) { throw IpcException("Runtime定时位流帧载荷无效"); }
+    if (request.version != kRuntimeControlIpcVersion || request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes || request.idempotency_key.empty() ||
+        request.idempotency_key.size() > kMaximumRuntimeControlIdempotencyBytes)
+        throw IpcException("Runtime定时位流帧IPC字段无效");
+    std::vector<std::uint8_t> body; body.reserve(kRuntimeTimedBitstreamFrameHeaderSize +
+        request.owner_key_id.size()+request.idempotency_key.size()+request.data.size());
+    append_u16(body,request.version); append_u16(body,request.permissions);
+    body.insert(body.end(),request.daemon_instance_id.begin(),request.daemon_instance_id.end());
+    body.insert(body.end(),request.lease_id.begin(),request.lease_id.end());
+    body.insert(body.end(),request.expected_node_uuid.begin(),request.expected_node_uuid.end());
+    append_u32(body,request.node_id); append_u32(body,request.resource_id);
+    append_u16(body,request.bit_count); append_u16(body,static_cast<std::uint16_t>(request.data.size()));
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(request.idempotency_key.size())); append_u16(body,0U);
+    body.insert(body.end(),request.owner_key_id.begin(),request.owner_key_id.end());
+    body.insert(body.end(),request.idempotency_key.begin(),request.idempotency_key.end());
+    body.insert(body.end(),request.data.begin(),request.data.end()); return body;
+}
+
+RuntimeTimedBitstreamFrameRequest decode_ipc_runtime_timed_bitstream_frame(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size()<kRuntimeTimedBitstreamFrameHeaderSize || get_u16(body.data())!=kRuntimeControlIpcVersion ||
+        get_u16(body.data()+66U)!=0U) throw IpcException("Runtime定时位流帧IPC头无效");
+    const auto data_size=get_u16(body.data()+62U); const auto owner=body[64U],idem=body[65U];
+    if(owner==0U||owner>kMaximumRuntimeControlIdentityBytes||idem==0U||idem>kMaximumRuntimeControlIdempotencyBytes||
+       data_size>protocol::kMaximumTimedBitstreamDataBytes||body.size()!=68U+owner+idem+data_size)
+        throw IpcException("Runtime定时位流帧IPC长度无效");
+    RuntimeTimedBitstreamFrameRequest request; request.version=get_u16(body.data());request.permissions=get_u16(body.data()+2U);
+    std::copy_n(body.begin()+4U,16U,request.daemon_instance_id.begin());std::copy_n(body.begin()+20U,16U,request.lease_id.begin());
+    std::copy_n(body.begin()+36U,16U,request.expected_node_uuid.begin());request.node_id=get_u32(body.data()+52U);
+    request.resource_id=get_u32(body.data()+56U);request.bit_count=get_u16(body.data()+60U);
+    request.owner_key_id.assign(body.begin()+68U,body.begin()+68U+owner);
+    request.idempotency_key.assign(body.begin()+68U+owner,body.begin()+68U+owner+idem);
+    request.data.assign(body.end()-data_size,body.end());
+    try { static_cast<void>(protocol::encode_timed_bitstream_write({request.bit_count,request.data})); }
+    catch (const protocol::WaveformPayloadException&) { throw IpcException("Runtime定时位流帧正文无效"); }
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_timed_bitstream_stop(
+    const RuntimeTimedBitstreamStopRequest& request) {
+    RuntimePwmStopRequest common; common.version=request.version; common.daemon_instance_id=request.daemon_instance_id;
+    common.lease_id=request.lease_id; common.expected_node_uuid=request.expected_node_uuid;
+    common.owner_key_id=request.owner_key_id; common.permissions=request.permissions; common.node_id=request.node_id;
+    common.resource_id=request.resource_id; common.idempotency_key=request.idempotency_key;
+    return encode_ipc_runtime_pwm_stop_request(common);
+}
+
+RuntimeTimedBitstreamStopRequest decode_ipc_runtime_timed_bitstream_stop(
+    const std::vector<std::uint8_t>& body) {
+    const auto common=decode_ipc_runtime_pwm_stop_request(body); RuntimeTimedBitstreamStopRequest request;
+    request.version=common.version;request.daemon_instance_id=common.daemon_instance_id;request.lease_id=common.lease_id;
+    request.expected_node_uuid=common.expected_node_uuid;request.owner_key_id=common.owner_key_id;
+    request.permissions=common.permissions;request.node_id=common.node_id;request.resource_id=common.resource_id;
+    request.idempotency_key=common.idempotency_key;return request;
+}
+
 std::vector<std::uint8_t> encode_ipc_runtime_control_release(
     const RuntimeControlReleaseRequest& request) {
     if (request.version != kRuntimeControlIpcVersion ||
@@ -2161,6 +2332,12 @@ const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept {
         case RuntimeOperationKind::ControlRelease: return "control_release";
         case RuntimeOperationKind::PwmConfigure: return "pwm_configure";
         case RuntimeOperationKind::PwmStop: return "pwm_stop";
+        case RuntimeOperationKind::TimedBitstreamConfigure:
+            return "timed_bitstream_configure";
+        case RuntimeOperationKind::TimedBitstreamFrame:
+            return "timed_bitstream_frame";
+        case RuntimeOperationKind::TimedBitstreamStop:
+            return "timed_bitstream_stop";
     }
     return "unknown";
 }

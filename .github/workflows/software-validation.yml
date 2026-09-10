@@ -35,6 +35,7 @@ jobs:
             build-essential cmake ninja-build python3 python3-pip \
             iproute2 kmod libusb-1.0-0-dev
           python3 -m pip install --break-system-packages kconfiglib==14.1.0
+          python3 -m pip install --break-system-packages -r gui/requirements.txt
 
       - name: 建立隔离的虚拟 CAN
         run: |

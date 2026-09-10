@@ -58,6 +58,10 @@ _CONTROL_OPERATIONS = {
     "runtime-control-release-operation",
     "runtime-pwm-acquire", "runtime-pwm-configure-operation",
     "runtime-pwm-stop-operation",
+    "runtime-timed-bitstream-acquire",
+    "runtime-timed-bitstream-configure-operation",
+    "runtime-timed-bitstream-frame-operation",
+    "runtime-timed-bitstream-stop-operation",
 }
 _OPERATION_BASE_FIELDS = {
     "operation_id", "lease_id", "expected_node_uuid", "resource_id",
@@ -65,7 +69,9 @@ _OPERATION_BASE_FIELDS = {
     "error_code",
 }
 _OPERATION_PWM_FIELDS = {"frequency_hz", "duty", "active_low"}
-_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop"}
+_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop",
+                    "timed_bitstream_configure", "timed_bitstream_frame",
+                    "timed_bitstream_stop"}
 _OPERATION_STATES = {
     "pending", "committed", "rejected", "unknown", "expired_unknown",
 }
@@ -584,6 +590,13 @@ class RemoteCliIpcClient:
         elif state == "committed" and kind == "pwm_stop":
             valid = recovery == "safe_closed" and object_id is not None and value is None and \
                 frequency_hz is None and duty is None and active_low is None and error_code is None
+        elif state == "committed" and kind in {
+                "timed_bitstream_configure", "timed_bitstream_frame"}:
+            valid = recovery == "none" and object_id is not None and \
+                value is None and error_code is None
+        elif state == "committed" and kind == "timed_bitstream_stop":
+            valid = recovery == "safe_closed" and object_id is not None and \
+                value is None and error_code is None
         elif state == "rejected":
             valid = recovery in {"not_sent", "safe_closed"} and \
                 object_id is None and value is None and \
@@ -1360,6 +1373,57 @@ class RemoteCliIpcClient:
         return self._json_operation_outcome(output, "runtime-pwm-stop-operation",
                                             expected_kind="pwm_stop")
 
+    def runtime_timed_bitstream_acquire(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, ttl_ms: int, *,
+            deadline: MonotonicDeadline | None = None) -> None:
+        output = self._run("runtime-timed-bitstream-acquire", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id,"daemon实例ID"),
+                       self._control_id(lease_id,"控制租约ID"),
+                       self._control_id(expected_node_uuid,"预期节点UUID"), owner_key_id,
+                       str(resource_id),str(ttl_ms)),deadline=deadline)
+        data=self._document(output,"runtime-timed-bitstream-acquire")
+        _exact_fields(data,set(),"runtime-timed-bitstream-acquire.data")
+
+    def runtime_timed_bitstream_configure_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, bit_period_ns: int,
+            zero_high_ns: int, one_high_ns: int, reset_time_us: int, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        values=(bit_period_ns,zero_high_ns,one_high_ns,reset_time_us)
+        if any(type(v) is not int or not 1 <= v <= 0xFFFFFFFF for v in values):
+            raise ToolbusIpcProtocolError("定时位流配置参数无效")
+        output=self._run("runtime-timed-bitstream-configure-operation",node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id,"daemon实例ID"),self._control_id(lease_id,"控制租约ID"),
+            self._control_id(expected_node_uuid,"预期节点UUID"),owner_key_id,str(resource_id),idempotency_key,
+            *(str(v) for v in values)),deadline=deadline)
+        return self._json_operation_outcome(output,"runtime-timed-bitstream-configure-operation",
+                                            expected_kind="timed_bitstream_configure")
+
+    def runtime_timed_bitstream_frame_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, bit_count: int, data: bytes, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if type(bit_count) is not int or not 1 <= bit_count <= 16176 or \
+                not isinstance(data,bytes) or len(data)!=(bit_count+7)//8:
+            raise ToolbusIpcProtocolError("定时位流帧参数无效")
+        output=self._run("runtime-timed-bitstream-frame-operation",node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id,"daemon实例ID"),self._control_id(lease_id,"控制租约ID"),
+            self._control_id(expected_node_uuid,"预期节点UUID"),owner_key_id,str(resource_id),idempotency_key,
+            str(bit_count),data.hex()),deadline=deadline)
+        return self._json_operation_outcome(output,"runtime-timed-bitstream-frame-operation",
+                                            expected_kind="timed_bitstream_frame")
+
+    def runtime_timed_bitstream_stop_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        output=self._run("runtime-timed-bitstream-stop-operation",node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id,"daemon实例ID"),self._control_id(lease_id,"控制租约ID"),
+            self._control_id(expected_node_uuid,"预期节点UUID"),owner_key_id,str(resource_id),idempotency_key),deadline=deadline)
+        return self._json_operation_outcome(output,"runtime-timed-bitstream-stop-operation",
+                                            expected_kind="timed_bitstream_stop")
+
     def runtime_control_release_operation(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str, *,
@@ -1877,6 +1941,16 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "runtime_pwm_stop_operation", "runtime_operation_status",
                 "runtime_operation_lookup"))
 
+    @property
+    def timed_bitstream_control_available(self) -> bool:
+        return bool(getattr(self.client,"structured_output",True)) and all(
+            callable(getattr(self.client,name,None)) for name in (
+                "runtime_timed_bitstream_acquire",
+                "runtime_timed_bitstream_configure_operation",
+                "runtime_timed_bitstream_frame_operation",
+                "runtime_timed_bitstream_stop_operation",
+                "runtime_operation_status","runtime_operation_lookup"))
+
     def _operation_singleflight(
             self, key: tuple[str, ...], operation: Callable[[], dict], *,
             deadline: MonotonicDeadline | None) -> dict:
@@ -1999,6 +2073,21 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             raise RuntimeProviderOperationError("protocol_incompatible", category="protocol",
                 retryable=False, possibly_committed=False)
         return node_match.group(1), numeric_node, int(resource_match.group(1), 16)
+
+    def _resolve_timed_bitstream_target(self, node_id: str, resource_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> tuple[str,int,int]:
+        with self._cache_condition:
+            snapshot=copy.deepcopy(self._cached_snapshot)
+        if snapshot is None: snapshot=self.read_snapshot(deadline=deadline).snapshot
+        node=next((item for item in snapshot["nodes"] if item["node_id"]==node_id),None)
+        resource=None if node is None else next((item for item in node["resources"] if item["resource_id"]==resource_id),None)
+        if node is None or node["state"]!="online" or resource is None or \
+                resource["kind"]!="timed-bitstream" or not resource["available"]:
+            raise RuntimeProviderOperationError("target_rejected",category="target",retryable=False,possibly_committed=False)
+        numeric=node["runtime"].get("bus_node_id"); rm=re.fullmatch(r"resource-([0-9a-f]{8})",resource_id); nm=re.fullmatch(r"node-([0-9a-f]{32})",node_id)
+        if type(numeric) is not int or not 1<=numeric<=127 or rm is None or nm is None:
+            raise RuntimeProviderOperationError("protocol_incompatible",category="protocol",retryable=False,possibly_committed=False)
+        return nm.group(1),numeric,int(rm.group(1),16)
 
     def _invalidate_snapshot_cache(self) -> None:
         with self._cache_condition:
@@ -2155,6 +2244,52 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             raise
         except ToolbusIpcError as error:
             raise _provider_operation_error(error) from error
+
+    def timed_bitstream_control_acquire(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            remaining_ttl_ms: Callable[[],int], *, deadline: MonotonicDeadline | None=None) -> None:
+        if not self.timed_bitstream_control_available: raise RuntimeProviderError("toolbusd定时位流控制IPC不可用")
+        try:
+            uuid,node,resource=self._resolve_timed_bitstream_target(node_id,resource_id,deadline=deadline)
+            ttl=call_with_deadline(remaining_ttl_ms,deadline=deadline)
+            call_with_deadline(self.client.runtime_timed_bitstream_acquire,daemon_instance_id,lease_id,uuid,
+                owner_key_id,node,resource,ttl,deadline=deadline)
+        except RequestDeadlineExceeded: raise
+        except ToolbusIpcError as error: raise _provider_operation_error(error) from error
+
+    def timed_bitstream_control_configure(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str,node_id: str,resource_id: str,idempotency_key: str,
+            bit_period_ns: int,zero_high_ns: int,one_high_ns: int,reset_time_us: int,*,deadline=None)->dict:
+        try:
+            uuid,node,resource=self._resolve_timed_bitstream_target(node_id,resource_id,deadline=deadline)
+            outcome=call_with_deadline(self.client.runtime_timed_bitstream_configure_operation,
+                daemon_instance_id,lease_id,uuid,owner_key_id,node,resource,idempotency_key,
+                bit_period_ns,zero_high_ns,one_high_ns,reset_time_us,deadline=deadline)
+            self._invalidate_snapshot_cache(); return outcome
+        except RequestDeadlineExceeded: raise
+        except ToolbusIpcError as error: raise _provider_operation_error(error) from error
+
+    def timed_bitstream_control_frame(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str,node_id: str,resource_id: str,idempotency_key: str,
+            bit_count: int,data: bytes,*,deadline=None)->dict:
+        try:
+            uuid,node,resource=self._resolve_timed_bitstream_target(node_id,resource_id,deadline=deadline)
+            outcome=call_with_deadline(self.client.runtime_timed_bitstream_frame_operation,
+                daemon_instance_id,lease_id,uuid,owner_key_id,node,resource,idempotency_key,
+                bit_count,data,deadline=deadline)
+            self._invalidate_snapshot_cache(); return outcome
+        except RequestDeadlineExceeded: raise
+        except ToolbusIpcError as error: raise _provider_operation_error(error) from error
+
+    def timed_bitstream_control_stop(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str,node_id: str,resource_id: str,idempotency_key: str,*,deadline=None)->dict:
+        try:
+            uuid,node,resource=self._resolve_timed_bitstream_target(node_id,resource_id,deadline=deadline)
+            outcome=call_with_deadline(self.client.runtime_timed_bitstream_stop_operation,
+                daemon_instance_id,lease_id,uuid,owner_key_id,node,resource,idempotency_key,deadline=deadline)
+            self._invalidate_snapshot_cache(); return outcome
+        except RequestDeadlineExceeded: raise
+        except ToolbusIpcError as error: raise _provider_operation_error(error) from error
 
     def operation_status(
             self, daemon_instance_id: str, owner_key_id: str,

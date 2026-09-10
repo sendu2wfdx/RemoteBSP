@@ -1,0 +1,49 @@
+{
+  "schema_version": 4,
+  "name": "Mock Timed Bitstream Runtime E2E",
+  "board_type": 1413633093,
+  "uuid": "00112233445566778899aabbccddee46",
+  "firmware_version": [0, 2, 0],
+  "firmware_identity": {
+    "project_sha256": null,
+    "config_sha256": null,
+    "firmware_input_sha256": null
+  },
+  "capabilities": ["timed_bitstream"],
+  "resource_groups": [
+    {
+      "type": "timed_bitstream",
+      "first_instance": 0,
+      "count": 1,
+      "id_base": 167772160,
+      "source": "native",
+      "rx_capacity": 0,
+      "tx_capacity": 2022,
+      "contract": {
+        "access": ["write", "exclusive_write", "lease_supported"],
+        "timing_resolution_ns": 50,
+        "worst_case_latency_us": 200,
+        "maximum_operations_per_second": 400,
+        "queue_capacity": 1,
+        "maximum_rx_bits_per_second": 0,
+        "maximum_tx_bits_per_second": 800000
+      }
+    }
+  ],
+  "bus_resources": [],
+  "stream_resources": [],
+  "waveform_endpoints": [
+    {
+      "type": "timed_bitstream",
+      "instance": 0,
+      "pin": 10,
+      "timer": 1,
+      "channel": 1,
+      "dma_channel": 1,
+      "maximum_frequency_hz": 0,
+      "maximum_bits": 16176,
+      "maximum_bit_rate": 800000
+    }
+  ],
+  "reserved_resources": []
+}

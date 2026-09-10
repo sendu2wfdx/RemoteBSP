@@ -81,8 +81,10 @@ def create_deployment_record(
     try:
         build_record_path = resolve_artifact(
             result.build_id, "build-record.json", output_root)
+        artifact_filename = ("firmware.bin" if result.backend == "can-katapult"
+                             else "firmware.elf")
         artifact_path = resolve_artifact(
-            result.build_id, "firmware.elf", output_root)
+            result.build_id, artifact_filename, output_root)
     except FirmwareBuildError as error:
         raise FirmwareDeploymentError(
             f"部署记录无法绑定构建产物：{error}") from error
@@ -120,7 +122,7 @@ def create_deployment_record(
                 "sha256": _sha256(build_record_path),
             },
             "flashed_artifact": {
-                "filename": "firmware.elf", "size": artifact_size,
+                "filename": artifact_filename, "size": artifact_size,
                 "sha256": _sha256(artifact_path),
             },
         },
@@ -131,7 +133,7 @@ def create_deployment_record(
             "note": "主机系统时钟未经过可信时间源证明；仅用于排序，不作为审计时间戳。",
         },
         "declaration": (
-            "本记录证明一次ST-Link写入已完成且运行中设备通过四重身份核验；"
+            f"本记录证明一次{'CAN Katapult APP' if result.backend == 'can-katapult' else 'ST-Link'}写入已完成且运行中设备通过四重身份核验；"
             "不证明外设功能或波形已经通过硬件测试。"),
     }
     record["record_sha256"] = _record_hash(record)
@@ -184,8 +186,10 @@ def validate_deployment_record(value: object) -> dict:
     if not isinstance(evidence, dict) or set(evidence) != {
             "build_record", "flashed_artifact"}:
         raise FirmwareDeploymentError("部署记录source_evidence无效")
+    artifact_filename = ("firmware.bin" if deployment["backend"] ==
+                         "can-katapult" else "firmware.elf")
     for key, filename in (("build_record", "build-record.json"),
-                          ("flashed_artifact", "firmware.elf")):
+                          ("flashed_artifact", artifact_filename)):
         item = evidence.get(key)
         if not isinstance(item, dict) or set(item) != {
                 "filename", "size", "sha256"} or \
