@@ -34,7 +34,8 @@ from .auth import (
     AuthConfigurationError,
     load_api_key_authenticator,
 )
-from .alert_rules import AlertRuleError, AlertRuleManager, AlertRuleStore
+from .alert_rules import (
+    AlertRuleError, AlertRuleManager, AlertRuleStorageError, AlertRuleStore)
 from .control_leases import (
     CONTROL_LEASE_SCHEMA_VERSION,
     DEFAULT_CONTROL_LEASE_CAPACITY,
@@ -2597,6 +2598,12 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         raise AlertRuleError("应用请求字段不合法")
                     result = self.alert_rules.apply(
                         body["confirmation_token"], body["confirmation"])
+            except AlertRuleStorageError:
+                # 存储异常可能包含本地路径、文件名或系统错误细节。
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "alert_rule_storage_unavailable",
+                            "告警规则存储暂不可用；规则未生效")
+                return
             except AlertRuleError as error:
                 self._error(HTTPStatus.CONFLICT, "alert_rule_update_rejected",
                             str(error))

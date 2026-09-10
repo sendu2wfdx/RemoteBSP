@@ -29,6 +29,10 @@ class AlertRuleError(RuntimeError):
     """规则配置不能安全加载或更新。"""
 
 
+class AlertRuleStorageError(AlertRuleError):
+    """规则存储不可用；异常细节不得直接暴露给远端调用方。"""
+
+
 DEFAULT_ALERT_RULES = (
     {"rule_id": "cpu-load-warning", "metric": "cpu_load_permille",
      "unit": "permille", "comparison": "greater_or_equal",
@@ -95,18 +99,19 @@ class AlertRuleStore:
         self.path = self.directory / ALERT_RULE_FILENAME
         try:
             if self.directory.exists() and self.directory.is_symlink():
-                raise AlertRuleError("告警规则目录不能是符号链接")
+                raise AlertRuleStorageError("告警规则目录不能是符号链接")
             self.directory.mkdir(mode=0o700, parents=False, exist_ok=True)
             if not self.directory.is_dir() or self.path.is_symlink():
-                raise AlertRuleError("告警规则存储路径不安全")
+                raise AlertRuleStorageError("告警规则存储路径不安全")
             if os.name == "posix":
                 info = self.directory.stat()
                 if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
-                    raise AlertRuleError("告警规则目录必须由服务用户独占")
-        except AlertRuleError:
+                    raise AlertRuleStorageError("告警规则目录必须由服务用户独占")
+        except AlertRuleStorageError:
             raise
         except OSError as error:
-            raise AlertRuleError(f"无法准备告警规则目录：{error}") from error
+            raise AlertRuleStorageError(
+                f"无法准备告警规则目录：{error}") from error
 
     def _document(self, revision: int, rules: tuple[dict, ...]) -> dict:
         return {"schema_version": ALERT_RULE_SCHEMA_VERSION,
@@ -118,12 +123,13 @@ class AlertRuleStore:
             return self._document(0, DEFAULT_ALERT_RULES)
         try:
             if self.path.is_symlink():
-                raise AlertRuleError("告警规则文件不能是符号链接")
+                raise AlertRuleStorageError("告警规则文件不能是符号链接")
             info = self.path.stat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or \
                     (os.name == "posix" and (info.st_uid != os.geteuid() or
                                              stat.S_IMODE(info.st_mode) & 0o077)):
-                raise AlertRuleError("告警规则文件必须是服务用户独占的单链接普通文件")
+                raise AlertRuleStorageError(
+                    "告警规则文件必须是服务用户独占的单链接普通文件")
             if info.st_size > MAXIMUM_RULE_FILE_BYTES:
                 raise ValueError("文件超过容量上限")
             raw = json.loads(self.path.read_bytes().decode("utf-8"))
@@ -138,7 +144,7 @@ class AlertRuleStore:
             except AlertRuleError as error:
                 raise ValueError(str(error)) from error
             return self._document(raw["revision"], rules)
-        except AlertRuleError:
+        except AlertRuleStorageError:
             raise
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             try:
@@ -146,15 +152,17 @@ class AlertRuleStore:
                 os.link(self.path, quarantine)
                 self.path.unlink()
             except OSError as isolate_error:
-                raise AlertRuleError(f"规则文件损坏且无法隔离：{isolate_error}") from error
-            raise AlertRuleError("规则文件已损坏并隔离；拒绝隐式回退") from error
+                raise AlertRuleStorageError(
+                    f"规则文件损坏且无法隔离：{isolate_error}") from error
+            raise AlertRuleStorageError(
+                "规则文件已损坏并隔离；拒绝隐式回退") from error
 
     def save(self, revision: int, rules: tuple[dict, ...]) -> dict:
         document = self._document(revision, validate_rules(list(rules)))
         encoded = (json.dumps(document, ensure_ascii=False, sort_keys=True,
                               separators=(",", ":")) + "\n").encode()
         if len(encoded) > MAXIMUM_RULE_FILE_BYTES:
-            raise AlertRuleError("规则文件超过容量上限")
+            raise AlertRuleStorageError("规则文件超过容量上限")
         temporary = self.directory / f".{ALERT_RULE_FILENAME}.{secrets.token_hex(8)}.tmp"
         try:
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -168,7 +176,7 @@ class AlertRuleStore:
             return document
         except OSError as error:
             temporary.unlink(missing_ok=True)
-            raise AlertRuleError(f"无法原子保存规则：{error}") from error
+            raise AlertRuleStorageError(f"无法原子保存规则：{error}") from error
 
 
 class AlertRuleManager:
