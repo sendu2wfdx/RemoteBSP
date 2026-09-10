@@ -224,8 +224,8 @@ SHA-256、比较结果 SHA-256 和确定性差异资料包 SHA-256。导入资�
 ## 非交互生产资料 CLI
 
 `gui/studio_cli.py` 为 CI、批产准备和离线归档提供单行 JSON 输入/输出约定。它直接
-调用 Studio 已有工程校验、固件构建、批次生成/校验和本地历史后端，不维护第二套
-板卡、资源、哈希或历史规则。可用子命令：
+调用 Studio 已有工程校验、固件构建、ST-Link 部署、批次生成/校验和本地历史后端，
+不维护第二套板卡、资源、哈希或历史规则。任何硬件动作都必须通过显式部署子命令发起：
 
 ```sh
 # 全资源静态校验；不会生成配置、构建或写文件。
@@ -236,6 +236,10 @@ python3 gui/studio_cli.py build --project project.json --dry-run
 
 # 只有显式 build 才调用现有固件构建后端；仍然不烧录、不访问板卡。
 python3 gui/studio_cli.py build --project project.json --jobs 32
+
+# 显式烧录已有受保护构建，并等待本机上位机原子更新身份文件后核对运行中身份。
+python3 gui/studio_cli.py deploy-stlink --build-id <构建ID> \
+  --identity-file /run/remotebsp/device-identity.json
 
 # 从已有生产记录生成确定性批次；不指定输出文件时只在 stdout 返回JSON结果。
 python3 gui/studio_cli.py batch-create --batch-id pilot-001 --name 首批归档 \
@@ -257,7 +261,13 @@ python3 gui/studio_cli.py history-search --history-root ./local-history \
 - `0`：操作成功，含成功的 dry-run；
 - `2`：命令、选项、类型或枚举用法错误；
 - `3`：输入文件、schema、资源、哈希、容量或安全边界不合法；
-- `4`：显式构建、原子输出或本地文件操作失败。
+- `4`：显式构建、部署、身份核对、原子输出或本地文件操作失败。
+
+`deploy-stlink` 是当前唯一会访问硬件的 CLI 命令；它复核构建记录和固件哈希后执行
+OpenOCD 写入、校验和复位。`--identity-file` 必须是普通、非符号链接、最大 16 KiB 的
+严格 JSON 文件，由外部上位机在节点重连后原子更新。该文件适配器不是从 `toolbusd`
+或 MCU 实时读取身份，当前也没有网页入口，因此成功只证明显式 CLI 部署及所提供身份
+快照的一致性，不能外推为 Studio 自动发现或真实运行时回读闭环。
 
 CLI 单路径最长 512 个字符，工程和差异输入最多 128 KiB，生产记录最多 64 KiB，
 板卡目录最多 2 MiB；JSON 重复字段和非标准数值会被拒绝；批次仍限制 32 份生产记录
