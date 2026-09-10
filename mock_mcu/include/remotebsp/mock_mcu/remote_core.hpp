@@ -12,6 +12,7 @@
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/gpio.hpp"
+#include "remotebsp/protocol/firmware_identity.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/packet.hpp"
@@ -70,6 +71,7 @@ struct NodeInfo {
     std::uint16_t firmware_patch{};
     std::uint32_t board_type{};
     std::uint8_t protocol_version{protocol::kProtocolVersion};
+    protocol::FirmwareIdentityPayload firmware_identity{};
 };
 
 enum class CoreError {
@@ -143,6 +145,8 @@ private:
     protocol::Packet make_response(const protocol::Packet& request,
                                    StatusCode status) const;
     protocol::Packet handle_get_info(const protocol::Packet& request) const;
+    protocol::Packet handle_firmware_identity(
+        const protocol::Packet& request) const;
     protocol::Packet handle_get_capability(
         const protocol::Packet& request) const;
     protocol::Packet handle_ping(const protocol::Packet& request) const;

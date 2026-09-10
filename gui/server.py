@@ -47,6 +47,7 @@ from production_history import (
     MAX_HISTORY_RESULTS,
     ProductionHistoryStore,
 )
+from device_parameters import DeviceParameterError, DeviceParameterManager
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -114,6 +115,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def production_history(self) -> ProductionHistoryStore:
         return getattr(self.server, "production_history")
 
+    @property
+    def device_parameter_manager(self) -> DeviceParameterManager | None:
+        return getattr(self.server, "device_parameter_manager", None)
+
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -171,6 +176,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "production_record_enabled": True,
                 "production_batch_enabled": True,
                 "production_history_enabled": True,
+                "device_parameters_enabled":
+                    self.device_parameter_manager is not None,
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
@@ -254,6 +261,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/production-batch/export",
                         "/api/production-batch/validate",
                         "/api/production-history/save",
+                        "/api/device-parameters/read",
+                        "/api/device-parameters/backup",
                         "/api/project/build"):
             self._send_json({"error": "未知API"}, HTTPStatus.NOT_FOUND)
             return
@@ -263,10 +272,33 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 raise ProjectConfigError("请求长度无效或超过256 KiB")
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = None if path.startswith((
-                "/api/production-batch/", "/api/production-history/")) else \
+                "/api/production-batch/", "/api/production-history/",
+                "/api/device-parameters/")) else \
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
-            if path == "/api/production-history/save":
+            if path.startswith("/api/device-parameters/"):
+                manager = self.device_parameter_manager
+                if manager is None:
+                    self._send_json(
+                        {"ok": False, "error": "Studio未配置toolbusd设备参数接口"},
+                        HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                if path in ("/api/device-parameters/read",
+                            "/api/device-parameters/backup"):
+                    if set(request):
+                        raise DeviceParameterError("只读请求不接受额外字段")
+                    snapshot = manager.snapshot()
+                    response = {
+                        "ok": True,
+                        "format": ("DEVICE_PARAMETER_BACKUP_V1" if
+                                   path.endswith("/backup") else
+                                   "DEVICE_PARAMETER_SNAPSHOT_V1"),
+                        "backup": snapshot if path.endswith("/backup") else None,
+                        "snapshot": snapshot,
+                    }
+                else:
+                    raise AssertionError("未处理的设备参数只读路径")
+            elif path == "/api/production-history/save":
                 saved = self.production_history.save(request.get("manifest"))
                 response = {
                     "ok": True, "format": "PRODUCTION_HISTORY_SAVE_V1",
@@ -438,7 +470,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                             HTTPStatus.UNPROCESSABLE_ENTITY)
         except (OSError, AttributeError, json.JSONDecodeError,
                 UnicodeDecodeError, TypeError, ValueError,
-                ProjectConfigError) as error:
+                ProjectConfigError, DeviceParameterError) as error:
             self._send_json({"ok": False, "error": str(error)},
                             HTTPStatus.BAD_REQUEST)
 
@@ -451,7 +483,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
 def make_server(host: str, port: int,
                 state_path: Path | None, *, build_jobs: int = 32,
                 build_output_root: Path = DEFAULT_OUTPUT_ROOT,
-                history_root: Path = DEFAULT_HISTORY_ROOT
+                history_root: Path = DEFAULT_HISTORY_ROOT,
+                device_parameter_manager: DeviceParameterManager | None = None
                 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
@@ -459,6 +492,7 @@ def make_server(host: str, port: int,
     server.build_output_root = build_output_root  # type: ignore[attr-defined]
     server.production_history = ProductionHistoryStore(  # type: ignore[attr-defined]
         history_root)
+    server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
     return server
 
 
@@ -472,17 +506,34 @@ def main() -> int:
     parser.add_argument("--history-root", type=Path,
                         default=DEFAULT_HISTORY_ROOT,
                         help="本地生产批次历史目录")
+    parser.add_argument("--toolbusd-socket",
+                        help="启用设备参数管理时使用的toolbusd本地socket")
+    parser.add_argument("--node-id", type=int, default=1,
+                        help="设备参数管理的单节点ID，默认1")
+    parser.add_argument("--remote-cli", default="remote-cli",
+                        help="remote-cli可执行文件")
     args = parser.parse_args()
     if args.build_jobs < 1 or args.build_jobs > 64:
         parser.error("--build-jobs必须位于1～64")
     mimetypes.add_type("text/javascript", ".js")
+    parameter_manager = None
+    if args.toolbusd_socket:
+        try:
+            parameter_manager = DeviceParameterManager(
+                args.toolbusd_socket, args.node_id,
+                remote_cli=args.remote_cli)
+        except DeviceParameterError as error:
+            parser.error(str(error))
     server = make_server(
         args.host, args.port, args.state, build_jobs=args.build_jobs,
-        history_root=args.history_root)
+        history_root=args.history_root,
+        device_parameter_manager=parameter_manager)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
     print(f"固件构建使用{args.build_jobs}个并行任务。")
     print(server.production_history.status()["status_text"])  # type: ignore[attr-defined]
+    if parameter_manager is not None:
+        print("设备参数管理已启用；写入需要UUID、代数及显式维护确认。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

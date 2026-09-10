@@ -139,6 +139,8 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
     switch (static_cast<protocol::Command>(request.header.command)) {
         case protocol::Command::GetInfo:
             return handle_get_info(request);
+        case protocol::Command::FirmwareIdentity:
+            return handle_firmware_identity(request);
         case protocol::Command::GetCapability:
             return handle_get_capability(request);
         case protocol::Command::Ping:
@@ -640,6 +642,21 @@ protocol::Packet RemoteCore::handle_get_info(
     append_u16(response.payload, node_info_.firmware_patch);
     append_u32(response.payload, node_info_.board_type);
     response.payload.push_back(node_info_.protocol_version);
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_firmware_identity(
+    const protocol::Packet& request) const {
+    if (!request.payload.empty() || request.header.object_id != 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    auto identity = node_info_.firmware_identity;
+    identity.board_type = node_info_.board_type;
+    identity.node_uuid = node_info_.uuid;
+    protocol::Packet response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_firmware_identity(identity);
+    response.payload.insert(response.payload.end(), encoded.begin(),
+                            encoded.end());
     return response;
 }
 

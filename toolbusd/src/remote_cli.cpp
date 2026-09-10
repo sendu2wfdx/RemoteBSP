@@ -429,7 +429,7 @@ void print_usage() {
            "<gpio_write|control_release> <控制租约ID> <幂等键>\n"
         << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
         << "  event-wait\n"
-        << "  get-info | get-capability\n"
+        << "  get-info | firmware-identity | get-capability\n"
         << "  resource-list\n"
         << "  resource-describe <资源ID>\n"
         << "  resource-status <资源ID>\n"
@@ -443,6 +443,7 @@ void print_usage() {
         << "  param-list\n"
         << "  param-get <名称|参数ID>\n"
         << "  param-set <名称|参数ID> <文本|hex:十六进制>\n"
+        << "  param-set-cas <名称|参数ID> <预期代数> <文本|hex:十六进制>\n"
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
@@ -791,6 +792,44 @@ int run(const std::vector<std::string>& arguments,
                   << static_cast<unsigned>(info.protocol_version) << '\n';
         return 0;
     }
+    if (name == "firmware-identity" && arguments.size() == 1) {
+        const auto identity = client.firmware_identity();
+        if (json_output) {
+            remotebsp::cli_json::write_firmware_identity(
+                std::cout, identity);
+        } else {
+            std::cout << "identity_schema_version="
+                      << identity.schema_version << '\n'
+                      << "board_type=0x" << std::hex
+                      << identity.board_type << std::dec << '\n'
+                      << "uuid=";
+            const std::vector<std::uint8_t> uuid(
+                identity.node_uuid.begin(), identity.node_uuid.end());
+            print_hex(uuid);
+            std::cout << '\n';
+            const auto print_field = [&](const char* name,
+                                         const auto& digest,
+                                         auto field) {
+                std::cout << name << '=';
+                if (identity.available(field)) {
+                    const std::vector<std::uint8_t> bytes(
+                        digest.begin(), digest.end());
+                    print_hex(bytes);
+                } else {
+                    std::cout << "unavailable";
+                }
+                std::cout << '\n';
+            };
+            print_field("project_sha256", identity.project_sha256,
+                        remotebsp::protocol::FirmwareIdentityField::ProjectSha256);
+            print_field("config_sha256", identity.config_sha256,
+                        remotebsp::protocol::FirmwareIdentityField::ConfigSha256);
+            print_field("firmware_input_sha256",
+                        identity.firmware_input_sha256,
+                        remotebsp::protocol::FirmwareIdentityField::FirmwareInputSha256);
+        }
+        return 0;
+    }
     if (name == "get-capability" && arguments.size() == 1) {
         // 请求失败时不要提前输出半截结果，避免错误信息看起来像协议损坏。
         const auto capabilities = client.get_capabilities();
@@ -841,6 +880,20 @@ int run(const std::vector<std::string>& arguments,
             value.assign(arguments[2].begin(), arguments[2].end());
         }
         const auto status = client.write_device_parameter(id, value);
+        print_device_parameter_status(status);
+        return 0;
+    }
+    if (name == "param-set-cas" && arguments.size() == 4) {
+        const auto id = parse_device_parameter_id(arguments[1]);
+        const auto expected_generation = parse_u32(arguments[2], "预期参数代数");
+        std::vector<std::uint8_t> value;
+        if (arguments[3].rfind("hex:", 0U) == 0U) {
+            value = parse_hex(arguments[3].substr(4U));
+        } else {
+            value.assign(arguments[3].begin(), arguments[3].end());
+        }
+        const auto status = client.write_device_parameter(
+            id, value, expected_generation);
         print_device_parameter_status(status);
         return 0;
     }
@@ -1430,6 +1483,7 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-operation-status" &&
              arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&
+             arguments[0] != "firmware-identity" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(
                 "--json当前仅支持Runtime合同命令");

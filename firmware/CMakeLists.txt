@@ -8,6 +8,8 @@ set(RBSP_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/.config" CACHE FILEPATH
     "Kconfig 配置文件")
 set(RBSP_STATIC_RESOURCE_TABLE "" CACHE FILEPATH
     "Studio生成的实体固件静态资源表；为空时兼容Kconfig静态GPIO列表")
+set(RBSP_FIRMWARE_INPUT_SHA256 "" CACHE STRING
+    "Studio构建输入身份SHA-256；仅与静态资源表共同使用")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -19,6 +21,16 @@ if(RBSP_STATIC_RESOURCE_TABLE)
     configure_file("${RBSP_STATIC_RESOURCE_TABLE}"
                    "${GENERATED_DIR}/remotebsp_static_resources.h" COPYONLY)
     set(RBSP_STUDIO_RESOURCE_DEFINITION RBSP_STUDIO_STATIC_RESOURCE_TABLE=1)
+    file(SHA256 "${RBSP_CONFIG}" RBSP_CONFIG_SHA256)
+    if(RBSP_FIRMWARE_INPUT_SHA256)
+        string(LENGTH "${RBSP_FIRMWARE_INPUT_SHA256}"
+               RBSP_FIRMWARE_INPUT_SHA256_LENGTH)
+        if(NOT RBSP_FIRMWARE_INPUT_SHA256_LENGTH EQUAL 64 OR
+           NOT RBSP_FIRMWARE_INPUT_SHA256 MATCHES "^[0-9a-fA-F]+$")
+            message(FATAL_ERROR
+                "RBSP_FIRMWARE_INPUT_SHA256必须为64位十六进制")
+        endif()
+    endif()
 endif()
 
 file(STRINGS "${RBSP_CONFIG}" RBSP_MOTION_LINES
@@ -97,6 +109,12 @@ target_compile_options(remotebsp_embedded_core PRIVATE
     -Wall -Wextra -Wpedantic -Werror
     -ffunction-sections -fdata-sections
 )
+if(RBSP_STUDIO_RESOURCE_DEFINITION)
+    target_compile_definitions(remotebsp_embedded_core PRIVATE
+        ${RBSP_STUDIO_RESOURCE_DEFINITION}
+        RBSP_CONFIG_SHA256="${RBSP_CONFIG_SHA256}"
+        RBSP_FIRMWARE_INPUT_SHA256="${RBSP_FIRMWARE_INPUT_SHA256}")
+endif()
 
 file(STRINGS "${RBSP_CONFIG}" RBSP_BOARD_LINES
      REGEX "^CONFIG_BOARD_STM32(F072RBT6|F103CBT6|G431CBU6)=y$")

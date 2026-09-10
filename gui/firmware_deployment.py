@@ -28,6 +28,10 @@ class FirmwareDeploymentError(RuntimeError):
 class IdentityCapabilityError(FirmwareDeploymentError):
     """运行时身份合同缺少完成部署核验所必需的字段。"""
 
+    def __init__(self, message: str, missing_fields: Sequence[str] = ()):
+        super().__init__(message)
+        self.missing_fields = tuple(missing_fields)
+
 
 _HASH = re.compile(r"[0-9a-f]{64}")
 _BUILD_ID = re.compile(r"[a-z0-9-]{8,96}")
@@ -98,9 +102,9 @@ RUNTIME_IDENTITY_CAPABILITIES_MISSING = (
 class ToolbusdIdentityReader:
     """通过 remote-cli 的稳定 JSON IPC 边界读取单个运行中节点。
 
-    当前 node-list 合同只公开 UUID、board_type、在线状态和协议/固件
-    版本，不公开工程、配置与固件输入哈希。因此本适配器能够严格确认目标
-    节点，却会拒绝把这个身份子集伪装成完整的 DeviceIdentity。
+    node-list 负责确认节点在线、UUID 与 board_type；firmware-identity
+    通过同一节点路由原子返回 UUID、board_type 与三个构建摘要。两份结果
+    必须一致，且三个摘要逐项可用，才能形成完整 DeviceIdentity。
     """
 
     MAX_BYTES = 64 * 1024
@@ -137,12 +141,8 @@ class ToolbusdIdentityReader:
         self.timeout = timeout
         self._runner = runner or self._run_cli
 
-    @staticmethod
-    def require_complete_identity() -> None:
-        raise IdentityCapabilityError(
-            "当前toolbusd node-list合同不公开" + "、".join(
-                RUNTIME_IDENTITY_CAPABILITIES_MISSING) +
-            "，不能用于四重烧录身份核验")
+    def require_complete_identity(self) -> None:
+        self.read_identity()
 
     @staticmethod
     def _strict_object(pairs: list[tuple[str, object]]) -> dict:
@@ -253,11 +253,60 @@ class ToolbusdIdentityReader:
 
     def read_identity(self) -> DeviceIdentity:
         node = self.read_runtime_node()
-        raise IdentityCapabilityError(
-            "toolbusd node-list已确认运行中节点"
-            f"{node.node_id}/{node.device_uuid}，但当前运行时合同不公开"
-            + "、".join(RUNTIME_IDENTITY_CAPABILITIES_MISSING) + "；"
-            "为避免把构建记录冒充设备回读，拒绝完成烧录后身份核验")
+        command = (self.remote_cli, "--json", "--socket", self.socket_path,
+                   "--node", str(self.node_id), "firmware-identity")
+        content = self._runner(command, self.timeout, self.MAX_BYTES)
+        if not isinstance(content, bytes):
+            raise FirmwareDeploymentError("remote-cli身份读取器必须返回bytes")
+        if len(content) > self.MAX_BYTES:
+            raise FirmwareDeploymentError("remote-cli身份输出超过64 KiB上限")
+        try:
+            root = json.loads(
+                content.decode("utf-8"), object_pairs_hook=self._strict_object,
+                parse_constant=lambda item: (_ for _ in ()).throw(
+                    FirmwareDeploymentError(
+                        f"固件身份输出包含非标准数值：{item}")))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise FirmwareDeploymentError(
+                f"固件身份输出不是合法UTF-8 JSON：{error}") from error
+        expected_fields = {
+            "schema_version", "command", "identity_schema_version",
+            "board_type", "uuid", "project_sha256", "config_sha256",
+            "firmware_input_sha256"}
+        if not isinstance(root, dict) or set(root) != expected_fields or \
+                type(root.get("schema_version")) is not int or \
+                root["schema_version"] != 1 or \
+                root.get("command") != "firmware-identity" or \
+                type(root.get("identity_schema_version")) is not int or \
+                root["identity_schema_version"] != 1 or \
+                type(root.get("board_type")) is not int or \
+                not 0 <= root["board_type"] <= 0xffffffff or \
+                not isinstance(root.get("uuid"), str) or \
+                not re.fullmatch(r"[0-9a-f]{32}", root["uuid"]):
+            raise FirmwareDeploymentError("firmware-identity JSON信封无效")
+        if root["board_type"] != next(
+                value for value, board in self._BOARD_TYPES.items()
+                if board == node.board_id) or root["uuid"] != node.device_uuid:
+            raise FirmwareDeploymentError(
+                "firmware-identity与node-list不是同一运行中节点")
+        hashes = {
+            "project_sha256": root["project_sha256"],
+            "config_sha256": root["config_sha256"],
+            "firmware_identity_sha256": root["firmware_input_sha256"],
+        }
+        missing = [name for name, value in hashes.items() if value is None]
+        if missing:
+            raise IdentityCapabilityError(
+                "运行中固件未提供" + "、".join(missing) +
+                "，拒绝完成烧录身份核验", missing)
+        for name, value in hashes.items():
+            if not isinstance(value, str) or not _HASH.fullmatch(value):
+                raise FirmwareDeploymentError(
+                    f"firmware-identity.{name}不是规范SHA-256")
+        return DeviceIdentity(
+            node.board_id, hashes["project_sha256"],
+            hashes["config_sha256"],
+            hashes["firmware_identity_sha256"], node.device_uuid)
 
 
 class JsonIdentityFileReader:

@@ -2,6 +2,10 @@
 
 #include <string.h>
 
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+#include "remotebsp_static_resources.h"
+#endif
+
 enum {
     RBSP_MESSAGE_REQUEST = 1,
     RBSP_MESSAGE_RESPONSE = 2,
@@ -15,6 +19,7 @@ enum {
     RBSP_COMMAND_PING = 0x0012,
     RBSP_COMMAND_BOOTLOADER_ENTER = 0x0013,
     RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
+    RBSP_COMMAND_FIRMWARE_IDENTITY = 0x0015,
     RBSP_COMMAND_TIME_SYNC = 0x0020,
     RBSP_COMMAND_RESOURCE_ENUM = 0x0030,
     RBSP_COMMAND_RESOURCE_DESCRIBE = 0x0031,
@@ -116,6 +121,43 @@ enum {
     RBSP_RESOURCE_LEASE_EXCLUSIVE = 2,
 #endif
 };
+
+enum {
+    RBSP_FIRMWARE_IDENTITY_SCHEMA_VERSION = 1U,
+    RBSP_FIRMWARE_IDENTITY_PROJECT_SHA256 = 1U << 0U,
+    RBSP_FIRMWARE_IDENTITY_CONFIG_SHA256 = 1U << 1U,
+    RBSP_FIRMWARE_IDENTITY_INPUT_SHA256 = 1U << 2U,
+};
+
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+static int hex_nibble(char value) {
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool decode_sha256_literal(const char* text, uint8_t output[32]) {
+    if (text == NULL || output == NULL || strlen(text) != 64U) {
+        return false;
+    }
+    for (uint8_t index = 0U; index < 32U; ++index) {
+        const int high = hex_nibble(text[index * 2U]);
+        const int low = hex_nibble(text[index * 2U + 1U]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        output[index] = (uint8_t)((high << 4U) | low);
+    }
+    return true;
+}
+#endif
 
 #if defined(CONFIG_REMOTEBSP_BUS)
 #if CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US > CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US
@@ -2022,6 +2064,25 @@ static bool process_request(rbsp_core_t* core,
             }
             break;
 
+        case RBSP_COMMAND_FIRMWARE_IDENTITY:
+            if (request->object_id != 0U || request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+                break;
+            }
+            put_u16(payload + 1U, RBSP_FIRMWARE_IDENTITY_SCHEMA_VERSION);
+            put_u16(payload + 3U,
+                    core->info.firmware_identity_available_fields);
+            put_u32(payload + 5U, core->info.board_type);
+            memcpy(payload + 9U, core->info.uuid, 16U);
+            memcpy(payload + 25U, core->info.project_sha256, 32U);
+            memcpy(payload + 57U, core->info.config_sha256, 32U);
+            memcpy(payload + 89U, core->info.firmware_input_sha256, 32U);
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, payload + 1U, 120U);
+            break;
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_TIME_SYNC: {
             if (!motion_available(core)) {
@@ -3805,6 +3866,30 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
     core->hal = *hal;
     core->link_mode = mode;
     core->info = *info;
+    core->info.firmware_identity_available_fields = 0U;
+    memset(core->info.project_sha256, 0,
+           sizeof(core->info.project_sha256));
+    memset(core->info.config_sha256, 0,
+           sizeof(core->info.config_sha256));
+    memset(core->info.firmware_input_sha256, 0,
+           sizeof(core->info.firmware_input_sha256));
+#ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
+    if (decode_sha256_literal(RBSP_STUDIO_RESOURCE_PROJECT_SHA256,
+                              core->info.project_sha256)) {
+        core->info.firmware_identity_available_fields |=
+            RBSP_FIRMWARE_IDENTITY_PROJECT_SHA256;
+    }
+    if (decode_sha256_literal(RBSP_CONFIG_SHA256,
+                              core->info.config_sha256)) {
+        core->info.firmware_identity_available_fields |=
+            RBSP_FIRMWARE_IDENTITY_CONFIG_SHA256;
+    }
+    if (decode_sha256_literal(RBSP_FIRMWARE_INPUT_SHA256,
+                              core->info.firmware_input_sha256)) {
+        core->info.firmware_identity_available_fields |=
+            RBSP_FIRMWARE_IDENTITY_INPUT_SHA256;
+    }
+#endif
     core->next_object_id = 1U;
 #if defined(CONFIG_REMOTEBSP_BUS)
     if (!bus_configuration_valid(hal)) {

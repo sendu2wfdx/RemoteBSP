@@ -276,6 +276,11 @@ NodeInfo Client::get_info() const {
     return info;
 }
 
+protocol::FirmwareIdentityPayload Client::firmware_identity() const {
+    return protocol::decode_firmware_identity(
+        body(command(protocol::Command::FirmwareIdentity), 120U));
+}
+
 std::uint64_t Client::get_capabilities() const {
     const auto data = body(command(protocol::Command::GetCapability), 8);
     return read_u64(data.data());
@@ -809,11 +814,17 @@ protocol::DeviceParameterValue Client::read_device_parameter(
 protocol::DeviceParameterStatus Client::write_device_parameter(
     std::uint16_t id, const std::vector<std::uint8_t>& value) const {
     const auto before = device_parameter_status();
+    return write_device_parameter(id, value, before.generation);
+}
+
+protocol::DeviceParameterStatus Client::write_device_parameter(
+    std::uint16_t id, const std::vector<std::uint8_t>& value,
+    std::uint32_t expected_generation) const {
     const auto unlock = protocol::decode_device_parameter_unlock_response(
         body(command(
             protocol::Command::DeviceParameterUnlock,
             protocol::encode_device_parameter_unlock_request(
-                {before.generation,
+                {expected_generation,
                  protocol::kDeviceParameterUnlockConfirmation}))));
     try {
         const auto after = protocol::decode_device_parameter_status(

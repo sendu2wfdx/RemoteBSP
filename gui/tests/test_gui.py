@@ -403,6 +403,12 @@ class GuiTest(unittest.TestCase):
                         if item.startswith("-DRBSP_STATIC_RESOURCE_TABLE="))
                     resource_path = Path(resource_option.split("=", 1)[1])
                     self.assertTrue(resource_path.is_file())
+                    identity_option = next(
+                        item for item in command
+                        if item.startswith(
+                            "-DRBSP_FIRMWARE_INPUT_SHA256="))
+                    self.assertRegex(identity_option.split("=", 1)[1],
+                                     r"^[0-9a-f]{64}$")
                     self.assertIn("RBSP_STUDIO_GPIO_RESOURCE_COUNT",
                                   resource_path.read_text(encoding="utf-8"))
                 if "--build" in command:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -19,10 +20,17 @@ from firmware_builder import (
 )
 from firmware_deployment import (
     FirmwareDeploymentError,
+    IdentityCapabilityError,
     JsonIdentityFileReader,
     RUNTIME_IDENTITY_CAPABILITIES_MISSING,
     ToolbusdIdentityReader,
     deploy_stlink,
+)
+from device_parameters import (
+    DeviceParameterError,
+    DeviceParameterManager,
+    MAX_BACKUP_BYTES,
+    WRITE_CONFIRMATION,
 )
 from production_batch import (
     MAX_BATCH_COMPARISONS,
@@ -258,13 +266,27 @@ def _run_deploy_stlink(args) -> dict:
 
 
 def _run_inspect_runtime_identity(args) -> dict:
-    node = ToolbusdIdentityReader(
+    reader = ToolbusdIdentityReader(
         args.toolbusd_socket, args.node_id,
         expected_uuid=args.node_uuid, remote_cli=args.remote_cli,
-        timeout=args.identity_timeout).read_runtime_node()
+        timeout=args.identity_timeout)
+    try:
+        identity = reader.read_identity()
+        node = reader.read_runtime_node()
+        if node.device_uuid != identity.device_uuid or \
+                node.board_id != identity.board_id:
+            raise FirmwareDeploymentError("身份检查期间运行中节点发生变化")
+        identity_complete = True
+        missing = []
+    except IdentityCapabilityError as error:
+        node = reader.read_runtime_node()
+        identity = None
+        identity_complete = False
+        missing = list(error.missing_fields or
+                       RUNTIME_IDENTITY_CAPABILITIES_MISSING)
     return {
         "ok": True, "format": "STUDIO_CLI_RUNTIME_IDENTITY_V1",
-        "identity_complete": False,
+        "identity_complete": identity_complete,
         "node_id": node.node_id, "board_id": node.board_id,
         "device_uuid": node.device_uuid, "online": node.online,
         "ready": node.ready,
@@ -274,9 +296,60 @@ def _run_inspect_runtime_identity(args) -> dict:
             "patch": node.firmware_version[2],
         },
         "protocol_version": node.protocol_version,
-        "capabilities_missing": list(RUNTIME_IDENTITY_CAPABILITIES_MISSING),
+        "project_sha256": (
+            identity.project_sha256 if identity is not None else None),
+        "config_sha256": (
+            identity.config_sha256 if identity is not None else None),
+        "firmware_identity_sha256": (
+            identity.firmware_identity_sha256
+            if identity is not None else None),
+        "capabilities_missing": missing,
         "deployment_verified": False,
         "execution_status": _execution_status(software_build="not_performed"),
+    }
+
+
+def _parameter_manager(args) -> DeviceParameterManager:
+    return DeviceParameterManager(
+        args.toolbusd_socket, args.node_id,
+        remote_cli=args.remote_cli, timeout=args.parameter_timeout)
+
+
+def _run_parameter_write(args) -> dict:
+    try:
+        value = base64.b64decode(args.value_base64, validate=True)
+    except (TypeError, ValueError) as error:
+        raise ProjectConfigError("--value-base64不是合法Base64") from error
+    # 规范化后再交给同一有界后端，避免宽松编码存在多种表示。
+    snapshot = _parameter_manager(args).write(
+        expected_uuid=args.expected_uuid,
+        expected_generation=args.expected_generation,
+        parameter_id=args.parameter_id,
+        value_base64=base64.b64encode(value).decode("ascii"),
+        confirmation=args.confirmation)
+    return {
+        "ok": True, "format": "STUDIO_CLI_DEVICE_PARAMETER_WRITE_V1",
+        "snapshot": snapshot,
+        "execution_status": {
+            "software_build": "not_performed", "firmware_flash": "not_performed",
+            "hardware_access": True, "device_parameters_written": True,
+        },
+    }
+
+
+def _run_parameter_restore(args) -> dict:
+    backup = _read_json(args.backup, "设备参数备份", MAX_BACKUP_BYTES)
+    snapshot = _parameter_manager(args).restore(
+        backup, expected_uuid=args.expected_uuid,
+        expected_generation=args.expected_generation,
+        confirmation=args.confirmation)
+    return {
+        "ok": True, "format": "STUDIO_CLI_DEVICE_PARAMETER_RESTORE_V1",
+        "snapshot": snapshot,
+        "execution_status": {
+            "software_build": "not_performed", "firmware_flash": "not_performed",
+            "hardware_access": True, "device_parameters_written": True,
+        },
     }
 
 
@@ -413,6 +486,30 @@ def _parser() -> StrictParser:
         "--identity-timeout", type=float, default=2.0)
     inspect_identity.set_defaults(handler=_run_inspect_runtime_identity)
 
+    def add_parameter_target(command):
+        command.add_argument("--toolbusd-socket", required=True)
+        command.add_argument("--node-id", type=int, default=1)
+        command.add_argument("--expected-uuid", required=True)
+        command.add_argument("--expected-generation", type=int, required=True)
+        command.add_argument("--confirmation", required=True,
+                             help=f"必须精确填写{WRITE_CONFIRMATION}")
+        command.add_argument("--remote-cli", default="remote-cli")
+        command.add_argument("--parameter-timeout", type=float, default=3.0)
+
+    parameter_write = sub.add_parser(
+        "device-parameter-write", help="显式写入单项设备参数")
+    add_parameter_target(parameter_write)
+    parameter_write.add_argument("--parameter-id", type=lambda value: int(value, 0),
+                                 required=True)
+    parameter_write.add_argument("--value-base64", required=True)
+    parameter_write.set_defaults(handler=_run_parameter_write)
+
+    parameter_restore = sub.add_parser(
+        "device-parameter-restore", help="显式恢复设备参数备份")
+    add_parameter_target(parameter_restore)
+    parameter_restore.add_argument("--backup", required=True)
+    parameter_restore.set_defaults(handler=_run_parameter_restore)
+
     create = sub.add_parser("batch-create", help="生成确定性生产批次")
     create.add_argument("--batch-id", required=True)
     create.add_argument("--name", required=True)
@@ -462,7 +559,8 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout,
         _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
                        "exit_code": EXIT_INPUT, "error": str(error)})
         return EXIT_INPUT
-    except (FirmwareBuildError, FirmwareDeploymentError, OSError) as error:
+    except (FirmwareBuildError, FirmwareDeploymentError,
+            DeviceParameterError, OSError) as error:
         _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
                        "exit_code": EXIT_OPERATION, "error": str(error)})
         return EXIT_OPERATION

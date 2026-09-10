@@ -172,6 +172,19 @@ parameter_read_output="$("$remote_cli_bin" --socket "$socket_path" \
     param-get serial-number)"
 grep -Fq 'generation=1 type=2 value=MOCK-E2E-001' \
     <<<"$parameter_read_output"
+# CAS 入口不得用内部重新读取的新代数替换调用方看到的旧代数。
+if "$remote_cli_bin" --socket "$socket_path" \
+        param-set-cas serial-number 0 STALE-WRITE >/dev/null 2>&1; then
+    echo "过期参数代数写入意外成功" >&2
+    exit 1
+fi
+parameter_read_after_stale="$("$remote_cli_bin" --socket "$socket_path" \
+    param-get serial-number)"
+grep -Fq 'generation=1 type=2 value=MOCK-E2E-001' \
+    <<<"$parameter_read_after_stale"
+parameter_cas_output="$("$remote_cli_bin" --socket "$socket_path" \
+    param-set-cas device-name 1 MOCK-CAS)"
+grep -Fq 'generation=2 stored=2' <<<"$parameter_cas_output"
 
 traffic_output="$("$remote_cli_bin" --socket "$socket_path" traffic-status)"
 expected_traffic_mode="$can_mode"

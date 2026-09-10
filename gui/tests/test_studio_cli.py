@@ -22,6 +22,7 @@ from firmware_deployment import (  # noqa: E402
     DeviceIdentity,
     FirmwareDeploymentError,
     FirmwareIdentity,
+    IdentityCapabilityError,
 )
 from production_batch import export_production_batch  # noqa: E402
 from production_record import generate_production_record  # noqa: E402
@@ -173,7 +174,7 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OPERATION)
         self.assertIn("身份核对失败", error["error"])
 
-    def test_runtime_identity_inspection_is_read_only_and_admits_gaps(self):
+    def test_runtime_identity_inspection_is_complete_but_not_deployment(self):
         arguments = [
             "inspect-runtime-identity",
             "--toolbusd-socket", "/tmp/toolbusd.sock", "--node-id", "7",
@@ -186,26 +187,87 @@ class StudioCliTest(unittest.TestCase):
             "firmware_version": (0, 2, 0), "protocol_version": 1,
         })()
         with patch("studio_cli.ToolbusdIdentityReader") as reader_type:
+            reader_type.return_value.read_identity.return_value = DeviceIdentity(
+                "weact-g431-core-v10", "a" * 64, "b" * 64,
+                "c" * 64, "ab" * 16)
             reader_type.return_value.read_runtime_node.return_value = runtime_node
             code, response, _, _ = self._call(arguments)
         self.assertEqual(code, EXIT_OK)
         reader_type.assert_called_once_with(
             "/tmp/toolbusd.sock", 7, expected_uuid="ab" * 16,
             remote_cli="/bin/remote-cli", timeout=1.25)
-        self.assertFalse(response["identity_complete"])
+        self.assertTrue(response["identity_complete"])
         self.assertFalse(response["deployment_verified"])
         self.assertEqual(response["firmware"], {
             "major": 0, "minor": 2, "patch": 0})
-        self.assertEqual(response["capabilities_missing"], [
-            "project_sha256", "config_sha256",
-            "firmware_identity_sha256"])
+        self.assertEqual(response["project_sha256"], "a" * 64)
+        self.assertEqual(response["config_sha256"], "b" * 64)
+        self.assertEqual(response["firmware_identity_sha256"], "c" * 64)
+        self.assertEqual(response["capabilities_missing"], [])
         self.assertFalse(response["execution_status"]["hardware_access"])
+
+        with patch("studio_cli.ToolbusdIdentityReader") as reader_type:
+            reader_type.return_value.read_identity.side_effect = \
+                IdentityCapabilityError(
+                    "缺字段", ("config_sha256",))
+            reader_type.return_value.read_runtime_node.return_value = runtime_node
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(response["identity_complete"])
+        self.assertIsNone(response["project_sha256"])
+        self.assertEqual(response["capabilities_missing"], [
+            "config_sha256"])
+        self.assertFalse(response["deployment_verified"])
 
         code, error, _, _ = self._call([
             "deploy-stlink", "--build-id", "weact-g431-core-v10-01234567",
             "--toolbusd-socket", "/tmp/toolbusd.sock"])
         self.assertEqual(code, EXIT_USAGE)
         self.assertEqual(error["exit_code"], EXIT_USAGE)
+
+    def test_device_parameter_write_is_explicit_cli_only(self):
+        snapshot = {"schema_version": 1, "node_uuid": "ab" * 16,
+                    "status": {"generation": 8}, "parameters": []}
+        arguments = [
+            "device-parameter-write", "--toolbusd-socket", "/tmp/toolbusd.sock",
+            "--node-id", "7", "--expected-uuid", "ab" * 16,
+            "--expected-generation", "7", "--parameter-id", "0x100",
+            "--value-base64", "bmV3", "--confirmation",
+            "WRITE_DEVICE_PARAMETERS", "--remote-cli", "/bin/remote-cli",
+            "--parameter-timeout", "1.5",
+        ]
+        with patch("studio_cli.DeviceParameterManager") as manager_type:
+            manager_type.return_value.write.return_value = snapshot
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        manager_type.assert_called_once_with(
+            "/tmp/toolbusd.sock", 7, remote_cli="/bin/remote-cli", timeout=1.5)
+        manager_type.return_value.write.assert_called_once_with(
+            expected_uuid="ab" * 16, expected_generation=7,
+            parameter_id=0x100, value_base64="bmV3",
+            confirmation="WRITE_DEVICE_PARAMETERS")
+        self.assertTrue(response["execution_status"]["hardware_access"])
+
+    def test_device_parameter_restore_reads_bounded_backup(self):
+        backup = self.directory / "parameters.json"
+        backup.write_text(json.dumps({
+            "schema_version": 1, "node_uuid": "ab" * 16,
+            "parameters": []}), encoding="utf-8")
+        arguments = [
+            "device-parameter-restore", "--toolbusd-socket", "/tmp/toolbusd.sock",
+            "--expected-uuid", "ab" * 16, "--expected-generation", "7",
+            "--confirmation", "WRITE_DEVICE_PARAMETERS",
+            "--backup", str(backup),
+        ]
+        with patch("studio_cli.DeviceParameterManager") as manager_type:
+            manager_type.return_value.restore.return_value = {
+                "status": {"generation": 7}}
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        passed = manager_type.return_value.restore.call_args.args[0]
+        self.assertEqual(passed["node_uuid"], "ab" * 16)
+        self.assertEqual(response["format"],
+                         "STUDIO_CLI_DEVICE_PARAMETER_RESTORE_V1")
 
     def test_batch_create_validate_and_atomic_archive_output(self):
         archive = self.directory / "batch.zip"

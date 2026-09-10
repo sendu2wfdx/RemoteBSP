@@ -215,7 +215,13 @@ int main(void) {
         .i2c_transfer = i2c_transfer,
         .spi_transfer = spi_transfer,
     };
-    const rbsp_node_info_t info = {{0}, 1U, 0U, 0U, 1U};
+    const rbsp_node_info_t info = {
+        .uuid = {0},
+        .firmware_major = 1U,
+        .firmware_minor = 0U,
+        .firmware_patch = 0U,
+        .board_type = 1U,
+    };
     rbsp_core_t core;
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     core.node_id = 25U;

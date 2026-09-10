@@ -150,6 +150,10 @@ typedef struct {
     uint16_t firmware_minor;
     uint16_t firmware_patch;
     uint32_t board_type;
+    uint16_t firmware_identity_available_fields;
+    uint8_t project_sha256[32];
+    uint8_t config_sha256[32];
+    uint8_t firmware_input_sha256[32];
 } rbsp_node_info_t;
 
 /* 板级驱动可选上报的瞬时状态；false 表示没有额外数据，并非资源故障。 */

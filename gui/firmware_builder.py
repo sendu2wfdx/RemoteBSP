@@ -310,6 +310,7 @@ def build_firmware_project(
             f"-DCMAKE_TOOLCHAIN_FILE={TOOLCHAIN_FILE}",
             f"-DRBSP_CONFIG={config_path}",
             f"-DRBSP_STATIC_RESOURCE_TABLE={resource_path}",
+            f"-DRBSP_FIRMWARE_INPUT_SHA256={firmware_input_sha256}",
         ]
         compile_command = [
             "cmake", "--build", str(build_dir), "--parallel", str(jobs),

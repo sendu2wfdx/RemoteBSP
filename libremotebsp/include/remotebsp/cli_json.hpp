@@ -53,6 +53,51 @@ inline void write_ipc_error(std::ostream& output, std::string_view command,
     output << "}}\n";
 }
 
+inline void write_digest_or_null(
+    std::ostream& output, const std::array<std::uint8_t, 32>& digest,
+    bool available) {
+    static constexpr char digits[] = "0123456789abcdef";
+    if (!available) {
+        output << "null";
+        return;
+    }
+    output << '"';
+    for (const auto byte : digest) {
+        output << digits[byte >> 4U] << digits[byte & 0x0FU];
+    }
+    output << '"';
+}
+
+inline void write_firmware_identity(
+    std::ostream& output,
+    const protocol::FirmwareIdentityPayload& identity) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"firmware-identity\""
+           << ",\"identity_schema_version\":"
+           << identity.schema_version
+           << ",\"board_type\":" << identity.board_type
+           << ",\"uuid\":\"";
+    static constexpr char digits[] = "0123456789abcdef";
+    for (const auto byte : identity.node_uuid) {
+        output << digits[byte >> 4U] << digits[byte & 0x0FU];
+    }
+    output << '"'
+           << ",\"project_sha256\":";
+    write_digest_or_null(
+        output, identity.project_sha256,
+        identity.available(protocol::FirmwareIdentityField::ProjectSha256));
+    output << ",\"config_sha256\":";
+    write_digest_or_null(
+        output, identity.config_sha256,
+        identity.available(protocol::FirmwareIdentityField::ConfigSha256));
+    output << ",\"firmware_input_sha256\":";
+    write_digest_or_null(
+        output, identity.firmware_input_sha256,
+        identity.available(
+            protocol::FirmwareIdentityField::FirmwareInputSha256));
+    output << "}\n";
+}
+
 inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
     switch (kind) {
         case RuntimeOperationKind::Unknown: return "unknown";

@@ -679,9 +679,31 @@ int main(void) {
         .enter_bootloader = fake_enter_bootloader,
     };
     rbsp_node_info_t info = {
-        {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-         0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
-        0, 1, 0, 0x0103CB};
+        .uuid = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+        .firmware_major = 0U,
+        .firmware_minor = 1U,
+        .firmware_patch = 0U,
+        .board_type = 0x0103CBU,
+    };
+    assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
+    core.node_id = 25U;
+    clear_sent();
+    uint8_t identity_request[64U];
+    uint8_t identity_response[192U];
+    uint16_t identity_request_size = make_request(
+        identity_request, 0x0015U, 190U, 0U, NULL, 0U);
+    feed_packet(&core, 0x619U, 190U, identity_request,
+                identity_request_size);
+    assert(reassemble_sent(identity_response, 0x599U) == 145U);
+    assert(identity_response[24U] == 0U);
+    assert(get_u16(identity_response + 25U) == 1U);
+    assert(get_u16(identity_response + 27U) == 0U);
+    assert(get_u32(identity_response + 29U) == info.board_type);
+    assert(memcmp(identity_response + 33U, info.uuid, 16U) == 0);
+    for (size_t index = 49U; index < 145U; ++index) {
+        assert(identity_response[index] == 0U);
+    }
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     test_resource_reset(&hal, &info);
     uint8_t request[1024];

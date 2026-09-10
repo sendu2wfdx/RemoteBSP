@@ -16,6 +16,8 @@ static I2C_HandleTypeDef i2c1;
 static SPI_HandleTypeDef spi1;
 static SPI_HandleTypeDef spi2;
 static bool i2c1_backend_failed;
+static bool spi1_backend_failed;
+static bool spi2_backend_failed;
 
 /*
  * 依据 RM0440 I2C_TIMINGR 与 AN4235 的 Fast-mode 约束计算：
@@ -220,7 +222,11 @@ bool rbsp_g431_bus_init(void) {
     pin.Mode = GPIO_MODE_OUTPUT_PP;
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
     HAL_GPIO_Init(GPIOA, &pin);
-    if (!spi_configure(&spi1, SPI1)) return false;
+    if (!spi_configure(&spi1, SPI1)) {
+        spi1_backend_failed = true;
+        return false;
+    }
+    spi1_backend_failed = false;
 #endif
 #ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
     __HAL_RCC_SPI2_CLK_ENABLE();
@@ -234,7 +240,11 @@ bool rbsp_g431_bus_init(void) {
     pin.Mode = GPIO_MODE_OUTPUT_PP;
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
     HAL_GPIO_Init(GPIOB, &pin);
-    if (!spi_configure(&spi2, SPI2)) return false;
+    if (!spi_configure(&spi2, SPI2)) {
+        spi2_backend_failed = true;
+        return false;
+    }
+    spi2_backend_failed = false;
 #endif
     return true;
 }
@@ -263,16 +273,26 @@ uint8_t rbsp_g431_bus_resource_count(void) {
 bool rbsp_g431_bus_resource_status(
     uint8_t resource_type, uint16_t instance,
     rbsp_resource_runtime_status_t* status) {
-    if (status == NULL || instance != 1U ||
-        (resource_type != 11U && resource_type != 12U)) {
-        return false;
-    }
+    if (status == NULL) return false;
 #ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
-    status->backend_failed = i2c1_backend_failed;
-    return true;
-#else
-    return false;
+    if (instance == 1U && (resource_type == 11U || resource_type == 12U)) {
+        status->backend_failed = i2c1_backend_failed;
+        return true;
+    }
 #endif
+#ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
+    if (instance == 1U && (resource_type == 13U || resource_type == 14U)) {
+        status->backend_failed = spi1_backend_failed;
+        return true;
+    }
+#endif
+#ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
+    if (instance == 2U && (resource_type == 13U || resource_type == 14U)) {
+        status->backend_failed = spi2_backend_failed;
+        return true;
+    }
+#endif
+    return false;
 }
 
 rbsp_bus_transaction_status_t rbsp_g431_i2c_transfer(
@@ -280,7 +300,6 @@ rbsp_bus_transaction_status_t rbsp_g431_i2c_transfer(
     uint16_t flags, const uint8_t* write_data, uint16_t write_length,
     uint8_t* read_data, uint16_t read_length, uint16_t* transmitted,
     uint16_t* received) {
-    (void)flags;
     *transmitted = 0U;
     *received = 0U;
 #ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
@@ -291,18 +310,34 @@ rbsp_bus_transaction_status_t rbsp_g431_i2c_transfer(
     const uint32_t budget_ms = timeout_ms(timeout_us);
     const uint16_t address = (uint16_t)(device->device_value << 1U);
     if (write_length != 0U && read_length != 0U) {
-        result = HAL_I2C_Master_Seq_Transmit_IT(&i2c1, address,
-            (uint8_t*)write_data, write_length, I2C_FIRST_FRAME);
-        if (result == HAL_OK) result = i2c1_wait_ready(budget_ms);
-        if (result == HAL_OK) {
-            *transmitted = write_length;
-            const uint32_t remaining = remaining_ms(started, budget_ms);
-            if (remaining == 0U) {
-                result = HAL_TIMEOUT;
-            } else {
-                result = HAL_I2C_Master_Seq_Receive_IT(&i2c1, address, read_data,
-                    read_length, I2C_LAST_FRAME);
-                if (result == HAL_OK) result = i2c1_wait_ready(remaining);
+        if ((flags & RBSP_BUS_CONTRACT_I2C_REPEATED_START) != 0U) {
+            result = HAL_I2C_Master_Seq_Transmit_IT(&i2c1, address,
+                (uint8_t*)write_data, write_length, I2C_FIRST_FRAME);
+            if (result == HAL_OK) result = i2c1_wait_ready(budget_ms);
+            if (result == HAL_OK) {
+                *transmitted = write_length;
+                const uint32_t remaining = remaining_ms(started, budget_ms);
+                if (remaining == 0U) {
+                    result = HAL_TIMEOUT;
+                } else {
+                    result = HAL_I2C_Master_Seq_Receive_IT(
+                        &i2c1, address, read_data, read_length,
+                        I2C_LAST_FRAME);
+                    if (result == HAL_OK) result = i2c1_wait_ready(remaining);
+                }
+            }
+        } else {
+            result = HAL_I2C_Master_Transmit(&i2c1, address,
+                (uint8_t*)write_data, write_length, budget_ms);
+            if (result == HAL_OK) {
+                *transmitted = write_length;
+                const uint32_t remaining = remaining_ms(started, budget_ms);
+                if (remaining == 0U) {
+                    result = HAL_TIMEOUT;
+                } else {
+                    result = HAL_I2C_Master_Receive(
+                        &i2c1, address, read_data, read_length, remaining);
+                }
             }
         }
     } else if (write_length != 0U) {
@@ -321,9 +356,11 @@ rbsp_bus_transaction_status_t rbsp_g431_i2c_transfer(
         hal_status(result, HAL_I2C_GetError(&i2c1));
     *transmitted = 0U;
     *received = 0U;
-    if (!i2c1_recover()) {
-        i2c1_backend_failed = true;
-        return RBSP_BUS_TRANSACTION_FAULT;
+    if ((flags & RBSP_BUS_CONTRACT_I2C_RECOVERY) != 0U) {
+        if (!i2c1_recover()) {
+            i2c1_backend_failed = true;
+            return RBSP_BUS_TRANSACTION_FAULT;
+        }
     }
     return status;
 #else
@@ -343,10 +380,14 @@ rbsp_bus_transaction_status_t rbsp_g431_spi_transfer(
     GPIO_TypeDef* cs_port = NULL;
     uint16_t cs_pin = 0U;
 #ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
-    if (device->controller == 1U) { handle = &spi1; cs_port = GPIOA; cs_pin = GPIO_PIN_15; }
+    if (device->controller == 1U && !spi1_backend_failed) {
+        handle = &spi1; cs_port = GPIOA; cs_pin = GPIO_PIN_15;
+    }
 #endif
 #ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
-    if (device->controller == 2U) { handle = &spi2; cs_port = GPIOB; cs_pin = GPIO_PIN_12; }
+    if (device->controller == 2U && !spi2_backend_failed) {
+        handle = &spi2; cs_port = GPIOB; cs_pin = GPIO_PIN_12;
+    }
 #endif
     if (handle == NULL) return RBSP_BUS_TRANSACTION_FAULT;
     const uint16_t length = transmit_length > receive_length ? transmit_length : receive_length;
@@ -377,7 +418,14 @@ rbsp_bus_transaction_status_t rbsp_g431_spi_transfer(
         *received = 0U;
         (void)HAL_SPI_Abort(handle);
         (void)HAL_SPI_DeInit(handle);
-        (void)spi_configure(handle, handle->Instance);
+        if (!spi_configure(handle, handle->Instance)) {
+#ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
+            if (handle == &spi1) spi1_backend_failed = true;
+#endif
+#ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
+            if (handle == &spi2) spi2_backend_failed = true;
+#endif
+        }
     }
     return hal_status(result, 0U);
 }

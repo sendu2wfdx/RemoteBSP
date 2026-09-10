@@ -4,6 +4,7 @@
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/health.hpp"
+#include "remotebsp/protocol/firmware_identity.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/motion_group.hpp"
@@ -302,6 +303,7 @@ public:
     std::vector<std::uint8_t> ping(
         const std::vector<std::uint8_t>& data) const;
     NodeInfo get_info() const;
+    protocol::FirmwareIdentityPayload firmware_identity() const;
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     DaemonIdentity daemon_identity() const;
@@ -394,6 +396,9 @@ public:
         std::uint16_t id) const;
     protocol::DeviceParameterStatus write_device_parameter(
         std::uint16_t id, const std::vector<std::uint8_t>& value) const;
+    protocol::DeviceParameterStatus write_device_parameter(
+        std::uint16_t id, const std::vector<std::uint8_t>& value,
+        std::uint32_t expected_generation) const;
 
     std::uint32_t gpio_create(std::uint16_t pin,
                               GpioDirection direction,

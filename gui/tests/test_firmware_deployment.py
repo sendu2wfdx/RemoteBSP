@@ -41,6 +41,18 @@ class FirmwareDeploymentTest(unittest.TestCase):
             },
         }).encode()
 
+    @staticmethod
+    def _firmware_identity(*, uuid="ab" * 16, board_type=0x0431CB,
+                           project="a" * 64, config="b" * 64,
+                           firmware_input="d" * 64):
+        return json.dumps({
+            "schema_version": 1, "command": "firmware-identity",
+            "identity_schema_version": 1, "board_type": board_type,
+            "uuid": uuid, "project_sha256": project,
+            "config_sha256": config,
+            "firmware_input_sha256": firmware_input,
+        }).encode()
+
     def test_toolbusd_reader_strictly_selects_runtime_node(self):
         calls = []
 
@@ -90,13 +102,63 @@ class FirmwareDeploymentTest(unittest.TestCase):
             flashed = []
             reader = ToolbusdIdentityReader(
                 "/tmp/toolbusd.sock", 7,
-                runner=lambda *_: self._node_list())
+                runner=lambda command, *_: (
+                    self._node_list() if command[-1] == "node-list" else
+                    self._firmware_identity(project=None)))
             with self.assertRaisesRegex(IdentityCapabilityError,
-                                        "不公开project_sha256"):
+                                        "未提供project_sha256"):
                 deploy_stlink(
                     build_id, reader, output_root=root,
                     runner=lambda *_: flashed.append(True))
             self.assertEqual(flashed, [])
+
+    def test_toolbusd_complete_identity_merges_same_node(self):
+        calls = []
+
+        def runner(command, *_):
+            calls.append(tuple(command))
+            return (self._node_list() if command[-1] == "node-list" else
+                    self._firmware_identity())
+
+        observed = ToolbusdIdentityReader(
+            "/tmp/toolbusd.sock", 7, runner=runner).read_identity()
+        self.assertEqual(observed, DeviceIdentity(
+            "weact-g431-core-v10", "a" * 64, "b" * 64,
+            "d" * 64, "ab" * 16))
+        self.assertEqual(calls[1][-3:],
+                         ("--node", "7", "firmware-identity"))
+
+    def test_toolbusd_identity_rejects_node_change(self):
+        def runner(command, *_):
+            return (self._node_list() if command[-1] == "node-list" else
+                    self._firmware_identity(uuid="cd" * 16))
+
+        with self.assertRaisesRegex(FirmwareDeploymentError, "同一运行中节点"):
+            ToolbusdIdentityReader(
+                "/tmp/toolbusd.sock", 7, runner=runner).read_identity()
+
+    def test_toolbusd_complete_identity_allows_flash_and_recheck(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = self._build(root)
+            identity_calls = []
+            flashed = []
+
+            def identity_runner(command, *_):
+                identity_calls.append(tuple(command))
+                return (self._node_list() if command[-1] == "node-list" else
+                        self._firmware_identity())
+
+            result = deploy_stlink(
+                build_id,
+                ToolbusdIdentityReader(
+                    "/tmp/toolbusd.sock", 7, runner=identity_runner),
+                output_root=root,
+                runner=lambda command, timeout: flashed.append(
+                    (tuple(command), timeout)), sleeper=lambda _: None)
+            self.assertTrue(result.verified)
+            self.assertEqual(len(flashed), 1)
+            self.assertEqual(len(identity_calls), 4)
 
     def test_json_identity_reader_is_strict_and_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:

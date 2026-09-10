@@ -8,6 +8,14 @@ target_compile_options(protocol_tests PRIVATE
 
 add_test(NAME protocol_tests COMMAND protocol_tests)
 
+add_executable(firmware_identity_tests firmware_identity_tests.cpp)
+target_link_libraries(firmware_identity_tests PRIVATE
+    remotebsp remotebsp_remote_core)
+target_compile_options(firmware_identity_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>)
+add_test(NAME firmware_identity_tests COMMAND firmware_identity_tests)
+
 add_executable(time_sync_protocol_tests time_sync_protocol_tests.cpp)
 target_link_libraries(time_sync_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(time_sync_protocol_tests PRIVATE
@@ -601,6 +609,29 @@ target_compile_options(embedded_bus_core_tests PRIVATE
     $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME embedded_bus_core_tests COMMAND embedded_bus_core_tests)
+
+# 直接编译 G431 生产板级 BUS HAL，并以主机桩验证错误恢复与片选时序。
+add_executable(g431_board_bus_hal_tests
+    ../firmware/tests/g431_board_bus_tests.c
+    ../firmware/boards/stm32g431cbu6/board_bus.c
+)
+target_include_directories(g431_board_bus_hal_tests PRIVATE
+    ../firmware/tests/g431_hal_stub
+    ../firmware/boards/stm32g431cbu6
+    ../firmware/include
+    ../firmware/tests/config_bus
+)
+target_compile_definitions(g431_board_bus_hal_tests PRIVATE
+    CONFIG_REMOTEBSP_BUS=1
+    CONFIG_G431_BUS_I2C1_PB6_PB7=1
+    CONFIG_G431_BUS_I2C1_DEVICE_ADDRESS=72
+    CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15=1
+    CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12=1
+)
+target_compile_options(g431_board_bus_hal_tests PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME g431_board_bus_hal_tests COMMAND g431_board_bus_hal_tests)
 
 # 同时开启总线与运动，防止共享通用资源命令和会话释放路径发生编译回归。
 add_executable(embedded_bus_motion_core_compile_tests

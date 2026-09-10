@@ -31,6 +31,7 @@ enum class Command : std::uint16_t {
     Ping = 0x0012,
     BootloaderEnter = 0x0013,
     BootloaderEnterUsb = 0x0014,
+    FirmwareIdentity = 0x0015,
     TimeSync = 0x0020,
     HealthSnapshot = 0x0021,
     ResourceEnum = 0x0030,
