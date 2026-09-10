@@ -478,6 +478,7 @@ public:
 
 private:
     struct MotionContractCache;
+    struct StreamReadCache;
 
     protocol::Packet command(protocol::Command command,
                              std::vector<std::uint8_t> payload = {},
@@ -486,6 +487,7 @@ private:
     std::string socket_path_;
     std::uint32_t node_id_;
     std::shared_ptr<MotionContractCache> motion_contract_cache_;
+    std::shared_ptr<StreamReadCache> stream_read_cache_;
 };
 
 }

@@ -1720,6 +1720,15 @@ private:
             ++generation;
         }
         bus_runtime_.invalidate_node(node_id);
+        const auto credit_prefix = std::to_string(node_id) + ":";
+        for (auto entry = stream_credit_history_.begin();
+             entry != stream_credit_history_.end();) {
+            if (entry->rfind(credit_prefix, 0U) == 0U) {
+                entry = stream_credit_history_.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
         const auto route = kNodeRequestBaseRoute + node_id;
         for (auto entry = request_routes_.begin();
              entry != request_routes_.end();) {
@@ -1808,6 +1817,50 @@ private:
         }
         if (update == remotebsp::toolbusd::BusContractUpdate::Invalid) {
             throw std::runtime_error("远端返回的总线设备合同与请求不匹配");
+        }
+        return node_generation;
+    }
+
+    std::uint64_t ensure_stream_contract(
+        std::uint32_t node_id, std::uint32_t resource_id) {
+        std::uint64_t node_generation = 0U;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                node_id > kMaximumNodeId) {
+                throw std::runtime_error("目标节点尚未发现或已经离线");
+            }
+            node_generation = bus_node_generations_[node_id];
+        }
+        if (static_cast<std::uint8_t>(resource_id >> 24U) !=
+            static_cast<std::uint8_t>(
+                remotebsp::protocol::ResourceType::Stream)) {
+            throw std::invalid_argument(
+                "STREAM 资源 ID 命名空间与命令不匹配");
+        }
+        const auto body = request_snapshot_resource(
+            node_id, remotebsp::protocol::Command::StreamContract,
+            remotebsp::protocol::encode_resource_id(resource_id),
+            std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(2500));
+        const auto contract =
+            remotebsp::protocol::decode_stream_contract(body);
+        if (contract.resource_id != resource_id) {
+            throw std::runtime_error(
+                "远端 STREAM 合同的资源 ID 与打开目标不一致");
+        }
+        if ((contract.transport_mask &
+             remotebsp::protocol::kStreamTransportUsb) == 0U) {
+            throw std::invalid_argument(
+                "STREAM 静态合同未授权 USB，拒绝在当前链路打开");
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const auto* node = nodes_.find_by_node_id(node_id);
+        if (node == nullptr || !node->online || !node->assigned ||
+            bus_node_generations_[node_id] != node_generation) {
+            throw std::runtime_error(
+                "STREAM 合同查询期间目标节点已离线或重新启动");
         }
         return node_generation;
     }
@@ -2457,6 +2510,23 @@ private:
                     throw std::runtime_error(
                         "STREAM 数据面只允许显式 USB 链路，禁止自动降级到 CAN");
                 }
+                const auto status_body = request_snapshot_resource(
+                    ipc_request.node_id,
+                    remotebsp::protocol::Command::StreamStatus,
+                    remotebsp::protocol::encode_resource_id(
+                        ipc_request.stream_id),
+                    std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(2500));
+                const auto stream_status =
+                    remotebsp::protocol::decode_stream_status(status_body);
+                if (stream_status.stream_id != ipc_request.stream_id ||
+                    stream_status.state ==
+                        remotebsp::protocol::StreamState::Stopped ||
+                    stream_status.state ==
+                        remotebsp::protocol::StreamState::Failed) {
+                    throw std::runtime_error(
+                        "STREAM 会话已失效或不属于当前节点代次");
+                }
                 std::unique_lock<std::mutex> lock(state_mutex_);
                 const auto* node = nodes_.find_by_node_id(ipc_request.node_id);
                 if (node == nullptr || !node->online || !node->assigned) {
@@ -2503,7 +2573,6 @@ private:
                     throw std::runtime_error("STREAM 序号不连续，拒绝消费和归还信用");
                 }
                 const auto encoded = event->payload;
-                found->second.erase(event);
                 lock.unlock();
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok, encoded);
@@ -2540,6 +2609,29 @@ private:
             // 会话由守护进程拥有，避免客户端伪造会话，也避免 toolbusd
             // 重启后请求 ID 从头计数时与 MCU 中的旧去重缓存冲突。
             request.header.session_id = session_id_;
+
+            if (command == remotebsp::protocol::Command::StreamCredit) {
+                const auto credit =
+                    remotebsp::protocol::decode_stream_credit(request.payload);
+                const auto credit_key = std::to_string(ipc_request.node_id) +
+                    ":" + std::to_string(credit.stream_id) + ":" +
+                    std::to_string(credit.acknowledged_sequence);
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (stream_credit_history_.find(credit_key) !=
+                    stream_credit_history_.end()) {
+                    remotebsp::protocol::Packet response;
+                    response.header.message_type =
+                        remotebsp::protocol::MessageType::Response;
+                    response.header.command = request.header.command;
+                    response.header.session_id = session_id_;
+                    response.header.request_id = request.header.request_id;
+                    response.payload = {0U};
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Ok,
+                        remotebsp::protocol::encode(std::move(response)));
+                    return;
+                }
+            }
 
             std::optional<remotebsp::toolbusd::BusRuntime::Reservation>
                 bus_reservation;
@@ -2641,6 +2733,17 @@ private:
                 }
                 bus_reservation.emplace(
                     std::move(admission.reservation));
+            } else if (command ==
+                       remotebsp::protocol::Command::StreamOpen) {
+                if (request.header.object_id != 0U) {
+                    throw std::invalid_argument(
+                        "STREAM 打开请求的对象 ID 必须为零");
+                }
+                const auto open =
+                    remotebsp::protocol::decode_stream_open_request(
+                        request.payload);
+                bus_node_generation = ensure_stream_contract(
+                    ipc_request.node_id, open.resource_id);
             }
 
             remotebsp::toolbusd::Submission submission;
@@ -2703,6 +2806,47 @@ private:
             });
             const auto response = responses_.find(key);
             if (response != responses_.end()) {
+                if (command == remotebsp::protocol::Command::StreamCredit &&
+                    !response->second.payload.empty() &&
+                    response->second.payload.front() == 0U &&
+                    (response->second.header.flags &
+                     remotebsp::protocol::kErrorResponseFlag) == 0U) {
+                    const auto credit =
+                        remotebsp::protocol::decode_stream_credit(
+                            submission.packet.payload);
+                    const auto credit_key =
+                        std::to_string(ipc_request.node_id) + ":" +
+                        std::to_string(credit.stream_id) + ":" +
+                        std::to_string(credit.acknowledged_sequence);
+                    if (stream_credit_history_.size() >= 512U) {
+                        stream_credit_history_.clear();
+                    }
+                    stream_credit_history_.insert(credit_key);
+                    auto queued = event_queues_.find(ipc_request.node_id);
+                    if (queued != event_queues_.end()) {
+                        const auto event = std::find_if(
+                            queued->second.begin(), queued->second.end(),
+                            [&](const auto& packet) {
+                                if (packet.header.command !=
+                                    static_cast<std::uint16_t>(
+                                        remotebsp::protocol::Command::
+                                            StreamData)) return false;
+                                try {
+                                    const auto data =
+                                        remotebsp::protocol::decode_stream_data(
+                                            packet.payload);
+                                    return data.stream_id == credit.stream_id &&
+                                           data.sequence ==
+                                               credit.acknowledged_sequence;
+                                } catch (const std::exception&) {
+                                    return false;
+                                }
+                            });
+                        if (event != queued->second.end()) {
+                            queued->second.erase(event);
+                        }
+                    }
+                }
                 if (bus_node_generation.has_value() &&
                     (command ==
                          remotebsp::protocol::Command::I2cContract ||
@@ -2955,6 +3099,9 @@ private:
     std::unordered_map<
         std::uint32_t, std::deque<remotebsp::protocol::Packet>>
         event_queues_;
+    // 已由远端确认的信用归还保持有界幂等窗口；用于客户端在 IPC
+    // 响应丢失后重试，避免重复向 MCU 增发信用。
+    std::unordered_set<std::string> stream_credit_history_;
     std::unordered_map<std::uint64_t, UartStreamBuffer>
         uart_stream_buffers_;
     std::atomic<std::uint16_t> next_transfer_id_{1};

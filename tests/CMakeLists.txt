@@ -112,7 +112,8 @@ add_test(NAME stream_process_e2e_tests
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/stream_process_e2e.sh
             $<TARGET_FILE:toolbusd> $<TARGET_FILE:mock_mcu>
             $<TARGET_FILE:remote-cli>
-            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_n2h_board_v4.json)
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_n2h_board_v4.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_can_only_board_v4.json)
 set_tests_properties(stream_process_e2e_tests PROPERTIES TIMEOUT 20)
 
 add_executable(bus_resource_tests bus_resource_tests.cpp)

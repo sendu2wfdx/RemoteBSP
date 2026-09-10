@@ -35,7 +35,9 @@ int main(int argc, char** argv) {
     const auto node_health = client.node_health_snapshot();
     assert(node_health.source ==
            remotebsp::protocol::HealthSource::RemoteCore);
-    assert(node_health.sample_sequence == 1U);
+    // toolbusd 的健康生产者与客户端请求可能并发采样；只要求序号有效且单调，
+    // 不能把“第一次由本测试读取”误当成“节点的第一次采样”。
+    assert(node_health.sample_sequence > 0U);
     assert(node_health.producer_generation != 0U);
     const auto* node_cpu = remotebsp::protocol::find_health_metric(
         node_health, remotebsp::protocol::HealthMetricId::CpuLoadPermille);

@@ -212,9 +212,15 @@ struct Client::MotionContractCache {
     std::optional<protocol::MotionContractPayload> value;
 };
 
+struct Client::StreamReadCache {
+    std::mutex mutex;
+    std::optional<protocol::StreamDataPayload> pending;
+};
+
 Client::Client(std::string socket_path, std::uint32_t node_id)
     : socket_path_(std::move(socket_path)), node_id_(node_id),
-      motion_contract_cache_(std::make_shared<MotionContractCache>()) {
+      motion_contract_cache_(std::make_shared<MotionContractCache>()),
+      stream_read_cache_(std::make_shared<StreamReadCache>()) {
     if (socket_path_.empty() ||
         socket_path_.size() >= sizeof(sockaddr_un{}.sun_path)) {
         throw ClientException("Unix Domain Socket 路径无效或过长");
@@ -824,6 +830,21 @@ std::optional<protocol::StreamDataPayload> Client::stream_read(
     if (stream_id == 0U || timeout_ms > 60000U) {
         throw ClientException("STREAM 读取参数无效");
     }
+    std::unique_lock<std::mutex> cache_lock(stream_read_cache_->mutex);
+    if (stream_read_cache_->pending.has_value()) {
+        const auto& pending = *stream_read_cache_->pending;
+        if (pending.stream_id != stream_id ||
+            pending.sequence != expected_sequence) {
+            throw ClientException(
+                "存在尚未确认的 STREAM 数据块，请先用原会话和序号重试");
+        }
+        stream_credit({stream_id,
+                       static_cast<std::uint32_t>(pending.data.size()),
+                       pending.sequence});
+        auto recovered = std::move(*stream_read_cache_->pending);
+        stream_read_cache_->pending.reset();
+        return recovered;
+    }
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_stream_read_request(
         socket.get(), node_id_, stream_id, expected_sequence, timeout_ms);
@@ -842,8 +863,10 @@ std::optional<protocol::StreamDataPayload> Client::stream_read(
     if (data.data.empty()) {
         throw ClientException("STREAM 数据块不能为空");
     }
+    stream_read_cache_->pending = data;
     stream_credit({stream_id, static_cast<std::uint32_t>(data.data.size()),
                    data.sequence});
+    stream_read_cache_->pending.reset();
     return data;
 }
 
