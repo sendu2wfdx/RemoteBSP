@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from runtime_api.auth import (
     ApiKeyAuthenticator,
     AuthConfigurationError,
     load_api_key_authenticator,
+    load_reloading_api_key_authenticator,
 )
 
 
@@ -164,6 +166,49 @@ class ApiKeyAuthenticatorTest(unittest.TestCase):
             oversized.write_bytes(b" " * (MAXIMUM_AUTH_CONFIG_BYTES + 1))
             with self.assertRaisesRegex(AuthConfigurationError, "不得超过"):
                 load_api_key_authenticator(oversized)
+
+    def test_hot_rotation_revokes_old_key_and_changes_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(directory, {"schema_version": 2, "keys": [
+                self._entry("old-reader", self.KEY_A),
+            ]})
+            authenticator = load_reloading_api_key_authenticator(path)
+            self.assertEqual(authenticator.authenticate(self.KEY_A).key_id,
+                             "old-reader")
+
+            replacement = Path(directory) / "runtime-auth.next"
+            replacement.write_text(json.dumps({
+                "schema_version": 2,
+                "keys": [self._entry(
+                    "new-controller", self.KEY_B,
+                    [CONTROL_LEASE_ACQUIRE_PERMISSION])],
+            }), encoding="utf-8")
+            os.replace(replacement, path)
+
+            self.assertIsNone(authenticator.authenticate(self.KEY_A))
+            principal = authenticator.authenticate(self.KEY_B)
+            self.assertEqual(principal.key_id, "new-controller")
+            self.assertEqual(principal.permissions,
+                             frozenset({CONTROL_LEASE_ACQUIRE_PERMISSION}))
+
+    def test_hot_reload_failure_closes_access_until_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(directory, {"schema_version": 2, "keys": [
+                self._entry("reader", self.KEY_A),
+            ]})
+            authenticator = load_reloading_api_key_authenticator(path)
+            path.write_text("{broken", encoding="utf-8")
+            self.assertIsNone(authenticator.authenticate(self.KEY_A))
+            self.assertEqual(authenticator.key_count, 0)
+
+            path.unlink()
+            self.assertIsNone(authenticator.authenticate(self.KEY_A))
+            self._write(directory, {"schema_version": 2, "keys": [
+                self._entry("repaired", self.KEY_B),
+            ]})
+            self.assertEqual(authenticator.authenticate(self.KEY_B).key_id,
+                             "repaired")
+            self.assertIsNone(authenticator.authenticate(self.KEY_A))
 
 
 if __name__ == "__main__":

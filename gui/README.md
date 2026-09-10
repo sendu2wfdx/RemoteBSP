@@ -80,15 +80,19 @@ python3 gui/server.py \
   --runtime-api-key-file /run/secrets/remotebsp-runtime-api-key
 ```
 
-代理只接受数字回环 HTTP 地址和显式端口，只开放 PWM configure、stop 与只读
-snapshot 三个固定上游端点；它不接受任意 URL、路径或通用 Runtime 转发。写请求
+代理只接受数字回环 HTTP 地址和显式端口，只开放 PWM configure、stop、短时租约
+申请/释放与只读 snapshot 固定上游端点；它不接受任意 URL、路径或通用 Runtime 转发。
+Studio 在首次配置前自动申请 30 秒租约，服务端固定注入 `pwm.write` 命令组；停止成功
+后立即释放，配置失败也尽力回收。页面另提供“仅释放租约”，用于操作中断后的安全收口。
+写请求
 必须使用 JSON、字段集合必须精确匹配且不超过 4096 字节；上游响应限制为 1 MiB，
 默认超时 3 秒（可用 `--runtime-proxy-timeout-ms` 在 100～10000 毫秒内调整）。API
 key 只在服务端启动时从独立文件读取，不写入 Studio 工程、能力响应或浏览器脚本。
 启用代理时 Studio 自身也强制监听数字回环地址，不能通过 `0.0.0.0` 暴露控制入口。
 
-同一个认证代理还提供通用定时位流的 configure、frame、stop 和只读 snapshot 固定
-白名单。Studio 的 WS2812 页面在浏览器本地把 `#RRGGBB` 像素按 RGB/GRB/BRG
+同一个认证代理还提供通用定时位流的 configure、frame、stop、租约申请/释放和只读
+snapshot 固定白名单；租约命令组由服务端固定为 `timed-bitstream.write`。Studio 的
+WS2812 页面在浏览器本地把 `#RRGGBB` 像素按六种 RGB 分量排列
 色序和 0～100% 整数亮度确定性缩放，编码为小写十六进制字节流；Runtime 与 MCU
 只看到 `bit_count` 和通用 timed-bitstream 数据，不包含 WS2812 业务语义。页面固定
 使用 800 kbit/s 的 1250/350/700 ns 时序，复位时间为 50～1000 µs。代理限制最多
@@ -101,8 +105,9 @@ key 只在服务端启动时从独立文件读取，不写入 Studio 工程、�
 烧录仍通过相互隔离的后端推进。
 
 内置动画会明确显示“演示模式 / DEMO”，不代表实体节点在线。只有使用
-`--state`连接 Mock 状态文件时才显示“Mock MCU 实时数据”。当前实时控制页中的
-GPIO、PWM 和 WS2812 操作也是本地预览，不会向实体板发送命令。
+`--state`连接 Mock 状态文件时才显示“Mock MCU 实时数据”。工程卡片中的 GPIO、PWM
+和 WS2812 控件仍是本地预览；独立 Runtime PWM/WS2812 卡片在认证代理启用时会执行
+真实运行时操作，并明确显示租约与结果。
 
 ## G431 实板验收记录
 

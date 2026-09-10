@@ -70,19 +70,24 @@ typedef struct {
     uint64_t next_available_time_ns;
     rbsp_motion_state_t state;
     rbsp_motion_fault_t fault;
-    uint64_t active_emitted[CONFIG_MOTION_MAX_AXES];
+    /*
+     * 单段步数来自 int32_t，绝对值最大为 2^31；下列逐段计数与
+     * Bresenham 除数/余数因此用 uint32_t 即可完整表达。累计位置和
+     * 单调时间仍保留 64 bit，避免以缩小数值范围换取 SRAM。
+     */
+    uint32_t active_emitted[CONFIG_MOTION_MAX_AXES];
     /*
      * 每个运动段启动时只做一次除法，将边沿间隔拆成整数商和余数。
      * compare ISR 中只需加法和比较，即可用 Bresenham/DDA 均匀分配余数。
      */
-    uint64_t active_target[CONFIG_MOTION_MAX_AXES];
+    uint32_t active_target[CONFIG_MOTION_MAX_AXES];
     uint64_t active_next_rise_ns[CONFIG_MOTION_MAX_AXES];
     uint64_t active_fall_ns[CONFIG_MOTION_MAX_AXES];
     uint64_t last_step_fall_ns[CONFIG_MOTION_MAX_AXES];
     uint64_t active_interval_ns[CONFIG_MOTION_MAX_AXES];
-    uint64_t active_interval_remainder[CONFIG_MOTION_MAX_AXES];
-    uint64_t active_interval_error[CONFIG_MOTION_MAX_AXES];
-    uint64_t active_interval_divisor[CONFIG_MOTION_MAX_AXES];
+    uint32_t active_interval_remainder[CONFIG_MOTION_MAX_AXES];
+    uint32_t active_interval_error[CONFIG_MOTION_MAX_AXES];
+    uint32_t active_interval_divisor[CONFIG_MOTION_MAX_AXES];
     uint32_t maximum_step_rate_hz[CONFIG_MOTION_MAX_AXES];
     uint64_t next_deadline_ns;
     uint64_t emitted_steps[CONFIG_MOTION_MAX_AXES];

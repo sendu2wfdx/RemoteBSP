@@ -40,9 +40,20 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         self.requests.append((self.command, self.path,
                               self.headers.get("Authorization", "").encode() + b"\0" + body))
+        if self.path == "/api/v1/control-leases":
+            self._reply({"api_version": "v1", "ok": True,
+                         "lease": {"lease_id": "a" * 32}})
+            return
         self._reply({"api_version": "v1", "ok": True, "data": {
             "operation": {"state": "committed", "replayed": False,
                           "result": {"object_id": 7}}}})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self.requests.append((self.command, self.path,
+                              self.headers.get("Authorization", "").encode()))
+        self._reply({"api_version": "v1", "ok": True, "data": {
+            "operation": {"state": "committed", "recovery": "safe_closed",
+                          "result": {}}}})
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -102,6 +113,14 @@ class RuntimePwmProxyTest(unittest.TestCase):
                 capability = target["runtime_pwm"]
                 self.assertTrue(capability["available"] and capability["auth_proxy"])
                 self.assertNotIn("server-only-secret", json.dumps(target))
+                lease_request = {"node_id": "node-" + "b" * 32,
+                    "resource_id": "resource-06000000", "ttl_ms": 30000,
+                    "idempotency_key": "studio-pwm-lease-1"}
+                acquired = json.load(urlopen(Request(
+                    base + capability["lease_acquire_path"],
+                    data=json.dumps(lease_request).encode(), method="POST",
+                    headers={"Content-Type": "application/json"})))
+                self.assertEqual(acquired["lease"]["lease_id"], "a" * 32)
                 configure = {"lease_id": "a" * 32, "node_id": "node-" + "b" * 32,
                     "resource_id": "resource-06000000", "idempotency_key": "configure-1",
                     "frequency_hz": 20000, "duty": 4200, "active_low": False}
@@ -111,9 +130,17 @@ class RuntimePwmProxyTest(unittest.TestCase):
                     headers={"Content-Type": "application/json"})))
                 self.assertEqual(response["data"]["operation"]["result"]["object_id"], 7)
                 json.load(urlopen(base + capability["snapshot_path"]))
+                json.load(urlopen(Request(base + capability["lease_release_path"],
+                    data=json.dumps({"lease_id": "a" * 32}).encode(), method="POST",
+                    headers={"Content-Type": "application/json"})))
                 self.assertEqual([item[:2] for item in UpstreamHandler.requests], [
+                    ("POST", "/api/v1/control-leases"),
                     ("POST", "/api/v1/control/pwm/configure"),
-                    ("GET", "/api/v1/snapshot")])
+                    ("GET", "/api/v1/snapshot"),
+                    ("DELETE", "/api/v1/control-leases/" + "a" * 32)])
+                forwarded_lease = json.loads(
+                    UpstreamHandler.requests[0][2].split(b"\0", 1)[1])
+                self.assertEqual(forwarded_lease["command_group"], "pwm.write")
                 self.assertTrue(all(b"Bearer server-only-secret" in item[2]
                                     for item in UpstreamHandler.requests))
                 bad = dict(configure, unexpected=True)
@@ -122,13 +149,13 @@ class RuntimePwmProxyTest(unittest.TestCase):
                                     data=json.dumps(bad).encode(), method="POST",
                                     headers={"Content-Type": "application/json"}))
                 self.assertEqual(rejected.exception.code, 400)
-                self.assertEqual(len(UpstreamHandler.requests), 2)
+                self.assertEqual(len(UpstreamHandler.requests), 4)
                 with self.assertRaises(HTTPError) as rejected:
                     urlopen(Request(base + capability["configure_path"] + "?path=stop",
                                     data=json.dumps(configure).encode(), method="POST",
                                     headers={"Content-Type": "application/json"}))
                 self.assertEqual(rejected.exception.code, 400)
-                self.assertEqual(len(UpstreamHandler.requests), 2)
+                self.assertEqual(len(UpstreamHandler.requests), 4)
             finally:
                 server.shutdown(); server.server_close(); thread.join(timeout=2)
 
@@ -146,6 +173,22 @@ class RuntimePwmProxyTest(unittest.TestCase):
                                 ("stop", {**common, "path": "/tmp/tool"})):
             with self.assertRaises(RuntimePwmProxyError):
                 self.proxy.timed_bitstream(operation, json.dumps(body).encode())
+
+    def test_lease_scope_is_server_selected_and_ids_are_strict(self) -> None:
+        body = {"node_id": "node-" + "b" * 32,
+                "resource_id": "resource-07000000", "ttl_ms": 30000,
+                "idempotency_key": "studio-bits-lease-1"}
+        self.proxy.acquire_lease("timed-bitstream.write", json.dumps(body).encode())
+        forwarded = json.loads(UpstreamHandler.requests[-1][2].split(b"\0", 1)[1])
+        self.assertEqual(forwarded["command_group"], "timed-bitstream.write")
+        for invalid in ({**body, "command_group": "gpio.write"},
+                        {**body, "ttl_ms": 30001},
+                        {**body, "node_id": "含中文"}):
+            with self.assertRaises(RuntimePwmProxyError):
+                self.proxy.acquire_lease("pwm.write", json.dumps(invalid).encode())
+        for lease_id in ("A" * 32, "a" * 31, "../snapshot"):
+            with self.assertRaises(RuntimePwmProxyError):
+                self.proxy.release_lease(json.dumps({"lease_id": lease_id}).encode())
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -165,6 +167,11 @@ def load_api_key_authenticator(path: Path) -> ApiKeyAuthenticator:
             raw = stream.read(MAXIMUM_AUTH_CONFIG_BYTES + 1)
     except OSError as error:
         raise AuthConfigurationError(f"无法读取认证配置：{error}") from error
+    return _parse_api_key_authenticator(raw)
+
+
+def _parse_api_key_authenticator(raw: bytes) -> ApiKeyAuthenticator:
+    """解析已完成有界读取的认证配置。"""
     if len(raw) > MAXIMUM_AUTH_CONFIG_BYTES:
         raise AuthConfigurationError(
             f"认证配置不得超过{MAXIMUM_AUTH_CONFIG_BYTES}字节")
@@ -214,3 +221,83 @@ def load_api_key_authenticator(path: Path) -> ApiKeyAuthenticator:
             api_key=entry["api_key"],
             permissions=frozenset(permissions)))
     return ApiKeyAuthenticator(credentials)
+
+
+class ReloadingApiKeyAuthenticator(ApiKeyAuthenticator):
+    """在文件身份变化后原子换入新认证表，异常时立即失败关闭。
+
+    写入方应在同一文件系统创建完整临时文件后原子替换目标路径。读取方会核对
+    打开文件与路径最终指向同一版本，避免把换写窗口中的混合内容投入使用。
+    """
+
+    def __init__(self, path: Path):
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._fingerprint: tuple[int, int, int, int, int] | None = None
+        self._delegate: ApiKeyAuthenticator | None = None
+        self._refresh(force=True)
+
+    @staticmethod
+    def _stat_fingerprint(value: os.stat_result
+                          ) -> tuple[int, int, int, int, int]:
+        return (value.st_dev, value.st_ino, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns)
+
+    def _read_consistent(self) -> tuple[ApiKeyAuthenticator,
+                                        tuple[int, int, int, int, int]]:
+        try:
+            with self._path.open("rb") as stream:
+                opened = os.fstat(stream.fileno())
+                raw = stream.read(MAXIMUM_AUTH_CONFIG_BYTES + 1)
+            current = self._path.stat()
+        except OSError as error:
+            raise AuthConfigurationError(
+                f"无法读取认证配置：{error}") from error
+        opened_fingerprint = self._stat_fingerprint(opened)
+        if opened_fingerprint != self._stat_fingerprint(current):
+            raise AuthConfigurationError("认证配置在读取期间发生变化")
+        return _parse_api_key_authenticator(raw), opened_fingerprint
+
+    def _refresh(self, *, force: bool = False) -> None:
+        with self._lock:
+            try:
+                observed = self._stat_fingerprint(self._path.stat())
+            except OSError:
+                self._delegate = None
+                self._fingerprint = None
+                return
+            if not force and observed == self._fingerprint:
+                return
+            # 先撤销旧表再解析新表：任何读取或校验失败都不能延长旧密钥寿命。
+            self._delegate = None
+            self._fingerprint = observed
+            try:
+                delegate, loaded = self._read_consistent()
+            except AuthConfigurationError:
+                return
+            self._fingerprint = loaded
+            self._delegate = delegate
+
+    @property
+    def key_count(self) -> int:
+        self._refresh()
+        with self._lock:
+            return 0 if self._delegate is None else self._delegate.key_count
+
+    def authenticate(self, candidate: str) -> AuthenticatedPrincipal | None:
+        self._refresh()
+        with self._lock:
+            delegate = self._delegate
+        return None if delegate is None else delegate.authenticate(candidate)
+
+    def verify(self, candidate: str) -> bool:
+        return self.authenticate(candidate) is not None
+
+
+def load_reloading_api_key_authenticator(
+        path: Path) -> ReloadingApiKeyAuthenticator:
+    """加载可热轮换认证器；启动时配置无效仍视为配置错误。"""
+    authenticator = ReloadingApiKeyAuthenticator(path)
+    if authenticator.key_count == 0:
+        raise AuthConfigurationError("认证配置初始版本不可安全使用")
+    return authenticator

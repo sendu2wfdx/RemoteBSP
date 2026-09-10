@@ -419,7 +419,8 @@ static bool start_segment(rbsp_motion_queue_t* queue,
             return false;
         }
         queue->direction_positive[axis] = positive;
-        const uint64_t target = absolute_steps(segment->steps[axis]);
+        const uint32_t target =
+            (uint32_t)absolute_steps(segment->steps[axis]);
         queue->active_target[axis] = target;
         if (target == 0U) {
             continue;
@@ -427,13 +428,13 @@ static bool start_segment(rbsp_motion_queue_t* queue,
         queue->active_next_rise_ns[axis] =
             segment->start_time_ns + first_rise_delay_ns;
         if (target > 1U) {
-            const uint64_t divisor = target - 1U;
+            const uint32_t divisor = target - 1U;
             const uint64_t span_ns =
                 segment->duration_ns - first_rise_delay_ns - pulse_ns;
             queue->active_interval_divisor[axis] = divisor;
             queue->active_interval_ns[axis] = span_ns / divisor;
             queue->active_interval_remainder[axis] =
-                span_ns % divisor;
+                (uint32_t)(span_ns % divisor);
         }
     }
     if (!set_segment_enabled(queue, io, segment)) {

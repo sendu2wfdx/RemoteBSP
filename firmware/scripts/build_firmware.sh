@@ -82,6 +82,12 @@ case "${target}" in
             remotebsp-stm32f072rbt6 \
             remotebsp-stm32f072-fly-d5
         ;;
+    fly-d5-motion|mellow-fly-d5-motion)
+        build_one f072-fly-d5-runtime-motion \
+            tests/configs/stm32f072_mellow_fly_d5_runtime_motion_5axis_tmc2209_defconfig \
+            remotebsp-stm32f072rbt6 \
+            remotebsp-stm32f072-fly-d5-runtime-motion-5axis-tmc2209
+        ;;
     fly-d5-katapult|mellow-fly-d5-katapult)
         build_one f072-fly-d5-katapult \
             configs/stm32f072_mellow_fly_d5_katapult_defconfig \
@@ -172,6 +178,9 @@ case "${target}" in
         bash "$0" weact-stm32g431cbu6-core-bus-hal
         bash "$0" stm32f072-bus-hal
         bash "$0" stm32f103-bus-hal
+        bash "$0" mellow-fly-d5-motion
+        bash "$0" weact-bluepill-plus-motion
+        bash "$0" weact-stm32g431cbu6-core-motion
         bash "$0" mellow-fly-d5-katapult
         bash "$0" weact-bluepill-plus-katapult
         bash "$0" weact-stm32g431cbu6-core-katapult
@@ -180,7 +189,7 @@ case "${target}" in
         python3 "${root_dir}/scripts/verify_ci_firmware_matrix.py"
         ;;
     *)
-        printf '用法：%s [f072|f103|g431|stm32f072-bus-hal|stm32f103-bus-hal|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-bus-hal|weact-stm32g431cbu6-core-studio-identity|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all|ci]\n' \
+        printf '用法：%s [f072|f103|g431|stm32f072-bus-hal|stm32f103-bus-hal|mellow-fly-d5|mellow-fly-d5-motion|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-bus-hal|weact-stm32g431cbu6-core-studio-identity|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all|ci]\n' \
             "$0" >&2
         exit 2
         ;;

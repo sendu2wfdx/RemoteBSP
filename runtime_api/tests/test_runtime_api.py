@@ -15,6 +15,7 @@ from runtime_api.auth import (
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
     ApiKeyCredential,
+    load_reloading_api_key_authenticator,
 )
 from runtime_api.models import RuntimeContractError, normalize_snapshot
 from runtime_api.provider import (
@@ -530,6 +531,40 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
         self.assertEqual(error.code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_auth_header")
 
+    def test_live_key_rotation_is_visible_at_http_boundary(self):
+        old_key = "o" * 32
+        new_key = "n" * 32
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime-auth.json"
+            path.write_text(json.dumps({
+                "schema_version": 2,
+                "keys": [{"key_id": "old", "api_key": old_key,
+                          "permissions": [RUNTIME_READ_PERMISSION]}],
+            }), encoding="utf-8")
+            self.server.authenticator = load_reloading_api_key_authenticator(
+                path)  # type: ignore[attr-defined]
+            self.assertEqual(urlopen(Request(
+                self.base + "/api/v1/snapshot",
+                headers={"X-API-Key": old_key})).status, 200)
+
+            replacement = Path(directory) / "runtime-auth.next"
+            replacement.write_text(json.dumps({
+                "schema_version": 2,
+                "keys": [{"key_id": "new", "api_key": new_key,
+                          "permissions": [RUNTIME_READ_PERMISSION]}],
+            }), encoding="utf-8")
+            replacement.replace(path)
+
+            error, payload = self._error(Request(
+                self.base + "/api/v1/snapshot",
+                headers={"X-API-Key": old_key}))
+            self.assertEqual(error.code, 401)
+            self.assertEqual(payload["error"]["code"],
+                             "authentication_required")
+            self.assertEqual(urlopen(Request(
+                self.base + "/api/v1/snapshot",
+                headers={"X-API-Key": new_key})).status, 200)
+
     def test_query_string_credentials_are_rejected(self):
         secret = self.API_KEY
         error, payload = self._error(
@@ -684,10 +719,12 @@ class RuntimeServerCliTest(unittest.TestCase):
                         "--event-capacity", "64",
                         "--control-lease-capacity", "32",
                         "--http-request-timeout-ms", "2500",
-                    ]):
+                ]):
                 self.assertEqual(runtime_server.main(), 0)
-        authenticator = factory.call_args.kwargs["authenticator"]
-        self.assertTrue(authenticator.verify("c" * 32))
+            authenticator = factory.call_args.kwargs["authenticator"]
+            self.assertTrue(authenticator.verify("c" * 32))
+        # 配置路径消失必须立即撤销，不得把启动时副本永久留在内存。
+        self.assertFalse(authenticator.verify("c" * 32))
         self.assertEqual(factory.call_args.kwargs["event_capacity"], 64)
         self.assertEqual(factory.call_args.kwargs[
             "control_lease_capacity"], 32)

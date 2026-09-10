@@ -41,6 +41,8 @@ class RuntimePwmProxy:
     _BITSTREAM_CONFIGURE = _BITSTREAM_COMMON | frozenset({
         "bit_period_ns", "zero_high_ns", "one_high_ns", "reset_time_us"})
     _BITSTREAM_FRAME = _BITSTREAM_COMMON | frozenset({"bit_count", "data"})
+    _LEASE_FIELDS = frozenset({
+        "node_id", "resource_id", "ttl_ms", "idempotency_key"})
 
     def __init__(self, upstream: str, api_key: str, *, timeout_seconds: float = 3.0):
         parsed = urlsplit(upstream)
@@ -93,7 +95,8 @@ class RuntimePwmProxy:
             raise RuntimePwmProxyError("PWM请求字段不完整或包含未知字段", 400)
         return value
 
-    def _request(self, path: str, *, body: dict | None = None) -> RuntimePwmProxyResponse:
+    def _request(self, path: str, *, body: dict | None = None,
+                 method: str | None = None) -> RuntimePwmProxyResponse:
         encoded = None if body is None else json.dumps(
             body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         headers = {"Authorization": "Bearer " + self._api_key,
@@ -101,7 +104,7 @@ class RuntimePwmProxy:
         if encoded is not None:
             headers["Content-Type"] = "application/json"
         request = Request(self._base + path, data=encoded, headers=headers,
-                          method="GET" if encoded is None else "POST")
+                          method=method or ("GET" if encoded is None else "POST"))
         try:
             response = urlopen(request, timeout=self._timeout)
         except HTTPError as error:
@@ -131,6 +134,49 @@ class RuntimePwmProxy:
 
     def snapshot(self) -> RuntimePwmProxyResponse:
         return self._request("/api/v1/snapshot")
+
+    @staticmethod
+    def _validate_lease_body(body: bytes) -> dict:
+        if not body or len(body) > RuntimePwmProxy.MAXIMUM_BODY_BYTES:
+            raise RuntimePwmProxyError("控制租约请求体为空或超过4096字节", 400)
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimePwmProxyError("控制租约请求体不是合法JSON", 400) from error
+        if not isinstance(value, dict) or set(value) != RuntimePwmProxy._LEASE_FIELDS:
+            raise RuntimePwmProxyError("控制租约请求字段不完整或包含未知字段", 400)
+        if type(value["ttl_ms"]) is not int or not 100 <= value["ttl_ms"] <= 30000:
+            raise RuntimePwmProxyError("控制租约ttl_ms必须位于100～30000", 400)
+        for name, maximum in (("node_id", 80), ("resource_id", 64),
+                              ("idempotency_key", 128)):
+            item = value[name]
+            if not isinstance(item, str) or not item or len(item) > maximum or \
+                    not item.isascii() or any(char.isspace() for char in item):
+                raise RuntimePwmProxyError(f"控制租约{name}不是规范ASCII标识", 400)
+        return value
+
+    def acquire_lease(self, command_group: str,
+                      body: bytes) -> RuntimePwmProxyResponse:
+        if command_group not in {"pwm.write", "timed-bitstream.write"}:
+            raise RuntimePwmProxyError("控制租约命令组不受支持", 400)
+        value = self._validate_lease_body(body)
+        value["command_group"] = command_group
+        return self._request("/api/v1/control-leases", body=value)
+
+    def release_lease(self, body: bytes) -> RuntimePwmProxyResponse:
+        if not body or len(body) > self.MAXIMUM_BODY_BYTES:
+            raise RuntimePwmProxyError("控制租约释放请求无效", 400)
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimePwmProxyError("控制租约释放请求不是合法JSON", 400) from error
+        if not isinstance(value, dict) or set(value) != {"lease_id"} or \
+                not isinstance(value["lease_id"], str) or \
+                len(value["lease_id"]) != 32 or \
+                any(char not in "0123456789abcdef" for char in value["lease_id"]):
+            raise RuntimePwmProxyError("控制租约ID必须是32位小写十六进制", 400)
+        return self._request("/api/v1/control-leases/" + value["lease_id"],
+                             method="DELETE")
 
     def timed_bitstream(self, operation: str, body: bytes) -> RuntimePwmProxyResponse:
         expected = {"configure": self._BITSTREAM_CONFIGURE,

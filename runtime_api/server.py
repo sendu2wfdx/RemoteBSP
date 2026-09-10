@@ -34,7 +34,7 @@ from .auth import (
     ApiKeyAuthenticator,
     AuthenticatedPrincipal,
     AuthConfigurationError,
-    load_api_key_authenticator,
+    load_reloading_api_key_authenticator,
 )
 from .alert_rules import (
     AlertRuleError, AlertRuleManager, AlertRuleStorageError, AlertRuleStore)
@@ -3202,7 +3202,8 @@ def main() -> int:
     authenticator = None
     if args.api_key_file:
         try:
-            authenticator = load_api_key_authenticator(args.api_key_file)
+            authenticator = load_reloading_api_key_authenticator(
+                args.api_key_file)
         except AuthConfigurationError as error:
             parser.error(f"--api-key-file无效：{error}")
     try:

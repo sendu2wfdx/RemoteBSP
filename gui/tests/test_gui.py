@@ -804,7 +804,8 @@ class GuiTest(unittest.TestCase):
                                b"runtimePwmLease", b"runtimePwmIdempotency",
                                b"runtimePwmFrequency", b"runtimePwmDuty",
                                b"runtimePwmConfigure", b"runtimePwmStop",
-                               b"runtimePwmRefresh", b"runtimePwmStatus"):
+                               b"runtimePwmRelease", b"runtimePwmRefresh",
+                               b"runtimePwmStatus"):
                     self.assertIn(marker, page)
                 target = json.loads(urlopen(
                     base + "/api/project/target").read())
@@ -812,8 +813,11 @@ class GuiTest(unittest.TestCase):
                 self.assertFalse(target["runtime_timed_bitstream"]["available"])
                 self.assertEqual(target["runtime_timed_bitstream"]["maximum_pixels"], 256)
                 for name in ("configure_path", "frame_path", "stop_path",
-                             "snapshot_path"):
+                             "snapshot_path", "lease_acquire_path",
+                             "lease_release_path"):
                     self.assertIsNone(target["runtime_timed_bitstream"][name])
+                self.assertIsNone(target["runtime_pwm"]["lease_acquire_path"])
+                self.assertIsNone(target["runtime_pwm"]["lease_release_path"])
                 self.assertFalse(target["runtime_pwm"]["auth_proxy"])
                 self.assertEqual(
                     target["runtime_pwm"]["reason"],
@@ -844,7 +848,8 @@ class GuiTest(unittest.TestCase):
                 for marker in (b"runtimeBitsLease", b"runtimeBitsNode",
                                b"runtimeBitsResource", b"runtimeBitsPixels",
                                b"runtimeBitsConfigure", b"runtimeBitsFrame",
-                               b"runtimeBitsStop", b"runtimeBitsSnapshot"):
+                               b"runtimeBitsStop", b"runtimeBitsRelease",
+                               b"runtimeBitsSnapshot"):
                     self.assertIn(marker, page)
                 self.assertIn(b"encodeWs2812Pixels", script)
                 self.assertIn(b"runtimeBitsAdapter", script)

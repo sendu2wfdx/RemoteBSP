@@ -241,6 +241,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                                        pwm_proxy is not None else None),
                     "stop_path": ("/api/runtime/pwm/stop" if
                                   pwm_proxy is not None else None),
+                    "lease_acquire_path": ("/api/runtime/pwm/lease/acquire" if
+                                           pwm_proxy is not None else None),
+                    "lease_release_path": ("/api/runtime/pwm/lease/release" if
+                                           pwm_proxy is not None else None),
                     "snapshot_path": ("/api/runtime/pwm/snapshot" if
                                       pwm_proxy is not None else None),
                     "contract": {
@@ -263,6 +267,12 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                                   if pwm_proxy is not None else None),
                     "snapshot_path": ("/api/runtime/timed-bitstream/snapshot"
                                       if pwm_proxy is not None else None),
+                    "lease_acquire_path": (
+                        "/api/runtime/timed-bitstream/lease/acquire"
+                        if pwm_proxy is not None else None),
+                    "lease_release_path": (
+                        "/api/runtime/timed-bitstream/lease/release"
+                        if pwm_proxy is not None else None),
                 },
             })
             return
@@ -351,6 +361,37 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        lease_groups = {
+            "/api/runtime/pwm/lease/acquire": "pwm.write",
+            "/api/runtime/timed-bitstream/lease/acquire":
+                "timed-bitstream.write",
+        }
+        lease_paths = set(lease_groups) | {
+            "/api/runtime/pwm/lease/release",
+            "/api/runtime/timed-bitstream/lease/release",
+        }
+        if path in lease_paths:
+            proxy = self.runtime_pwm_proxy
+            if proxy is None:
+                self._send_json({"ok": False, "error": "Runtime控制租约代理未启用"},
+                                HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                if parsed.query:
+                    raise RuntimePwmProxyError("控制租约端点不接受查询参数", 400)
+                if self.headers.get_content_type() != "application/json":
+                    raise RuntimePwmProxyError("控制租约请求必须使用application/json", 415)
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > proxy.MAXIMUM_BODY_BYTES:
+                    raise RuntimePwmProxyError("控制租约请求长度无效或超过4096字节", 400)
+                body = self.rfile.read(length)
+                response = (proxy.acquire_lease(lease_groups[path], body)
+                            if path in lease_groups else proxy.release_lease(body))
+                self._send_json(response.document, HTTPStatus(response.status))
+            except (ValueError, RuntimePwmProxyError) as error:
+                status = error.status if isinstance(error, RuntimePwmProxyError) else 400
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus(status))
+            return
         bitstream_prefix = "/api/runtime/timed-bitstream/"
         operation = path[len(bitstream_prefix):] if path.startswith(bitstream_prefix) else None
         if operation in {"configure", "frame", "stop"}:

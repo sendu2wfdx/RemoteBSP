@@ -731,6 +731,29 @@ static void test_append_does_not_restart_running_segment(void) {
     assert(queue.next_deadline_ns == deadline_ns);
 }
 
+static void test_large_negative_step_target_is_preserved(void) {
+    memset(io_enabled, 0, sizeof(io_enabled));
+    memset(io_direction, 0, sizeof(io_direction));
+    memset(io_step, 0, sizeof(io_step));
+    memset(io_limit, 0, sizeof(io_limit));
+    const rbsp_motion_io_t io = {
+        set_enable, set_direction, set_step, limit_active};
+    rbsp_motion_queue_t queue;
+    assert(rbsp_motion_init(&queue, 1U));
+
+    rbsp_motion_segment_t segment =
+        make_segment(1U, 1000000ULL, 1000000000000ULL, true);
+    segment.axis_count = 1U;
+    memset(segment.steps, 0, sizeof(segment.steps));
+    segment.steps[0] = -10000000;
+    assert(rbsp_motion_enqueue(&queue, &segment, 0U, NULL) ==
+           RBSP_MOTION_ENQUEUE_OK);
+    uint64_t deadline_ns = 0U;
+    assert(service_at(&queue, &io, 1000000ULL, &deadline_ns));
+    assert(queue.active_target[0] == UINT32_C(10000000));
+    assert(!queue.direction_positive[0]);
+}
+
 static void test_shared_enable_group(void) {
     const uint16_t groups[] = {10U, 10U, 20U};
     bool requests[] = {false, false, false};
@@ -773,5 +796,6 @@ int main(void) {
     test_long_running_continuous_multi_axis();
     test_total_step_rate_budget();
     test_append_does_not_restart_running_segment();
+    test_large_negative_step_target_is_preserved();
     test_shared_enable_group();
 }
