@@ -11,7 +11,7 @@ sys.path.insert(0, str(GUI_ROOT))
 
 from firmware_deployment import (  # noqa: E402
     DeviceIdentity, FirmwareDeploymentError, deploy_stlink,
-    expected_identity, make_stlink_plan)
+    JsonIdentityFileReader, expected_identity, make_stlink_plan)
 
 
 class Reader:
@@ -26,6 +26,40 @@ class Reader:
 
 
 class FirmwareDeploymentTest(unittest.TestCase):
+    def test_json_identity_reader_is_strict_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "identity.json"
+            identity = {
+                "board_id": "weact-g431-core-v10",
+                "project_sha256": "a" * 64,
+                "config_sha256": "b" * 64,
+                "firmware_identity_sha256": "c" * 64,
+                "device_uuid": "uuid-1",
+            }
+            path.write_text(json.dumps(identity), encoding="utf-8")
+            observed = JsonIdentityFileReader(path).read_identity()
+            self.assertEqual(observed.device_uuid, "uuid-1")
+            path.write_text('{"board_id":"x","board_id":"y"}',
+                            encoding="utf-8")
+            with self.assertRaisesRegex(FirmwareDeploymentError, "重复字段"):
+                JsonIdentityFileReader(path).read_identity()
+            path.write_bytes(b" " * (JsonIdentityFileReader.MAX_BYTES + 1))
+            with self.assertRaisesRegex(FirmwareDeploymentError, "16 KiB"):
+                JsonIdentityFileReader(path).read_identity()
+
+    def test_non_finite_wait_is_rejected_before_flash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = self._build(root)
+            called = []
+            with self.assertRaisesRegex(FirmwareDeploymentError,
+                                        "重连等待参数无效"):
+                deploy_stlink(
+                    build_id, Reader([]), output_root=root,
+                    reconnect_timeout=float("nan"),
+                    runner=lambda command, timeout: called.append(command))
+            self.assertEqual(called, [])
+
     def _build(self, root: Path):
         build_id = "weact-test-01234567"
         directory = root / build_id

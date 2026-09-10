@@ -17,6 +17,12 @@ from firmware_builder import (  # noqa: E402
     FirmwareBuildError,
     FirmwareBuildResult,
 )
+from firmware_deployment import (  # noqa: E402
+    DeploymentResult,
+    DeviceIdentity,
+    FirmwareDeploymentError,
+    FirmwareIdentity,
+)
 from production_batch import export_production_batch  # noqa: E402
 from production_record import generate_production_record  # noqa: E402
 from studio_cli import (  # noqa: E402
@@ -130,6 +136,42 @@ class StudioCliTest(unittest.TestCase):
             code, error, _, _ = self._call(arguments)
         self.assertEqual(code, EXIT_OPERATION)
         self.assertEqual(error["exit_code"], EXIT_OPERATION)
+
+    def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
+        identity_file = self.directory / "identity.json"
+        identity_file.write_text("{}", encoding="utf-8")
+        expected = FirmwareIdentity(
+            "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64)
+        observed = DeviceIdentity(
+            "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64,
+            "device-uuid")
+        result = DeploymentResult(
+            "weact-g431-core-v10-01234567", "stlink-openocd", expected,
+            observed, 2, True)
+        arguments = [
+            "deploy-stlink", "--build-id", result.build_id,
+            "--output-root", str(self.directory / "out"),
+            "--identity-file", str(identity_file),
+            "--probe-serial", "probe-1", "--flash-timeout", "30",
+            "--reconnect-timeout", "4", "--poll-interval", "0.1",
+        ]
+        with patch("studio_cli.deploy_stlink", return_value=result) as deploy:
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        reader = deploy.call_args.args[1]
+        self.assertEqual(reader.path, identity_file.resolve())
+        self.assertEqual(deploy.call_args.kwargs["probe_serial"], "probe-1")
+        self.assertEqual(deploy.call_args.kwargs["flash_timeout"], 30)
+        self.assertTrue(response["verified"])
+        self.assertEqual(response["execution_status"]["firmware_flash"],
+                         "performed_and_verified")
+        self.assertTrue(response["execution_status"]["hardware_access"])
+
+        with patch("studio_cli.deploy_stlink", side_effect=
+                   FirmwareDeploymentError("模拟身份核对失败")):
+            code, error, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OPERATION)
+        self.assertIn("身份核对失败", error["error"])
 
     def test_batch_create_validate_and_atomic_archive_output(self):
         archive = self.directory / "batch.zip"

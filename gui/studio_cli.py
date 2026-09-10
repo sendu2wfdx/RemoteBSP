@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RemoteBSP Studio 非交互生产资料命令行；默认从不烧录或访问硬件。"""
+"""RemoteBSP Studio 非交互命令行；硬件操作必须由显式部署命令发起。"""
 
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ from firmware_builder import (
     DEFAULT_OUTPUT_ROOT,
     FirmwareBuildError,
     build_firmware_project,
+)
+from firmware_deployment import (
+    FirmwareDeploymentError,
+    JsonIdentityFileReader,
+    deploy_stlink,
 )
 from production_batch import (
     MAX_BATCH_COMPARISONS,
@@ -226,6 +231,29 @@ def _run_build(args) -> dict:
     }
 
 
+def _run_deploy_stlink(args) -> dict:
+    output_root = _bounded_path(args.output_root, "构建产物目录")
+    identity_file = _bounded_path(args.identity_file, "设备身份文件")
+    result = deploy_stlink(
+        args.build_id, JsonIdentityFileReader(identity_file),
+        output_root=output_root, probe_serial=args.probe_serial,
+        flash_timeout=args.flash_timeout,
+        reconnect_timeout=args.reconnect_timeout,
+        poll_interval=args.poll_interval)
+    return {
+        "ok": True, "format": "STUDIO_CLI_STLINK_DEPLOYMENT_V1",
+        "build_id": result.build_id, "backend": result.backend,
+        "board_id": result.expected.board_id,
+        "device_uuid": result.observed.device_uuid,
+        "attempts": result.attempts, "verified": result.verified,
+        "execution_status": {
+            "software_build": "not_performed",
+            "firmware_flash": "performed_and_verified",
+            "hardware_access": True,
+        },
+    }
+
+
 def _run_batch_create(args) -> dict:
     record_paths = args.production_record or []
     comparison_paths = args.comparison or []
@@ -336,6 +364,18 @@ def _parser() -> StrictParser:
     build.add_argument("--dry-run", action="store_true")
     build.set_defaults(handler=_run_build)
 
+    deploy = sub.add_parser(
+        "deploy-stlink", help="显式通过ST-Link烧录并核对运行中身份")
+    deploy.add_argument("--build-id", required=True)
+    deploy.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    deploy.add_argument("--identity-file", required=True,
+                        help="由本机上位机原子更新的设备身份JSON文件")
+    deploy.add_argument("--probe-serial")
+    deploy.add_argument("--flash-timeout", type=int, default=120)
+    deploy.add_argument("--reconnect-timeout", type=float, default=10.0)
+    deploy.add_argument("--poll-interval", type=float, default=0.25)
+    deploy.set_defaults(handler=_run_deploy_stlink)
+
     create = sub.add_parser("batch-create", help="生成确定性生产批次")
     create.add_argument("--batch-id", required=True)
     create.add_argument("--name", required=True)
@@ -385,7 +425,7 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO = sys.stdout,
         _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
                        "exit_code": EXIT_INPUT, "error": str(error)})
         return EXIT_INPUT
-    except (FirmwareBuildError, OSError) as error:
+    except (FirmwareBuildError, FirmwareDeploymentError, OSError) as error:
         _emit(stderr, {"ok": False, "format": "STUDIO_CLI_ERROR_V1",
                        "exit_code": EXIT_OPERATION, "error": str(error)})
         return EXIT_OPERATION

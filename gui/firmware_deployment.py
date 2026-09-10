@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 import subprocess
 import time
@@ -69,6 +71,70 @@ class DeploymentResult:
 class IdentityReader(Protocol):
     def read_identity(self) -> DeviceIdentity:
         """读取设备启动后的固件身份和配置身份。"""
+
+
+class JsonIdentityFileReader:
+    """从上位机原子更新的有界 JSON 文件读取运行中设备身份。"""
+
+    MAX_BYTES = 16 * 1024
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    @staticmethod
+    def _strict_object(pairs: list[tuple[str, object]]) -> dict:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise FirmwareDeploymentError(f"身份文件包含重复字段：{key}")
+            value[key] = item
+        return value
+
+    def read_identity(self) -> DeviceIdentity:
+        try:
+            if self.path.is_symlink() or not self.path.is_file():
+                raise FirmwareDeploymentError("身份文件必须是普通文件")
+            with self.path.open("rb") as stream:
+                content = stream.read(self.MAX_BYTES + 1)
+            if len(content) > self.MAX_BYTES:
+                raise FirmwareDeploymentError("身份文件超过16 KiB上限")
+            value = json.loads(
+                content.decode("utf-8"), object_pairs_hook=self._strict_object,
+                parse_constant=lambda item: (_ for _ in ()).throw(
+                    FirmwareDeploymentError(f"身份文件包含非标准数值：{item}")))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise FirmwareDeploymentError(f"身份文件暂不可读：{error}") from error
+        if not isinstance(value, dict):
+            raise FirmwareDeploymentError("身份文件必须是JSON对象")
+        allowed = {"board_id", "project_sha256", "config_sha256",
+                   "firmware_identity_sha256", "device_uuid"}
+        unknown = sorted(set(value) - allowed)
+        missing = sorted(allowed - set(value))
+        if unknown or missing:
+            details = []
+            if missing:
+                details.append("缺少" + ",".join(missing))
+            if unknown:
+                details.append("未知" + ",".join(unknown))
+            raise FirmwareDeploymentError("身份文件字段无效：" + "；".join(details))
+        board_id = value["board_id"]
+        device_uuid = value["device_uuid"]
+        if not isinstance(board_id, str) or board_id not in _OPENOCD_TARGET:
+            raise FirmwareDeploymentError("身份文件board_id无效")
+        if not isinstance(device_uuid, str) or not device_uuid or \
+                len(device_uuid) > 128 or any(
+                    character in device_uuid for character in "\r\n\0"):
+            raise FirmwareDeploymentError("身份文件device_uuid无效")
+        return DeviceIdentity(
+            board_id=board_id,
+            project_sha256=_require_hash(value["project_sha256"],
+                                         "project_sha256"),
+            config_sha256=_require_hash(value["config_sha256"],
+                                        "config_sha256"),
+            firmware_identity_sha256=_require_hash(
+                value["firmware_identity_sha256"],
+                "firmware_identity_sha256"),
+            device_uuid=device_uuid)
 
 
 def _require_hash(value: object, field: str) -> str:
@@ -173,8 +239,10 @@ def deploy_stlink(
     """烧录、复位、等待节点重连，并核对运行中固件身份。"""
     if flash_timeout < 1 or flash_timeout > 600:
         raise FirmwareDeploymentError("烧录超时必须位于1～600秒")
-    if reconnect_timeout <= 0 or reconnect_timeout > 120 or \
-            poll_interval <= 0 or poll_interval > reconnect_timeout:
+    if not math.isfinite(reconnect_timeout) or \
+            not math.isfinite(poll_interval) or reconnect_timeout <= 0 or \
+            reconnect_timeout > 120 or poll_interval <= 0 or \
+            poll_interval > reconnect_timeout:
         raise FirmwareDeploymentError("重连等待参数无效")
     expected = expected_identity(build_id, output_root=output_root)
     plan = make_stlink_plan(build_id, output_root=output_root,
