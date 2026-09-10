@@ -2,6 +2,7 @@
 
 #include "remotebsp/protocol/health.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
+#include "remotebsp/toolbusd/bus_runtime.hpp"
 
 #include <cstdint>
 #include <mutex>
@@ -19,6 +20,10 @@ enum class ToolbusdHealthMetricId : std::uint16_t {
     TrafficEstimatedWireTimeNs = 0x8005U,
     RuntimeOperationLedgerMutationAvailable = 0x8006U,
     RuntimeOperationLedgerOperationCount = 0x8007U,
+    BusAdmittedTransactionTotal = 0x8008U,
+    BusRateLimitedTransactionTotal = 0x8009U,
+    BusBusyTransactionTotal = 0x800AU,
+    BusContractRejectedTransactionTotal = 0x800BU,
 };
 
 // v1 公共单位暂不含纳秒；扩展单位仍按协议的未知枚举前向兼容规则传递。
@@ -33,12 +38,14 @@ struct ToolbusdHealthObservation {
     std::optional<std::uint64_t> resource_fault_count;
     std::optional<bool> operation_ledger_mutation_available;
     std::optional<std::uint64_t> operation_ledger_operation_count;
+    std::optional<BusTelemetrySnapshot> bus_telemetry;
 };
 
 enum class ToolbusdHealthProducerError {
     InvalidGeneration,
     ClockRegression,
     InvalidTrafficSnapshot,
+    InvalidBusTelemetrySnapshot,
     SequenceExhausted,
 };
 

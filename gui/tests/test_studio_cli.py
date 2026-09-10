@@ -141,6 +141,42 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OPERATION)
         self.assertEqual(error["exit_code"], EXIT_OPERATION)
 
+    def test_stlink_deployment_preflight_is_atomic_and_never_flashes(self):
+        plan_path = self.directory / "stlink-plan.json"
+        artifact = {
+            "format": "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1",
+            "schema_version": 1, "build_id": "weact-test-01234567",
+            "sha256": "a" * 64, "hardware_access": False,
+            "flash_performed": False}
+        with patch("studio_cli.create_stlink_deployment_plan",
+                   return_value=artifact) as create, \
+                patch("studio_cli.deploy_stlink") as deploy:
+            code, response, _, _ = self._call([
+                "deployment-preflight-stlink", "--build-id",
+                "weact-test-01234567", "--output-root", str(self.directory),
+                "--probe-serial", "ABC-123", "--plan-output",
+                str(plan_path)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(response["hardware_access"])
+        self.assertFalse(response["flash_performed"])
+        self.assertEqual(json.loads(plan_path.read_text(encoding="utf-8")),
+                         artifact)
+        create.assert_called_once_with(
+            "weact-test-01234567", output_root=self.directory,
+            probe_serial="ABC-123")
+        deploy.assert_not_called()
+        with patch("studio_cli.validate_stlink_deployment_plan",
+                   return_value=artifact) as validate, \
+                patch("studio_cli.deploy_stlink") as deploy:
+            code, checked, _, _ = self._call([
+                "deployment-plan-validate", "--plan", str(plan_path),
+                "--output-root", str(self.directory)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(checked["plan_sha256"], "a" * 64)
+        self.assertFalse(checked["hardware_access"])
+        validate.assert_called_once()
+        deploy.assert_not_called()
+
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
         identity_file.write_text("{}", encoding="utf-8")

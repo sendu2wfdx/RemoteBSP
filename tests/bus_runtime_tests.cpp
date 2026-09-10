@@ -241,6 +241,17 @@ void check_device_rate_shaping_and_isolation() {
     assert(runtime.admit_i2c(
                1U, {limited.resource_id, 1000U, 0U, 1U, {0U}}).status ==
            toolbusd::BusAdmissionStatus::Accepted);
+    const auto telemetry = runtime.telemetry_snapshot();
+    assert(telemetry.version == toolbusd::BusTelemetrySnapshot::kVersion);
+    assert(telemetry.admitted_total == 3U);
+    assert(telemetry.rate_limited_total == 2U);
+    assert(telemetry.busy_total == 0U);
+    assert(telemetry.resources.size() == 2U);
+    assert(telemetry.resources[0U].resource_id == limited.resource_id);
+    assert(telemetry.resources[0U].admitted_total == 2U);
+    assert(telemetry.resources[0U].rate_limited_total == 2U);
+    assert(telemetry.resources[1U].resource_id == peer.resource_id);
+    assert(telemetry.resources[1U].admitted_total == 1U);
 }
 
 void check_bus_contention_does_not_consume_device_quota() {
@@ -266,6 +277,10 @@ void check_bus_contention_does_not_consume_device_quota() {
     assert(runtime.admit_i2c(
                1U, {contender.resource_id, 1000U, 0U, 1U, {0U}}).status ==
            toolbusd::BusAdmissionStatus::Accepted);
+    const auto telemetry = runtime.telemetry_snapshot();
+    assert(telemetry.admitted_total == 2U && telemetry.busy_total == 1U);
+    assert(telemetry.resources[0U].busy_total == 0U);
+    assert(telemetry.resources[1U].busy_total == 1U);
 }
 
 void check_spi_rate_shaping_and_contract_refresh() {

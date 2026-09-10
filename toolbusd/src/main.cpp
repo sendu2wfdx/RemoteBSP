@@ -2654,6 +2654,7 @@ private:
         }
         observation.active_lease_count =
             runtime_control_.active_lease_count();
+        observation.bus_telemetry = bus_runtime_.telemetry_snapshot();
         observation.operation_ledger_mutation_available =
             operation_ledger_.mutation_available();
         if (*observation.operation_ledger_mutation_available) {

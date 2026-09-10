@@ -70,6 +70,27 @@ bool valid_traffic_snapshot(const TrafficSnapshot& snapshot) noexcept {
            estimated_wire_time_ns == snapshot.estimated_wire_time_ns;
 }
 
+bool valid_bus_telemetry(const BusTelemetrySnapshot& snapshot) noexcept {
+    if (snapshot.version != BusTelemetrySnapshot::kVersion) return false;
+    std::uint64_t admitted = 0U, limited = 0U, busy = 0U, rejected = 0U;
+    std::uint64_t previous = 0U;
+    bool first = true;
+    for (const auto& item : snapshot.resources) {
+        const auto key = (static_cast<std::uint64_t>(item.node_id) << 32U) |
+                         item.resource_id;
+        if (item.node_id == 0U || item.resource_id == 0U ||
+            (!first && key <= previous) ||
+            !checked_add(admitted, item.admitted_total) ||
+            !checked_add(limited, item.rate_limited_total) ||
+            !checked_add(busy, item.busy_total) ||
+            !checked_add(rejected, item.contract_rejected_total)) return false;
+        first = false; previous = key;
+    }
+    return admitted == snapshot.admitted_total &&
+           limited == snapshot.rate_limited_total && busy == snapshot.busy_total &&
+           rejected == snapshot.contract_rejected_total;
+}
+
 }  // namespace
 
 ToolbusdHealthProducerException::ToolbusdHealthProducerException(
@@ -106,6 +127,12 @@ protocol::HealthSnapshot ToolbusdHealthProducer::capture(
         throw ToolbusdHealthProducerException(
             ToolbusdHealthProducerError::InvalidTrafficSnapshot,
             "toolbusd 流量快照不满足内部一致性约束");
+    }
+    if (observation.bus_telemetry.has_value() &&
+        !valid_bus_telemetry(*observation.bus_telemetry)) {
+        throw ToolbusdHealthProducerException(
+            ToolbusdHealthProducerError::InvalidBusTelemetrySnapshot,
+            "总线遥测快照不满足版本、排序或汇总一致性约束");
     }
     if (next_sequence_ == 0U) {
         throw ToolbusdHealthProducerException(
@@ -201,6 +228,26 @@ protocol::HealthSnapshot ToolbusdHealthProducer::capture(
                       ToolbusdHealthMetricId::
                           RuntimeOperationLedgerOperationCount),
                   HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusAdmittedTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->admitted_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusAdmittedTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusRateLimitedTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->rate_limited_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusRateLimitedTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusBusyTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->busy_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusBusyTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusContractRejectedTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->contract_rejected_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusContractRejectedTransactionTotal), HealthMetricUnit::Count),
     };
     last_sample_time_ms_ = observation.sample_time_ms;
 

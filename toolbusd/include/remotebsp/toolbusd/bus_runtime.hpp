@@ -9,6 +9,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace remotebsp::toolbusd {
 
@@ -26,6 +27,25 @@ enum class BusAdmissionStatus : std::uint8_t {
     ResourceBusy,
     ContractMismatch,
     RateLimited,
+};
+
+struct BusResourceTelemetry {
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint64_t admitted_total{};
+    std::uint64_t rate_limited_total{};
+    std::uint64_t busy_total{};
+    std::uint64_t contract_rejected_total{};
+};
+
+struct BusTelemetrySnapshot {
+    static constexpr std::uint16_t kVersion = 1U;
+    std::uint16_t version{kVersion};
+    std::uint64_t admitted_total{};
+    std::uint64_t rate_limited_total{};
+    std::uint64_t busy_total{};
+    std::uint64_t contract_rejected_total{};
+    std::vector<BusResourceTelemetry> resources;
 };
 
 /*
@@ -107,6 +127,7 @@ public:
 
     std::size_t contract_count() const noexcept;
     std::size_t active_bus_count() const noexcept;
+    BusTelemetrySnapshot telemetry_snapshot() const;
 
 private:
     struct DeviceKey {
@@ -127,6 +148,13 @@ private:
         std::uint64_t next_eligible_us{};
     };
 
+    struct TelemetryCounters {
+        std::uint64_t admitted{};
+        std::uint64_t rate_limited{};
+        std::uint64_t busy{};
+        std::uint64_t contract_rejected{};
+    };
+
     Admission admit(std::uint32_t node_id, std::uint32_t resource_id,
                     protocol::BusResourceKind expected_kind,
                     std::uint32_t timeout_us, std::size_t transfer_bytes,
@@ -145,6 +173,7 @@ private:
         contracts_;
     // 每份合同只占一个定长状态，不随请求速率或运行时间增长。
     std::unordered_map<DeviceKey, RateState, DeviceKeyHash> rate_states_;
+    std::unordered_map<DeviceKey, TelemetryCounters, DeviceKeyHash> telemetry_;
     std::unordered_set<std::uint64_t> active_buses_;
     std::unordered_set<DeviceKey, DeviceKeyHash> loading_contracts_;
 };

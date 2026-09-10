@@ -65,6 +65,9 @@ void test_real_software_state_to_wire_contract() {
     observation.resource_fault_count = 0U;
     observation.operation_ledger_mutation_available = true;
     observation.operation_ledger_operation_count = 7U;
+    observation.bus_telemetry = toolbusd::BusTelemetrySnapshot{
+        toolbusd::BusTelemetrySnapshot::kVersion, 3U, 2U, 1U, 4U,
+        {{1U, 0x0C000001U, 3U, 2U, 1U, 4U}}};
 
     const auto snapshot = producer.capture(observation);
     CHECK(snapshot.version == protocol::kHealthContractVersion);
@@ -103,6 +106,13 @@ void test_real_software_state_to_wire_contract() {
           admitted->value == 1U);
     CHECK(ledger_available != nullptr && ledger_available->value == 1U);
     CHECK(ledger_operations != nullptr && ledger_operations->value == 7U);
+    const auto* bus_limited = find_metric(snapshot, static_cast<std::uint16_t>(
+        toolbusd::ToolbusdHealthMetricId::BusRateLimitedTransactionTotal));
+    const auto* bus_rejected = find_metric(snapshot, static_cast<std::uint16_t>(
+        toolbusd::ToolbusdHealthMetricId::BusContractRejectedTransactionTotal));
+    CHECK(bus_limited != nullptr && bus_limited->unit == protocol::HealthMetricUnit::Count &&
+          bus_limited->value == 2U);
+    CHECK(bus_rejected != nullptr && bus_rejected->value == 4U);
 
     const auto wire = protocol::encode_health_snapshot(snapshot);
     const auto decoded = protocol::decode_health_snapshot(wire);

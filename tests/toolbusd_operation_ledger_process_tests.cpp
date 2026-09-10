@@ -529,6 +529,35 @@ void check_startup_block_and_unavailable(const std::string& toolbusd) {
                     "owner", 0x01000001U, 1000U);
             });
     }
+
+    {
+        std::cerr << "阶段: ledger-truncated 启动\n";
+        TestDirectory directory;
+        remotebsp::toolbusd::OperationDigest operation_id{};
+        {
+            remotebsp::toolbusd::OperationLedgerOptions options;
+            options.directory = directory.child("ledger");
+            remotebsp::toolbusd::OperationLedger ledger(options);
+            operation_id = ledger.begin_gpio_write(
+                blocked_operation()).record.operation_id;
+        }
+        const auto segment = directory.child(
+            "ledger/segment-0000000000000001.rbol");
+        const auto committed_size = std::filesystem::file_size(segment);
+        CHECK(committed_size > 1U);
+        std::filesystem::resize_file(segment, committed_size - 1U);
+        CHECK(::chmod(segment.c_str(), 0600) == 0);
+        auto daemon = start_daemon(toolbusd, directory);
+        remotebsp::Client client(directory.child("toolbusd.sock").string(), 1U);
+        const auto daemon_id = client.daemon_identity().instance_id;
+        expect_ipc_error(
+            static_cast<std::uint16_t>(
+                remotebsp::toolbusd::IpcErrorCode::BackendUnavailable),
+            [&] {
+                static_cast<void>(client.runtime_operation_status(
+                    daemon_id, "owner", operation_id));
+            });
+    }
     std::cerr << "阶段: startup-block/unavailable 结束\n";
 }
 

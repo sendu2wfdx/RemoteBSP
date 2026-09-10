@@ -44,6 +44,9 @@
   固定 `/dev/serial/by-id` 设备、服务端 flashtool、受保护 APP 产物和定向运行节点 UUID，
   并复用四重身份回读与部署记录。下一步完成签名者/公钥治理、外部可信时间证明及
   ST-Link/CAN/USB Katapult 实体部署验收；
+  ST-Link 烧录前现可生成版本化、自哈希的离线部署计划，绑定归档工程、完整 `.config`、
+  构建记录、ELF、板卡 target、探针选择和四重预期身份；计划复核会重新读取受保护产物，
+  不访问硬件，也不把预检记作烧录或回读成功；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，
@@ -240,7 +243,9 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
   原子事务测试已完成且默认关闭；`toolbusd` 已增加有界合同缓存、首访单飞、父总线仲裁、
   节点代次失效和异常释放，并以常量空间的设备级最小间隔执行
   `maximum_operations_per_second`：非阻塞返回限速和确定重试间隔，总线竞争失败不扣额度，
-  被限速设备不阻塞同父总线其他设备。下一步补充总线整形/错误遥测，再由 Studio 生成经
+  被限速设备不阻塞同父总线其他设备；主机准入层已增加按节点/设备隔离的接纳、限速、
+  父总线忙与合同不匹配饱和计数，并以稳定健康指标 ID `0x8008`～`0x800b` 汇总发布。
+  下一步补充远端 NACK/Timeout/Fault 分类遥测，再由 Studio 生成经
   实体能力确认的总线静态表并逐板
   实现/验收 HAL；
 - SPI 转 UART/GPIO/I2C 等板级适配器暴露转换后的统一资源，隐藏内部 SPI；

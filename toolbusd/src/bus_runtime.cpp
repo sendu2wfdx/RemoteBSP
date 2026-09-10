@@ -12,6 +12,10 @@
 namespace remotebsp::toolbusd {
 namespace {
 
+void saturating_increment(std::uint64_t& value) noexcept {
+    if (value != std::numeric_limits<std::uint64_t>::max()) ++value;
+}
+
 bool same_contract(const protocol::BusResourceContract& left,
                    const protocol::BusResourceContract& right) noexcept {
     return left.resource_id == right.resource_id &&
@@ -217,6 +221,7 @@ void BusRuntime::invalidate_node(std::uint32_t node_id) noexcept {
     for (auto entry = contracts_.begin(); entry != contracts_.end();) {
         if (entry->first.node_id == node_id) {
             rate_states_.erase(entry->first);
+            telemetry_.erase(entry->first);
             entry = contracts_.erase(entry);
         } else {
             ++entry;
@@ -267,11 +272,13 @@ BusRuntime::Admission BusRuntime::admit(
         return {BusAdmissionStatus::ContractMissing, {}, 0U};
     }
     const auto& contract = found->second;
+    auto& telemetry = telemetry_[{node_id, resource_id}];
     if (contract.kind != expected_kind || timeout_us < contract.minimum_timeout_us ||
         timeout_us > contract.maximum_timeout_us ||
         transfer_bytes > contract.maximum_transfer_bytes ||
         (required_contract_flags &
          static_cast<std::uint8_t>(~contract.flags)) != 0U) {
+        saturating_increment(telemetry.contract_rejected);
         return {BusAdmissionStatus::ContractMismatch, {}, 0U};
     }
     const DeviceKey device_key{node_id, resource_id};
@@ -280,6 +287,7 @@ BusRuntime::Admission BusRuntime::admit(
     if (rate != 0U) {
         const auto state = rate_states_.find(device_key);
         if (state != rate_states_.end() && now_us < state->second.next_eligible_us) {
+            saturating_increment(telemetry.rate_limited);
             return {BusAdmissionStatus::RateLimited, {},
                     state->second.next_eligible_us - now_us};
         }
@@ -287,6 +295,7 @@ BusRuntime::Admission BusRuntime::admit(
     const auto bus_key = make_bus_key(node_id,
                                       contract.parent_bus_resource_id);
     if (!active_buses_.insert(bus_key).second) {
+        saturating_increment(telemetry.busy);
         return {BusAdmissionStatus::ResourceBusy, {}, 0U};
     }
     // 只有真正获得父总线的请求才消耗设备配额；总线竞争失败不会误伤该设备。
@@ -298,6 +307,7 @@ BusRuntime::Admission BusRuntime::admit(
                 ? std::numeric_limits<std::uint64_t>::max()
                 : now_us + interval_us;
     }
+    saturating_increment(telemetry.admitted);
     return {BusAdmissionStatus::Accepted,
             Reservation(this, bus_key), 0U};
 }
@@ -326,6 +336,31 @@ std::size_t BusRuntime::contract_count() const noexcept {
 std::size_t BusRuntime::active_bus_count() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return active_buses_.size();
+}
+
+BusTelemetrySnapshot BusRuntime::telemetry_snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    BusTelemetrySnapshot snapshot;
+    snapshot.resources.reserve(telemetry_.size());
+    const auto add = [](std::uint64_t& total, std::uint64_t value) {
+        total = value > std::numeric_limits<std::uint64_t>::max() - total
+                    ? std::numeric_limits<std::uint64_t>::max() : total + value;
+    };
+    for (const auto& [key, counters] : telemetry_) {
+        snapshot.resources.push_back({key.node_id, key.resource_id,
+            counters.admitted, counters.rate_limited, counters.busy,
+            counters.contract_rejected});
+        add(snapshot.admitted_total, counters.admitted);
+        add(snapshot.rate_limited_total, counters.rate_limited);
+        add(snapshot.busy_total, counters.busy);
+        add(snapshot.contract_rejected_total, counters.contract_rejected);
+    }
+    std::sort(snapshot.resources.begin(), snapshot.resources.end(),
+        [](const auto& left, const auto& right) {
+            return left.node_id < right.node_id ||
+                   (left.node_id == right.node_id && left.resource_id < right.resource_id);
+        });
+    return snapshot;
 }
 
 }  // namespace remotebsp::toolbusd

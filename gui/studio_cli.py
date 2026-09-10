@@ -25,9 +25,11 @@ from firmware_deployment import (
     JsonIdentityFileReader,
     RUNTIME_IDENTITY_CAPABILITIES_MISSING,
     ToolbusdIdentityReader,
+    create_stlink_deployment_plan,
     deploy_can_katapult,
     deploy_usb_katapult,
     deploy_stlink,
+    validate_stlink_deployment_plan,
 )
 from deployment_record import create_deployment_record, validate_deployment_record
 from device_parameters import (
@@ -76,6 +78,7 @@ MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_COMPARISON_INPUT_BYTES = 128 * 1024
 MAX_CLI_PATH_CHARS = 512
 MAX_ADC_CALIBRATION_BYTES = 16 * 1024
+MAX_DEPLOYMENT_PLAN_BYTES = 64 * 1024
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -295,6 +298,33 @@ def _run_deploy_stlink(args) -> dict:
             "hardware_access": True,
         },
     }
+
+
+def _run_deployment_preflight_stlink(args) -> dict:
+    artifact = create_stlink_deployment_plan(
+        args.build_id,
+        output_root=_bounded_path(args.output_root, "构建产物目录"),
+        probe_serial=args.probe_serial)
+    content = (json.dumps(artifact, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    written = _atomic_output(args.plan_output, content, force=args.force)
+    return {"ok": True,
+            "format": "STUDIO_CLI_STLINK_DEPLOYMENT_PREFLIGHT_V1",
+            "plan": artifact, "plan_output": str(written),
+            "hardware_access": False, "flash_performed": False}
+
+
+def _run_deployment_plan_validate(args) -> dict:
+    artifact = _read_json(
+        args.plan, "ST-Link部署计划", MAX_DEPLOYMENT_PLAN_BYTES)
+    validated = validate_stlink_deployment_plan(
+        artifact,
+        output_root=_bounded_path(args.output_root, "构建产物目录"))
+    return {"ok": True,
+            "format": "STUDIO_CLI_STLINK_DEPLOYMENT_PLAN_VALIDATE_V1",
+            "build_id": validated["build_id"],
+            "plan_sha256": validated["sha256"],
+            "hardware_access": False, "flash_performed": False}
 
 
 def _run_deploy_can_katapult(args) -> dict:
@@ -741,6 +771,23 @@ def _parser() -> StrictParser:
     build.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     build.add_argument("--dry-run", action="store_true")
     build.set_defaults(handler=_run_build)
+
+    deployment_preflight = sub.add_parser(
+        "deployment-preflight-stlink",
+        help="离线生成受保护构建对应的ST-Link烧录计划，不访问硬件")
+    deployment_preflight.add_argument("--build-id", required=True)
+    deployment_preflight.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    deployment_preflight.add_argument("--probe-serial")
+    deployment_preflight.add_argument("--plan-output", required=True)
+    deployment_preflight.add_argument("--force", action="store_true")
+    deployment_preflight.set_defaults(handler=_run_deployment_preflight_stlink)
+
+    deployment_validate = sub.add_parser(
+        "deployment-plan-validate",
+        help="离线复核ST-Link计划及当前构建证据，拒绝产物漂移")
+    deployment_validate.add_argument("--plan", required=True)
+    deployment_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    deployment_validate.set_defaults(handler=_run_deployment_plan_validate)
 
     deploy = sub.add_parser(
         "deploy-stlink", help="显式通过ST-Link烧录并核对运行中身份")

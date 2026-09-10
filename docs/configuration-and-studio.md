@@ -162,6 +162,18 @@ schema 迁移及实板掉电测试。
 - 三块正式板卡通过上述Studio后端完成真实交叉编译；
 - Mock GPIO、步进位置、PWM、WS2812 和故障状态可视化。
 
+ST-Link 还提供纯离线部署预检工件 `REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1`。它从受保护
+构建目录重新解析版本化 Studio 工程、完整 `firmware.config`、构建记录和 ELF，要求工程
+及配置摘要与构建身份一致，并保存板卡专用 OpenOCD target、可选探针序列号、无 shell
+拼接的精确 argv、四重预期身份、四类输入摘要和工件自身 SHA-256。生成与复核命令均明确
+报告 `hardware_access=false`、`flash_performed=false`；任何计划字段或归档产物漂移都会
+失败关闭。该工件用于烧录前审阅和归档，不是烧录成功或实体回读证明：
+
+```text
+studio_cli.py deployment-preflight-stlink --build-id <ID> --plan-output stlink-plan.json
+studio_cli.py deployment-plan-validate --plan stlink-plan.json
+```
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

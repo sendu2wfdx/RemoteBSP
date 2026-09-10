@@ -13,8 +13,9 @@ from firmware_deployment import (  # noqa: E402
     DeviceIdentity, FirmwareDeploymentError, deploy_can_katapult, deploy_stlink,
     deploy_usb_katapult,
     IdentityCapabilityError, JsonIdentityFileReader, ToolbusdIdentityReader,
-    expected_identity, make_can_katapult_plan, make_stlink_plan,
-    make_usb_katapult_plan)
+    create_stlink_deployment_plan, expected_identity, make_can_katapult_plan,
+    make_stlink_plan, make_usb_katapult_plan,
+    validate_stlink_deployment_plan)
 
 
 class Reader:
@@ -228,6 +229,40 @@ class FirmwareDeploymentTest(unittest.TestCase):
             self.assertIn("target/stm32g4x.cfg", plan.command)
             self.assertIn("verify reset exit", plan.command[-1])
             self.assertNotIn(";", "".join(plan.command))
+
+    def test_versioned_stlink_preflight_binds_complete_build_and_detects_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            directory = root / build_id
+            project = directory / "studio-project.json"
+            project.write_text('{"schema_version":2}\n', encoding="utf-8")
+            record_path = directory / "build-record.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["project_sha256"] = hashlib.sha256(
+                project.read_bytes()).hexdigest()
+            config = directory / "firmware.config"
+            record["config_sha256"] = hashlib.sha256(
+                config.read_bytes()).hexdigest()
+            record["artifacts"].append({
+                "filename": project.name, "size": project.stat().st_size,
+                "sha256": record["project_sha256"]})
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+
+            artifact = create_stlink_deployment_plan(
+                build_id, output_root=root, probe_serial="ABC-123")
+            self.assertFalse(artifact["hardware_access"])
+            self.assertFalse(artifact["flash_performed"])
+            self.assertEqual(validate_stlink_deployment_plan(
+                artifact, output_root=root), artifact)
+            changed = json.loads(json.dumps(artifact))
+            changed["command_argv"][-1] += " shutdown"
+            with self.assertRaisesRegex(FirmwareDeploymentError, "完整性"):
+                validate_stlink_deployment_plan(changed, output_root=root)
+            config.write_bytes(config.read_bytes() + b"# drift\n")
+            with self.assertRaisesRegex(FirmwareDeploymentError,
+                                        "受保护|构建证据"):
+                validate_stlink_deployment_plan(artifact, output_root=root)
 
     def test_rejects_probe_serial_injection(self):
         with tempfile.TemporaryDirectory() as temp:
