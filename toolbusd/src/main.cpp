@@ -207,6 +207,7 @@ struct ToolbusDaemonTestOptions {
 #ifdef REMOTEBSP_TEST_HOOKS
     std::uint32_t fail_terminal_record_sync_ordinal{};
     std::uint32_t gpio_post_lookup_barrier_participants{};
+    std::uint32_t drop_stream_credit_ipc_response_ordinal{};
 #endif
 };
 
@@ -527,6 +528,8 @@ public:
                   ? nullptr
                   : std::make_unique<OneShotTestBarrier>(
                         test_options.gpio_post_lookup_barrier_participants)),
+          drop_stream_credit_ipc_response_ordinal_(
+              test_options.drop_stream_credit_ipc_response_ordinal),
 #endif
           socket_path_(std::move(socket_path)) {}
 
@@ -2860,6 +2863,17 @@ private:
                     remotebsp::protocol::encode(response->second);
                 responses_.erase(response);
                 request_routes_.erase(key);
+#ifdef REMOTEBSP_TEST_HOOKS
+                // 只在测试构建中模拟“远端已提交信用，但本地 IPC 响应丢失”。
+                // 故障点必须位于历史登记和事件出队之后，才能覆盖真实的不确定提交边界。
+                if (command == remotebsp::protocol::Command::StreamCredit &&
+                    drop_stream_credit_ipc_response_ordinal_ != 0U &&
+                    stream_credit_ipc_response_count_.fetch_add(1U) + 1U ==
+                        drop_stream_credit_ipc_response_ordinal_) {
+                    lock.unlock();
+                    return;
+                }
+#endif
                 lock.unlock();
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok, encoded);
@@ -3070,6 +3084,8 @@ private:
     std::unique_ptr<remotebsp::toolbusd::LinkRecordingController> recording_;
 #ifdef REMOTEBSP_TEST_HOOKS
     std::unique_ptr<OneShotTestBarrier> gpio_post_lookup_barrier_;
+    const std::uint32_t drop_stream_credit_ipc_response_ordinal_{};
+    std::atomic<std::uint32_t> stream_credit_ipc_response_count_{0U};
 #endif
     remotebsp::toolbusd::NodeRegistry nodes_;
     remotebsp::toolbusd::BusRuntime bus_runtime_;
@@ -3134,6 +3150,7 @@ int main(int argc, char** argv) {
 #ifdef REMOTEBSP_TEST_HOOKS
                      " [--test-operation-ledger-fail-terminal-sync 序号]"
                      " [--test-runtime-gpio-post-lookup-barrier 参与数]"
+                     " [--test-stream-credit-drop-ipc-response 序号]"
 #endif
                      "\n";
         return 2;
@@ -3254,6 +3271,15 @@ int main(int argc, char** argv) {
                         "Runtime GPIO 测试屏障参与数必须为 2～64 且只能指定一次");
                 }
                 test_options.gpio_post_lookup_barrier_participants = value;
+            } else if (option ==
+                       "--test-stream-credit-drop-ipc-response") {
+                if (value > 1024U ||
+                    test_options.drop_stream_credit_ipc_response_ordinal !=
+                        0U) {
+                    throw std::invalid_argument(
+                        "STREAM 信用 IPC 响应丢失测试序号必须为 1～1024 且只能指定一次");
+                }
+                test_options.drop_stream_credit_ipc_response_ordinal = value;
 #endif
             } else {
                 throw std::invalid_argument("未知 toolbusd 选项");

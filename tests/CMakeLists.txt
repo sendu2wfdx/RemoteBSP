@@ -116,6 +116,17 @@ add_test(NAME stream_process_e2e_tests
             ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_can_only_board_v4.json)
 set_tests_properties(stream_process_e2e_tests PROPERTIES TIMEOUT 20)
 
+add_executable(stream_credit_fault_client stream_credit_fault_client.cpp)
+target_link_libraries(stream_credit_fault_client PRIVATE remotebsp)
+target_compile_options(stream_credit_fault_client PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME stream_credit_fault_process_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/stream_credit_fault_process.sh
+            $<TARGET_FILE:toolbusd> $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:stream_credit_fault_client>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_n2h_board_v4.json)
+set_tests_properties(stream_credit_fault_process_tests PROPERTIES TIMEOUT 20)
+
 add_executable(bus_resource_tests bus_resource_tests.cpp)
 target_link_libraries(bus_resource_tests PRIVATE remotebsp_remote_core)
 target_compile_options(bus_resource_tests PRIVATE

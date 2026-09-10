@@ -136,6 +136,12 @@ TX 溢出和后端故障字段，对 H2N 保持 RX 方向语义。
 也不会归还信用。普通事件仍留在原有队列中，不会被 STREAM 消费接口误取。
 `remote-cli` 已提供合同、打开、读、写、状态和停止入口。真实进程回归使用
 `toolbusd + mock_mcu + remote-cli` 经 Mock USB 验证连续块、精确信用恢复和错误序号拒绝。
+另有仅在测试构建启用的单次故障点，会在远端已接受 `STREAM_CREDIT`、toolbusd 已登记
+幂等历史并移除对应事件之后，主动关闭本地 IPC 而不返回响应。同一 `Client` 实例随后以
+原 `stream_id + sequence` 重试：必须取得缓存中的同一数据块，toolbusd 不得二次发送
+信用，远端可用信用保持合同上限，下一块序号仍连续。该故障点由
+`REMOTEBSP_TEST_HOOKS` 编译边界隔离，生产构建没有对应运行路径；确认历史固定为
+最多 512 项，并在节点代际失效时清除。
 
 当前 toolbusd 是单链路进程，所有 STREAM 命令和专用读取 IPC 都硬绑定到该进程启动时
 显式选择的 USB/Mock USB `LinkTransport`；若进程运行在 Classical CAN 或 CAN-FD，
