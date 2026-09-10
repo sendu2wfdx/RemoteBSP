@@ -821,6 +821,85 @@ void test_timed_bitstream_request_roundtrip_and_bounds() {
     CHECK(toolbusd::decode_ipc_runtime_timed_bitstream_stop(encoded).idempotency_key=="stop");
 }
 
+void test_bus_resource_reset_request_roundtrip_and_dispatch() {
+    static_assert(static_cast<std::uint8_t>(
+                      toolbusd::IpcRequestKind::RuntimeBusResourceResetOperation) ==
+                      27U,
+                  "总线资源复位IPC kind必须保持稳定");
+    toolbusd::RuntimeBusResourceResetRequest reset;
+    reset.daemon_instance_id = filled<16>(1U);
+    reset.lease_id = filled<16>(2U);
+    reset.expected_node_uuid = filled<16>(3U);
+    reset.owner_key_id = "owner";
+    reset.permissions = toolbusd::kRuntimePermissionBusReset;
+    reset.node_id = 7U;
+    reset.resource_id = 0x02000001U;
+    reset.idempotency_key = "bus-reset:1";
+
+    const auto encoded =
+        toolbusd::encode_ipc_runtime_bus_resource_reset(reset);
+    const auto decoded =
+        toolbusd::decode_ipc_runtime_bus_resource_reset(encoded);
+    CHECK(decoded.daemon_instance_id == reset.daemon_instance_id);
+    CHECK(decoded.lease_id == reset.lease_id);
+    CHECK(decoded.expected_node_uuid == reset.expected_node_uuid);
+    CHECK(decoded.owner_key_id == reset.owner_key_id);
+    CHECK(decoded.permissions == reset.permissions);
+    CHECK(decoded.node_id == reset.node_id);
+    CHECK(decoded.resource_id == reset.resource_id);
+    CHECK(decoded.idempotency_key == reset.idempotency_key);
+
+    auto malformed = encoded;
+    malformed[62U] = 1U;
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_bus_resource_reset(malformed));
+    });
+    malformed = encoded;
+    malformed[0U] = 0xffU;
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_bus_resource_reset(malformed));
+    });
+    malformed = encoded;
+    malformed.pop_back();
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_bus_resource_reset(malformed));
+    });
+    malformed = encoded;
+    malformed.push_back(0U);
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_bus_resource_reset(malformed));
+    });
+
+    int sockets[2]{};
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    toolbusd::write_ipc_runtime_bus_resource_reset_operation_request(
+        sockets[0], reset);
+    const auto request = toolbusd::read_ipc_request(sockets[1]);
+    CHECK(request.kind ==
+          toolbusd::IpcRequestKind::RuntimeBusResourceResetOperation);
+    CHECK(request.runtime_bus_resource_reset.resource_id == reset.resource_id);
+    CHECK(request.runtime_bus_resource_reset.idempotency_key ==
+          reset.idempotency_key);
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+
+    malformed = encoded;
+    malformed[62U] = 1U;
+    expect_tagged_reader_failure(
+        toolbusd::IpcRequestKind::RuntimeBusResourceResetOperation,
+        malformed);
+
+    reset.owner_key_id.clear();
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::encode_ipc_runtime_bus_resource_reset(reset));
+    });
+}
+
 }  // namespace
 
 int main() {
@@ -832,6 +911,7 @@ int main() {
     test_client_api_and_query_replay_contract();
     test_pwm_request_roundtrip_and_strict_decode();
     test_timed_bitstream_request_roundtrip_and_bounds();
+    test_bus_resource_reset_request_roundtrip_and_dispatch();
     if (failures != 0) {
         std::cerr << failures << " 项 Runtime operation IPC 测试失败\n";
         return 1;

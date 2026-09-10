@@ -452,6 +452,105 @@ void check_release_terminal_persistence_failure_flags(
     std::cerr << "阶段: release-terminal-failure-flags 结束\n";
 }
 
+void check_bus_reset_unknown_and_restart(
+    const std::string& toolbusd, const std::string& mock_mcu,
+    const std::string& bus_manifest) {
+    std::cerr << "阶段: bus-reset-unknown-restart 启动\n";
+    TestDirectory directory;
+    const auto usb = directory.child("usb.sock").string();
+    const auto ipc = directory.child("toolbusd.sock").string();
+    auto daemon = start_daemon(toolbusd, directory, "ledger",
+                               {"--test-bus-reset-drop-response", "1"});
+    CHECK(wait_for_path(usb, std::chrono::seconds(5)));
+    ChildProcess node(spawn(
+        {mock_mcu, usb, "usb-mock", "--board", bus_manifest}));
+    const auto discovered = wait_for_ready_node(ipc, std::chrono::seconds(7));
+    remotebsp::Client client(ipc, discovered.node_id);
+    const auto daemon_id = client.daemon_identity().instance_id;
+    const auto node_uuid = discovered.identity.uuid;
+    const auto target_lease = filled<16>(0x61U);
+    const auto peer_lease = filled<16>(0x62U);
+    constexpr std::uint32_t target_resource = 201326593U;
+    constexpr std::uint32_t peer_resource = 234881025U;
+
+    client.runtime_control_acquire(
+        daemon_id, target_lease, node_uuid, "bus-owner", target_resource,
+        30000U, remotebsp::toolbusd::kRuntimePermissionBusReset);
+    const auto first = client.runtime_bus_resource_reset_operation(
+        daemon_id, target_lease, node_uuid, "bus-owner", target_resource,
+        "lost-response");
+    CHECK(first.kind == remotebsp::RuntimeOperationKind::BusResourceReset);
+    CHECK(first.state == remotebsp::RuntimeOperationState::Unknown);
+    CHECK(first.recovery ==
+          remotebsp::RuntimeOperationRecovery::ScopeBlocked);
+    CHECK(!first.replayed);
+
+    // 相同 selector 只能查询已持久化终态；若这里误发第二次，测试钩子
+    // 的 ordinal 已经过期，结果会错误变成 Committed。
+    const auto replay = client.runtime_bus_resource_reset_operation(
+        daemon_id, target_lease, node_uuid, "bus-owner", target_resource,
+        "lost-response");
+    CHECK(replay.operation_id == first.operation_id);
+    CHECK(replay.state == remotebsp::RuntimeOperationState::Unknown);
+    CHECK(replay.recovery ==
+          remotebsp::RuntimeOperationRecovery::ScopeBlocked);
+    CHECK(replay.replayed);
+    const auto status = client.runtime_operation_status(
+        daemon_id, "bus-owner", first.operation_id);
+    CHECK(status.state == remotebsp::RuntimeOperationState::Unknown);
+    CHECK(status.replayed);
+
+    expect_ipc_error(
+        static_cast<std::uint16_t>(
+            remotebsp::toolbusd::IpcErrorCode::IdempotencyConflict),
+        [&] {
+            static_cast<void>(client.runtime_bus_resource_reset_operation(
+                daemon_id, target_lease, node_uuid, "bus-owner",
+                peer_resource, "lost-response"));
+        });
+    expect_ipc_error(
+        static_cast<std::uint16_t>(
+            remotebsp::toolbusd::IpcErrorCode::LeaseConflict),
+        [&] {
+            client.runtime_control_acquire(
+                daemon_id, filled<16>(0x63U), node_uuid, "bus-owner",
+                target_resource, 30000U,
+                remotebsp::toolbusd::kRuntimePermissionBusReset);
+        });
+
+    // 冻结键精确到节点资源；同节点的另一 SPI 设备仍可取得租约并复位。
+    client.runtime_control_acquire(
+        daemon_id, peer_lease, node_uuid, "bus-owner", peer_resource,
+        30000U, remotebsp::toolbusd::kRuntimePermissionBusReset);
+    const auto peer = client.runtime_bus_resource_reset_operation(
+        daemon_id, peer_lease, node_uuid, "bus-owner", peer_resource,
+        "peer-reset");
+    CHECK(peer.state == remotebsp::RuntimeOperationState::Committed);
+    CHECK(peer.recovery == remotebsp::RuntimeOperationRecovery::SafeClosed);
+
+    daemon.stop();
+    daemon = start_daemon(toolbusd, directory, "ledger");
+    remotebsp::Client restarted(ipc, discovered.node_id);
+    const auto restarted_daemon_id =
+        restarted.daemon_identity().instance_id;
+    const auto recovered = restarted.runtime_operation_status(
+        restarted_daemon_id, "bus-owner", first.operation_id);
+    CHECK(recovered.state == remotebsp::RuntimeOperationState::Unknown);
+    CHECK(recovered.recovery ==
+          remotebsp::RuntimeOperationRecovery::ScopeBlocked);
+    CHECK(recovered.replayed);
+    expect_ipc_error(
+        static_cast<std::uint16_t>(
+            remotebsp::toolbusd::IpcErrorCode::LeaseConflict),
+        [&] {
+            restarted.runtime_control_acquire(
+                restarted_daemon_id, filled<16>(0x64U), node_uuid,
+                "bus-owner", target_resource, 30000U,
+                remotebsp::toolbusd::kRuntimePermissionBusReset);
+        });
+    std::cerr << "阶段: bus-reset-unknown-restart 结束\n";
+}
+
 remotebsp::toolbusd::RuntimeGpioWriteOperation blocked_operation() {
     remotebsp::toolbusd::RuntimeGpioWriteOperation operation;
     operation.daemon_origin = filled<16>(0x11U);
@@ -564,9 +663,9 @@ void check_startup_block_and_unavailable(const std::string& toolbusd) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
+    if (argc != 4) {
         std::cerr << "用法: toolbusd_operation_ledger_process_tests "
-                     "<toolbusd> <mock_mcu>\n";
+                     "<toolbusd> <mock_mcu> <bus_manifest>\n";
         return 2;
     }
     try {
@@ -575,6 +674,7 @@ int main(int argc, char** argv) {
         check_concurrent_gpio_replay(argv[1], argv[2]);
         check_gpio_terminal_persistence_failure_flags(argv[1], argv[2]);
         check_release_terminal_persistence_failure_flags(argv[1], argv[2]);
+        check_bus_reset_unknown_and_restart(argv[1], argv[2], argv[3]);
         check_startup_block_and_unavailable(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << "进程测试异常: " << error.what() << '\n';

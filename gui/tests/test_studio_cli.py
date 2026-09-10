@@ -273,6 +273,24 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(checked["outcome"], "absent")
         deploy.assert_not_called()
 
+    def test_deployment_execute_defaults_to_not_running(self):
+        plan = self.directory / "execute-plan.json"
+        identity = self.directory / "identity.json"
+        output = self.directory / "execute-attempt.json"
+        plan.write_text("{}", encoding="utf-8")
+        identity.write_text("{}", encoding="utf-8")
+        with patch("studio_cli.execute_deployment_plan",
+                   side_effect=FirmwareDeploymentError(
+                       "执行部署必须同时使用--execute和确认短语")) as execute:
+            code, error, _, _ = self._call([
+                "deployment-execute", "--plan", str(plan),
+                "--identity-file", str(identity), "--attempt-output",
+                str(output), "--confirmation", "EXECUTE_DEPLOYMENT_PLAN"])
+        self.assertEqual(code, EXIT_OPERATION)
+        self.assertIn("--execute", error["error"])
+        self.assertFalse(output.exists())
+        self.assertFalse(execute.call_args.kwargs["execute"])
+
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
         identity_file.write_text("{}", encoding="utf-8")

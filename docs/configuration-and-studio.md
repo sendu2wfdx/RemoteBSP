@@ -207,7 +207,9 @@ studio_cli.py deployment-plan-validate --plan can-katapult-plan.json
 离线计划和“已经烧录并核验”之间使用独立的
 `REMOTEBSP_DEPLOYMENT_ATTEMPT_V1`，不能用计划文件冒充执行结果。初始记录只能是
 `outcome=absent`，开始/结束时间、退出码和输出摘要均为空，且
-`hardware_success_claimed=false`。执行整合层完成真实工具调用后可派生终态记录，保存原始
+`hardware_success_claimed=false`。执行整合层开始受控执行后可派生终态记录；即使工具因
+本机配置错误而未能启动，也必须生成 `tool_invoked=false` 且带错误类型的 `failed` 终态，
+不能丢失尝试。终态保存原始
 计划 SHA-256、前一状态 SHA-256、UTC 开始/结束时间、工具退出码、stdout 字节数及
 SHA-256；stdout 原文不进入记录。
 
@@ -225,6 +227,21 @@ studio_cli.py deployment-attempt-validate --plan stlink-plan.json \
 ```
 
 时间来自执行整合层并明确只是记录字段；本框架不把主机 UTC 伪装成可信时间证明。
+
+受控执行命令 `deployment-execute` 会先重新验证 ST-Link、CAN Katapult 或 USB Katapult
+计划，再调用对应的既有 deploy 路径。它必须同时出现 `--execute` 和精确确认短语
+`EXECUTE_DEPLOYMENT_PLAN`，默认不会执行。工具以参数数组启动、不经过 shell；stdout 与
+stderr 分别限制为 1 MiB，尝试记录只保存各自字节数和 SHA-256。工具非零退出、启动异常、
+输出越界或回读异常都会形成原子保存的 `failed` 终态；工具成功但没有显式回读适配器的
+四重身份与设备 UUID 结果仍不能成为 `verified`。
+
+```text
+studio_cli.py deployment-execute --plan stlink-plan.json \
+  --identity-file runtime-identity.json --attempt-output attempt.json \
+  --execute --confirmation EXECUTE_DEPLOYMENT_PLAN
+```
+
+当前自动测试只使用假工具和 Mock 回读适配器，没有连接或烧录实体板。
 
 尚未完成：
 

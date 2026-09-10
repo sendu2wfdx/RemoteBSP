@@ -54,6 +54,7 @@ class TlsRuntimeProcessTest(unittest.TestCase):
             certificate.chmod(0o644)
             private_key.chmod(0o600)
             config = root / "tls.json"
+            rotation_audit = root / "tls-rotation-audit.json"
             create_artifact(
                 config, runtime_bind="127.0.0.1", proxy_bind="127.0.0.1",
                 certificate_file=certificate.resolve(),
@@ -66,7 +67,8 @@ class TlsRuntimeProcessTest(unittest.TestCase):
             process = subprocess.Popen([
                 sys.executable, "-m", "runtime_api.server", "--host",
                 "127.0.0.1", "--port", str(port),
-                "--tls-baseline-config", str(config)],
+                "--tls-baseline-config", str(config),
+                "--tls-rotation-audit", str(rotation_audit)],
                 cwd=Path(__file__).resolve().parents[2],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             context = ssl.create_default_context()
@@ -121,6 +123,7 @@ class TlsRuntimeProcessTest(unittest.TestCase):
             certificate2, private_key2 = self._make_certificate(
                 openssl, root, "rotation-two")
             config = root / "tls.json"
+            rotation_audit = root / "tls-rotation-audit.json"
             create_artifact(
                 config, runtime_bind="127.0.0.1", proxy_bind="127.0.0.1",
                 certificate_file=certificate1.resolve(),
@@ -132,7 +135,8 @@ class TlsRuntimeProcessTest(unittest.TestCase):
             process = subprocess.Popen([
                 sys.executable, "-m", "runtime_api.server", "--host",
                 "127.0.0.1", "--port", str(port),
-                "--tls-baseline-config", str(config)],
+                "--tls-baseline-config", str(config),
+                "--tls-rotation-audit", str(rotation_audit)],
                 cwd=Path(__file__).resolve().parents[2],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             context = ssl.create_default_context()
@@ -213,6 +217,31 @@ class TlsRuntimeProcessTest(unittest.TestCase):
                 _, stderr = process.communicate(timeout=5)
             self.assertIn('"result": "success"', stderr)
             self.assertIn('"old_context_retained": true', stderr)
+            audit_document = json.loads(rotation_audit.read_text())
+            records = audit_document["records"]
+            self.assertEqual([record["result"] for record in records], [
+                "startup_loaded", "reloaded",
+                "reload_failed_old_context_retained"])
+            serialized = json.dumps(audit_document)
+            self.assertNotIn(str(private_key1), serialized)
+            self.assertNotIn(str(private_key2), serialized)
+            self.assertNotIn(str(config), serialized)
+            self.assertEqual(records[1]["old_certificate_sha256"], old_digest)
+            self.assertEqual(records[1]["new_certificate_sha256"], new_digest)
+
+            # 持久审计损坏时，新进程必须在监听前失败关闭。
+            rotation_audit.write_text("{}", encoding="utf-8")
+            rotation_audit.chmod(0o600)
+            failed = subprocess.run([
+                sys.executable, "-m", "runtime_api.server", "--host",
+                "127.0.0.1", "--port", "0",
+                "--tls-baseline-config", str(config),
+                "--tls-rotation-audit", str(rotation_audit)],
+                cwd=Path(__file__).resolve().parents[2],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=8, check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("TLS轮换审计配置无效", failed.stderr)
 
 
 if __name__ == "__main__":

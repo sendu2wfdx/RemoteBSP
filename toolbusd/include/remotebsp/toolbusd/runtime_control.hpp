@@ -22,6 +22,7 @@ constexpr std::uint16_t kRuntimeControlIpcVersion = 2U;
 constexpr std::uint16_t kRuntimePermissionGpioWrite = 0x0001U;
 constexpr std::uint16_t kRuntimePermissionPwmWrite = 0x0002U;
 constexpr std::uint16_t kRuntimePermissionTimedBitstreamWrite = 0x0004U;
+constexpr std::uint16_t kRuntimePermissionBusReset = 0x0008U;
 constexpr std::size_t kMaximumRuntimeControlIdentityBytes = 64U;
 constexpr std::size_t kMaximumRuntimeControlIdempotencyBytes = 64U;
 constexpr std::uint32_t kMaximumRuntimeControlTtlMs = 30000U;
@@ -105,6 +106,18 @@ struct RuntimeTimedBitstreamStopRequest {
     std::array<std::uint8_t, 16> expected_node_uuid{};
     std::string owner_key_id;
     std::uint16_t permissions{kRuntimePermissionTimedBitstreamWrite};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::string idempotency_key;
+};
+
+struct RuntimeBusResourceResetRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionBusReset};
     std::uint32_t node_id{};
     std::uint32_t resource_id{};
     std::string idempotency_key;
@@ -317,6 +330,9 @@ public:
     // 只读解析当前活动租约，供持久账本在历史回放前核对服务端范围。
     // 返回空值只表示当前 Gate 中没有该租约；身份不匹配仍严格拒绝。
     std::optional<ResolvedReleaseLease> resolve_release_lease(
+        const RuntimeControlReleaseRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
+    void forget_lease_after_remote_reset(
         const RuntimeControlReleaseRequest& request,
         const std::array<std::uint8_t, 16>& current_daemon_instance_id);
 

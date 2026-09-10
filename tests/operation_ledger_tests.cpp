@@ -98,6 +98,13 @@ RuntimePwmStopOperation pwm_stop_operation(
             std::move(idempotency), 2U, 7U, 0x06000000U};
 }
 
+RuntimeBusResourceResetOperation bus_reset_operation(
+    std::uint32_t resource = 0x0A000001U,
+    std::string idempotency = "bus-reset-idem") {
+    return {identity(0x11U), identity(0x66U), identity(0x33U), "owner",
+            std::move(idempotency), 2U, 7U, resource};
+}
+
 std::string hex(const OperationDigest& digest) {
     constexpr char digits[] = "0123456789abcdef";
     std::string result;
@@ -1058,6 +1065,60 @@ void check_timed_bitstream_v3_digest_only_and_recovery() {
     CHECK(stop_ledger.blocked_scopes().empty());
 }
 
+void check_bus_resource_reset_v4_identity_and_scope_recovery() {
+    static_assert(static_cast<std::uint8_t>(
+                      OperationKind::RuntimeBusResourceReset) == 8U,
+                  "总线资源复位操作类型必须保持稳定");
+    TestDirectory directory;
+    const auto operation = bus_reset_operation();
+    const auto peer = bus_reset_operation(0x0A000002U, "peer-reset");
+    CHECK(OperationLedger::derive_operation_id(operation) !=
+          OperationLedger::derive_operation_id(peer));
+    CHECK(OperationLedger::derive_request_digest(operation) !=
+          OperationLedger::derive_request_digest(peer));
+
+    OperationDigest pending_id{};
+    {
+        OperationLedger ledger(options(directory));
+        const auto begun = ledger.begin_bus_resource_reset(operation);
+        pending_id = begun.record.operation_id;
+        CHECK(begun.record.kind == OperationKind::RuntimeBusResourceReset);
+        CHECK(begun.disposition ==
+              OperationBeginDisposition::StartedDurablePending);
+        CHECK(ledger.begin_bus_resource_reset(operation).disposition ==
+              OperationBeginDisposition::ExistingPending);
+        CHECK(ledger.blocked_scopes().size() == 1U);
+
+        const auto peer_begun = ledger.begin_bus_resource_reset(peer);
+        CHECK(ledger.blocked_scopes().size() == 2U);
+        (void)ledger.finish(peer_begun.record.operation_id,
+                            peer_begun.record.request_digest,
+                            OperationState::Committed,
+                            OperationRecovery::SafeClosed);
+        CHECK(ledger.blocked_scopes().size() == 1U);
+
+        auto conflict = operation;
+        conflict.node_id = 8U;
+        CHECK(OperationLedger::derive_operation_id(conflict) == pending_id);
+        check_error(OperationLedgerError::IdempotencyConflict, [&] {
+            static_cast<void>(ledger.begin_bus_resource_reset(conflict));
+        });
+    }
+
+    OperationLedger recovered(options(directory));
+    CHECK(recovered.mutation_available());
+    const auto found = recovered.lookup(pending_id, "owner");
+    CHECK(found.disposition == OperationLookupDisposition::Found);
+    CHECK(found.record->kind == OperationKind::RuntimeBusResourceReset);
+    CHECK(found.record->state == OperationState::Unknown);
+    CHECK(found.record->recovery == OperationRecovery::ScopeBlocked);
+    CHECK(recovered.blocked_scopes().size() == 1U);
+    CHECK(recovered.blocked_scopes().front().expected_node_uuid ==
+          operation.expected_node_uuid);
+    CHECK(recovered.blocked_scopes().front().resource_id ==
+          operation.resource_id);
+}
+
 }  // namespace
 
 int main() {
@@ -1088,5 +1149,6 @@ int main() {
     check_recovery_sync_failure_hides_partial_index();
     check_mid_log_corruption_fails_closed();
     check_timed_bitstream_v3_digest_only_and_recovery();
+    check_bus_resource_reset_v4_identity_and_scope_recovery();
     return 0;
 }

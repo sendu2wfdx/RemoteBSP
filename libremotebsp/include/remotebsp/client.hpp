@@ -85,6 +85,7 @@ enum class RuntimeOperationKind : std::uint8_t {
     TimedBitstreamConfigure = 5U,
     TimedBitstreamFrame = 6U,
     TimedBitstreamStop = 7U,
+    BusResourceReset = 8U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -408,6 +409,12 @@ public:
         const std::string& idempotency_key, std::uint16_t bit_count,
         const std::vector<std::uint8_t>& data) const;
     RuntimeOperationOutcome runtime_timed_bitstream_stop_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key) const;
+    RuntimeOperationOutcome runtime_bus_resource_reset_operation(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
         const std::array<std::uint8_t, 16>& expected_node_uuid,

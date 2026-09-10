@@ -61,7 +61,10 @@ from .control_audit_journal import (
     ControlAuditJournal,
     ControlAuditRecord,
 )
-from .tls_deployment import TlsDeploymentError, prepare_server_context
+from .tls_deployment import (
+    TlsDeploymentError, certificate_fingerprint, prepare_server_context)
+from .tls_rotation_audit import (
+    TlsRotationAuditError, TlsRotationAuditJournal)
 from .audit import (
     BoundedAuditSink,
     DEFAULT_AUDIT_CAPACITY,
@@ -314,16 +317,27 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self._tls_generation = 0
         self._tls_last_result = "disabled"
         self._tls_last_error: str | None = None
+        self._tls_fingerprint: str | None = None
+        self._tls_audit: TlsRotationAuditJournal | None = None
         super().__init__(server_address, request_handler_class)
 
-    def enable_tls(self, config: Path, expected_bind: str) -> None:
+    def enable_tls(self, config: Path, expected_bind: str,
+                   audit: TlsRotationAuditJournal | None = None) -> None:
         """完整预检后启用TLS；监听socket自身保持明文以支持上下文轮换。"""
         context = prepare_server_context(config, expected_bind)
+        fingerprint = certificate_fingerprint(config)
+        generation = audit.next_generation() if audit is not None else 1
+        if audit is not None:
+            audit.append(generation=generation, result="startup_loaded",
+                         old_fingerprint=None,
+                         new_fingerprint=fingerprint)
         with self._tls_lock:
             self._tls_context = context
             self._tls_config = Path(config)
             self._tls_expected_bind = expected_bind
-            self._tls_generation = 1
+            self._tls_generation = generation
+            self._tls_fingerprint = fingerprint
+            self._tls_audit = audit
             self._tls_last_result = "loaded"
             self._tls_last_error = None
 
@@ -333,11 +347,28 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             config = self._tls_config
             expected_bind = self._tls_expected_bind
             generation = self._tls_generation
+            old_fingerprint = self._tls_fingerprint
+            audit = self._tls_audit
         if config is None or expected_bind is None:
             return False
         try:
             candidate = prepare_server_context(config, expected_bind)
-        except (TlsDeploymentError, OSError) as error:
+            new_fingerprint = certificate_fingerprint(config)
+            if audit is not None:
+                audit.append(
+                    generation=generation + 1, result="reloaded",
+                    old_fingerprint=old_fingerprint,
+                    new_fingerprint=new_fingerprint)
+        except (TlsDeploymentError, TlsRotationAuditError, OSError) as error:
+            if audit is not None:
+                try:
+                    audit.append(
+                        generation=generation,
+                        result="reload_failed_old_context_retained",
+                        old_fingerprint=old_fingerprint,
+                        new_fingerprint=None)
+                except (TlsRotationAuditError, OSError):
+                    pass
             with self._tls_lock:
                 self._tls_last_result = "reload_failed_old_context_retained"
                 self._tls_last_error = str(error)
@@ -351,6 +382,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             return False
         with self._tls_lock:
             self._tls_context = candidate
+            self._tls_fingerprint = new_fingerprint
             self._tls_generation += 1
             generation = self._tls_generation
             self._tls_last_result = "reloaded"
@@ -371,6 +403,10 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                 "last_result": self._tls_last_result,
                 "last_error": self._tls_last_error,
                 "new_connections_only": True,
+                "certificate_sha256": self._tls_fingerprint,
+                "persistent_audit": (
+                    self._tls_audit.status()
+                    if self._tls_audit is not None else None),
             }
 
     def get_request(self):
@@ -3102,6 +3138,7 @@ def make_server(host: str, port: int,
                 runtime_dashboard: RuntimeDashboard | None = None,
                 alert_rules: AlertRuleManager | None = None,
                 tls_baseline_config: Path | None = None,
+                tls_rotation_audit: TlsRotationAuditJournal | None = None,
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -3133,7 +3170,7 @@ def make_server(host: str, port: int,
                          request_io_timeout_seconds=
                          request_io_timeout_seconds)
     if tls_baseline_config is not None:
-        server.enable_tls(tls_baseline_config, host)
+        server.enable_tls(tls_baseline_config, host, tls_rotation_audit)
     server.tls_enabled = tls_baseline_config is not None  # type: ignore[attr-defined]
     server.provider = provider  # type: ignore[attr-defined]
     server.authenticator = authenticator  # type: ignore[attr-defined]
@@ -3186,6 +3223,9 @@ def main() -> int:
     parser.add_argument(
         "--tls-baseline-config", type=Path,
         help="显式启用回环HTTPS的已校验TLS基线工件；默认仍为回环HTTP")
+    parser.add_argument(
+        "--tls-rotation-audit", type=Path,
+        help="TLS轮换版本化持久审计文件；必须与TLS基线一起使用")
     parser.add_argument(
         "--control-audit-dir", type=Path,
         help="持久控制审计目录；必须与--control-audit-key-file成对配置")
@@ -3299,6 +3339,9 @@ def main() -> int:
             (args.control_audit_key_file is None):
         parser.error(
             "--control-audit-dir与--control-audit-key-file必须成对配置")
+    if args.tls_rotation_audit is not None and \
+            args.tls_baseline_config is None:
+        parser.error("--tls-rotation-audit必须与--tls-baseline-config一起使用")
     if not args.toolbusd_legacy_text and \
             args.maximum_resource_queries > 128:
         parser.error("结构化Runtime快照最多允许128项资源")
@@ -3345,6 +3388,12 @@ def main() -> int:
         except ControlAuditError as error:
             parser.error(f"控制审计配置无效：{error}")
     try:
+        tls_rotation_audit = TlsRotationAuditJournal(
+            args.tls_rotation_audit) \
+            if args.tls_rotation_audit is not None else None
+    except TlsRotationAuditError as error:
+        parser.error(f"TLS轮换审计配置无效：{error}")
+    try:
         event_store = RuntimeEventStore(
             args.event_store_dir,
             maximum_bytes=args.event_store_maximum_bytes
@@ -3378,8 +3427,9 @@ def main() -> int:
                 args.http_request_timeout_ms / 1000.0,
             runtime_dashboard=runtime_dashboard,
             alert_rules=alert_rules,
-            tls_baseline_config=args.tls_baseline_config)
-    except TlsDeploymentError as error:
+            tls_baseline_config=args.tls_baseline_config,
+            tls_rotation_audit=tls_rotation_audit)
+    except (TlsDeploymentError, TlsRotationAuditError, OSError) as error:
         if control_audit_journal is not None:
             control_audit_journal.close()
         parser.error(f"TLS基线无效：{error}")

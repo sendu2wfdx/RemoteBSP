@@ -421,6 +421,28 @@ backend poison 和租约，成功时只清该设备状态并释放该设备租�
 执行的复位。应用应重新枚举/获取状态并重新申请租约后再决定下一步。Mock 可独立注入
 设备 poison 与 reset 失败，用纯软件测试上述权限、失败保持、成功清理和资源隔离语义；
 这仍不是实体 HAL 恢复或波形验收。
+
+### 13.2 恢复操作账本协议设计
+
+总线恢复不再要求自动化客户端直接复用普通 `resource-reset` 的同步 CLI。正式 Runtime
+入口已新增 `RuntimeOperationKind::BusResourceReset`，请求身份包含 daemon 实例、控制
+租约 ID、owner、幂等键、预期节点 UUID、节点 ID 和设备资源 ID；operation ID 与请求摘要
+必须覆盖这些字段。相同 selector 重放返回原记录，不再次下发；selector 相同但摘要不同
+返回幂等冲突。
+
+该操作遵循现有 durable-pending 顺序：账本先持久化 `Pending` 并冻结
+`(expected_node_uuid, resource_id)`，再核对节点代次并发送一次 `ResourceReset`。明确 `Ok`
+形成 `Committed` 并解冻；发送前确定拒绝形成 `Rejected/NotSent`；发送后超时、断链或非法
+响应形成 `Unknown/ScopeBlocked`，禁止盲目重复。查询 operation ID 必须稳定返回
+pending/terminal/unknown；记录过期返回 `ExpiredUnknown`。冻结只覆盖目标设备，同节点其他
+设备和其他节点仍可获取租约与执行事务。只有节点 UUID 对应的新启动代次被确认后，现有
+账本恢复流程才可把未知项转为 `NodeRebootConfirmed` 并解冻。
+
+OperationLedger 写格式已由 v3 提升为 v4，继续显式读取 v1～v3；旧版本记录若携带 kind 8
+会失败关闭，不能伪装成其他操作。Runtime IPC 使用独立请求 kind 27 和严格定长头，CLI
+提供 `runtime-bus-reset-acquire`、`runtime-bus-resource-reset-operation`，既有
+`runtime-operation-status/lookup` 可查询相同 operation ID。测试故障钩子可在 MCU 已执行
+后丢弃首个复位响应，用于验证 Unknown/ScopeBlocked 与禁止重发。
 此处
 除明确标注的 G431 历史实测外，本节验证均为 Ubuntu WSL 中的纯软件测试或
 交叉编译。G431 已实现 I2C1/SPI1/SPI2 HAL，并以主机 HAL 桩直接覆盖生产代码的

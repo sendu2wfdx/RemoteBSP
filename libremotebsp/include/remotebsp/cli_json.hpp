@@ -111,6 +111,8 @@ inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
             return "timed_bitstream_frame";
         case RuntimeOperationKind::TimedBitstreamStop:
             return "timed_bitstream_stop";
+        case RuntimeOperationKind::BusResourceReset:
+            return "bus_resource_reset";
     }
     return "unknown";
 }

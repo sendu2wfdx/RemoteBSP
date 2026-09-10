@@ -35,7 +35,8 @@ Runtime 只信任直连对端和自身 API key，不把代理提供的客户端�
 
 ```bash
 python3 -m runtime_api.server --host 127.0.0.1 --port 8780 \
-  --tls-baseline-config /etc/remotebsp/runtime-tls-baseline.json
+  --tls-baseline-config /etc/remotebsp/runtime-tls-baseline.json \
+  --tls-rotation-audit /var/lib/remotebsp/tls-rotation-audit.json
 ```
 
 启动入口会重新执行完整预检，并要求 `--host` 与工件的 `proxy_bind` 完全一致。证书和私钥
@@ -58,6 +59,13 @@ Runtime 继续提供默认的回环 HTTP 开发入口。
 上下文。这不是对既有连接“中途换证书”的虚假热切换。根 API 的 `capabilities.tls` 提供
 当前代次、最近结果和错误；标准错误流同时输出 `runtime_tls_reload` 结构化审计事件。失败
 状态明确为 `reload_failed_old_context_retained`，成功代次才递增。
+
+配置 `--tls-rotation-audit` 后，每次启动、成功轮换和失败回滚都会先写入版本化、有界（默认
+64 条）的原子替换审计文件。记录只包含时间、代次、结果以及旧/新叶证书的 SHA-256 指纹，
+不记录证书路径、私钥路径或任何密钥材料。文件固定为 `0600`，内容带摘要；重启时恢复最近
+记录并从下一代次继续。文件类型、权限、schema 或摘要损坏会在建立监听前失败关闭，避免
+把无法证明审计连续性的服务误报为正常。该摘要用于发现损坏，并不是抵抗已取得目录写权限
+攻击者的数字签名。
 
 进程级测试使用两套临时自签名证书并发发起握手，验证观测结果只可能是完整旧证书或完整
 新证书；还验证新连接切换、旧连接边界，以及篡改基线后的失败回滚。上述结果只属于软件

@@ -535,13 +535,16 @@ target_link_libraries(toolbusd_operation_ledger_process_tests PRIVATE
 add_dependencies(toolbusd_operation_ledger_process_tests
     toolbusd
     mock_mcu)
+target_compile_definitions(toolbusd_operation_ledger_process_tests PRIVATE
+    TEST_BUS_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json")
 target_compile_options(toolbusd_operation_ledger_process_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME toolbusd_operation_ledger_process_tests
     COMMAND toolbusd_operation_ledger_process_tests
             $<TARGET_FILE:toolbusd>
-            $<TARGET_FILE:mock_mcu>)
+            $<TARGET_FILE:mock_mcu>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_bus_board_v2.json)
 
 add_executable(toolbusd_ipc_capacity_process_tests
     toolbusd_ipc_capacity_process_tests.cpp)

@@ -8,15 +8,23 @@ import hmac
 import json
 import re
 import secrets
+import os
+import subprocess
+import tempfile
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 
 from firmware_deployment import (
-    DeploymentResult, DeviceIdentity, FirmwareDeploymentError)
+    DeploymentResult, DeviceIdentity, FirmwareDeploymentError,
+    deploy_can_katapult, deploy_stlink, deploy_usb_katapult,
+    validate_can_katapult_deployment_plan, validate_stlink_deployment_plan,
+    validate_usb_katapult_deployment_plan)
 
 
 FORMAT = "REMOTEBSP_DEPLOYMENT_ATTEMPT_V1"
 MAX_STDOUT_BYTES = 1024 * 1024
+EXECUTION_CONFIRMATION = "EXECUTE_DEPLOYMENT_PLAN"
 _HASH = re.compile(r"[0-9a-f]{64}")
 _UUID = re.compile(r"[0-9a-f]{32}")
 _ATTEMPT_ID = re.compile(r"[0-9a-f]{32}")
@@ -58,7 +66,8 @@ def create_absent_attempt(plan: object) -> dict:
         "started_utc": None, "ended_utc": None,
         "execution": {"status": "absent", "tool_invoked": False,
                       "exit_code": None, "stdout_byte_count": 0,
-                      "stdout_sha256": None, "error_type": None},
+                      "stdout_sha256": None, "stderr_byte_count": 0,
+                      "stderr_sha256": None, "error_type": None},
         "readback": {"status": "absent", "error_type": None,
                      "expected_identity": plan.get("expected_identity"),
                      "observed_identity": None},
@@ -71,6 +80,7 @@ def create_absent_attempt(plan: object) -> dict:
 def finalize_attempt(
         initial: object, plan: object, *, started_utc: str, ended_utc: str,
         tool_invoked: bool, exit_code: int | None, stdout: bytes,
+        stderr: bytes = b"",
         result: DeploymentResult | None = None,
         execution_error_type: str | None = None,
         readback_error_type: str | None = None) -> dict:
@@ -79,17 +89,23 @@ def finalize_attempt(
         raise FirmwareDeploymentError("只能从同一计划的未执行尝试生成终态")
     start = _timestamp(started_utc, "开始时间")
     end = _timestamp(ended_utc, "结束时间")
-    if end < start or tool_invoked is not True or type(exit_code) is not int or \
-            not -2147483648 <= exit_code <= 2147483647 or \
-            not isinstance(stdout, bytes) or len(stdout) > MAX_STDOUT_BYTES:
+    if datetime.fromisoformat(end[:-1] + "+00:00") < \
+            datetime.fromisoformat(start[:-1] + "+00:00") or \
+            type(tool_invoked) is not bool or \
+            (tool_invoked and (type(exit_code) is not int or
+             not -2147483648 <= exit_code <= 2147483647)) or \
+            (not tool_invoked and (exit_code is not None or
+             execution_error_type is None)) or \
+            not isinstance(stdout, bytes) or not isinstance(stderr, bytes) or \
+            len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDOUT_BYTES:
         raise FirmwareDeploymentError("部署工具执行证据无效或输出超过1 MiB")
     stdout_sha = hashlib.sha256(stdout).hexdigest()
-    execution_ok = exit_code == 0 and execution_error_type is None
+    execution_ok = tool_invoked and exit_code == 0 and execution_error_type is None
     observed = None
     readback_status = "absent" if not execution_ok and readback_error_type is None else "failed"
     outcome = "failed"
     if result is not None:
-        if not execution_ok or not result.verified or result.build_id != plan.get("build_id") or \
+        if not tool_invoked or not execution_ok or not result.verified or result.build_id != plan.get("build_id") or \
                 result.backend != plan.get("backend"):
             raise FirmwareDeploymentError("部署成功结果与工具执行或计划不一致")
         expected = plan.get("expected_identity")
@@ -113,9 +129,11 @@ def finalize_attempt(
         "previous_attempt_sha256": previous["sha256"],
         "started_utc": start, "ended_utc": end,
         "execution": {"status": "succeeded" if execution_ok else "failed",
-                      "tool_invoked": True, "exit_code": exit_code,
+                      "tool_invoked": tool_invoked, "exit_code": exit_code,
                       "stdout_byte_count": len(stdout),
                       "stdout_sha256": stdout_sha,
+                      "stderr_byte_count": len(stderr),
+                      "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
                       "error_type": execution_error_type},
         "readback": {"status": readback_status,
                      "error_type": None if result is not None else readback_error_type,
@@ -146,7 +164,8 @@ def validate_deployment_attempt(value: object, plan: object | None = None) -> di
     readback = value.get("readback")
     if not isinstance(execution, dict) or set(execution) != {
             "status", "tool_invoked", "exit_code", "stdout_byte_count",
-            "stdout_sha256", "error_type"} or not isinstance(readback, dict) or \
+            "stdout_sha256", "stderr_byte_count", "stderr_sha256",
+            "error_type"} or not isinstance(readback, dict) or \
             set(readback) != {"status", "error_type", "expected_identity",
                               "observed_identity"}:
         raise FirmwareDeploymentError("部署尝试执行或回读字段无效")
@@ -166,7 +185,8 @@ def validate_deployment_attempt(value: object, plan: object | None = None) -> di
                 value.get("previous_attempt_sha256") is not None or \
                 execution != {"status": "absent", "tool_invoked": False,
                               "exit_code": None, "stdout_byte_count": 0,
-                              "stdout_sha256": None, "error_type": None} or \
+                              "stdout_sha256": None, "stderr_byte_count": 0,
+                              "stderr_sha256": None, "error_type": None} or \
                 readback.get("status") != "absent" or \
                 readback.get("observed_identity") is not None or \
                 value.get("hardware_success_claimed") is not False:
@@ -179,22 +199,33 @@ def validate_deployment_attempt(value: object, plan: object | None = None) -> di
             raise FirmwareDeploymentError("部署尝试结束时间早于开始时间")
         if not isinstance(value.get("previous_attempt_sha256"), str) or \
                 not _HASH.fullmatch(value["previous_attempt_sha256"]) or \
-                execution.get("tool_invoked") is not True or \
-                type(execution.get("exit_code")) is not int or \
+                type(execution.get("tool_invoked")) is not bool or \
+                (execution.get("tool_invoked") and
+                 type(execution.get("exit_code")) is not int) or \
+                (not execution.get("tool_invoked") and
+                 execution.get("exit_code") is not None) or \
                 type(execution.get("stdout_byte_count")) is not int or \
                 not 0 <= execution["stdout_byte_count"] <= MAX_STDOUT_BYTES or \
                 not isinstance(execution.get("stdout_sha256"), str) or \
-                not _HASH.fullmatch(execution["stdout_sha256"]):
+                not _HASH.fullmatch(execution["stdout_sha256"]) or \
+                type(execution.get("stderr_byte_count")) is not int or \
+                not 0 <= execution["stderr_byte_count"] <= MAX_STDOUT_BYTES or \
+                not isinstance(execution.get("stderr_sha256"), str) or \
+                not _HASH.fullmatch(execution["stderr_sha256"]):
             raise FirmwareDeploymentError("部署尝试终态执行证据无效")
         for error_type in (execution.get("error_type"),
                            readback.get("error_type")):
             if error_type is not None and (not isinstance(error_type, str) or
                     not _ERROR_TYPE.fullmatch(error_type)):
                 raise FirmwareDeploymentError("部署尝试错误类型无效")
-        execution_succeeded = execution.get("exit_code") == 0 and \
+        execution_succeeded = execution.get("tool_invoked") is True and \
+            execution.get("exit_code") == 0 and \
             execution.get("error_type") is None
         if (execution.get("status") == "succeeded") != execution_succeeded:
             raise FirmwareDeploymentError("部署工具状态、退出码和错误类型不一致")
+        if not execution.get("tool_invoked") and \
+                execution.get("error_type") is None:
+            raise FirmwareDeploymentError("工具调用前失败缺少错误类型")
         verified = outcome == "verified"
         if (readback.get("status") == "verified") != verified or \
                 (readback.get("observed_identity") is not None) != verified or \
@@ -231,3 +262,131 @@ def validate_deployment_attempt(value: object, plan: object | None = None) -> di
             readback.get("expected_identity") != plan.get("expected_identity")):
         raise FirmwareDeploymentError("部署尝试与部署计划不一致")
     return value
+
+
+def _capturing_runner(command, timeout: int) -> tuple[int, bytes, bytes]:
+    try:
+        with tempfile.TemporaryFile() as stdout_file, \
+                tempfile.TemporaryFile() as stderr_file:
+            completed = subprocess.run(
+                list(command), check=False, stdout=stdout_file,
+                stderr=stderr_file, timeout=timeout, shell=False)
+            stdout_file.seek(0); stderr_file.seek(0)
+            stdout = stdout_file.read(MAX_STDOUT_BYTES + 1)
+            stderr = stderr_file.read(MAX_STDOUT_BYTES + 1)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FirmwareDeploymentError(f"部署工具启动或执行失败：{error}") from error
+    if len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDOUT_BYTES:
+        raise FirmwareDeploymentError("部署工具stdout或stderr超过1 MiB上限")
+    return completed.returncode, stdout, stderr
+
+
+def _atomic_attempt(path, attempt: dict, force: bool) -> None:
+    if not hasattr(path, "parent") or path.is_symlink() or \
+            not path.parent.is_dir() or path.parent.is_symlink() or \
+            ((path.exists() or path.is_symlink()) and not force):
+        raise FirmwareDeploymentError("部署尝试输出路径无效、已存在或父目录不安全")
+    content = (json.dumps(attempt, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content); stream.flush(); os.fsync(stream.fileno())
+        if force:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path); temporary.unlink()
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def execute_deployment_plan(
+        plan: object, *, output_root, reader, attempt_output,
+        execute: bool, confirmation: str, force: bool = False,
+        flash_timeout: int = 120, reconnect_timeout: float = 10.0,
+        poll_interval: float = 0.25,
+        runner=_capturing_runner,
+        started_utc: str, ended_utc_provider) -> dict:
+    """重验计划后调用既有三类 deploy；调用方必须显式双重确认。"""
+    if execute is not True or confirmation != EXECUTION_CONFIRMATION:
+        raise FirmwareDeploymentError(
+            f"执行部署必须同时使用--execute和确认短语{EXECUTION_CONFIRMATION}")
+    if not isinstance(plan, dict):
+        raise FirmwareDeploymentError("部署计划必须是对象")
+    validators = {
+        "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1": validate_stlink_deployment_plan,
+        "REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1": validate_can_katapult_deployment_plan,
+        "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1": validate_usb_katapult_deployment_plan,
+    }
+    validator = validators.get(plan.get("format"))
+    if validator is None:
+        raise FirmwareDeploymentError("部署计划类型不受支持")
+    plan = validator(plan, output_root=output_root)
+    initial = create_absent_attempt(plan)
+    captured = {"invoked": False, "exit": None, "stdout": b"", "stderr": b""}
+
+    def invoke(command, timeout):
+        captured["invoked"] = True
+        try:
+            exit_code, stdout, stderr = runner(command, timeout)
+        except Exception as caught:
+            captured.update(exit=-1, stdout=b"",
+                            stderr=type(caught).__name__.encode("ascii", "replace"))
+            raise
+        if type(exit_code) is not int or not isinstance(stdout, bytes) or \
+                not isinstance(stderr, bytes) or len(stdout) > MAX_STDOUT_BYTES or \
+                len(stderr) > MAX_STDOUT_BYTES:
+            captured.update(exit=-1, stdout=b"",
+                            stderr=b"InvalidCapturedToolResult")
+            raise FirmwareDeploymentError("部署工具捕获结果无效或超过1 MiB")
+        captured.update(exit=exit_code, stdout=stdout, stderr=stderr)
+        if exit_code != 0:
+            raise FirmwareDeploymentError(f"部署工具退出码为{exit_code}")
+
+    class ExplicitReadback:
+        def read_identity(self):
+            return reader.read_identity()
+
+    common = dict(output_root=output_root, flash_timeout=flash_timeout,
+                  reconnect_timeout=reconnect_timeout,
+                  poll_interval=poll_interval, runner=invoke)
+    result = None
+    error = None
+    try:
+        if plan["backend"] == "stlink-openocd":
+            result = deploy_stlink(
+                plan["build_id"], ExplicitReadback(),
+                probe_serial=plan["probe_serial"], **common)
+        elif plan["backend"] == "can-katapult":
+            result = deploy_can_katapult(
+                plan["build_id"], ExplicitReadback(),
+                can_interface=plan["can_interface"],
+                katapult_uuid=plan["katapult_uuid"],
+                flashtool=Path(plan["flashtool"]),
+                **common)
+        else:
+            result = deploy_usb_katapult(
+                plan["build_id"], ExplicitReadback(),
+                usb_device=plan["usb_device"],
+                flashtool=Path(plan["flashtool"]),
+                **common)
+    except Exception as caught:
+        error = caught
+    execution_error_type = None
+    readback_error_type = None
+    if error is not None:
+        if not captured["invoked"] or captured["exit"] != 0:
+            execution_error_type = type(error).__name__
+        else:
+            readback_error_type = type(error).__name__
+    attempt = finalize_attempt(
+        initial, plan, started_utc=started_utc,
+        ended_utc=ended_utc_provider(), tool_invoked=captured["invoked"],
+        exit_code=captured["exit"], stdout=captured["stdout"],
+        stderr=captured["stderr"], result=result,
+        execution_error_type=execution_error_type,
+        readback_error_type=readback_error_type)
+    _atomic_attempt(attempt_output, attempt, force)
+    return attempt

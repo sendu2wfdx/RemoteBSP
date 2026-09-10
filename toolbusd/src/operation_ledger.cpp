@@ -30,7 +30,7 @@ constexpr std::size_t kRecordTrailerBytes = 12U;
 constexpr std::size_t kMaximumRecordBytes = 1024U;
 constexpr std::size_t kManifestBytes = 152U;
 constexpr std::uint16_t kLedgerFormatVersion = 2U;
-constexpr std::uint16_t kRecordFormatVersion = 3U;
+constexpr std::uint16_t kRecordFormatVersion = 4U;
 constexpr std::uint64_t kCommitMarker = 0x314D4F434C4F4252ULL;
 constexpr char kRecordMagic[8] = {'R', 'B', 'O', 'P', 'L', 'G', '1', '\0'};
 constexpr char kManifestMagic[8] = {'R', 'B', 'O', 'L', 'M', 'F', '1', '\0'};
@@ -306,7 +306,8 @@ bool valid_kind(std::uint8_t value) noexcept {
            value == static_cast<std::uint8_t>(OperationKind::RuntimePwmStop) ||
            value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamConfigure) ||
            value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamFrame) ||
-           value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamStop);
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamStop) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeBusResourceReset);
 }
 
 bool parse_segment_name(const std::string& name,
@@ -350,7 +351,8 @@ bool valid_state_recovery(OperationKind kind, OperationState state,
         const bool closes_scope =
             kind == OperationKind::RuntimeControlRelease ||
             kind == OperationKind::RuntimePwmStop ||
-            kind == OperationKind::RuntimeTimedBitstreamStop;
+            kind == OperationKind::RuntimeTimedBitstreamStop ||
+            kind == OperationKind::RuntimeBusResourceReset;
         return recovery == (closes_scope ? OperationRecovery::SafeClosed
                                          : OperationRecovery::None);
     }
@@ -394,6 +396,11 @@ bool valid_terminal_result(const OperationRecord& existing,
             return result.object_id.has_value() && *result.object_id != 0U &&
                    !result.value.has_value() && !result.frequency_hz.has_value() &&
                    !result.duty.has_value() && !result.active_low.has_value();
+        }
+        if (existing.kind == OperationKind::RuntimeBusResourceReset) {
+            return !result.object_id.has_value() && !result.value.has_value() &&
+                   !result.frequency_hz.has_value() && !result.duty.has_value() &&
+                   !result.active_low.has_value();
         }
         return !result.object_id.has_value() && !result.value.has_value() &&
                !result.frequency_hz.has_value() && !result.duty.has_value() &&
@@ -665,6 +672,29 @@ public:
         record.operation_id = OperationLedger::derive_operation_id(operation);
         record.request_digest = OperationLedger::derive_request_digest(operation);
         record.kind = OperationKind::RuntimeTimedBitstreamStop;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.scope = {operation.expected_node_uuid, operation.resource_id};
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.node_id = operation.node_id;
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_bus_resource_reset(
+        const RuntimeBusResourceResetOperation& operation) {
+        validate_common(operation.daemon_origin, operation.lease_id,
+                        operation.owner_key_id);
+        if (is_zero(operation.expected_node_uuid) || operation.node_id == 0U ||
+            operation.node_id > 127U || operation.resource_id == 0U ||
+            operation.permissions == 0U || !valid_text(operation.idempotency_key))
+            throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                           "总线资源复位参数不符合账本合同");
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = OperationLedger::derive_request_digest(operation);
+        record.kind = OperationKind::RuntimeBusResourceReset;
         record.daemon_origin = operation.daemon_origin;
         record.lease_id = operation.lease_id;
         record.scope = {operation.expected_node_uuid, operation.resource_id};
@@ -1530,6 +1560,10 @@ private:
             decoded.record.kind == OperationKind::RuntimePwmStop) {
             throw_corrupt("OperationLedger v1记录包含未定义的PWM停止类型");
         }
+        if (format_version < 4U &&
+            decoded.record.kind == OperationKind::RuntimeBusResourceReset) {
+            throw_corrupt("OperationLedger旧版记录包含未定义的总线资源复位类型");
+        }
         if (!valid_state_recovery(decoded.record.kind, decoded.record.state,
                                   decoded.record.recovery)) {
             throw_corrupt("OperationLedger状态与恢复证据组合无效");
@@ -1768,6 +1802,22 @@ private:
                 if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
                     OperationLedger::derive_request_digest(operation) != record.request_digest)
                     throw_corrupt("定时位流停止记录身份摘要不匹配");
+            } else if (record.kind == OperationKind::RuntimeBusResourceReset) {
+                if (record.requested_payload_digest.has_value() ||
+                    record.requested_value.has_value() ||
+                    record.requested_frequency_hz.has_value() ||
+                    record.requested_duty.has_value() ||
+                    record.requested_active_low.has_value() ||
+                    record.admission_id != 0U)
+                    throw_corrupt("总线资源复位记录字段组合无效");
+                RuntimeBusResourceResetOperation operation{
+                    record.daemon_origin, record.lease_id,
+                    record.scope.expected_node_uuid, record.owner_key_id,
+                    record.idempotency_key, record.permissions, record.node_id,
+                    record.scope.resource_id};
+                if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
+                    OperationLedger::derive_request_digest(operation) != record.request_digest)
+                    throw_corrupt("总线资源复位记录身份摘要不匹配");
             } else {
                 if (record.requested_value.has_value() ||
                     record.idempotency_key != "release:v1") {
@@ -2480,6 +2530,9 @@ DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamFrameOperation,
 DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamStopOperation,
                           OperationKind::RuntimeTimedBitstreamStop,
                           "定时位流停止")
+DEFINE_TIMED_OPERATION_ID(RuntimeBusResourceResetOperation,
+                          OperationKind::RuntimeBusResourceReset,
+                          "总线资源复位")
 #undef DEFINE_TIMED_OPERATION_ID
 
 namespace {
@@ -2557,6 +2610,15 @@ OperationDigest OperationLedger::derive_request_digest(
         operation.daemon_origin, operation.lease_id, operation.expected_node_uuid,
         operation.owner_key_id, operation.permissions, operation.node_id,
         operation.resource_id, 0x87U, nullptr);
+}
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimeBusResourceResetOperation& operation) {
+    return timed_request_digest(derive_operation_id(operation),
+        operation.daemon_origin, operation.lease_id,
+        operation.expected_node_uuid, operation.owner_key_id,
+        operation.permissions, operation.node_id, operation.resource_id,
+        0x88U, nullptr);
 }
 
 OperationDigest OperationLedger::derive_request_digest(
@@ -2697,6 +2759,11 @@ OperationBeginResult OperationLedger::begin_timed_bitstream_frame(
 OperationBeginResult OperationLedger::begin_timed_bitstream_stop(
     const RuntimeTimedBitstreamStopOperation& operation) {
     return impl_->begin_timed_bitstream_stop(operation);
+}
+
+OperationBeginResult OperationLedger::begin_bus_resource_reset(
+    const RuntimeBusResourceResetOperation& operation) {
+    return impl_->begin_bus_resource_reset(operation);
 }
 
 OperationRecord OperationLedger::finish(

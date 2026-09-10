@@ -62,6 +62,7 @@ _CONTROL_OPERATIONS = {
     "runtime-timed-bitstream-configure-operation",
     "runtime-timed-bitstream-frame-operation",
     "runtime-timed-bitstream-stop-operation",
+    "runtime-bus-reset-acquire", "runtime-bus-resource-reset-operation",
 }
 _OPERATION_BASE_FIELDS = {
     "operation_id", "lease_id", "expected_node_uuid", "resource_id",
@@ -71,7 +72,7 @@ _OPERATION_BASE_FIELDS = {
 _OPERATION_PWM_FIELDS = {"frequency_hz", "duty", "active_low"}
 _OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop",
                     "timed_bitstream_configure", "timed_bitstream_frame",
-                    "timed_bitstream_stop"}
+                    "timed_bitstream_stop", "bus_resource_reset"}
 _OPERATION_STATES = {
     "pending", "committed", "rejected", "unknown", "expired_unknown",
 }
@@ -596,6 +597,9 @@ class RemoteCliIpcClient:
                 value is None and error_code is None
         elif state == "committed" and kind == "timed_bitstream_stop":
             valid = recovery == "safe_closed" and object_id is not None and \
+                value is None and error_code is None
+        elif state == "committed" and kind == "bus_resource_reset":
+            valid = recovery == "safe_closed" and object_id is None and \
                 value is None and error_code is None
         elif state == "rejected":
             valid = recovery in {"not_sent", "safe_closed"} and \

@@ -184,6 +184,7 @@ remotebsp::RuntimeOperationKind parse_runtime_operation_kind(
     if (text == "timed_bitstream_configure") return remotebsp::RuntimeOperationKind::TimedBitstreamConfigure;
     if (text == "timed_bitstream_frame") return remotebsp::RuntimeOperationKind::TimedBitstreamFrame;
     if (text == "timed_bitstream_stop") return remotebsp::RuntimeOperationKind::TimedBitstreamStop;
+    if (text == "bus_resource_reset") return remotebsp::RuntimeOperationKind::BusResourceReset;
     throw std::invalid_argument(
         "Runtime 操作类型必须是 gpio_write、control_release、pwm_configure 或 pwm_stop");
 }
@@ -442,6 +443,8 @@ void print_usage() {
         << "  runtime-timed-bitstream-configure-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键> <位周期ns> <0高电平ns> <1高电平ns> <复位us>\n"
         << "  runtime-timed-bitstream-frame-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键> <位数> <hex数据>\n"
         << "  runtime-timed-bitstream-stop-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <资源ID> <幂等键>\n"
+        << "  runtime-bus-reset-acquire <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <设备资源ID> <租约ms>\n"
+        << "  runtime-bus-resource-reset-operation <daemon实例ID> <控制租约ID> <预期节点UUID> <调用者ID> <设备资源ID> <幂等键>\n"
         << "  runtime-operation-status <daemon实例ID> <调用者ID> "
            "<operation ID>\n"
         << "  runtime-operation-lookup <daemon实例ID> <调用者ID> "
@@ -650,6 +653,14 @@ int run(const std::vector<std::string>& arguments,
         std::cout << (json_output ? "{\"schema_version\":1,\"command\":\"runtime-timed-bitstream-acquire\",\"data\":{}}\n" : "ok\n");
         return 0;
     }
+    if (name == "runtime-bus-reset-acquire" && arguments.size() == 7) {
+        client.runtime_control_acquire(parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), parse_hex_id(arguments[3], "预期节点UUID"),
+            arguments[4], parse_u32(arguments[5], "设备资源ID"),
+            parse_u32(arguments[6], "租约毫秒"), 0x0008U);
+        std::cout << (json_output ? "{\"schema_version\":1,\"command\":\"runtime-bus-reset-acquire\",\"data\":{}}\n" : "ok\n");
+        return 0;
+    }
 
     if (name == "runtime-gpio-write" && arguments.size() == 8) {
         const auto value = parse_u32(arguments[7], "GPIO 电平");
@@ -784,6 +795,14 @@ int run(const std::vector<std::string>& arguments,
         remotebsp::cli_json::write_runtime_operation_outcome(
             std::cout, name, outcome);
         return 0;
+    }
+    if (name == "runtime-bus-resource-reset-operation" && arguments.size() == 7) {
+        if (!json_output) throw std::invalid_argument("runtime-bus-resource-reset-operation 必须与 --json 一起使用");
+        const auto outcome=client.runtime_bus_resource_reset_operation(
+            parse_hex_id(arguments[1],"daemon实例ID"),parse_hex_id(arguments[2],"控制租约ID"),
+            parse_hex_id(arguments[3],"预期节点UUID"),arguments[4],
+            parse_u32(arguments[5],"设备资源ID"),arguments[6]);
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout,name,outcome); return 0;
     }
 
     if (name == "runtime-operation-lookup" && arguments.size() == 6) {
@@ -1816,6 +1835,8 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-timed-bitstream-configure-operation" &&
              arguments[0] != "runtime-timed-bitstream-frame-operation" &&
              arguments[0] != "runtime-timed-bitstream-stop-operation" &&
+             arguments[0] != "runtime-bus-reset-acquire" &&
+             arguments[0] != "runtime-bus-resource-reset-operation" &&
              arguments[0] != "runtime-operation-status" &&
              arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&

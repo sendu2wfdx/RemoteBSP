@@ -168,6 +168,7 @@ bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
            kind == Kind::RuntimeTimedBitstreamConfigureOperation ||
            kind == Kind::RuntimeTimedBitstreamFrameOperation ||
            kind == Kind::RuntimeTimedBitstreamStopOperation ||
+           kind == Kind::RuntimeBusResourceResetOperation ||
            kind == Kind::RuntimeOperationQuery ||
            kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
@@ -217,6 +218,7 @@ struct ToolbusDaemonTestOptions {
     std::uint32_t drop_stream_credit_ipc_response_ordinal{};
     std::uint32_t drop_pwm_acquire_response_ordinal{};
     std::uint32_t pwm_remote_lease_ttl_ms{};
+    std::uint32_t drop_bus_reset_response_ordinal{};
 #endif
 };
 
@@ -299,6 +301,8 @@ remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
             outcome.kind = IpcKind::TimedBitstreamFrame; break;
         case LedgerKind::RuntimeTimedBitstreamStop:
             outcome.kind = IpcKind::TimedBitstreamStop; break;
+        case LedgerKind::RuntimeBusResourceReset:
+            outcome.kind = IpcKind::BusResourceReset; break;
     }
     switch (record.state) {
         case LedgerState::Pending: outcome.state = IpcState::Pending; break;
@@ -418,7 +422,9 @@ remotebsp::toolbusd::IpcErrorEnvelope gate_error_envelope(
          kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmStopOperation ||
          kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamConfigureOperation ||
          kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamFrameOperation ||
-         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamStopOperation);
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeTimedBitstreamStopOperation ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeBusResourceResetOperation);
+
     return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion, code, category,
             retryable && !possibly_committed, possibly_committed,
             message};
@@ -564,6 +570,8 @@ public:
           drop_pwm_acquire_response_ordinal_(
               test_options.drop_pwm_acquire_response_ordinal),
           test_pwm_remote_lease_ttl_ms_(test_options.pwm_remote_lease_ttl_ms),
+          drop_bus_reset_response_ordinal_(
+              test_options.drop_bus_reset_response_ordinal),
 #endif
           socket_path_(std::move(socket_path)) {}
 
@@ -1335,12 +1343,16 @@ private:
             runtime_control_.acquire(request, daemon_instance_id_,
                                      node_generation, descriptor, contract);
         }
-        if ((request.permissions ==
-                 remotebsp::toolbusd::kRuntimePermissionPwmWrite ||
-             request.permissions ==
-                 remotebsp::toolbusd::kRuntimePermissionTimedBitstreamWrite) &&
-            (contract.access_flags &
-             remotebsp::protocol::kResourceAccessLeaseRequired) != 0U) {
+        const bool bus_reset_requires_remote_lease =
+            request.permissions ==
+            remotebsp::toolbusd::kRuntimePermissionBusReset;
+        if (bus_reset_requires_remote_lease ||
+            ((request.permissions ==
+                  remotebsp::toolbusd::kRuntimePermissionPwmWrite ||
+              request.permissions ==
+                  remotebsp::toolbusd::kRuntimePermissionTimedBitstreamWrite) &&
+             (contract.access_flags &
+              remotebsp::protocol::kResourceAccessLeaseRequired) != 0U)) {
             const auto remote_ttl = std::min<std::uint32_t>(
                 60000U, request.ttl_ms > 55000U ? 60000U
                                                 : request.ttl_ms + 5000U);
@@ -2182,6 +2194,94 @@ private:
         }
     }
 
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_bus_reset_operation(
+        const remotebsp::toolbusd::RuntimeBusResourceResetRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimeBusResourceResetOperation operation{
+            request.daemon_instance_id, request.lease_id,
+            request.expected_node_uuid, request.owner_key_id,
+            request.idempotency_key, request.permissions,
+            request.node_id, request.resource_id};
+        const auto operation_id = OperationLedger::derive_operation_id(operation);
+        const auto digest = OperationLedger::derive_request_digest(operation);
+        const auto old = operation_ledger_.lookup(operation_id, request.owner_key_id);
+        if (old.disposition == OperationLookupDisposition::Found) {
+            if (old.record->request_digest != digest)
+                throw OperationLedgerException(OperationLedgerError::IdempotencyConflict,
+                                               "相同总线复位 selector 绑定了不同请求");
+            return operation_outcome(*old.record, true);
+        }
+        RuntimeControlReleaseRequest lease_request;
+        lease_request.daemon_instance_id = request.daemon_instance_id;
+        lease_request.lease_id = request.lease_id;
+        lease_request.owner_key_id = request.owner_key_id;
+        const auto lease = runtime_control_.resolve_release_lease(
+            lease_request, daemon_instance_id_);
+        if (!lease.has_value() || lease->permissions != kRuntimePermissionBusReset ||
+            lease->expected_node_uuid != request.expected_node_uuid ||
+            lease->node_id != request.node_id ||
+            lease->resource_id != request.resource_id) {
+            throw RuntimeControlException(RuntimeControlError::LeaseConflict,
+                                          "总线复位租约身份或范围不匹配");
+        }
+        std::uint64_t generation{};
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                node->identity.uuid != request.expected_node_uuid)
+                throw RuntimeTargetException(IpcErrorCode::NodeUnavailable, false,
+                                             "总线复位发送前目标节点不可用");
+            generation = bus_node_generations_[request.node_id];
+        }
+        OperationBeginResult begun;
+        {
+            std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+            begun = operation_ledger_.begin_bus_resource_reset(operation);
+        }
+        if (begun.disposition != OperationBeginDisposition::StartedDurablePending)
+            return operation_outcome(begun.record, true);
+        const auto finish = [&](OperationState state, OperationRecovery recovery,
+                                RuntimeOperationError error) {
+            std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+            return operation_ledger_.finish(operation_id, digest, state, recovery,
+                {std::nullopt, std::nullopt, static_cast<std::uint16_t>(error)});
+        };
+        try {
+            static_cast<void>(request_runtime_control_packet(
+                request.node_id, generation, request.expected_node_uuid,
+                remotebsp::protocol::Command::ResourceReset,
+                remotebsp::protocol::encode_resource_id(request.resource_id),
+                0U, std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(1800)));
+#ifdef REMOTEBSP_TEST_HOOKS
+            if (drop_bus_reset_response_ordinal_ != 0U &&
+                ++bus_reset_response_count_ ==
+                    drop_bus_reset_response_ordinal_) {
+                throw RuntimeTargetException(IpcErrorCode::DeadlineExceeded,
+                    true, "测试故障：总线复位已提交后丢失响应");
+            }
+#endif
+            runtime_control_.forget_lease_after_remote_reset(
+                lease_request, daemon_instance_id_);
+            return operation_outcome(finish(OperationState::Committed,
+                OperationRecovery::SafeClosed, RuntimeOperationError::None), false);
+        } catch (const RuntimeTargetException& error) {
+            return operation_outcome(finish(
+                error.possibly_committed() ? OperationState::Unknown
+                                           : OperationState::Rejected,
+                error.possibly_committed() ? OperationRecovery::ScopeBlocked
+                                           : OperationRecovery::NotSent,
+                error.code() == IpcErrorCode::DeadlineExceeded
+                    ? RuntimeOperationError::Deadline
+                    : RuntimeOperationError::Backend), false);
+        } catch (...) {
+            return operation_outcome(finish(OperationState::Unknown,
+                OperationRecovery::ScopeBlocked,
+                RuntimeOperationError::Backend), false);
+        }
+    }
+
     remotebsp::toolbusd::RuntimeOperationOutcome runtime_operation_query(
         const remotebsp::toolbusd::RuntimeOperationQuery& request) {
         using namespace remotebsp::toolbusd;
@@ -2243,8 +2343,13 @@ private:
             operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
             operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
             operation_id=OperationLedger::derive_operation_id(operation);
-        } else {
+        } else if (request.kind == RuntimeOperationKind::TimedBitstreamStop) {
             RuntimeTimedBitstreamStopOperation operation;
+            operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
+            operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
+            operation_id=OperationLedger::derive_operation_id(operation);
+        } else {
+            RuntimeBusResourceResetOperation operation;
             operation.daemon_origin=request.daemon_instance_id;operation.lease_id=request.lease_id;
             operation.owner_key_id=request.owner_key_id;operation.idempotency_key=request.idempotency_key;
             operation_id=OperationLedger::derive_operation_id(operation);
@@ -2870,6 +2975,15 @@ private:
                                         RuntimeTimedBitstreamStopOperation) {
                 const auto outcome=runtime_timed_stop_operation(
                     ipc_request.runtime_timed_bitstream_stop);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimeBusResourceResetOperation) {
+                const auto outcome = runtime_bus_reset_operation(
+                    ipc_request.runtime_bus_resource_reset);
                 remotebsp::toolbusd::write_ipc_response(client,
                     remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
@@ -3735,8 +3849,10 @@ private:
     const std::uint32_t drop_stream_credit_ipc_response_ordinal_{};
     const std::uint32_t drop_pwm_acquire_response_ordinal_{};
     const std::uint32_t test_pwm_remote_lease_ttl_ms_{};
+    const std::uint32_t drop_bus_reset_response_ordinal_{};
     std::atomic<std::uint32_t> stream_credit_ipc_response_count_{0U};
     std::atomic<std::uint32_t> pwm_acquire_response_count_{0U};
+    std::atomic<std::uint32_t> bus_reset_response_count_{0U};
 #endif
     remotebsp::toolbusd::NodeRegistry nodes_;
     remotebsp::toolbusd::BusRuntime bus_runtime_;
@@ -3808,6 +3924,7 @@ int main(int argc, char** argv) {
                      " [--test-stream-credit-drop-ipc-response 序号]"
                      " [--test-pwm-acquire-drop-response 序号]"
                      " [--test-pwm-remote-lease-ttl-ms 毫秒]"
+                     " [--test-bus-reset-drop-response 序号]"
 #endif
                      "\n";
         return 2;
@@ -3956,6 +4073,11 @@ int main(int argc, char** argv) {
                     test_options.pwm_remote_lease_ttl_ms != 0U)
                     throw std::invalid_argument("PWM 测试远端租约TTL必须为100～5000ms");
                 test_options.pwm_remote_lease_ttl_ms = value;
+            } else if (option == "--test-bus-reset-drop-response") {
+                if (value > 1024U ||
+                    test_options.drop_bus_reset_response_ordinal != 0U)
+                    throw std::invalid_argument("总线复位响应丢失测试序号无效");
+                test_options.drop_bus_reset_response_ordinal = value;
 #endif
             } else {
                 throw std::invalid_argument("未知 toolbusd 选项");

@@ -619,6 +619,26 @@ RuntimeOperationOutcome Client::runtime_timed_bitstream_stop_operation(
     return public_operation_outcome(toolbusd::decode_ipc_runtime_operation_outcome(response.body));
 }
 
+RuntimeOperationOutcome Client::runtime_bus_resource_reset_operation(
+    const std::array<std::uint8_t,16>& daemon_instance_id,
+    const std::array<std::uint8_t,16>& lease_id,
+    const std::array<std::uint8_t,16>& expected_node_uuid,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key) const {
+    toolbusd::RuntimeBusResourceResetRequest request;
+    request.daemon_instance_id=daemon_instance_id; request.lease_id=lease_id;
+    request.expected_node_uuid=expected_node_uuid; request.owner_key_id=owner_key_id;
+    request.node_id=node_id_; request.resource_id=resource_id;
+    request.idempotency_key=idempotency_key;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_bus_resource_reset_operation_request(socket.get(), request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if(response.status!=toolbusd::IpcStatus::Ok)
+        throw_structured_ipc_error(response,"Runtime 总线资源复位操作失败");
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
 RuntimeOperationOutcome Client::runtime_operation_status(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::string& owner_key_id,

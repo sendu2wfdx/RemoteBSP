@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence, TextIO
 
@@ -36,7 +37,9 @@ from firmware_deployment import (
     validate_usb_katapult_deployment_plan,
 )
 from deployment_record import create_deployment_record, validate_deployment_record
-from deployment_attempt import create_absent_attempt, validate_deployment_attempt
+from deployment_attempt import (
+    EXECUTION_CONFIRMATION, create_absent_attempt, execute_deployment_plan,
+    validate_deployment_attempt)
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -374,6 +377,29 @@ def _run_deployment_attempt_validate(args) -> dict:
             "format": "STUDIO_CLI_DEPLOYMENT_ATTEMPT_VALIDATE_V1",
             "attempt_id": attempt["attempt_id"],
             "outcome": attempt["outcome"],
+            "hardware_success_claimed": attempt["hardware_success_claimed"]}
+
+
+def _run_deployment_execute(args) -> dict:
+    plan = _read_json(args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES)
+    reader = JsonIdentityFileReader(
+        _bounded_path(args.identity_file, "设备身份文件"))
+    now = lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    attempt = execute_deployment_plan(
+        plan, output_root=_bounded_path(args.output_root, "构建产物目录"),
+        reader=reader,
+        attempt_output=_bounded_path(args.attempt_output, "部署尝试输出"),
+        execute=args.execute, confirmation=args.confirmation,
+        force=args.force, flash_timeout=args.flash_timeout,
+        reconnect_timeout=args.reconnect_timeout,
+        poll_interval=args.poll_interval, started_utc=now(),
+        ended_utc_provider=now)
+    if attempt["outcome"] != "verified":
+        raise FirmwareDeploymentError(
+            f"部署未通过完整回读核验；failed尝试已原子保存到{args.attempt_output}")
+    return {"ok": attempt["outcome"] == "verified",
+            "format": "STUDIO_CLI_DEPLOYMENT_EXECUTE_V1",
+            "attempt": attempt, "outcome": attempt["outcome"],
             "hardware_success_claimed": attempt["hardware_success_claimed"]}
 
 
@@ -912,6 +938,22 @@ def _parser() -> StrictParser:
     attempt_validate.add_argument("--attempt", required=True)
     attempt_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     attempt_validate.set_defaults(handler=_run_deployment_attempt_validate)
+
+    deployment_execute = sub.add_parser(
+        "deployment-execute",
+        help="显式执行已验证部署计划并原子保存尝试证据")
+    deployment_execute.add_argument("--plan", required=True)
+    deployment_execute.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    deployment_execute.add_argument("--identity-file", required=True)
+    deployment_execute.add_argument("--attempt-output", required=True)
+    deployment_execute.add_argument("--execute", action="store_true")
+    deployment_execute.add_argument("--confirmation", required=True,
+                                    help=f"必须精确填写{EXECUTION_CONFIRMATION}")
+    deployment_execute.add_argument("--flash-timeout", type=int, default=120)
+    deployment_execute.add_argument("--reconnect-timeout", type=float, default=10.0)
+    deployment_execute.add_argument("--poll-interval", type=float, default=0.25)
+    deployment_execute.add_argument("--force", action="store_true")
+    deployment_execute.set_defaults(handler=_run_deployment_execute)
 
     deploy = sub.add_parser(
         "deploy-stlink", help="显式通过ST-Link烧录并核对运行中身份")

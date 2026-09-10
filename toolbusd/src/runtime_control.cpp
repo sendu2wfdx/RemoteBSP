@@ -348,7 +348,8 @@ void RuntimeControlGate::bind_pwm_remote_lease(
     const auto found = leases_.find(binary_id(lease_id));
     if (found == leases_.end() ||
         (found->second.permissions != kRuntimePermissionPwmWrite &&
-         found->second.permissions != kRuntimePermissionTimedBitstreamWrite) ||
+         found->second.permissions != kRuntimePermissionTimedBitstreamWrite &&
+         found->second.permissions != kRuntimePermissionBusReset) ||
         found->second.remote_lease_id != 0U)
         reject(RuntimeControlError::LeaseConflict,
                "PWM 远端租约无法绑定到当前本地租约");
@@ -377,17 +378,23 @@ void RuntimeControlGate::acquire(
     }
     if (request.permissions != kRuntimePermissionGpioWrite &&
         request.permissions != kRuntimePermissionPwmWrite &&
-        request.permissions != kRuntimePermissionTimedBitstreamWrite) {
+        request.permissions != kRuntimePermissionTimedBitstreamWrite &&
+        request.permissions != kRuntimePermissionBusReset) {
         reject(RuntimeControlError::PermissionDenied,
                "Runtime 控制租约没有唯一的受支持写权限");
     }
     const auto expected_type =
-        request.permissions == kRuntimePermissionPwmWrite
+        request.permissions == kRuntimePermissionBusReset
+            ? descriptor.type
+            : request.permissions == kRuntimePermissionPwmWrite
             ? protocol::ResourceType::Pwm
             : (request.permissions == kRuntimePermissionTimedBitstreamWrite
                    ? protocol::ResourceType::TimedBitstream
                    : protocol::ResourceType::Gpio);
     if (descriptor.resource_id != request.resource_id ||
+        (request.permissions == kRuntimePermissionBusReset &&
+         descriptor.type != protocol::ResourceType::I2cDevice &&
+         descriptor.type != protocol::ResourceType::SpiDevice) ||
         descriptor.type != expected_type ||
         contract.resource_id != request.resource_id ||
         (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
@@ -1545,6 +1552,28 @@ RuntimeControlGate::resolve_release_lease(
         found->second.resource_id,
         found->second.permissions,
         found->second.admission_id};
+}
+
+void RuntimeControlGate::forget_lease_after_remote_reset(
+    const RuntimeControlReleaseRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id) {
+    const auto resolved = resolve_release_lease(request,
+                                                current_daemon_instance_id);
+    if (!resolved.has_value() ||
+        resolved->permissions != kRuntimePermissionBusReset) {
+        reject(RuntimeControlError::LeaseConflict,
+               "总线复位后的本地租约不存在或权限不匹配");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto key = binary_id(request.lease_id);
+    const auto found = leases_.find(key);
+    if (found == leases_.end() ||
+        found->second.admission_id != resolved->admission_id) {
+        reject(RuntimeControlError::LeaseConflict,
+               "总线复位后的本地租约生命周期已变化");
+    }
+    erase_lease_locked(key);
+    expiry_changed_.notify_all();
 }
 
 void RuntimeControlGate::release(

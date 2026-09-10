@@ -33,6 +33,7 @@ enum class OperationKind : std::uint8_t {
     RuntimeTimedBitstreamConfigure = 5U,
     RuntimeTimedBitstreamFrame = 6U,
     RuntimeTimedBitstreamStop = 7U,
+    RuntimeBusResourceReset = 8U,
 };
 
 enum class OperationState : std::uint8_t {
@@ -186,6 +187,19 @@ struct RuntimeTimedBitstreamStopOperation {
     std::uint32_t resource_id{};
 };
 
+// 对已持有独占租约的 I2C/SPI 设备执行一次有副作用的软件恢复。
+// 幂等键只用于账本身份；Pending 持久化后调用方不得自动重发。
+struct RuntimeBusResourceResetOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+};
+
 struct OperationTerminalResult {
     OperationTerminalResult() = default;
     OperationTerminalResult(std::optional<std::uint32_t> object,
@@ -287,6 +301,8 @@ public:
         const RuntimeTimedBitstreamFrameOperation& operation);
     static OperationDigest derive_operation_id(
         const RuntimeTimedBitstreamStopOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimeBusResourceResetOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_request_digest(
@@ -302,6 +318,8 @@ public:
         const RuntimeTimedBitstreamFrameOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeTimedBitstreamStopOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimeBusResourceResetOperation& operation);
 
     OperationBeginResult begin_gpio_write(
         const RuntimeGpioWriteOperation& operation);
@@ -318,6 +336,8 @@ public:
         const RuntimeTimedBitstreamFrameOperation& operation);
     OperationBeginResult begin_timed_bitstream_stop(
         const RuntimeTimedBitstreamStopOperation& operation);
+    OperationBeginResult begin_bus_resource_reset(
+        const RuntimeBusResourceResetOperation& operation);
 
     OperationRecord finish(const OperationDigest& operation_id,
                            const OperationDigest& request_digest,

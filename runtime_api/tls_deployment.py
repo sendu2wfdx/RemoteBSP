@@ -155,6 +155,17 @@ def prepare_server_context(path: Path, expected_bind: str) -> ssl.SSLContext:
     return context
 
 
+def certificate_fingerprint(path: Path) -> str:
+    """完整预检后返回叶证书DER的SHA-256指纹。"""
+    document, _ = _preflight(path)
+    pem = Path(document["certificate_file"]).read_text(encoding="ascii")
+    begin = pem.index("-----BEGIN CERTIFICATE-----")
+    end_marker = "-----END CERTIFICATE-----"
+    end = pem.index(end_marker, begin) + len(end_marker)
+    der = ssl.PEM_cert_to_DER_cert(pem[begin:end])
+    return hashlib.sha256(der).hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Runtime TLS 部署基线工件")
     sub = parser.add_subparsers(dest="command", required=True)
