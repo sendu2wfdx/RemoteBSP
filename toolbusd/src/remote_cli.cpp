@@ -1291,6 +1291,7 @@ int run(const std::vector<std::string>& arguments,
 
 int main(int argc, char** argv) {
     bool json_output = false;
+    std::string json_command = "unknown";
     try {
         std::string socket_path = "/tmp/toolbusd.sock";
         std::uint32_t node_id = 1;
@@ -1314,18 +1315,32 @@ int main(int argc, char** argv) {
         for (; index < argc; ++index) {
             arguments.emplace_back(argv[index]);
         }
+        if (!arguments.empty()) {
+            json_command = arguments[0];
+        }
         if (json_output && (arguments.empty() ||
             (arguments[0] != "traffic-status" &&
              arguments[0] != "daemon-identity" &&
              arguments[0] != "health-snapshot" &&
              arguments[0] != "node-list" &&
              arguments[0] != "runtime-snapshot" &&
+             arguments[0] != "runtime-control-acquire" &&
+             arguments[0] != "runtime-gpio-write" &&
+             arguments[0] != "runtime-control-release" &&
              arguments[0] != "resource-list" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(
-                "--json当前仅支持Runtime只读命令");
+                "--json当前仅支持Runtime合同命令");
         }
         return run(arguments, socket_path, node_id, json_output);
+    } catch (const remotebsp::IpcErrorException& error) {
+        if (json_output) {
+            remotebsp::cli_json::write_ipc_error(
+                std::cout, json_command, error);
+        } else {
+            std::cerr << "remote-cli 错误: " << error.what() << '\n';
+        }
+        return 1;
     } catch (const std::exception& error) {
         std::cerr << "remote-cli 错误: " << error.what() << '\n';
         return 1;

@@ -3,6 +3,7 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -436,6 +437,23 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
                              method="HEAD")) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(response.read(), b"")
+
+    def test_authenticated_health_uses_request_deadline(self):
+        class SlowHealthProvider(MockSnapshotProvider):
+            def health_snapshot(self, *, deadline=None):
+                if deadline is None:
+                    raise AssertionError("认证健康读取必须携带统一期限")
+                time.sleep(0.12)
+                deadline.check()
+
+        self.server.provider = SlowHealthProvider()  # type: ignore[attr-defined]
+        self.server.request_io_timeout_seconds = 0.1  # type: ignore[attr-defined]
+        error, payload = self._error(Request(
+            self.base + "/api/v1/health",
+            headers={"Authorization": f"Bearer {self.API_KEY}"}))
+        self.assertEqual(error.code, 504)
+        self.assertEqual(payload["error"]["code"],
+                         "request_deadline_exceeded")
 
     def test_write_method_authenticates_before_read_only_rejection(self):
         request = Request(self.base + "/api/v1/nodes", data=b"{}",

@@ -123,6 +123,117 @@ std::vector<std::uint8_t> text_body(const std::string& text) {
     return {text.begin(), text.end()};
 }
 
+class RuntimeTargetException : public std::runtime_error {
+public:
+    RuntimeTargetException(remotebsp::toolbusd::IpcErrorCode code,
+                           bool possibly_committed,
+                           const char* message)
+        : std::runtime_error(message), code_(code),
+          possibly_committed_(possibly_committed) {}
+    remotebsp::toolbusd::IpcErrorCode code() const noexcept { return code_; }
+    bool possibly_committed() const noexcept {
+        return possibly_committed_;
+    }
+private:
+    remotebsp::toolbusd::IpcErrorCode code_;
+    bool possibly_committed_;
+};
+
+bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
+    using Kind = remotebsp::toolbusd::IpcRequestKind;
+    return kind == Kind::RuntimeControlAcquire ||
+           kind == Kind::RuntimeGpioWrite ||
+           kind == Kind::RuntimeControlRelease ||
+           kind == Kind::HealthSnapshot;
+}
+
+remotebsp::toolbusd::IpcErrorEnvelope gate_error_envelope(
+    const remotebsp::toolbusd::RuntimeControlException& error,
+    remotebsp::toolbusd::IpcRequestKind kind) {
+    using Category = remotebsp::toolbusd::IpcErrorCategory;
+    using Code = remotebsp::toolbusd::IpcErrorCode;
+    using GateCode = remotebsp::toolbusd::RuntimeControlError;
+    Code code = Code::InternalFailure;
+    Category category = Category::Internal;
+    bool retryable = false;
+    const char* message = "Runtime 控制内部失败";
+    switch (error.code()) {
+        case GateCode::InvalidRequest:
+            code = Code::InvalidRequest; category = Category::Request;
+            message = "Runtime 控制请求字段无效"; break;
+        case GateCode::DaemonIdentityMismatch:
+            code = Code::DaemonIdentityMismatch;
+            category = Category::Authentication;
+            message = "toolbusd 实例身份不匹配"; break;
+        case GateCode::PermissionDenied:
+            code = Code::PermissionDenied;
+            category = Category::Authorization;
+            message = "调用者无此 Runtime 控制权限"; break;
+        case GateCode::LeaseConflict:
+            code = Code::LeaseConflict; category = Category::Conflict;
+            retryable = true; message = "目标资源已有互斥控制租约"; break;
+        case GateCode::LeaseNotFound:
+            code = Code::LeaseNotFound; category = Category::Conflict;
+            message = "Runtime 控制租约不存在"; break;
+        case GateCode::LeaseExpired:
+            code = Code::LeaseExpired; category = Category::Conflict;
+            message = "Runtime 控制租约已过期"; break;
+        case GateCode::ContractRejected:
+            code = Code::ContractRejected;
+            category = Category::Authorization;
+            message = "目标节点或资源合同校验失败"; break;
+        case GateCode::CapacityExceeded:
+            code = Code::CapacityExceeded; category = Category::Unavailable;
+            retryable = true; message = "Runtime 控制容量已满"; break;
+        case GateCode::IdempotencyConflict:
+            code = Code::IdempotencyConflict;
+            category = Category::Conflict;
+            message = "幂等键与原命令参数冲突"; break;
+        case GateCode::SafeStopFailed:
+            code = Code::SafeStopFailed; category = Category::Internal;
+            message = "GPIO 安全停机或对象关闭未确定成功"; break;
+        case GateCode::ObjectRetired:
+            code = Code::ObjectRetired; category = Category::Conflict;
+            message = "GPIO 对象处于隔离或退休状态"; break;
+    }
+    const bool possibly_committed =
+        error.code() == GateCode::SafeStopFailed &&
+        (kind == remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeControlRelease);
+    return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion, code, category,
+            retryable && !possibly_committed, possibly_committed,
+            message};
+}
+
+remotebsp::toolbusd::IpcErrorEnvelope generic_error_envelope(
+    remotebsp::toolbusd::IpcRequestKind kind,
+    const std::exception& error) {
+    using Category = remotebsp::toolbusd::IpcErrorCategory;
+    using Code = remotebsp::toolbusd::IpcErrorCode;
+    if (const auto* target = dynamic_cast<const RuntimeTargetException*>(&error)) {
+        const auto category = target->code() == Code::DeadlineExceeded
+                                  ? Category::Timeout
+                                  : Category::Unavailable;
+        return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                target->code(), category,
+                !target->possibly_committed(), target->possibly_committed(),
+                target->what()};
+    }
+    if (dynamic_cast<const std::invalid_argument*>(&error) != nullptr) {
+        return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                Code::InvalidRequest, Category::Request, false, false,
+                "本地 IPC 请求字段无效"};
+    }
+    if (kind == remotebsp::toolbusd::IpcRequestKind::HealthSnapshot) {
+        return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                Code::HealthUnavailable, Category::Unavailable, true, false,
+                "toolbusd 健康快照暂不可用"};
+    }
+    return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+            Code::BackendUnavailable, Category::Unavailable, true, false,
+            "Runtime 控制后端暂不可用"};
+}
+
 std::uint32_t make_session_id() noexcept {
     const auto ticks = static_cast<std::uint64_t>(
         std::chrono::steady_clock::now().time_since_epoch().count());
@@ -781,7 +892,9 @@ private:
         std::vector<std::uint8_t> payload, std::uint32_t object_id,
         std::chrono::steady_clock::time_point deadline) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error("Runtime GPIO 写入达到总时间上限");
+            throw RuntimeTargetException(
+                remotebsp::toolbusd::IpcErrorCode::DeadlineExceeded,
+                false, "Runtime GPIO 写入达到总时间上限");
         }
         remotebsp::protocol::Packet request;
         request.header.message_type =
@@ -799,8 +912,9 @@ private:
                 node_id > kMaximumNodeId ||
                 node->identity.uuid != expected_node_uuid ||
                 bus_node_generations_[node_id] != node_generation) {
-                throw std::runtime_error(
-                    "Runtime GPIO 写入前目标节点已离线或重启");
+                throw RuntimeTargetException(
+                    remotebsp::toolbusd::IpcErrorCode::NodeUnavailable,
+                    false, "Runtime GPIO 写入前目标节点已离线或重启");
             }
             submission = requests_.submit(std::move(request));
             request_routes_[request_key(session_id_, submission.request_id)] =
@@ -812,8 +926,9 @@ private:
             std::lock_guard<std::mutex> lock(state_mutex_);
             requests_.cancel(session_id_, submission.request_id);
             request_routes_.erase(key);
-            throw std::runtime_error(
-                "Runtime GPIO 写入被带宽准入拒绝");
+            throw RuntimeTargetException(
+                remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,
+                false, "Runtime GPIO 写入被带宽准入拒绝");
         }
 
         std::unique_lock<std::mutex> lock(state_mutex_);
@@ -831,20 +946,28 @@ private:
                     remotebsp::protocol::MessageType::Response ||
                 packet.header.command !=
                     static_cast<std::uint16_t>(command) ||
-                packet.payload.empty() || packet.payload.front() != 0U ||
+                packet.payload.empty()) {
+                throw RuntimeTargetException(
+                    remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,
+                    true,
+                    "Runtime GPIO 远端响应无效，提交状态未知");
+            }
+            if (packet.payload.front() != 0U ||
                 (packet.header.flags &
                  remotebsp::protocol::kErrorResponseFlag) != 0U) {
-                throw std::runtime_error(
-                    "Runtime GPIO 远端写命令失败关闭");
+                throw RuntimeTargetException(
+                    remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,
+                    false, "Runtime GPIO 远端写命令被确定拒绝");
             }
             return packet;
         }
         requests_.cancel(session_id_, submission.request_id);
         request_routes_.erase(key);
         timed_out_.erase(key);
-        throw std::runtime_error(
-            completed ? "Runtime GPIO 远端请求超时"
-                      : "Runtime GPIO 写入达到总时间上限");
+        throw RuntimeTargetException(
+            remotebsp::toolbusd::IpcErrorCode::DeadlineExceeded,
+            true, completed ? "Runtime GPIO 远端请求超时，提交状态未知"
+                            : "Runtime GPIO 写入达到总时间上限，提交状态未知");
     }
 
     void runtime_control_acquire(
@@ -943,8 +1066,10 @@ private:
                          1U, 0U},
                         0U, deadline);
                     if (response.header.object_id == 0U) {
-                        throw std::runtime_error(
-                            "Runtime GPIO_CREATE 未返回对象 ID");
+                        throw RuntimeTargetException(
+                            remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,
+                            true,
+                            "Runtime GPIO_CREATE 已响应但对象 ID 无效，提交状态未知");
                     }
                     return response.header.object_id;
                 },
@@ -1338,9 +1463,14 @@ private:
     }
 
     void handle_client(int client) {
+        std::optional<remotebsp::toolbusd::IpcRequestKind>
+            structured_error_kind;
         try {
             auto ipc_request =
                 remotebsp::toolbusd::read_ipc_request(client);
+            if (uses_structured_error(ipc_request.kind)) {
+                structured_error_kind = ipc_request.kind;
+            }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::ListNodes) {
                 std::vector<remotebsp::toolbusd::IpcNodeInfo> result;
@@ -1833,11 +1963,58 @@ private:
             remotebsp::toolbusd::write_ipc_response(
                 client, remotebsp::toolbusd::IpcStatus::TimedOut,
                 text_body("远端请求超时"));
+        } catch (const remotebsp::toolbusd::IpcException& error) {
+            try {
+                const auto error_kind = error.has_request_kind()
+                    ? std::optional<remotebsp::toolbusd::IpcRequestKind>(
+                          error.request_kind())
+                    : structured_error_kind;
+                if (error_kind.has_value() &&
+                    uses_structured_error(*error_kind)) {
+                    const remotebsp::toolbusd::IpcErrorEnvelope envelope{
+                        remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                        remotebsp::toolbusd::IpcErrorCode::InvalidRequest,
+                        remotebsp::toolbusd::IpcErrorCategory::Request,
+                        false, false, "本地 IPC 请求版本、长度或字段无效"};
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        remotebsp::toolbusd::encode_ipc_error_envelope(
+                            envelope));
+                } else {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        text_body(error.what()));
+                }
+            } catch (...) {
+            }
+        } catch (const remotebsp::toolbusd::RuntimeControlException& error) {
+            try {
+                if (structured_error_kind.has_value()) {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        remotebsp::toolbusd::encode_ipc_error_envelope(
+                            gate_error_envelope(
+                                error, *structured_error_kind)));
+                } else {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        text_body(error.what()));
+                }
+            } catch (...) {
+            }
         } catch (const std::exception& error) {
             try {
-                remotebsp::toolbusd::write_ipc_response(
-                    client, remotebsp::toolbusd::IpcStatus::Error,
-                    text_body(error.what()));
+                if (structured_error_kind.has_value()) {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        remotebsp::toolbusd::encode_ipc_error_envelope(
+                            generic_error_envelope(
+                                *structured_error_kind, error)));
+                } else {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        text_body(error.what()));
+                }
             } catch (...) {
             }
         }

@@ -9,16 +9,26 @@ import struct
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
+from .deadline import (
+    MonotonicDeadline,
+    RequestDeadlineExceeded,
+    call_with_deadline,
+)
 from .models import normalize_snapshot
 from .health_projection import (
     HealthProjectionError,
     TrustedToolbusdHealthProjection,
 )
-from .provider import RuntimeProvider, RuntimeProviderError, SnapshotRead
+from .provider import (
+    RuntimeProvider,
+    RuntimeProviderError,
+    RuntimeProviderOperationError,
+    SnapshotRead,
+)
 
 
 _UUID = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -36,6 +46,10 @@ _HEALTH_VALUES = {
 }
 _TRAFFIC_CLASSES = (
     "safety", "motion", "system", "interactive", "streaming", "bulk")
+_CONTROL_OPERATIONS = {
+    "runtime-control-acquire", "runtime-gpio-write",
+    "runtime-control-release",
+}
 
 
 class ToolbusIpcError(RuntimeError):
@@ -44,6 +58,117 @@ class ToolbusIpcError(RuntimeError):
 
 class ToolbusIpcProtocolError(ToolbusIpcError):
     """remote-cli 输出不符合当前已知契约。"""
+
+
+class ToolbusIpcOperationError(ToolbusIpcError):
+    """remote-cli v1 错误信封；数字码与 C++ IPC 合同保持一致。"""
+
+    _ROOT_FIELDS = {"schema_version", "command", "error"}
+    _FIELDS = {"ipc_error_version", "code", "category", "retryable",
+               "possibly_committed", "message"}
+    _CATEGORIES = {
+        1: 1, 2: 1, 100: 2, 101: 3, 105: 3,
+        102: 4, 103: 4, 104: 4, 107: 4, 109: 4,
+        106: 5, 200: 5, 201: 5, 203: 5,
+        202: 6, 108: 7, 255: 7,
+    }
+    _POSSIBLY_COMMITTED_CODES = {108, 201, 202, 255}
+    _RETRYABLE_CODES = {102, 106, 200, 201, 202, 203}
+
+    def __init__(self, code: int, category: int, retryable: bool,
+                 possibly_committed: bool, message: str):
+        if self._CATEGORIES.get(code) != category or type(retryable) is not bool \
+                or type(possibly_committed) is not bool or \
+                (possibly_committed and code not in
+                 self._POSSIBLY_COMMITTED_CODES) or \
+                (possibly_committed and retryable) or \
+                (not possibly_committed and
+                 retryable != (code in self._RETRYABLE_CODES)):
+            raise ToolbusIpcProtocolError("remote-cli结构化错误字段无效")
+        if not isinstance(message, str) or not message:
+            raise ToolbusIpcProtocolError("remote-cli结构化错误消息无效")
+        try:
+            encoded_message = message.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ToolbusIpcProtocolError(
+                "remote-cli结构化错误消息不是有效UTF-8") from error
+        if len(encoded_message) > 256 or any(
+                ord(character) < 0x20 or ord(character) == 0x7f
+                for character in message):
+            raise ToolbusIpcProtocolError("remote-cli结构化错误消息无效")
+        self.code = code
+        self.category = category
+        self.retryable = retryable
+        self.possibly_committed = possibly_committed
+        self.message = message
+        super().__init__(message)
+
+    @classmethod
+    def from_document(cls, output: str, command: str
+                      ) -> "ToolbusIpcOperationError":
+        try:
+            root = _json_object(json.loads(
+                output, object_pairs_hook=_json_pairs,
+                parse_constant=_reject_json_constant), command)
+        except (json.JSONDecodeError, RecursionError) as error:
+            raise ToolbusIpcProtocolError(
+                f"{command}错误输出不是合法JSON") from error
+        _exact_fields(root, cls._ROOT_FIELDS, command)
+        if _json_integer(root["schema_version"], "schema_version",
+                         minimum=1, maximum=0xffffffff) != 1 or \
+                _json_string(root["command"], "command") != command:
+            raise ToolbusIpcProtocolError("remote-cli错误输出版本或命令不匹配")
+        error_root = _json_object(root["error"], "error")
+        _exact_fields(error_root, cls._FIELDS, "error")
+        if _json_integer(error_root["ipc_error_version"],
+                         "error.ipc_error_version", minimum=1,
+                         maximum=0xffff) != 1:
+            raise ToolbusIpcProtocolError("remote-cli错误信封版本不受支持")
+        return cls(
+            _json_integer(error_root["code"], "error.code",
+                          maximum=0xffff),
+            _json_integer(error_root["category"], "error.category",
+                          maximum=0xff),
+            _json_boolean(error_root["retryable"], "error.retryable"),
+            _json_boolean(error_root["possibly_committed"],
+                          "error.possibly_committed"),
+            _json_string(error_root["message"], "error.message"))
+
+
+def _provider_operation_error(error: ToolbusIpcError
+                              ) -> RuntimeProviderOperationError:
+    if isinstance(error, ToolbusIpcOperationError):
+        if error.code == 202:
+            code, category = "deadline_exceeded", "timeout"
+        elif error.code in {1, 2}:
+            code, category = "protocol_incompatible", "protocol"
+        elif error.code in {101, 102, 103, 104, 105, 107, 109, 200}:
+            code, category = "target_rejected", "target"
+        else:
+            code, category = "backend_unavailable", "transport"
+        return RuntimeProviderOperationError(
+            code, category=category,
+            retryable=error.retryable,
+            possibly_committed=error.possibly_committed,
+            invalidates_global_operational=error.code in {1, 2, 100})
+    if isinstance(error, ToolbusIpcProtocolError):
+        return RuntimeProviderOperationError(
+            "protocol_incompatible", category="protocol",
+            retryable=False, possibly_committed=True, detail=str(error),
+            invalidates_global_operational=True)
+    # 旧 CLI 只有字符串，不能按文本猜业务语义或提交状态。
+    return RuntimeProviderOperationError(
+        "backend_unavailable", category="transport",
+        retryable=False, possibly_committed=True, detail=str(error),
+        invalidates_global_operational=True)
+
+
+class _RemoteCliProcessError(ToolbusIpcError):
+    """保留非零退出的有界 stdout，交由知道命令名的上层严格解析。"""
+
+    def __init__(self, stdout: str, detail: str):
+        self.stdout = stdout
+        super().__init__(detail)
 
 
 class ToolbusIpcClient(Protocol):
@@ -98,7 +223,8 @@ def _run_remote_cli(command: Sequence[str], timeout_seconds: float,
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
     if completed.returncode != 0:
         detail = stderr or f"退出码{completed.returncode}"
-        raise ToolbusIpcError(f"remote-cli返回失败：{detail}")
+        raise _RemoteCliProcessError(
+            stdout, f"remote-cli返回失败：{detail}")
     return stdout
 
 
@@ -221,7 +347,8 @@ class RemoteCliIpcClient:
         self.runner = runner
 
     def _run(self, operation: str, *, node_id: int | None = None,
-             arguments: Sequence[str] = ()) -> str:
+             arguments: Sequence[str] = (),
+             deadline: MonotonicDeadline | None = None) -> str:
         command = [self.executable, "--socket", str(self.socket_path)]
         if self.structured_output:
             command.insert(1, "--json")
@@ -231,16 +358,43 @@ class RemoteCliIpcClient:
             command.extend(("--node", str(node_id)))
         command.append(operation)
         command.extend(arguments)
+        timeout_seconds = self.timeout_seconds if deadline is None else \
+            deadline.remaining_seconds(cap=self.timeout_seconds)
+
+        def check_after_runner() -> None:
+            if deadline is None:
+                return
+            try:
+                deadline.check()
+            except RequestDeadlineExceeded as error:
+                if operation in _CONTROL_OPERATIONS:
+                    raise ToolbusIpcOperationError(
+                        202, 6, False, True,
+                        "控制命令已开始执行但未在期限内返回") from error
+                raise
+
         try:
             output = self.runner(
-                command, self.timeout_seconds, self.maximum_output_bytes)
+                command, timeout_seconds, self.maximum_output_bytes)
+        except _RemoteCliProcessError as error:
+            if self.structured_output:
+                # daemon 已返回的精确信封优先于事后期限，不能丢失提交语义。
+                raise ToolbusIpcOperationError.from_document(
+                    error.stdout, operation) from error
+            raise ToolbusIpcError("remote-cli返回失败") from error
+        except ToolbusIpcOperationError:
+            raise
         except UnicodeDecodeError as error:
             raise ToolbusIpcProtocolError(
                 "remote-cli输出不是UTF-8") from error
+        except Exception:
+            check_after_runner()
+            raise
         if not isinstance(output, str):
             raise ToolbusIpcProtocolError("remote-cli执行器必须返回字符串")
         if len(output.encode("utf-8")) > self.maximum_output_bytes:
             raise ToolbusIpcProtocolError("remote-cli输出超过允许上限")
+        check_after_runner()
         return output
 
     @staticmethod
@@ -770,8 +924,9 @@ class RemoteCliIpcClient:
                                     maximum=0xFFFFFFFFFFFFFFFF)
         return result
 
-    def daemon_identity(self) -> str:
-        output = self._run("daemon-identity")
+    def daemon_identity(
+            self, *, deadline: MonotonicDeadline | None = None) -> str:
+        output = self._run("daemon-identity", deadline=deadline)
         if self.structured_output:
             return self._json_daemon_identity(output)
         lines = self._lines(output, "daemon-identity")
@@ -804,13 +959,15 @@ class RemoteCliIpcClient:
             self, daemon_instance_id: str, lease_id: str,
             expected_node_uuid: str, owner_key_id: str, node_id: int,
             resource_id: int,
-            ttl_ms: int) -> None:
+            ttl_ms: int, *,
+            deadline: MonotonicDeadline | None = None) -> None:
         output = self._run(
             "runtime-control-acquire", node_id=node_id,
             arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
                        self._control_id(lease_id, "控制租约ID"),
                        self._control_id(expected_node_uuid, "预期节点UUID"),
-                       owner_key_id, str(resource_id), str(ttl_ms)))
+                       owner_key_id, str(resource_id), str(ttl_ms)),
+            deadline=deadline)
         if not self.structured_output:
             if output.strip() != "ok":
                 raise ToolbusIpcProtocolError("控制租约登记返回值无效")
@@ -822,7 +979,8 @@ class RemoteCliIpcClient:
             self, daemon_instance_id: str, lease_id: str,
             expected_node_uuid: str, owner_key_id: str, node_id: int,
             resource_id: int,
-            idempotency_key: str, value: bool) -> dict:
+            idempotency_key: str, value: bool, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
         if type(value) is not bool:
             raise ToolbusIpcProtocolError("GPIO目标电平必须是布尔值")
         output = self._run(
@@ -831,7 +989,7 @@ class RemoteCliIpcClient:
                        self._control_id(lease_id, "控制租约ID"),
                        self._control_id(expected_node_uuid, "预期节点UUID"),
                        owner_key_id, str(resource_id), idempotency_key,
-                       "1" if value else "0"))
+                       "1" if value else "0"), deadline=deadline)
         if not self.structured_output:
             raise ToolbusIpcProtocolError("GPIO写控制要求结构化remote-cli输出")
         data = self._document(output, "runtime-gpio-write")
@@ -852,12 +1010,13 @@ class RemoteCliIpcClient:
 
     def runtime_control_release(
             self, daemon_instance_id: str, lease_id: str,
-            owner_key_id: str) -> None:
+            owner_key_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> None:
         output = self._run(
             "runtime-control-release",
             arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
                        self._control_id(lease_id, "控制租约ID"),
-                       owner_key_id))
+                       owner_key_id), deadline=deadline)
         if not self.structured_output:
             if output.strip() != "ok":
                 raise ToolbusIpcProtocolError("控制租约释放返回值无效")
@@ -968,27 +1127,35 @@ class RemoteCliIpcClient:
             raise ToolbusIpcProtocolError("resource-status返回了错误的资源ID")
         return result
 
-    def runtime_snapshot(self, maximum_resources: int) -> dict:
+    def runtime_snapshot(
+            self, maximum_resources: int, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
         if maximum_resources < 1 or maximum_resources > 128:
             raise ToolbusIpcProtocolError(
                 "Runtime快照资源上限必须位于1～128")
-        process_timeout_ms = int(self.timeout_seconds * 1000)
+        process_timeout_ms = int(
+            self.timeout_seconds * 1000) if deadline is None else \
+            deadline.remaining_milliseconds(
+                cap=int(self.timeout_seconds * 1000))
         headroom_ms = min(100, max(1, process_timeout_ms // 10))
         timeout_ms = min(
             5000, max(1, process_timeout_ms - headroom_ms))
         output = self._run(
             "runtime-snapshot",
-            arguments=(str(maximum_resources), str(timeout_ms)))
+            arguments=(str(maximum_resources), str(timeout_ms)),
+            deadline=deadline)
         if not self.structured_output:
             raise ToolbusIpcProtocolError(
                 "Runtime单次快照要求结构化remote-cli输出")
         return self._json_runtime_snapshot(output)
 
-    def health_snapshot(self) -> dict:
+    def health_snapshot(
+            self, *, deadline: MonotonicDeadline | None = None) -> dict:
         if not self.structured_output:
             raise ToolbusIpcProtocolError(
                 "健康快照要求结构化remote-cli输出")
-        return self._json_health_snapshot(self._run("health-snapshot"))
+        return self._json_health_snapshot(
+            self._run("health-snapshot", deadline=deadline))
 
 
 class _RuntimeSnapshotView:
@@ -1063,6 +1230,14 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self.refresh_wait_timeout_ms = refresh_wait_timeout_ms
         self.maximum_clock_error_bound_ns = maximum_clock_error_bound_ns
         self.maximum_clock_sample_age_ms = maximum_clock_sample_age_ms
+        # 旧版逐资源查询无法把 deadline 传入回调，因此执行线程只能在回调
+        # 自己返回后回收。整个 Provider 共用一个有界执行器和一个活动代次，
+        # 防止连续超时为仍在运行的旧调用不断创建新线程池。
+        self._status_executor = ThreadPoolExecutor(
+            max_workers=maximum_concurrent_status_queries,
+            thread_name_prefix="runtime-status")
+        self._status_condition = threading.Condition()
+        self._status_inflight: list | None = None
         self._cache_condition = threading.Condition()
         self._cached_snapshot: dict | None = None
         self._cache_stored_at_ms: int | None = None
@@ -1102,15 +1277,23 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             },
         }
 
-    def health_snapshot(self) -> dict:
+    def health_snapshot(
+            self, *, deadline: MonotonicDeadline | None = None) -> dict:
         reader = getattr(self.client, "health_snapshot", None)
         if not bool(getattr(self.client, "structured_output", True)) or \
                 not callable(reader):
             raise RuntimeProviderError("toolbusd 健康快照 IPC 不可用")
         # 串行覆盖调用和状态切换，防止旧 daemon 的迟到结果反向覆盖新世代。
-        with self._health_lock:
+        if deadline is None:
+            acquired = self._health_lock.acquire()
+        else:
+            acquired = self._health_lock.acquire(
+                timeout=deadline.remaining_seconds())
+        if not acquired:
+            raise RequestDeadlineExceeded("健康快照请求期限已耗尽")
+        try:
             try:
-                source = reader()
+                source = call_with_deadline(reader, deadline=deadline)
             except ToolbusIpcProtocolError as error:
                 raise RuntimeProviderError(
                     f"toolbusd 健康快照协议不兼容：{error}") from error
@@ -1135,6 +1318,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 raise RuntimeProviderError(
                     f"toolbusd 健康快照被可信边界拒绝：{error}") from error
             return {"daemon_instance_id": instance_id, **projected}
+        finally:
+            self._health_lock.release()
 
     @property
     def gpio_control_available(self) -> bool:
@@ -1144,72 +1329,132 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "runtime_control_acquire", "runtime_gpio_write",
                 "runtime_control_release"))
 
-    def _resolve_gpio_target(self, node_id: str,
-                             resource_id: str) -> tuple[str, int, int]:
-        read = self.read_snapshot()
+    def _resolve_gpio_target(
+            self, node_id: str, resource_id: str, *,
+            deadline: MonotonicDeadline | None = None
+    ) -> tuple[str, int, int]:
+        read = self.read_snapshot(deadline=deadline)
         node = next((item for item in read.snapshot["nodes"]
                      if item["node_id"] == node_id), None)
         if node is None:
-            raise RuntimeProviderError(f"控制目标节点不存在：{node_id}")
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False)
         if node["state"] != "online":
-            raise RuntimeProviderError(f"控制目标节点当前不可用：{node_id}")
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=True,
+                possibly_committed=False)
         resource = next((item for item in node["resources"]
                          if item["resource_id"] == resource_id), None)
         if resource is None:
-            raise RuntimeProviderError(f"控制目标资源不存在：{resource_id}")
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False)
         if resource["kind"] != "gpio" or not resource["available"]:
-            raise RuntimeProviderError("控制目标不是当前可用的GPIO资源")
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False)
         numeric_node = node["runtime"].get("bus_node_id")
         if type(numeric_node) is not int or not 1 <= numeric_node <= 127:
-            raise RuntimeProviderError("控制目标缺少有效的总线节点ID")
+            raise RuntimeProviderOperationError(
+                "protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False)
         match = re.fullmatch(r"resource-([0-9a-f]{8})", resource_id)
         if match is None:
-            raise RuntimeProviderError("控制目标资源ID不是toolbusd规范ID")
+            raise RuntimeProviderOperationError(
+                "protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False)
         node_match = re.fullmatch(r"node-([0-9a-f]{32})", node_id)
         if node_match is None:
-            raise RuntimeProviderError("控制目标节点ID不是toolbusd规范UUID")
+            raise RuntimeProviderOperationError(
+                "protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False)
         return node_match.group(1), numeric_node, int(match.group(1), 16)
 
     def gpio_control_acquire(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str, node_id: str, resource_id: str,
-            remaining_ttl_ms: Callable[[], int]) -> None:
+            remaining_ttl_ms: Callable[[], int], *,
+            deadline: MonotonicDeadline | None = None) -> None:
         if not self.gpio_control_available:
             raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
-        node_uuid, numeric_node, numeric_resource = self._resolve_gpio_target(
-            node_id, resource_id)
-        ttl_ms = remaining_ttl_ms()
         try:
-            self.client.runtime_control_acquire(
+            node_uuid, numeric_node, numeric_resource = \
+                self._resolve_gpio_target(
+                    node_id, resource_id, deadline=deadline)
+            ttl_ms = call_with_deadline(
+                remaining_ttl_ms, deadline=deadline)
+        except RuntimeProviderOperationError:
+            raise
+        except RequestDeadlineExceeded as error:
+            # 尚未调用写命令，期限失败确定未提交，可安全重放。
+            raise RuntimeProviderOperationError(
+                "deadline_exceeded", category="timeout", retryable=True,
+                possibly_committed=False) from error
+        except RuntimeProviderError as error:
+            # 快照读取、缓存或目标解析失败均发生在 daemon acquire 之前；
+            # 明确标记为确定未提交，让 HTTP 层回滚本次本地租约。
+            raise RuntimeProviderOperationError(
+                "backend_unavailable", category="transport", retryable=True,
+                possibly_committed=False, detail=str(error)) from error
+        try:
+            call_with_deadline(
+                self.client.runtime_control_acquire,
                 daemon_instance_id, lease_id, node_uuid, owner_key_id,
-                numeric_node, numeric_resource, ttl_ms)
+                numeric_node, numeric_resource, ttl_ms,
+                deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
         except ToolbusIpcError as error:
-            raise RuntimeProviderError(f"toolbusd拒绝控制租约：{error}") from error
+            raise _provider_operation_error(error) from error
 
     def gpio_control_write(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str, node_id: str, resource_id: str,
-            idempotency_key: str, value: bool) -> dict:
+            idempotency_key: str, value: bool, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
         if not self.gpio_control_available:
             raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
-        node_uuid, numeric_node, numeric_resource = self._resolve_gpio_target(
-            node_id, resource_id)
         try:
-            return self.client.runtime_gpio_write(
+            node_uuid, numeric_node, numeric_resource = \
+                self._resolve_gpio_target(
+                    node_id, resource_id, deadline=deadline)
+        except RuntimeProviderOperationError:
+            raise
+        except RequestDeadlineExceeded as error:
+            raise RuntimeProviderOperationError(
+                "deadline_exceeded", category="timeout", retryable=True,
+                possibly_committed=False) from error
+        except RuntimeProviderError as error:
+            # 目标预检尚未触发实际 GPIO I/O，失败可安全直接重试。
+            raise RuntimeProviderOperationError(
+                "backend_unavailable", category="transport", retryable=True,
+                possibly_committed=False, detail=str(error)) from error
+        try:
+            return call_with_deadline(
+                self.client.runtime_gpio_write,
                 daemon_instance_id, lease_id, node_uuid, owner_key_id,
-                numeric_node, numeric_resource, idempotency_key, value)
+                numeric_node, numeric_resource, idempotency_key, value,
+                deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
         except ToolbusIpcError as error:
-            raise RuntimeProviderError(f"toolbusd拒绝GPIO写入：{error}") from error
+            raise _provider_operation_error(error) from error
 
     def gpio_control_release(self, daemon_instance_id: str, lease_id: str,
-                             owner_key_id: str) -> None:
+                             owner_key_id: str, *,
+                             deadline: MonotonicDeadline | None = None) -> None:
         if not self.gpio_control_available:
             raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
         try:
-            self.client.runtime_control_release(
-                daemon_instance_id, lease_id, owner_key_id)
+            call_with_deadline(
+                self.client.runtime_control_release,
+                daemon_instance_id, lease_id, owner_key_id,
+                deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
         except ToolbusIpcError as error:
-            raise RuntimeProviderError(f"toolbusd拒绝控制租约释放：{error}") from error
+            raise _provider_operation_error(error) from error
 
     @staticmethod
     def _link_kind(mode: str) -> str:
@@ -1231,16 +1476,95 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             "occurred_at_ms": captured_at_ms,
         }
 
-    def _read_resource_status(self, client: ToolbusIpcClient, node_id: int,
-                              descriptor: dict) -> tuple[dict | None,
-                                                         ToolbusIpcError | None]:
+    def _read_resource_status(
+            self, client: ToolbusIpcClient, node_id: int,
+            descriptor: dict, deadline: MonotonicDeadline | None = None
+    ) -> tuple[dict | None, ToolbusIpcError | None]:
         try:
-            return client.resource_status(
-                node_id, int(descriptor["resource_id"])), None
+            return call_with_deadline(
+                client.resource_status, node_id,
+                int(descriptor["resource_id"]), deadline=deadline), None
         except ToolbusIpcProtocolError:
             raise
         except ToolbusIpcError as error:
             return None, error
+
+    def _read_resource_statuses(
+            self, client: ToolbusIpcClient, node_id: int,
+            descriptors: list[dict], deadline: MonotonicDeadline | None
+    ) -> list[tuple[dict | None, ToolbusIpcError | None]]:
+        """共享绝对期限，并确保旧代任务退出前不再提交新一代。"""
+        if deadline is not None:
+            deadline.check()
+        if not descriptors:
+            return []
+
+        with self._status_condition:
+            while self._status_inflight is not None:
+                if all(future.done()
+                       for future in self._status_inflight):
+                    self._status_inflight = None
+                    break
+                timeout = None if deadline is None else \
+                    deadline.remaining_seconds()
+                self._status_condition.wait(timeout)
+                if deadline is not None:
+                    deadline.check()
+
+            # 空列表是“正在发布新代次”的哨兵；当前持有条件锁，其他调用
+            # 不会观察到一半提交的代次。
+            futures = []
+            self._status_inflight = futures
+            try:
+                for descriptor in descriptors:
+                    futures.append(self._status_executor.submit(
+                        self._read_resource_status, client, node_id,
+                        descriptor, deadline))
+            except BaseException:
+                # submit 本身也可能在部分任务已经开始后失败；这些任务同样
+                # 必须负责在最后一个退出时解锁代次。
+                for future in futures:
+                    future.add_done_callback(self._status_future_done)
+                for future in futures:
+                    future.cancel()
+                if all(future.done() for future in futures):
+                    self._status_inflight = None
+                self._status_condition.notify_all()
+                raise
+            for future in futures:
+                future.add_done_callback(self._status_future_done)
+
+        try:
+            results = []
+            for future in futures:
+                timeout = None if deadline is None else \
+                    deadline.remaining_seconds()
+                try:
+                    results.append(future.result(timeout=timeout))
+                except FutureTimeout as error:
+                    raise RequestDeadlineExceeded(
+                        "资源状态并发查询期限已耗尽") from error
+            if deadline is not None:
+                deadline.check()
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            with self._status_condition:
+                if self._status_inflight is futures and all(
+                        item.done() for item in futures):
+                    self._status_inflight = None
+                self._status_condition.notify_all()
+            raise
+        return results
+
+    def _status_future_done(self, _future) -> None:
+        """最后一个旧代任务退出后，允许下一次刷新发布新代次。"""
+        with self._status_condition:
+            futures = self._status_inflight
+            if futures is not None and futures and all(
+                    future.done() for future in futures):
+                self._status_inflight = None
+            self._status_condition.notify_all()
 
     def _clock_quality_alerts(self, node_id: str, numeric_id: int,
                               clock: dict,
@@ -1306,8 +1630,11 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
     def get_snapshot(self) -> dict:
         return self.read_snapshot().snapshot
 
-    def read_snapshot(self) -> SnapshotRead:
+    def read_snapshot(
+            self, *, deadline: MonotonicDeadline | None = None) -> SnapshotRead:
         """合并并发刷新，并返回缓存年龄；刷新失败不提供陈旧回退。"""
+        if deadline is not None:
+            deadline.check()
         now_ms = self._clock_value()
         with self._cache_condition:
             cached = self._cached_read(now_ms)
@@ -1315,10 +1642,13 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 return cached
             self._raise_cached_failure(now_ms)
             if self._refreshing:
-                deadline = time.monotonic() + \
+                wait_expires = time.monotonic() + \
                     self.refresh_wait_timeout_ms / 1000.0
                 while self._refreshing:
-                    remaining = deadline - time.monotonic()
+                    remaining = wait_expires - time.monotonic()
+                    if deadline is not None:
+                        remaining = min(
+                            remaining, deadline.remaining_seconds())
                     if remaining <= 0:
                         raise RuntimeProviderError(
                             "等待toolbusd快照刷新超时")
@@ -1333,8 +1663,15 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             self._error_stored_at_ms = None
 
         try:
-            snapshot = self._build_snapshot()
+            snapshot = self._build_snapshot(deadline=deadline)
             stored_at_ms = self._clock_value()
+            if deadline is not None:
+                deadline.check()
+        except RequestDeadlineExceeded:
+            with self._cache_condition:
+                self._refreshing = False
+                self._cache_condition.notify_all()
+            raise
         except RuntimeProviderError as error:
             self._finish_failed_refresh(str(error), now_ms)
             raise
@@ -1428,7 +1765,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             self._refreshing = False
             self._cache_condition.notify_all()
 
-    def _build_snapshot(self) -> dict:
+    def _build_snapshot(
+            self, *, deadline: MonotonicDeadline | None = None) -> dict:
         captured_at_ms = self._clock_value()
         source_client: ToolbusIpcClient = self.client
         source_sequence: int | None = None
@@ -1437,8 +1775,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         structured_output = getattr(self.client, "structured_output", True)
         if callable(snapshot_reader) and structured_output:
             try:
-                source = snapshot_reader(
-                    self.maximum_resources_per_snapshot)
+                source = call_with_deadline(
+                    snapshot_reader, self.maximum_resources_per_snapshot,
+                    deadline=deadline)
             except ToolbusIpcProtocolError as error:
                 raise RuntimeProviderError(
                     f"toolbusd IPC协议不兼容：{error}") from error
@@ -1453,8 +1792,10 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             }
             captured_at_ms = self._clock_value()
         try:
-            traffic = source_client.traffic_status()
-            source_nodes = source_client.list_nodes()
+            traffic = call_with_deadline(
+                source_client.traffic_status, deadline=deadline)
+            source_nodes = call_with_deadline(
+                source_client.list_nodes, deadline=deadline)
             link_kind = self._link_kind(str(traffic["mode"]))
         except (KeyError, ToolbusIpcError, ValueError) as error:
             raise RuntimeProviderError(f"toolbusd IPC不可用：{error}") from error
@@ -1490,7 +1831,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             runtime_error: str | None = None
             if online and ready:
                 try:
-                    descriptors = source_client.list_resources(numeric_id)
+                    descriptors = call_with_deadline(
+                        source_client.list_resources, numeric_id,
+                        deadline=deadline)
                 except ToolbusIpcProtocolError as error:
                     raise RuntimeProviderError(
                         f"toolbusd IPC协议不兼容：{error}") from error
@@ -1507,13 +1850,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     raise RuntimeProviderError(
                         "toolbusd资源数量超过单次快照查询上限")
                 try:
-                    with ThreadPoolExecutor(
-                            max_workers=self.maximum_concurrent_status_queries,
-                            thread_name_prefix="runtime-status") as executor:
-                        status_results = list(executor.map(
-                            lambda descriptor: self._read_resource_status(
-                                source_client, numeric_id, descriptor),
-                            descriptors))
+                    status_results = self._read_resource_statuses(
+                        source_client, numeric_id, descriptors, deadline)
                 except ToolbusIpcProtocolError as error:
                     raise RuntimeProviderError(
                         f"toolbusd IPC协议不兼容：{error}") from error

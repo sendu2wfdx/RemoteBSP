@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <system_error>
 
 namespace remotebsp::toolbusd {
@@ -29,6 +30,7 @@ constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
 constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
 constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
+constexpr std::size_t kIpcErrorEnvelopeHeaderSize = 12U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -90,6 +92,119 @@ std::int32_t get_i32(const std::uint8_t* input) {
     }
     return static_cast<std::int32_t>(
         static_cast<std::int64_t>(value) - (1LL << 32U));
+}
+
+std::optional<IpcErrorCategory> expected_error_category(
+    IpcErrorCode code) noexcept {
+    switch (code) {
+        case IpcErrorCode::InvalidRequest:
+        case IpcErrorCode::UnsupportedRequest:
+            return IpcErrorCategory::Request;
+        case IpcErrorCode::DaemonIdentityMismatch:
+            return IpcErrorCategory::Authentication;
+        case IpcErrorCode::PermissionDenied:
+        case IpcErrorCode::ContractRejected:
+            return IpcErrorCategory::Authorization;
+        case IpcErrorCode::LeaseConflict:
+        case IpcErrorCode::LeaseNotFound:
+        case IpcErrorCode::LeaseExpired:
+        case IpcErrorCode::IdempotencyConflict:
+        case IpcErrorCode::ObjectRetired:
+            return IpcErrorCategory::Conflict;
+        case IpcErrorCode::CapacityExceeded:
+        case IpcErrorCode::NodeUnavailable:
+        case IpcErrorCode::BackendUnavailable:
+        case IpcErrorCode::HealthUnavailable:
+            return IpcErrorCategory::Unavailable;
+        case IpcErrorCode::DeadlineExceeded:
+            return IpcErrorCategory::Timeout;
+        case IpcErrorCode::SafeStopFailed:
+        case IpcErrorCode::InternalFailure:
+            return IpcErrorCategory::Internal;
+    }
+    return std::nullopt;
+}
+
+bool safe_error_message(const std::string& message) noexcept {
+    if (message.empty() || message.size() > kMaximumIpcErrorMessageBytes) {
+        return false;
+    }
+    std::size_t offset = 0U;
+    while (offset < message.size()) {
+        const auto first = static_cast<std::uint8_t>(message[offset]);
+        if (first < 0x80U) {
+            if (first < 0x20U || first == 0x7FU) return false;
+            ++offset;
+            continue;
+        }
+        std::size_t width = 0U;
+        std::uint32_t code_point = 0U;
+        std::uint32_t minimum = 0U;
+        if ((first & 0xE0U) == 0xC0U) {
+            width = 2U;
+            code_point = first & 0x1FU;
+            minimum = 0x80U;
+        } else if ((first & 0xF0U) == 0xE0U) {
+            width = 3U;
+            code_point = first & 0x0FU;
+            minimum = 0x800U;
+        } else if ((first & 0xF8U) == 0xF0U) {
+            width = 4U;
+            code_point = first & 0x07U;
+            minimum = 0x10000U;
+        } else {
+            return false;
+        }
+        if (offset + width > message.size()) return false;
+        for (std::size_t index = 1U; index < width; ++index) {
+            const auto continuation =
+                static_cast<std::uint8_t>(message[offset + index]);
+            if ((continuation & 0xC0U) != 0x80U) return false;
+            code_point = (code_point << 6U) | (continuation & 0x3FU);
+        }
+        if (code_point < minimum || code_point > 0x10FFFFU ||
+            (code_point >= 0xD800U && code_point <= 0xDFFFU)) {
+            return false;
+        }
+        offset += width;
+    }
+    return true;
+}
+
+bool possibly_committed_allowed(IpcErrorCode code) noexcept {
+    return code == IpcErrorCode::SafeStopFailed ||
+           code == IpcErrorCode::BackendUnavailable ||
+           code == IpcErrorCode::DeadlineExceeded ||
+           code == IpcErrorCode::InternalFailure;
+}
+
+bool error_flags_allowed(IpcErrorCode code, bool retryable,
+                         bool possibly_committed) noexcept {
+    if (possibly_committed) {
+        return !retryable && possibly_committed_allowed(code);
+    }
+    switch (code) {
+        case IpcErrorCode::LeaseConflict:
+        case IpcErrorCode::CapacityExceeded:
+        case IpcErrorCode::NodeUnavailable:
+        case IpcErrorCode::BackendUnavailable:
+        case IpcErrorCode::DeadlineExceeded:
+        case IpcErrorCode::HealthUnavailable:
+            return retryable;
+        case IpcErrorCode::InvalidRequest:
+        case IpcErrorCode::UnsupportedRequest:
+        case IpcErrorCode::DaemonIdentityMismatch:
+        case IpcErrorCode::PermissionDenied:
+        case IpcErrorCode::LeaseNotFound:
+        case IpcErrorCode::LeaseExpired:
+        case IpcErrorCode::ContractRejected:
+        case IpcErrorCode::IdempotencyConflict:
+        case IpcErrorCode::SafeStopFailed:
+        case IpcErrorCode::ObjectRetired:
+        case IpcErrorCode::InternalFailure:
+            return !retryable;
+    }
+    return false;
 }
 
 void send_all(int socket, const std::uint8_t* data, std::size_t size) {
@@ -161,6 +276,19 @@ void send_body(int socket, const std::vector<std::uint8_t>& body) {
 IpcException::IpcException(const std::string& message)
     : std::runtime_error(message) {}
 
+IpcException::IpcException(const std::string& message,
+                           IpcRequestKind request_kind)
+    : std::runtime_error(message), has_request_kind_(true),
+      request_kind_(request_kind) {}
+
+bool IpcException::has_request_kind() const noexcept {
+    return has_request_kind_;
+}
+
+IpcRequestKind IpcException::request_kind() const noexcept {
+    return request_kind_;
+}
+
 void write_ipc_request(int socket, const protocol::Packet& packet,
                        std::uint32_t node_id) {
     if (node_id == 0 || node_id > 127) {
@@ -206,7 +334,7 @@ IpcRequest read_ipc_request(int socket) {
         if (body.size() != 5U ||
             get_u16(body.data() + 1U) != kHealthSnapshotIpcVersion ||
             get_u16(body.data() + 3U) != 0U) {
-            throw IpcException("健康快照请求版本或长度无效");
+            throw IpcException("健康快照请求版本或长度无效", kind);
         }
         IpcRequest request;
         request.kind = kind;
@@ -294,23 +422,36 @@ IpcRequest read_ipc_request(int socket) {
     if (kind == IpcRequestKind::RuntimeControlAcquire) {
         IpcRequest request;
         request.kind = kind;
-        request.runtime_control_acquire = decode_ipc_runtime_control_acquire(
-            {body.begin() + 1U, body.end()});
+        try {
+            request.runtime_control_acquire =
+                decode_ipc_runtime_control_acquire(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
         return request;
     }
     if (kind == IpcRequestKind::RuntimeGpioWrite) {
         IpcRequest request;
         request.kind = kind;
-        request.runtime_gpio_write = decode_ipc_runtime_gpio_write(
-            {body.begin() + 1U, body.end()});
+        try {
+            request.runtime_gpio_write = decode_ipc_runtime_gpio_write(
+                {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
         return request;
     }
     if (kind == IpcRequestKind::RuntimeControlRelease) {
         IpcRequest request;
         request.kind = kind;
-        request.runtime_control_release =
-            decode_ipc_runtime_control_release(
-                {body.begin() + 1U, body.end()});
+        try {
+            request.runtime_control_release =
+                decode_ipc_runtime_control_release(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
         return request;
     }
     if (body.size() < 1 + sizeof(std::uint32_t)) {
@@ -1383,6 +1524,105 @@ RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
     }
     return {get_u16(body.data()), get_u32(body.data() + 2U),
             body[6U] != 0U, body[7U] != 0U};
+}
+
+std::vector<std::uint8_t> encode_ipc_error_envelope(
+    const IpcErrorEnvelope& error) {
+    const auto expected = expected_error_category(error.code);
+    if (error.version != kIpcErrorEnvelopeVersion ||
+        !expected.has_value() || *expected != error.category ||
+        !error_flags_allowed(error.code, error.retryable,
+                             error.possibly_committed) ||
+        !safe_error_message(error.message)) {
+        throw IpcException("本地 IPC 错误信封字段无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kIpcErrorEnvelopeHeaderSize + error.message.size());
+    append_u16(body, error.version);
+    append_u16(body, static_cast<std::uint16_t>(
+                         kIpcErrorEnvelopeHeaderSize));
+    append_u16(body, static_cast<std::uint16_t>(error.code));
+    body.push_back(static_cast<std::uint8_t>(error.category));
+    body.push_back(static_cast<std::uint8_t>(
+        (error.retryable ? 0x01U : 0U) |
+        (error.possibly_committed ? 0x02U : 0U)));
+    append_u16(body, static_cast<std::uint16_t>(error.message.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), error.message.begin(), error.message.end());
+    return body;
+}
+
+IpcErrorEnvelope decode_ipc_error_envelope(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kIpcErrorEnvelopeHeaderSize ||
+        get_u16(body.data()) != kIpcErrorEnvelopeVersion ||
+        get_u16(body.data() + 2U) != kIpcErrorEnvelopeHeaderSize ||
+        (body[7U] & ~0x03U) != 0U || get_u16(body.data() + 10U) != 0U) {
+        throw IpcException("本地 IPC 错误信封版本或头部无效");
+    }
+    const auto code = static_cast<IpcErrorCode>(get_u16(body.data() + 4U));
+    const auto category = static_cast<IpcErrorCategory>(body[6U]);
+    const auto expected = expected_error_category(code);
+    const auto message_size = get_u16(body.data() + 8U);
+    const bool possibly_committed = (body[7U] & 0x02U) != 0U;
+    if (!expected.has_value() || *expected != category ||
+        !error_flags_allowed(code, (body[7U] & 0x01U) != 0U,
+                             possibly_committed) ||
+        message_size == 0U || message_size > kMaximumIpcErrorMessageBytes ||
+        body.size() != kIpcErrorEnvelopeHeaderSize + message_size) {
+        throw IpcException("本地 IPC 错误信封代码、类别或长度无效");
+    }
+    IpcErrorEnvelope error;
+    error.code = code;
+    error.category = category;
+    error.retryable = (body[7U] & 0x01U) != 0U;
+    error.possibly_committed = possibly_committed;
+    error.message.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kIpcErrorEnvelopeHeaderSize),
+        body.end());
+    if (!safe_error_message(error.message)) {
+        throw IpcException("本地 IPC 错误信封消息无效");
+    }
+    return error;
+}
+
+const char* ipc_error_code_name(IpcErrorCode code) noexcept {
+    switch (code) {
+        case IpcErrorCode::InvalidRequest: return "invalid_request";
+        case IpcErrorCode::UnsupportedRequest: return "unsupported_request";
+        case IpcErrorCode::DaemonIdentityMismatch:
+            return "daemon_identity_mismatch";
+        case IpcErrorCode::PermissionDenied: return "permission_denied";
+        case IpcErrorCode::LeaseConflict: return "lease_conflict";
+        case IpcErrorCode::LeaseNotFound: return "lease_not_found";
+        case IpcErrorCode::LeaseExpired: return "lease_expired";
+        case IpcErrorCode::ContractRejected: return "contract_rejected";
+        case IpcErrorCode::CapacityExceeded: return "capacity_exceeded";
+        case IpcErrorCode::IdempotencyConflict:
+            return "idempotency_conflict";
+        case IpcErrorCode::SafeStopFailed: return "safe_stop_failed";
+        case IpcErrorCode::ObjectRetired: return "object_retired";
+        case IpcErrorCode::NodeUnavailable: return "node_unavailable";
+        case IpcErrorCode::BackendUnavailable: return "backend_unavailable";
+        case IpcErrorCode::DeadlineExceeded: return "deadline_exceeded";
+        case IpcErrorCode::HealthUnavailable: return "health_unavailable";
+        case IpcErrorCode::InternalFailure: return "internal_failure";
+    }
+    return "unknown";
+}
+
+const char* ipc_error_category_name(IpcErrorCategory category) noexcept {
+    switch (category) {
+        case IpcErrorCategory::Request: return "request";
+        case IpcErrorCategory::Authentication: return "authentication";
+        case IpcErrorCategory::Authorization: return "authorization";
+        case IpcErrorCategory::Conflict: return "conflict";
+        case IpcErrorCategory::Unavailable: return "unavailable";
+        case IpcErrorCategory::Timeout: return "timeout";
+        case IpcErrorCategory::Internal: return "internal";
+    }
+    return "unknown";
 }
 
 void write_ipc_response(int socket, IpcStatus status,

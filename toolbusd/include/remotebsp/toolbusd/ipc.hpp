@@ -46,6 +46,47 @@ constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
 constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
 constexpr std::uint16_t kMaximumIpcMotionGroupMembers = 32U;
+constexpr std::uint16_t kIpcErrorEnvelopeVersion = 1U;
+constexpr std::size_t kMaximumIpcErrorMessageBytes = 256U;
+
+enum class IpcErrorCategory : std::uint8_t {
+    Request = 1U,
+    Authentication = 2U,
+    Authorization = 3U,
+    Conflict = 4U,
+    Unavailable = 5U,
+    Timeout = 6U,
+    Internal = 7U,
+};
+
+enum class IpcErrorCode : std::uint16_t {
+    InvalidRequest = 1U,
+    UnsupportedRequest = 2U,
+    DaemonIdentityMismatch = 100U,
+    PermissionDenied = 101U,
+    LeaseConflict = 102U,
+    LeaseNotFound = 103U,
+    LeaseExpired = 104U,
+    ContractRejected = 105U,
+    CapacityExceeded = 106U,
+    IdempotencyConflict = 107U,
+    SafeStopFailed = 108U,
+    ObjectRetired = 109U,
+    NodeUnavailable = 200U,
+    BackendUnavailable = 201U,
+    DeadlineExceeded = 202U,
+    HealthUnavailable = 203U,
+    InternalFailure = 255U,
+};
+
+struct IpcErrorEnvelope {
+    std::uint16_t version{kIpcErrorEnvelopeVersion};
+    IpcErrorCode code{IpcErrorCode::InternalFailure};
+    IpcErrorCategory category{IpcErrorCategory::Internal};
+    bool retryable{};
+    bool possibly_committed{};
+    std::string message;
+};
 
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
@@ -143,6 +184,13 @@ struct IpcRuntimeSnapshot {
 class IpcException : public std::runtime_error {
 public:
     explicit IpcException(const std::string& message);
+    IpcException(const std::string& message, IpcRequestKind request_kind);
+    bool has_request_kind() const noexcept;
+    IpcRequestKind request_kind() const noexcept;
+
+private:
+    bool has_request_kind_{};
+    IpcRequestKind request_kind_{IpcRequestKind::RemotePacket};
 };
 
 void write_ipc_request(int socket, const protocol::Packet& packet,
@@ -222,6 +270,12 @@ std::vector<std::uint8_t> encode_ipc_runtime_gpio_write_result(
     const RuntimeGpioWriteResult& result);
 RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
     const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_error_envelope(
+    const IpcErrorEnvelope& error);
+IpcErrorEnvelope decode_ipc_error_envelope(
+    const std::vector<std::uint8_t>& body);
+const char* ipc_error_code_name(IpcErrorCode code) noexcept;
+const char* ipc_error_category_name(IpcErrorCategory category) noexcept;
 
 void write_ipc_response(int socket, IpcStatus status,
                         const std::vector<std::uint8_t>& body);

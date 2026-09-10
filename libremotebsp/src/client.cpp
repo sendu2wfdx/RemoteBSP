@@ -144,6 +144,38 @@ MotionGroupTransactionStatus motion_group_status_from_ipc(
     return result;
 }
 
+[[noreturn]] void throw_structured_ipc_error(
+    const toolbusd::IpcResponse& response, const char* fallback) {
+    try {
+        const auto error = toolbusd::decode_ipc_error_envelope(response.body);
+        throw IpcErrorException(
+            error.version, static_cast<std::uint16_t>(error.code),
+            static_cast<std::uint8_t>(error.category), error.retryable,
+            error.possibly_committed, error.message);
+    } catch (const IpcErrorException&) {
+        throw;
+    } catch (const std::exception&) {
+        // 覆盖请求绝不把旧 daemon 文本或畸形二进制提升为机器合同。
+        throw ClientException(std::string(fallback) +
+                              "：toolbusd 错误信封无效或版本过旧");
+    }
+}
+
+}
+
+IpcErrorException::IpcErrorException(
+    std::uint16_t version, std::uint16_t code, std::uint8_t category,
+    bool retryable, bool possibly_committed, const std::string& message)
+    : ClientException(message), version_(version), code_(code),
+      category_(category), retryable_(retryable),
+      possibly_committed_(possibly_committed) {}
+
+std::uint16_t IpcErrorException::version() const noexcept { return version_; }
+std::uint16_t IpcErrorException::code() const noexcept { return code_; }
+std::uint8_t IpcErrorException::category() const noexcept { return category_; }
+bool IpcErrorException::retryable() const noexcept { return retryable_; }
+bool IpcErrorException::possibly_committed() const noexcept {
+    return possibly_committed_;
 }
 
 RemoteException::RemoteException(std::uint8_t status,
@@ -282,8 +314,7 @@ ToolbusdHealthSnapshot Client::health_snapshot() const {
     toolbusd::write_ipc_health_snapshot_request(socket.get());
     const auto response = toolbusd::read_ipc_response(socket.get());
     if (response.status != toolbusd::IpcStatus::Ok) {
-        throw ClientException(
-            std::string(response.body.begin(), response.body.end()));
+        throw_structured_ipc_error(response, "toolbusd 健康快照失败");
     }
     const auto source = toolbusd::decode_ipc_health_snapshot(response.body);
     return {source.version, source.daemon_instance_id, source.health};
@@ -306,11 +337,11 @@ void Client::runtime_control_acquire(
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_runtime_control_acquire_request(socket.get(), request);
     const auto response = toolbusd::read_ipc_response(socket.get());
-    if (response.status != toolbusd::IpcStatus::Ok || !response.body.empty()) {
-        throw ClientException(response.body.empty()
-                                  ? "Runtime 控制租约登记失败"
-                                  : std::string(response.body.begin(),
-                                                response.body.end()));
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime 控制租约登记失败");
+    }
+    if (!response.body.empty()) {
+        throw ClientException("Runtime 控制租约登记响应载荷无效");
     }
 }
 
@@ -332,12 +363,8 @@ RuntimeGpioWriteResult Client::runtime_gpio_write(
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_runtime_gpio_write_request(socket.get(), request);
     const auto response = toolbusd::read_ipc_response(socket.get());
-    if (response.status == toolbusd::IpcStatus::TimedOut) {
-        throw ClientException("Runtime GPIO 写入超时");
-    }
     if (response.status != toolbusd::IpcStatus::Ok) {
-        throw ClientException(
-            std::string(response.body.begin(), response.body.end()));
+        throw_structured_ipc_error(response, "Runtime GPIO 写入失败");
     }
     const auto result =
         toolbusd::decode_ipc_runtime_gpio_write_result(response.body);
@@ -355,12 +382,11 @@ void Client::runtime_control_release(
     SocketHandle socket(connect_socket(socket_path_));
     toolbusd::write_ipc_runtime_control_release_request(socket.get(), request);
     const auto response = toolbusd::read_ipc_response(socket.get());
-    if (response.status != toolbusd::IpcStatus::Ok ||
-        !response.body.empty()) {
-        throw ClientException(
-            response.body.empty()
-                ? "Runtime 控制租约释放失败"
-                : std::string(response.body.begin(), response.body.end()));
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime 控制租约释放失败");
+    }
+    if (!response.body.empty()) {
+        throw ClientException("Runtime 控制租约释放响应载荷无效");
     }
 }
 

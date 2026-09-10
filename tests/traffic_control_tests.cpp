@@ -232,6 +232,28 @@ void test_versioned_cli_json() {
           std::string::npos);
     CHECK(resource_status.str().find("\"rx_overruns\":5") !=
           std::string::npos);
+
+    const IpcErrorException ipc_error(
+        toolbusd::kIpcErrorEnvelopeVersion,
+        static_cast<std::uint16_t>(toolbusd::IpcErrorCode::LeaseNotFound),
+        static_cast<std::uint8_t>(toolbusd::IpcErrorCategory::Conflict),
+        false, false, "租约 \"lease-a\" 不存在");
+    std::ostringstream error_output;
+    cli_json::write_ipc_error(
+        error_output, "runtime-control-release", ipc_error);
+    CHECK(error_output.str().find(
+        "{\"schema_version\":1,\"command\":\"runtime-control-release\"") ==
+          0U);
+    CHECK(error_output.str().find("\"ipc_error_version\":1") !=
+          std::string::npos);
+    CHECK(error_output.str().find("\"code\":103") != std::string::npos);
+    CHECK(error_output.str().find("\"category\":4") != std::string::npos);
+    CHECK(error_output.str().find("\"retryable\":false") !=
+          std::string::npos);
+    CHECK(error_output.str().find("\"possibly_committed\":false") !=
+          std::string::npos);
+    CHECK(error_output.str().find("租约 \\\"lease-a\\\" 不存在") !=
+          std::string::npos);
 }
 
 }

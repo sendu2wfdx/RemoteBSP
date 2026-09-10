@@ -216,6 +216,27 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// 仅表示通过严格 IPC 错误信封收到的远端守护进程错误。message 只供人阅读，
+// 调用方必须依据稳定 code/category/flags 分支。
+class IpcErrorException : public ClientException {
+public:
+    IpcErrorException(std::uint16_t version, std::uint16_t code,
+                      std::uint8_t category, bool retryable,
+                      bool possibly_committed, const std::string& message);
+    std::uint16_t version() const noexcept;
+    std::uint16_t code() const noexcept;
+    std::uint8_t category() const noexcept;
+    bool retryable() const noexcept;
+    bool possibly_committed() const noexcept;
+
+private:
+    std::uint16_t version_{};
+    std::uint16_t code_{};
+    std::uint8_t category_{};
+    bool retryable_{};
+    bool possibly_committed_{};
+};
+
 class RemoteException : public ClientException {
 public:
     RemoteException(std::uint8_t status, const std::string& message);

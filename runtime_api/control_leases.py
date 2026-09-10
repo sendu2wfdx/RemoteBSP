@@ -9,6 +9,12 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Callable
 
+from .deadline import (
+    MonotonicDeadline,
+    RequestDeadlineExceeded,
+    call_with_deadline,
+)
+
 
 CONTROL_LEASE_SCHEMA_VERSION = 1
 DEFAULT_CONTROL_LEASE_CAPACITY = 256
@@ -338,6 +344,7 @@ class DaemonBoundControlLeaseManager:
         self._identity_completed_generation = 0
         self._identity_invalidated_generation = 0
         self._identity_refresh_error: str | None = None
+        self._identity_refresh_valid = False
 
     @property
     def capacity(self) -> int:
@@ -348,7 +355,9 @@ class DaemonBoundControlLeaseManager:
         with self._binding_condition:
             return self._daemon_instance_id
 
-    def matches_current_daemon(self, expected_instance_id: str) -> bool:
+    def matches_current_daemon(
+            self, expected_instance_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> bool:
         """重新读取 daemon 身份，并判断是否仍为已准入的同一实例。
 
         身份不可读时沿用租约管理器的失败关闭语义；身份换代时
@@ -359,12 +368,19 @@ class DaemonBoundControlLeaseManager:
                 expected_instance_id == "0" * 32:
             raise ValueError("待核对的toolbusd实例身份无效")
         return bool(self._with_current_identity(
-            lambda: self._daemon_instance_id == expected_instance_id))
+            lambda: self._daemon_instance_id == expected_instance_id,
+            deadline=deadline))
 
-    def _read_identity(self) -> str:
+    def _read_identity(
+            self, deadline: MonotonicDeadline | None = None) -> str:
         try:
-            identity = self._identity_reader()
+            identity = call_with_deadline(
+                self._identity_reader, deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
         except Exception as error:
+            if deadline is not None:
+                deadline.check()
             raise ControlLeaseError(
                 f"无法确认toolbusd实例身份：{error}") from error
         if not isinstance(identity, str) or \
@@ -373,21 +389,42 @@ class DaemonBoundControlLeaseManager:
             raise ControlLeaseError("toolbusd返回了无效的实例身份")
         return identity
 
-    def _with_current_identity(self, operation: Callable[[], object]):
-        with self._binding_condition:
-            if self._identity_refreshing:
+    def _with_current_identity(
+            self, operation: Callable[[], object], *,
+            deadline: MonotonicDeadline | None = None):
+        while True:
+            with self._binding_condition:
+                if self._identity_refreshing:
+                    generation = self._identity_refresh_generation
+                    while self._identity_completed_generation < generation:
+                        timeout = None if deadline is None else \
+                            deadline.remaining_seconds()
+                        self._binding_condition.wait(timeout)
+                        if deadline is not None:
+                            deadline.check()
+                    if self._identity_refresh_error is not None:
+                        raise ControlLeaseError(self._identity_refresh_error)
+                    if self._identity_refresh_valid:
+                        return operation()
+                    # 刷新者仅因自己的请求期限取消；没有产生共享身份证据。
+                    # 当前等待者用自己的剩余预算重新竞争一次刷新。
+                    continue
+                self._identity_refreshing = True
+                self._identity_refresh_generation += 1
                 generation = self._identity_refresh_generation
-                while self._identity_completed_generation < generation:
-                    self._binding_condition.wait()
-                if self._identity_refresh_error is not None:
-                    raise ControlLeaseError(self._identity_refresh_error)
-                return operation()
-            self._identity_refreshing = True
-            self._identity_refresh_generation += 1
-            generation = self._identity_refresh_generation
+                break
         try:
-            identity = self._read_identity()
+            identity = self._read_identity(deadline)
             error_message = None
+        except RequestDeadlineExceeded:
+            with self._binding_condition:
+                self._identity_refreshing = False
+                self._identity_completed_generation = generation
+                self._identity_refresh_error = None
+                self._identity_refresh_valid = False
+                self._binding_condition.notify_all()
+            # 请求取消不是 daemon 失败证据，不得撤销其他请求的租约或能力。
+            raise
         except ControlLeaseError as error:
             identity = None
             error_message = str(error)
@@ -398,6 +435,7 @@ class DaemonBoundControlLeaseManager:
                 error_message = "toolbusd实例身份读取已被显式作废"
                 identity = None
             self._identity_refresh_error = error_message
+            self._identity_refresh_valid = error_message is None
             if error_message is not None:
                 self._manager.invalidate_all()
                 self._daemon_instance_id = None
@@ -409,29 +447,34 @@ class DaemonBoundControlLeaseManager:
             self._binding_condition.notify_all()
             return operation()
 
-    def acquire(self, **arguments) -> tuple[ControlLease, bool]:
+    def acquire(self, *, deadline: MonotonicDeadline | None = None,
+                **arguments) -> tuple[ControlLease, bool]:
         return self._with_current_identity(
-            lambda: self._manager.acquire(**arguments))
+            lambda: self._manager.acquire(**arguments), deadline=deadline)
 
     def release(self, lease_id: str, *, requester_key_id: str,
-                allow_foreign: bool = False) -> ControlLease:
+                allow_foreign: bool = False,
+                deadline: MonotonicDeadline | None = None) -> ControlLease:
         return self._with_current_identity(
             lambda: self._manager.release(
                 lease_id, requester_key_id=requester_key_id,
-                allow_foreign=allow_foreign))
+                allow_foreign=allow_foreign), deadline=deadline)
 
     def authorize(self, lease_id: str, *, requester_key_id: str,
-                  allow_foreign: bool = False) -> ControlLease:
+                  allow_foreign: bool = False,
+                  deadline: MonotonicDeadline | None = None) -> ControlLease:
         return self._with_current_identity(
             lambda: self._manager.authorize(
                 lease_id, requester_key_id=requester_key_id,
-                allow_foreign=allow_foreign))
+                allow_foreign=allow_foreign), deadline=deadline)
 
     def remaining_ttl_ms(self, lease_id: str, *,
-                         requester_key_id: str) -> int:
+                         requester_key_id: str,
+                         deadline: MonotonicDeadline | None = None) -> int:
         return self._with_current_identity(
             lambda: self._manager.remaining_ttl_ms(
-                lease_id, requester_key_id=requester_key_id))
+                lease_id, requester_key_id=requester_key_id),
+            deadline=deadline)
 
     def rollback_acquire(self, lease_id: str, *, owner_key_id: str) -> None:
         # 普通目标或下游登记失败只回滚本次租约；不把无关租约和幂等历史清空。
@@ -439,8 +482,10 @@ class DaemonBoundControlLeaseManager:
             self._manager.rollback_acquire(
                 lease_id, owner_key_id=owner_key_id)
 
-    def active_count(self) -> int:
-        return self._with_current_identity(self._manager.active_count)
+    def active_count(
+            self, *, deadline: MonotonicDeadline | None = None) -> int:
+        return self._with_current_identity(
+            self._manager.active_count, deadline=deadline)
 
     def invalidate_all(self) -> None:
         with self._binding_condition:

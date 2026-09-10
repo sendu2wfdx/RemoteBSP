@@ -12,6 +12,47 @@ namespace remotebsp::cli_json {
 
 constexpr std::uint32_t kSchemaVersion = 1;
 
+inline void write_string(std::ostream& output, std::string_view value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    output << '"';
+    for (const unsigned char byte : value) {
+        switch (byte) {
+            case '"': output << "\\\""; break;
+            case '\\': output << "\\\\"; break;
+            case '\b': output << "\\b"; break;
+            case '\f': output << "\\f"; break;
+            case '\n': output << "\\n"; break;
+            case '\r': output << "\\r"; break;
+            case '\t': output << "\\t"; break;
+            default:
+                if (byte < 0x20U) {
+                    output << "\\u00" << digits[byte >> 4U]
+                           << digits[byte & 0x0FU];
+                } else {
+                    output << static_cast<char>(byte);
+                }
+        }
+    }
+    output << '"';
+}
+
+inline void write_ipc_error(std::ostream& output, std::string_view command,
+                            const IpcErrorException& error) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":";
+    write_string(output, command);
+    output << ",\"error\":{\"ipc_error_version\":" << error.version()
+           << ",\"code\":" << error.code()
+           << ",\"category\":" << static_cast<unsigned>(error.category())
+           << ",\"retryable\":"
+           << (error.retryable() ? "true" : "false")
+           << ",\"possibly_committed\":"
+           << (error.possibly_committed() ? "true" : "false")
+           << ",\"message\":";
+    write_string(output, error.what());
+    output << "}}\n";
+}
+
 inline const char* resource_type(protocol::ResourceType type) {
     switch (type) {
         case protocol::ResourceType::Gpio: return "gpio";

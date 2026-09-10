@@ -10,7 +10,6 @@ import secrets
 import socket
 import sys
 import threading
-import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -63,11 +62,17 @@ from .events import (
     validate_event_cursor,
 )
 from .models import RUNTIME_SNAPSHOT_SCHEMA_VERSION
+from .deadline import (
+    MonotonicDeadline,
+    RequestDeadlineExceeded,
+    call_with_deadline,
+)
 from .provider import (
     FileSnapshotProvider,
     MockSnapshotProvider,
     RuntimeProvider,
     RuntimeProviderError,
+    RuntimeProviderOperationError,
     SnapshotRead,
 )
 from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
@@ -150,31 +155,42 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     server_version = "RemoteBSP-Runtime/0.1"
 
     def handle(self) -> None:
-        # socket timeout 只限制相邻两次 I/O 的空闲时间。单独的总期限可阻止
-        # 攻击者持续滴入请求行或头部字节来无限占用有限工作线程。
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionAbortedError,
+                ConnectionResetError):
+            # 期限或对端断开只终止当前连接，不影响其他请求。
+            pass
+
+    def handle_one_request(self) -> None:
+        # 期限属于单个 HTTP request，keep-alive 上的后续请求
+        # 必须获得新期限，不得继承前一次请求的旧预算。
+        self._request_deadline = MonotonicDeadline.after_seconds(
+            self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
         header_complete = threading.Event()
+        self._header_complete = header_complete
 
         def close_stalled_header() -> None:
-            if header_complete.wait(
-                    self.server.request_io_timeout_seconds):  # type: ignore[attr-defined]
+            try:
+                timeout = self._request_deadline.remaining_seconds()
+            except RequestDeadlineExceeded:
+                timeout = 0.0
+            if header_complete.wait(timeout):
                 return
             try:
                 self.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
-        self._header_complete = header_complete
-        watchdog = threading.Thread(target=close_stalled_header, daemon=True)
-        watchdog.start()
+        threading.Thread(target=close_stalled_header, daemon=True).start()
         try:
-            try:
-                super().handle()
-            except (BrokenPipeError, ConnectionResetError):
-                # 头部总期限或对端主动断开后，响应写入可能失败。这是单连接
-                # 的预期终止，不能升级成服务端线程 traceback 或影响其他请求。
-                pass
+            super().handle_one_request()
         finally:
             header_complete.set()
+
+    @property
+    def request_deadline(self) -> MonotonicDeadline:
+        return self._request_deadline
 
     @property
     def provider(self) -> RuntimeProvider:
@@ -217,7 +233,12 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if not operational or not isinstance(admitted, str):
             return False
         try:
-            matches = self.control_leases.matches_current_daemon(admitted)
+            matches = self.control_leases.matches_current_daemon(
+                admitted, deadline=self.request_deadline)
+        except RequestDeadlineExceeded:
+            # 请求自身预算不足不是 daemon 换代证据；本次失败关闭，但不污染
+            # 其他请求共享的 operational 证明或活动租约。
+            return False
         except (ControlLeaseError, ValueError):
             matches = False
         if not matches:
@@ -279,6 +300,26 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         self._audit_key_id: str | None = None
         self._audit_path_category = self._classify_path(self.path)
         self._audit_emitted = False
+
+    def _structured_provider_error(
+            self, error: RuntimeProviderOperationError) -> None:
+        status, public_code = {
+            "deadline_exceeded": (
+                HTTPStatus.GATEWAY_TIMEOUT, "control_deadline_exceeded"),
+            "backend_unavailable": (
+                HTTPStatus.SERVICE_UNAVAILABLE, "control_backend_unavailable"),
+            "protocol_incompatible": (
+                HTTPStatus.BAD_GATEWAY, "control_protocol_incompatible"),
+            "target_rejected": (
+                HTTPStatus.CONFLICT, "control_target_rejected"),
+        }[error.code]
+        self._error(
+            status, public_code, "控制操作未获得可验证的下游成功结果",
+            details={
+                "category": error.category,
+                "retryable": error.retryable,
+                "possibly_committed": error.possibly_committed,
+            })
 
     @staticmethod
     def _classify_path(target: str) -> str:
@@ -549,14 +590,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         f"控制请求体必须位于2～{MAXIMUM_CONTROL_REQUEST_BYTES}字节")
             return None
         try:
-            deadline = time.monotonic() + \
-                self.server.request_io_timeout_seconds  # type: ignore[attr-defined]
             chunks: list[bytes] = []
             received = 0
             while received < length:
-                remaining_seconds = deadline - time.monotonic()
-                if remaining_seconds <= 0:
-                    raise TimeoutError
+                remaining_seconds = self.request_deadline.remaining_seconds()
                 self.connection.settimeout(remaining_seconds)
                 maximum = min(length - received, MAXIMUM_CONTROL_REQUEST_BYTES)
                 read1 = getattr(self.rfile, "read1", None)
@@ -569,12 +606,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             raw = b"".join(chunks)
             value = json.loads(raw.decode("utf-8"),
                                object_pairs_hook=_strict_json_object)
-        except (TimeoutError, socket.timeout):
-            try:
-                self.connection.settimeout(
-                    self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
-            except OSError:
-                pass
+        except (RequestDeadlineExceeded, TimeoutError, socket.timeout):
             self._error(HTTPStatus.REQUEST_TIMEOUT, "request_body_timeout",
                         "读取控制请求体超时")
             return None
@@ -590,7 +622,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         finally:
             try:
                 self.connection.settimeout(
-                    self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
+                    self.request_deadline.remaining_seconds())
+            except RequestDeadlineExceeded:
+                pass
             except OSError:
                 pass
         if not isinstance(value, dict):
@@ -614,6 +648,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         lease = None
         replayed = False
         downstream_registered = False
+        downstream_started = False
         daemon_id = None
         operational_revision = self._gpio_control_revision()
         try:
@@ -636,10 +671,12 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                             "gpio_control_unavailable",
                             "GPIO写控制后端不可用")
                 return
-            lease, replayed = self.control_leases.acquire(
+            lease, replayed = call_with_deadline(
+                self.control_leases.acquire,
                 owner_key_id=principal.key_id, node_id=node_id,
                 resource_id=resource_id, command_group=command_group,
-                ttl_ms=ttl_ms, idempotency_key=idempotency_key)
+                ttl_ms=ttl_ms, idempotency_key=idempotency_key,
+                deadline=self.request_deadline)
             if command_group == GPIO_WRITE_COMMAND_GROUP:
                 daemon_id = getattr(
                     self.control_leases, "daemon_instance_id", None)
@@ -647,17 +684,25 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     raise ControlLeaseError("toolbusd实例身份尚未绑定")
                 # replay 也必须重新经过下游幂等登记，不能只凭 Runtime
                 # 进程内历史恢复 operational 证明。
-                self.provider.gpio_control_acquire(  # type: ignore[attr-defined]
+                downstream_started = True
+                call_with_deadline(
+                    self.provider.gpio_control_acquire,  # type: ignore[attr-defined]
                     daemon_id, lease.lease_id, principal.key_id,
                     node_id, resource_id,
-                    lambda: self.control_leases.remaining_ttl_ms(
+                    lambda: call_with_deadline(
+                        self.control_leases.remaining_ttl_ms,
                         lease.lease_id,
-                        requester_key_id=principal.key_id))
+                        requester_key_id=principal.key_id,
+                        deadline=self.request_deadline),
+                    deadline=self.request_deadline)
                 downstream_registered = True
                 # 远端登记可能接近 IPC 总期限；成功响应前再次按单调时钟
                 # 确认本地租约仍活动，绝不返回一个已经过期的租约。
-                self.control_leases.authorize(
-                    lease.lease_id, requester_key_id=principal.key_id)
+                call_with_deadline(
+                    self.control_leases.authorize, lease.lease_id,
+                    requester_key_id=principal.key_id,
+                    deadline=self.request_deadline)
+                self.request_deadline.check()
                 self._admit_gpio_control(
                     daemon_id, operational_revision)
         except ValueError as error:
@@ -672,17 +717,59 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "control_lease_capacity_exceeded", str(error))
             return
+        except RequestDeadlineExceeded:
+            # 下游调用一旦开始，deadline 只能说明结果未知，不能证明未提交；
+            # 保留本地租约直至短 TTL 到期，避免错误释放后产生双重所有者。
+            if lease is not None and not replayed and not downstream_started:
+                self.control_leases.rollback_acquire(
+                    lease.lease_id, owner_key_id=lease.owner_key_id)
+            if downstream_started:
+                self._structured_provider_error(RuntimeProviderOperationError(
+                    "deadline_exceeded", category="timeout",
+                    retryable=False, possibly_committed=True))
+            else:
+                self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                            "control_deadline_exceeded",
+                            "控制请求未在统一处理期限内完成")
+            return
+        except RuntimeProviderOperationError as error:
+            if lease is not None and not replayed and \
+                    not error.possibly_committed:
+                self.control_leases.rollback_acquire(
+                    lease.lease_id, owner_key_id=lease.owner_key_id)
+            if error.invalidates_global_operational:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=(daemon_id if isinstance(
+                        daemon_id, str) else None),
+                    expected_revision=operational_revision)
+            self._structured_provider_error(error)
+            return
         except (ControlLeaseError, RuntimeProviderError) as error:
             if downstream_registered and isinstance(daemon_id, str) and \
                     lease is not None:
                 try:
-                    self.provider.gpio_control_release(  # type: ignore[attr-defined]
-                        daemon_id, lease.lease_id, lease.owner_key_id)
-                except RuntimeProviderError:
+                    call_with_deadline(
+                        self.provider.gpio_control_release,  # type: ignore[attr-defined]
+                        daemon_id, lease.lease_id, lease.owner_key_id,
+                        deadline=self.request_deadline)
+                except (RequestDeadlineExceeded, RuntimeProviderError):
                     pass
-            if lease is not None and not replayed:
+            if lease is not None and not replayed and not downstream_started:
                 self.control_leases.rollback_acquire(
                     lease.lease_id, owner_key_id=lease.owner_key_id)
+            try:
+                self.request_deadline.check()
+            except RequestDeadlineExceeded:
+                if downstream_started:
+                    self._structured_provider_error(
+                        RuntimeProviderOperationError(
+                            "deadline_exceeded", category="timeout",
+                            retryable=False, possibly_committed=True))
+                else:
+                    self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                                "control_deadline_exceeded",
+                                "控制请求未在统一处理期限内完成")
+                return
             if isinstance(error, ControlLeaseError):
                 self._clear_gpio_control_operational(
                     expected_revision=operational_revision)
@@ -704,6 +791,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         daemon_id_before = getattr(
             self.control_leases, "daemon_instance_id", None)
         daemon_id = None
+        downstream_started = False
         try:
             lease_id = validate_lease_id(lease_id)
             allow_foreign = CONTROL_LEASE_REVOKE_PERMISSION in \
@@ -713,9 +801,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
                             "当前API密钥没有释放控制租约的权限")
                 return
-            lease = self.control_leases.authorize(
+            lease = call_with_deadline(
+                self.control_leases.authorize,
                 lease_id, requester_key_id=principal.key_id,
-                allow_foreign=allow_foreign)
+                allow_foreign=allow_foreign,
+                deadline=self.request_deadline)
             if lease.command_group == GPIO_WRITE_COMMAND_GROUP:
                 if not self.gpio_control_configured:
                     raise ControlLeaseError("GPIO写控制后端不可用")
@@ -725,11 +815,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     raise ControlLeaseError("toolbusd实例身份尚未绑定")
                 # 管理员撤销权限来自服务端认证配置；v1 IPC 不携带可伪造的
                 # foreign/admin 位，而是以登记时的真实所有者释放。
-                self.provider.gpio_control_release(  # type: ignore[attr-defined]
-                    daemon_id, lease.lease_id, lease.owner_key_id)
-            self.control_leases.release(
+                downstream_started = True
+                call_with_deadline(
+                    self.provider.gpio_control_release,  # type: ignore[attr-defined]
+                    daemon_id, lease.lease_id, lease.owner_key_id,
+                    deadline=self.request_deadline)
+            call_with_deadline(
+                self.control_leases.release,
                 lease_id, requester_key_id=principal.key_id,
-                allow_foreign=allow_foreign)
+                allow_foreign=allow_foreign,
+                deadline=self.request_deadline)
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, "control_lease_id_invalid",
                         str(error))
@@ -751,7 +846,47 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
                         str(error))
             return
+        except RequestDeadlineExceeded:
+            if downstream_started:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=(daemon_id if isinstance(
+                        daemon_id, str) else daemon_id_before),
+                    expected_revision=operational_revision)
+                self._structured_provider_error(RuntimeProviderOperationError(
+                    "deadline_exceeded", category="timeout",
+                    retryable=False, possibly_committed=True))
+            else:
+                self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                            "control_deadline_exceeded",
+                            "控制请求未在统一处理期限内完成")
+            return
+        except RuntimeProviderOperationError as error:
+            if error.invalidates_global_operational or \
+                    error.possibly_committed:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=(daemon_id if isinstance(
+                        daemon_id, str) else daemon_id_before),
+                    expected_revision=operational_revision)
+            self._structured_provider_error(error)
+            return
         except (ControlLeaseError, RuntimeProviderError):
+            try:
+                self.request_deadline.check()
+            except RequestDeadlineExceeded:
+                if downstream_started:
+                    self._clear_gpio_control_operational(
+                        expected_instance_id=(daemon_id if isinstance(
+                            daemon_id, str) else daemon_id_before),
+                        expected_revision=operational_revision)
+                    self._structured_provider_error(
+                        RuntimeProviderOperationError(
+                            "deadline_exceeded", category="timeout",
+                            retryable=False, possibly_committed=True))
+                else:
+                    self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                                "control_deadline_exceeded",
+                                "控制请求未在统一处理期限内完成")
+                return
             self._clear_gpio_control_operational(
                 expected_instance_id=(daemon_id if isinstance(daemon_id, str)
                                       else daemon_id_before),
@@ -778,6 +913,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         daemon_id_before = getattr(
             self.control_leases, "daemon_instance_id", None)
         daemon_id = None
+        downstream_started = False
         try:
             lease_id = validate_lease_id(value["lease_id"])
             node_id = validate_control_id(value["node_id"], "node_id")
@@ -788,8 +924,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             desired = value["value"]
             if type(desired) is not bool:
                 raise ValueError("value必须是布尔值")
-            lease = self.control_leases.authorize(
-                lease_id, requester_key_id=principal.key_id)
+            lease = call_with_deadline(
+                self.control_leases.authorize, lease_id,
+                requester_key_id=principal.key_id,
+                deadline=self.request_deadline)
             if lease.command_group != GPIO_WRITE_COMMAND_GROUP or \
                     lease.node_id != node_id or \
                     lease.resource_id != resource_id:
@@ -798,9 +936,12 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self.control_leases, "daemon_instance_id", None)
             if not isinstance(daemon_id, str):
                 raise ControlLeaseError("toolbusd实例身份尚未绑定")
-            result = self.provider.gpio_control_write(  # type: ignore[attr-defined]
+            downstream_started = True
+            result = call_with_deadline(
+                self.provider.gpio_control_write,  # type: ignore[attr-defined]
                 daemon_id, lease_id, principal.key_id, node_id,
-                resource_id, idempotency_key, desired)
+                resource_id, idempotency_key, desired,
+                deadline=self.request_deadline)
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
                         str(error))
@@ -824,7 +965,47 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.CONFLICT, "control_lease_conflict",
                         str(error))
             return
+        except RequestDeadlineExceeded:
+            if downstream_started:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=(daemon_id if isinstance(
+                        daemon_id, str) else daemon_id_before),
+                    expected_revision=operational_revision)
+                self._structured_provider_error(RuntimeProviderOperationError(
+                    "deadline_exceeded", category="timeout",
+                    retryable=False, possibly_committed=True))
+            else:
+                self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                            "control_deadline_exceeded",
+                            "控制请求未在统一处理期限内完成")
+            return
+        except RuntimeProviderOperationError as error:
+            if error.invalidates_global_operational or \
+                    error.possibly_committed:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=(daemon_id if isinstance(
+                        daemon_id, str) else daemon_id_before),
+                    expected_revision=operational_revision)
+            self._structured_provider_error(error)
+            return
         except (ControlLeaseError, RuntimeProviderError):
+            try:
+                self.request_deadline.check()
+            except RequestDeadlineExceeded:
+                if downstream_started:
+                    self._clear_gpio_control_operational(
+                        expected_instance_id=(daemon_id if isinstance(
+                            daemon_id, str) else daemon_id_before),
+                        expected_revision=operational_revision)
+                    self._structured_provider_error(
+                        RuntimeProviderOperationError(
+                            "deadline_exceeded", category="timeout",
+                            retryable=False, possibly_committed=True))
+                else:
+                    self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                                "control_deadline_exceeded",
+                                "控制请求未在统一处理期限内完成")
+                return
             self._clear_gpio_control_operational(
                 expected_instance_id=(daemon_id if isinstance(daemon_id, str)
                                       else daemon_id_before),
@@ -839,7 +1020,13 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
-            read = self.provider.read_snapshot()
+            read = call_with_deadline(
+                self.provider.read_snapshot, deadline=self.request_deadline)
+        except RequestDeadlineExceeded:
+            self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                        "request_deadline_exceeded",
+                        "Runtime读取未在统一处理期限内完成")
+            return None
         except RuntimeProviderError:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "provider_unavailable",
@@ -857,7 +1044,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return {"available": False, "snapshot": None,
                     "reason": "unsupported"}
         try:
-            snapshot = reader()
+            snapshot = call_with_deadline(
+                reader, deadline=self.request_deadline)
+        except RequestDeadlineExceeded:
+            raise
         except RuntimeProviderError:
             # 健康遥测失败与 Runtime 资源快照隔离，且不向 HTTP 泄漏后端细节。
             return {"available": False, "snapshot": None,
@@ -944,12 +1134,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             read = self._snapshot()
             if read is not None:
                 snapshot = read.snapshot
+                try:
+                    toolbusd_health = self._toolbusd_health()
+                except RequestDeadlineExceeded:
+                    self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                                "request_deadline_exceeded",
+                                "健康读取未在统一处理期限内完成")
+                    return
                 self._success({"status": "ok",
                                "snapshot_id": snapshot["snapshot_id"],
                                "capabilities":
                                    self._runtime_capabilities(),
-                               "toolbusd_health":
-                                   self._toolbusd_health()},
+                               "toolbusd_health": toolbusd_health},
                               read=read)
             return
         if parts == ["api", API_VERSION, "events"]:

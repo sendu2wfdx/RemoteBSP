@@ -203,14 +203,24 @@ runtime_node_uuid="$($remote_cli_bin --socket "$socket_path" node-list |
 runtime_lease_id="11223344556677889900aabbccddeeff"
 unknown_runtime_lease_id="ffeeddccbbaa00998877665544332211"
 runtime_gpio_resource="0x1000005"
-if "$remote_cli_bin" --socket "$socket_path" --node 1 \
+set +e
+runtime_unknown_error="$($remote_cli_bin --socket "$socket_path" --node 1 \
+    --json \
     runtime-gpio-write "$daemon_instance_id" "$unknown_runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
     unknown-before-acquire 1 \
-    >/dev/null 2>&1; then
+    2>/dev/null)"
+runtime_unknown_status=$?
+set -e
+if [[ "$runtime_unknown_status" -eq 0 ]]; then
     echo "未登记的 Runtime 控制租约不应允许 GPIO 写入" >&2
     exit 1
 fi
+grep -Fq '"command":"runtime-gpio-write"' <<<"$runtime_unknown_error"
+grep -Fq '"code":103' <<<"$runtime_unknown_error"
+grep -Fq '"category":4' <<<"$runtime_unknown_error"
+grep -Fq '"retryable":false' <<<"$runtime_unknown_error"
+grep -Fq '"possibly_committed":false' <<<"$runtime_unknown_error"
 "$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-control-acquire "$daemon_instance_id" "$runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" 5000 >/dev/null
@@ -224,6 +234,17 @@ runtime_gpio_replay="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
     gpio-e2e-command 1)"
 grep -Fq 'value=1 replayed=yes' <<<"$runtime_gpio_replay"
+set +e
+runtime_release_error="$($remote_cli_bin --socket "$socket_path" --json \
+    runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
+    other-runtime-owner 2>/dev/null)"
+runtime_release_status=$?
+set -e
+[[ "$runtime_release_status" -ne 0 ]]
+grep -Fq '"command":"runtime-control-release"' <<<"$runtime_release_error"
+grep -Fq '"code":101' <<<"$runtime_release_error"
+grep -Fq '"category":3' <<<"$runtime_release_error"
+grep -Fq '"possibly_committed":false' <<<"$runtime_release_error"
 "$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
     e2e-runtime >/dev/null

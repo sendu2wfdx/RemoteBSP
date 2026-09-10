@@ -1,6 +1,9 @@
 import json
+import subprocess
 import threading
+import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -17,11 +20,17 @@ from runtime_api.control_leases import (
     ControlLeaseManager,
     DaemonBoundControlLeaseManager,
 )
-from runtime_api.provider import MockSnapshotProvider, RuntimeProviderError
+from runtime_api.provider import (
+    MockSnapshotProvider,
+    RuntimeProviderError,
+    RuntimeProviderOperationError,
+)
 from runtime_api.server import make_server
 from runtime_api.toolbusd_provider import (
     RemoteCliIpcClient,
+    ToolbusIpcOperationError,
     ToolbusIpcProtocolError,
+    ToolbusdSnapshotProvider,
 )
 
 
@@ -45,7 +54,10 @@ class FakeGpioProvider(MockSnapshotProvider):
         arguments = (*arguments[:-1], arguments[-1]())
         self.acquires.append(arguments)
         if arguments[4] == self.fail_resource:
-            raise RuntimeProviderError("不应回显的 /secret/socket 路径")
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False,
+                detail="不应回显的 /secret/socket 路径")
         if self.acquire_hook is not None:
             self.acquire_hook(arguments)
         if self.after_acquire is not None:
@@ -71,6 +83,40 @@ class FakeGpioProvider(MockSnapshotProvider):
 
 
 class RemoteCliGpioControlTest(unittest.TestCase):
+    @staticmethod
+    def _error_document(command="runtime-gpio-write", *, code=103,
+                        category=4, retryable=False,
+                        possibly_committed=False):
+        return json.dumps({
+            "schema_version": 1,
+            "command": command,
+            "error": {
+                "ipc_error_version": 1,
+                "code": code,
+                "category": category,
+                "retryable": retryable,
+                "possibly_committed": possibly_committed,
+                "message": "Runtime 控制请求失败",
+            },
+        }).encode("utf-8")
+
+    def test_real_runner_parses_nonzero_stdout_error_document(self):
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1,
+            stdout=self._error_document(), stderr=b"")
+        with patch(
+                "runtime_api.toolbusd_provider.subprocess.run",
+                return_value=completed):
+            client = RemoteCliIpcClient("/tmp/toolbusd-test.sock")
+            with self.assertRaises(ToolbusIpcOperationError) as caught:
+                client.runtime_gpio_write(
+                    "1" * 32, "2" * 32, "3" * 32, "operator", 3,
+                    0x01000005, "write-1", True)
+        self.assertEqual(caught.exception.code, 103)
+        self.assertEqual(caught.exception.category, 4)
+        self.assertFalse(caught.exception.retryable)
+        self.assertFalse(caught.exception.possibly_committed)
+
     def test_three_commands_use_strict_structured_contract(self):
         calls = []
 
@@ -189,6 +235,28 @@ class GpioControlHttpTest(unittest.TestCase):
                 self._lease_body())) as response:
             self.assertEqual(response.status, 201)
             return json.loads(response.read())["data"]["lease"]["lease_id"]
+
+    def test_request_deadline_returns_sanitized_gateway_timeout(self):
+        self.server.request_io_timeout_seconds = 0.1  # type: ignore[attr-defined]
+
+        def expire_after_downstream_started(_arguments):
+            time.sleep(0.11)
+            raise RuntimeProviderError(
+                "remote-cli /secret/socket token=not-for-http")
+
+        self.provider.acquire_hook = expire_after_downstream_started
+        status, payload = self._error(self._request(
+            "POST", "/api/v1/control-leases", "a" * 32,
+            self._lease_body()))
+        self.assertEqual(status, 504)
+        self.assertEqual(payload["error"]["code"],
+                         "control_deadline_exceeded")
+        encoded = json.dumps(payload)
+        self.assertNotIn("secret", encoded)
+        self.assertNotIn("token", encoded)
+        # 调用已进入下游且结果迟到，提交状态未知；本地租约必须保留至TTL，
+        # 不能盲目回滚后允许另一个所有者进入同一scope。
+        self.assertEqual(self.server.control_leases.active_count(), 1)  # type: ignore[attr-defined]
 
     def test_acquire_write_replay_and_admin_release_are_server_derived(self):
         root = json.loads(urlopen(self._request(
@@ -415,9 +483,13 @@ class GpioControlHttpTest(unittest.TestCase):
                       idempotency_key="lease-request-2")
         code, payload = self._error(self._request(
             "POST", "/api/v1/control-leases", "a" * 32, second))
-        self.assertEqual(code, 503)
+        self.assertEqual(code, 409)
         self.assertEqual(payload["error"]["code"],
-                         "control_lease_unavailable")
+                         "control_target_rejected")
+        self.assertEqual(payload["error"]["details"], {
+            "category": "target", "retryable": False,
+            "possibly_committed": False,
+        })
         self.assertNotIn("secret", json.dumps(payload))
         self.assertEqual(
             self.server.control_leases.active_count(), 1)  # type: ignore[attr-defined]
@@ -435,6 +507,76 @@ class GpioControlHttpTest(unittest.TestCase):
                 "POST", "/api/v1/control/gpio/write", "a" * 32,
                 write)) as response:
             self.assertEqual(response.status, 200)
+
+    def test_snapshot_preflight_failure_rolls_back_before_remote_acquire(self):
+        class CountingClient:
+            structured_output = True
+
+            def __init__(self):
+                self.acquire_calls = 0
+
+            def runtime_control_acquire(self, *_arguments, **_keywords):
+                self.acquire_calls += 1
+
+            def runtime_gpio_write(self, *_arguments, **_keywords):
+                raise AssertionError("本用例不应执行GPIO写")
+
+            def runtime_control_release(self, *_arguments, **_keywords):
+                raise AssertionError("本用例不应执行租约释放")
+
+        class FailingSnapshotProvider(ToolbusdSnapshotProvider):
+            def read_snapshot(self, *, deadline=None):
+                raise RuntimeProviderError("快照后端暂时不可用")
+
+        client = CountingClient()
+        self.server.provider = FailingSnapshotProvider(client)
+        code, payload = self._error(self._request(
+            "POST", "/api/v1/control-leases", "a" * 32,
+            self._lease_body()))
+        self.assertEqual(code, 503)
+        self.assertEqual(payload["error"]["code"],
+                         "control_backend_unavailable")
+        self.assertEqual(payload["error"]["details"], {
+            "category": "transport", "retryable": True,
+            "possibly_committed": False,
+        })
+        self.assertEqual(client.acquire_calls, 0)
+        self.assertEqual(
+            self.server.control_leases.active_count(), 0)  # type: ignore[attr-defined]
+
+    def test_definite_local_write_and_release_errors_keep_global_operational(self):
+        lease_id = self._acquire()
+
+        def reject_write(*_arguments):
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False)
+
+        self.provider.gpio_control_write = reject_write
+        write = {
+            "lease_id": lease_id, "node_id": "mock-node-1",
+            "resource_id": "gpio-0", "idempotency_key": "local-reject",
+            "value": True,
+        }
+        status, _ = self._error(self._request(
+            "POST", "/api/v1/control/gpio/write", "a" * 32, write))
+        self.assertEqual(status, 409)
+        root = json.loads(urlopen(self._request(
+            "GET", "/api/v1", "a" * 32)).read())
+        self.assertTrue(root["data"]["capabilities"]["write_commands"])
+
+        def reject_release(*_arguments):
+            raise RuntimeProviderOperationError(
+                "target_rejected", category="target", retryable=False,
+                possibly_committed=False)
+
+        self.provider.gpio_control_release = reject_release
+        status, _ = self._error(self._request(
+            "DELETE", f"/api/v1/control-leases/{lease_id}", "a" * 32))
+        self.assertEqual(status, 409)
+        root = json.loads(urlopen(self._request(
+            "GET", "/api/v1", "a" * 32)).read())
+        self.assertTrue(root["data"]["capabilities"]["write_commands"])
 
     def test_identity_failure_cannot_be_undone_by_old_inflight_write(self):
         lease_id = self._acquire()

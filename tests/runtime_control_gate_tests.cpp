@@ -13,7 +13,9 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -34,6 +36,13 @@ const toolbusd::RuntimeControlGate::GpioSafeStopper noop_stop =
 const toolbusd::RuntimeControlGate::GpioCloser noop_close =
     [](std::uint32_t, std::uint64_t,
        const std::array<std::uint8_t, 16>&, std::uint32_t) {};
+
+void check_always(bool condition, const char* expression) {
+    if (!condition) {
+        throw std::runtime_error(
+            std::string("测试检查失败: ") + expression);
+    }
+}
 
 struct ThrowingCopyState {
     bool throw_on_copy{};
@@ -1241,12 +1250,144 @@ void check_ipc_round_trip_and_strict_lengths() {
     }
 }
 
+void check_ipc_error_envelope_is_strict_and_bounded() {
+    using Category = toolbusd::IpcErrorCategory;
+    using Code = toolbusd::IpcErrorCode;
+    const toolbusd::IpcErrorEnvelope uncertain{
+        toolbusd::kIpcErrorEnvelopeVersion, Code::SafeStopFailed,
+        Category::Internal, false, true, "安全停机响应状态未知"};
+    const auto body = toolbusd::encode_ipc_error_envelope(uncertain);
+    const auto decoded = toolbusd::decode_ipc_error_envelope(body);
+    check_always(decoded.version == toolbusd::kIpcErrorEnvelopeVersion,
+                 "错误信封版本应保持一致");
+    check_always(decoded.code == Code::SafeStopFailed,
+                 "错误信封代码应保持一致");
+    check_always(decoded.category == Category::Internal,
+                 "错误信封类别应保持一致");
+    check_always(!decoded.retryable, "不确定提交不得建议直接重试");
+    check_always(decoded.possibly_committed, "不确定提交标志不得丢失");
+    check_always(decoded.message == "安全停机响应状态未知",
+                 "错误信封消息应保持一致");
+
+    int sockets[2]{};
+    const auto socket_result = ::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
+    check_always(socket_result == 0, "socketpair必须成功执行");
+    toolbusd::write_ipc_response(
+        sockets[0], toolbusd::IpcStatus::Error, body);
+    const auto framed = toolbusd::read_ipc_response(sockets[1]);
+    check_always(framed.status == toolbusd::IpcStatus::Error,
+                 "IPC响应状态必须为Error");
+    check_always(
+        toolbusd::decode_ipc_error_envelope(framed.body).code ==
+            Code::SafeStopFailed,
+        "IPC帧内错误信封必须可严格解码");
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+
+    // Release 的确定拒绝不允许声明“可能已提交”，也不建议盲重放。
+    const toolbusd::IpcErrorEnvelope release_not_found{
+        toolbusd::kIpcErrorEnvelopeVersion, Code::LeaseNotFound,
+        Category::Conflict, false, false, "Runtime 控制租约不存在"};
+    const auto release_decoded = toolbusd::decode_ipc_error_envelope(
+        toolbusd::encode_ipc_error_envelope(release_not_found));
+    check_always(release_decoded.code == Code::LeaseNotFound,
+                 "确定拒绝代码应保持一致");
+    check_always(!release_decoded.retryable,
+                 "LeaseNotFound不得建议重试");
+    check_always(!release_decoded.possibly_committed,
+                 "LeaseNotFound不得声明可能提交");
+
+    const auto must_reject_body = [](std::vector<std::uint8_t> malformed) {
+        try {
+            static_cast<void>(
+                toolbusd::decode_ipc_error_envelope(malformed));
+            check_always(false, "畸形错误信封必须被解码器拒绝");
+        } catch (const toolbusd::IpcException&) {
+        }
+    };
+    auto malformed = body;
+    malformed[0U] = 2U;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[2U] = 11U;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[4U] = 0xfeU;
+    malformed[5U] = 0xffU;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[6U] = static_cast<std::uint8_t>(Category::Conflict);
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[7U] = 0x80U;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[7U] = 0x03U;
+    must_reject_body(malformed);
+    malformed = toolbusd::encode_ipc_error_envelope(
+        {toolbusd::kIpcErrorEnvelopeVersion, Code::InvalidRequest,
+         Category::Request, false, false, "x"});
+    malformed[7U] = 0x01U;
+    must_reject_body(malformed);
+    malformed = toolbusd::encode_ipc_error_envelope(
+        {toolbusd::kIpcErrorEnvelopeVersion, Code::DeadlineExceeded,
+         Category::Timeout, true, false, "超时"});
+    malformed[7U] = 0x00U;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed[10U] = 1U;
+    must_reject_body(malformed);
+    malformed = body;
+    malformed.push_back(0U);
+    must_reject_body(malformed);
+    malformed = toolbusd::encode_ipc_error_envelope(
+        {toolbusd::kIpcErrorEnvelopeVersion, Code::InvalidRequest,
+         Category::Request, false, false, "x"});
+    malformed[12U] = 0xc0U;
+    must_reject_body(malformed);
+    malformed[12U] = 0x7fU;
+    must_reject_body(malformed);
+
+    const auto must_reject_value = [](toolbusd::IpcErrorEnvelope invalid) {
+        try {
+            static_cast<void>(toolbusd::encode_ipc_error_envelope(invalid));
+            check_always(false, "非法错误字段必须被编码器拒绝");
+        } catch (const toolbusd::IpcException&) {
+        }
+    };
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::LeaseConflict, Category::Conflict,
+                       true, true, "冲突"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::LeaseNotFound, Category::Conflict,
+                       false, true, "不存在"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::LeaseNotFound, Category::Conflict,
+                       true, false, "不得重试"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::InvalidRequest, Category::Request,
+                       true, false, "不得重试"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::DeadlineExceeded, Category::Timeout,
+                       false, false, "标志不完整"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::LeaseNotFound, Category::Unavailable,
+                       false, false, "类别不匹配"});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::InvalidRequest, Category::Request,
+                       false, false, std::string(257U, 'x')});
+    must_reject_value({toolbusd::kIpcErrorEnvelopeVersion,
+                       Code::InvalidRequest, Category::Request,
+                       false, false, std::string("x\n")});
+}
+
 }  // namespace
 
 int main() {
     check_identity_permission_contract_and_idempotency();
     check_scope_expiry_generation_and_reuse();
     check_ipc_round_trip_and_strict_lengths();
+    check_ipc_error_envelope_is_strict_and_bounded();
     check_per_scope_isolation_and_serialization();
     check_release_stops_low_closes_and_reuses_scope();
     check_close_uncertain_retries_close_only();

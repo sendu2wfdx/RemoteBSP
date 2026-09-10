@@ -15,6 +15,41 @@ class RuntimeProviderError(RuntimeError):
     """快照来源暂时不可用或数据损坏。"""
 
 
+class RuntimeProviderOperationError(RuntimeProviderError):
+    """供 HTTP 层稳定映射的脱敏 Provider 操作错误。"""
+
+    _CODE_CATEGORIES = {
+        "deadline_exceeded": "timeout",
+        "backend_unavailable": "transport",
+        "protocol_incompatible": "protocol",
+        "target_rejected": "target",
+    }
+
+    def __init__(self, code: str, *, category: str,
+                 retryable: bool, possibly_committed: bool,
+                 detail: str | None = None,
+                 invalidates_global_operational: bool = False):
+        expected_category = self._CODE_CATEGORIES.get(code)
+        if expected_category is None:
+            raise ValueError("未知Runtime Provider错误码")
+        if category != expected_category:
+            raise ValueError("Runtime Provider错误码与类别不匹配")
+        if type(retryable) is not bool or type(possibly_committed) is not bool:
+            raise ValueError("Runtime Provider错误标志必须是布尔值")
+        if retryable and possibly_committed:
+            raise ValueError("可能已提交的操作不得标记为可直接重试")
+        if type(invalidates_global_operational) is not bool:
+            raise ValueError("全局控制能力失效标志必须是布尔值")
+        self.code = code
+        self.category = category
+        self.retryable = retryable
+        self.possibly_committed = possibly_committed
+        self.invalidates_global_operational = invalidates_global_operational
+        # detail 仅供进程内诊断链使用，HTTP 层不得回显。
+        self.detail = detail
+        super().__init__(code)
+
+
 @dataclass(frozen=True)
 class SnapshotRead:
     """一次快照读取及其进程内新鲜度信息。"""
