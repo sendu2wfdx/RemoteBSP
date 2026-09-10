@@ -39,8 +39,10 @@ GPIO 租约仍由 `POST /api/v1/control-leases` 申请，但 `command_group` 必
 错误按稳定机器字段映射为 `409/control_target_rejected`、
 `502/control_protocol_incompatible`、`503/control_backend_unavailable` 或
 `504/control_deadline_exceeded`；错误详情只公开 `category`、`retryable` 和
-`possibly_committed`，不公开 daemon 消息。所有 HTTP 结果复用现有有界脱敏审计，仅记录认证键 ID、
-方法类别、`gpio_control`/`control_leases` 路径类别和结果码，不记录请求体、幂等键或电平。
+`possibly_committed`，不公开 daemon 消息。所有 HTTP 结果复用现有有界脱敏请求审计，仅记录
+认证键 ID、方法类别、`gpio_control`/`control_leases` 路径类别和结果码；越过权限检查的租约
+申请/释放和 GPIO 写入另进入同步的 `ControlAuditJournal`。持久记录用 HMAC 请求摘要关联
+规范请求，但两条审计路径都不保存 API 密钥、认证头、幂等键原文、请求体或电平。
 
 ## 调用顺序
 
@@ -99,9 +101,19 @@ Unix Domain Socket 在监听前固定为 `0660`，因此当前可信调用者边
 恶意进程冒充另一个 Runtime 身份。部署时不得把 toolbusd socket 授权给普通网页进程或
 不受信任用户。
 
-操作结果账本已经持久化，但它不是操作者审计日志，也不提供密码学防篡改；HTTP 脱敏审计
-仍是进程内存记录。因此这一竖切仍是受信本机边界内的最小控制闭环，不是可直接公网部署
-的完整权限系统。
+操作结果账本已经持久化，但它不是操作者审计日志。Runtime 的
+`ControlAuditJournal(directory, key_file)` 现以同步 intent/terminal/unknown、跨段
+HMAC-SHA256 链、签名 manifest、受限文件权限和独占锁保存控制操作者证据；普通 HTTP
+脱敏审计仍是进程内存记录。HMAC 是共享密钥认证，不是加密、签名或不可否认性，也不能
+防护取得密钥的同机 root；没有外部可信链头时不能证明整库未回滚。因此这一竖切仍是受信
+本机边界内的最小控制闭环，不是可直接公网部署的完整权限系统。
+
+`append_intent` 必须在改变 Runtime 租约状态或调用下游前同步，失败时不允许产生下游调用。
+下游确定完成后，只有 `append_terminal` 同步成功才可返回成功。下游已经开始但结果无法证明
+时记录 `unknown`；terminal/unknown 同步本身失败会使后续 mutation 全部失败关闭，但不会
+擦除或覆盖 `toolbusd` 已保存的 operation。GPIO Write/Release 继续按 operation ID 查询，
+不得盲目重试或回滚。租约申请没有同等的 operation ledger；申请完成后的 terminal 失败会
+保留现有租约并关闭新 mutation，只能依赖 daemon 世代绑定、有限 TTL 和显式释放恢复。
 
 ## 当前未覆盖
 
@@ -111,6 +123,7 @@ Unix Domain Socket 在监听前固定为 `0660`，因此当前可信调用者边
 - 不可信本地多租户隔离；
 - 可靠 MCU boot generation 驱动的自动解冻，以及实体掉电/链路断开下的安全时延证明；
 - 无限期结果保留或对 `expired_unknown` 的可重放承诺（明确不提供）。
+- TLS、API 密钥热撤销、控制审计密钥轮换/外部链头锚定、集中审计和跨重启事件历史。
 
 Runtime 根能力只在“回环监听、启用认证、使用 daemon 世代绑定租约管理器、Provider
 确认结构化 acquire、operation write/release、status/lookup IPC 均存在”时报告
@@ -131,5 +144,8 @@ daemon 身份变化、不可读或格式无效才全局失效。若 daemon 已�
 目标 I/O 前持久化 pending、成功返回前持久化终态；Runtime 可按 operation ID 或严格
 selector 跨本地租约 TTL 查询，并把 pending 映射为 202、unknown/expired_unknown 映射为
 不可直接重试的 409。daemon 重启会恢复 durable pending 为 unknown 并重建资源阻断。
-这些保证来自单元、Mock 与本地进程测试，不是实体 GPIO 电平或掉电文件系统验证；daemon
-操作者审计的持久化、完整性保护和失败事件增强也仍是部署前置项。
+这些保证来自单元、Mock 与本地进程测试，不是实体 GPIO 电平或生产文件系统掉电验证。
+持久控制审计另有 16 项 journal 内核测试与 6 项 HTTP 集成测试，Runtime 本阶段全量
+164 项软件回归已通过；测试证明范围和人工恢复步骤见
+[Runtime 持久控制审计](runtime-control-audit.md)。TLS、密钥生命周期、速率限制、总线消息
+认证和部署加固仍是前置项。

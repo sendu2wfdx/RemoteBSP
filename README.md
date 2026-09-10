@@ -66,7 +66,7 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与 GPIO/UART/PWM/定时位流只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、主动推送、持久审计完整性和实体失效安全时延验证仍待实现 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；`ControlAuditJournal` 已用同步 intent/terminal/unknown、HMAC-SHA256 链、分段容量和失败关闭覆盖租约与 GPIO 控制，16 项日志内核及 6 项 HTTP 集成测试已通过。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、主动推送、跨重启事件历史和实体失效安全时延验证仍待实现 |
 | 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。toolbusd 软件生产者、版本化只读 IPC、CLI 与 Runtime 可信投影已接入；MCU/Remote Core 生产者和实体采样尚未实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
@@ -196,14 +196,19 @@ toolbusd 另通过独立版本化只读 IPC 生产 `HealthSnapshot v1`，把 dae
 存活探针不读取 Provider。该快照仅报告 toolbusd 可证明的软件状态，不冒充 MCU 或物理链路测量。
 Runtime 的认证授权已包含 API key 身份、`runtime.read`、`runtime.gpio.write` 及控制租约
 申请/释放/撤销权限：
-密钥以固定长度摘要比较，审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出。控制租约仅在
+密钥以固定长度摘要比较；普通 REST 审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出。
+控制变更另要求显式配置 `ControlAuditJournal(directory, key_file)`，命令行通过
+`--control-audit-dir` 与 `--control-audit-key-file` 成对传入。它在任何下游副作用前同步
+intent，在成功响应前同步 terminal，结果不可证明时记录 unknown；HMAC-SHA256 链、签名
+manifest、目录/文件权限、单链接和独占锁校验会在启动时失败关闭控制入口。控制租约仅在
 回环监听且启用认证时开放，按节点+资源排他并有 100～30000 ms TTL、终态幂等保护和请求
 读取期限。`gpio.write` 租约会以剩余 TTL、稳定节点 UUID、当前节点代次和幂等键登记到
 `toolbusd` IPC v2；守护进程在实际写入前再次核对当前节点注册表和静态 GPIO 合同。
 GPIO 写入和释放现先持久化 pending，再执行目标 I/O，并在返回成功前持久化终态；
 `remote-cli` 与 Runtime HTTP 可在本地租约 TTL 结束后继续查询 operation，无法证明结果时
-返回 `unknown`/`expired_unknown` 并冻结或要求协调，绝不把未知当成可直接重试。这仍不提供
-链路加密、无限期历史或持久审计完整性。增量事件采用带进程
+返回 `unknown`/`expired_unknown` 并冻结或要求协调，绝不把未知当成可直接重试。控制审计
+负责操作者证据，operation ledger 仍是结果与恢复的权威；普通读取审计仍是进程内记录。
+这仍不提供链路加密、无限期历史、可信时间、不可否认性或对同机 root 的防护。增量事件采用带进程
 实例标识的严格游标、有界分页和过期重同步，
 只表示成功快照之间的差分，不是 WebSocket，也不能捕获两次轮询间出现后又恢复的瞬态。
 非回环部署仍必须由受控 TLS 反向代理、密钥文件权限和限速补齐。

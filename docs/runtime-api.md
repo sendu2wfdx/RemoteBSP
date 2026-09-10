@@ -78,6 +78,9 @@ python3 -m runtime_api.server --snapshot /tmp/remotebsp-runtime-v1.json
 python3 -m runtime_api.server \
   --toolbusd-socket /tmp/toolbusd.sock \
   --remote-cli ./build-wsl/remote-cli \
+  --api-key-file /etc/remotebsp/runtime-api-keys.json \
+  --control-audit-dir /var/lib/remotebsp/runtime-control-audit \
+  --control-audit-key-file /etc/remotebsp/runtime-control-audit.key \
   --ipc-timeout-ms 2000 \
   --snapshot-cache-ms 250 \
   --status-query-workers 8 \
@@ -85,6 +88,12 @@ python3 -m runtime_api.server \
   --clock-error-warning-ns 250000 \
   --clock-sample-age-warning-ms 1000
 ```
+
+`--control-audit-dir` 与 `--control-audit-key-file` 必须成对配置。启用认证控制面时，缺少
+任一参数都会让读取端点继续可用、但所有 mutation 在改变本地租约或调用下游前以
+`control_audit_unavailable` 失败关闭。密钥是 32～64 字节原始高熵数据，必须位于当前服务
+用户拥有、禁止组/其他访问且不是符号链接或多链接的普通文件；日志目录也必须由当前用户
+独占。不要把密钥明文放入命令行、环境日志、Studio 工程或 Git。
 
 与该 Runtime 配套的 `toolbusd` 现在必须显式指定持久账本目录，例如
 `--runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger`。目录不能在 daemon
@@ -213,6 +222,13 @@ X-API-Key: <api-key>
 
 ## 安全审计
 
+Runtime 使用两条用途不同的审计路径：普通 REST 请求使用有界、非阻塞的
+`SecurityAuditRecord v1`；租约申请/释放和 GPIO 写入使用同步、持久且失败关闭的
+`ControlAuditJournal`。后者也不替代 `toolbusd` operation ledger，operation 的结果查询、
+幂等重放和作用域阻断仍以 daemon 账本为权威。
+
+### 普通请求审计
+
 每个由 Runtime 处理的 REST 请求最多生成一条 `SecurityAuditRecord v1`。服务端使用
 密码学随机源生成 32 位十六进制 `request_id`，并通过 `X-Request-ID` 响应头返回同一值，
 便于把客户端故障与审计事件关联。记录的封闭结构为：
@@ -250,6 +266,41 @@ X-API-Key: <api-key>
 HTTP 服务关闭时会通知输出线程停止，并最多等待 1 秒排空；输出端永久阻塞时关闭仍有界，
 守护线程不会阻止进程退出。输出回调不应执行递归审计，也必须自行负责可靠落盘、文件轮换
 和完整性保护。默认环形缓冲不是持久审计存储；跨进程可靠交付和集中采集仍是后续部署边界。
+
+### 持久控制审计
+
+`ControlAuditJournal(directory, key_file)` 使用规范 JSON 记录、单调序号、跨段
+HMAC-SHA256 链和带 HMAC 的 manifest。默认硬上限为 65536 条、总计 64 MiB、单段
+4 MiB；达到容量或遇到短写、`ENOSPC`、`EIO`、文件/目录同步失败时停止接受新的控制
+变更，不静默覆盖记录。构造阶段会检查目录和密钥所有者/权限、密钥单链接、日志文件
+类型与权限，并用非阻塞 `flock` 防止两个 Runtime 同时写同一目录。启动扫描发现错误
+密钥、链篡改、中段截断、manifest 不一致或未知文件时失败关闭；只允许按已签名 manifest
+丢弃一次未提交尾写。重启发现 durable intent 没有终态时，会在开放控制前同步补记
+`unknown/process_recovery`。
+
+控制调用遵守以下顺序：
+
+1. `append_intent(...)` 在本地租约状态变化或任何下游 mutation 前同步完成；失败时下游
+   调用次数必须为零；
+2. 下游给出确定结果后，以 `append_terminal(...)` 同步 `committed`、`rejected`、
+   `released` 或 `failed`，成功 HTTP 只能在该同步完成后返回；
+3. 下游已开始但结果不可证明时，以 `append_unknown(...)` 记录原因和已有 operation ID，
+   HTTP 固定不可直接重试，并引导查询原 operation。
+
+控制日志只持久化认证身份、随机请求 ID、动作、可用时的规范租约 ID、HMAC 请求摘要、
+结果和可用的 operation ID。它不保存 API 密钥、认证头、幂等键、原始请求体或 GPIO 值。
+HMAC 请求摘要使用独立域和同一受控密钥，避免低熵控制字段被离线枚举。根能力和认证健康
+响应分别报告 `control_audit` 与 `runtime_control_audit` 的 configured/operational、记录数、
+段数、字节数、最后序号和未决 intent；journal 运行中发生任何持久化失败后，后续 mutation
+保持关闭，而读取端点继续可用。
+
+terminal 同步失败若发生在下游之后，不能擦除已经存在的 operation，也不能谎报确定未
+提交或盲目回滚。GPIO Write/Release 继续通过 operation ID 查询；租约申请没有相同的
+跨进程结果账本，其未知结果只能依赖 daemon 世代绑定、有限 TTL 和显式恢复。完整同步和
+人工恢复边界见[Runtime 持久控制审计](runtime-control-audit.md)。
+
+HMAC 是共享密钥完整性认证，不是签名、加密、可信时间或不可否认性；掌握密钥或控制同机
+`root` 的主体仍可伪造/删除记录，没有外部链头锚定时也不能证明整库未被回滚。
 
 ## 增量事件短轮询
 
@@ -568,8 +619,10 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 
 `DELETE /api/v1/control-leases/{lease_id}` 不接受请求体。所有者需要
 `runtime.control.lease.release`；持有 `runtime.control.lease.revoke` 的监督者可撤销
-其他身份的租约。所有申请、幂等重放、冲突、权限拒绝、释放和撤销均进入现有脱敏审计，
-审计只记录身份和 `control_leases` 路径类别，不记录作用域、幂等键或请求体。
+其他身份的租约。所有申请、幂等重放、冲突、权限拒绝、释放和撤销均进入普通脱敏请求
+审计；越过权限检查的申请和释放还必须在任何状态变化前进入持久控制审计。普通请求审计
+只记录身份和 `control_leases` 路径类别，不记录作用域、幂等键或请求体；控制 journal 用
+HMAC 请求摘要关联规范请求，但同样不保存幂等键原文或请求体。
 
 服务在连接交给有限工作线程之前设置单次 I/O 空闲超时，并另外执行两个不会被持续滴入
 字节重置的总期限：请求处理开始至完整 HTTP 头部解析完成为“头部总期限”，控制请求体
@@ -713,9 +766,9 @@ SocketCAN、USB 或传输层。
 
 当前认证授权、短租约与持久操作账本解决的是“哪个密钥身份可以读、申请、本人释放、
 监督撤销或查询本人操作”、单进程并发写意图互斥、GPIO 最终准入和失效安全停机，以及
-toolbusd 重启后的旧租约失效、未知操作恢复和资源阻断。Ubuntu WSL 的 Runtime GPIO
-专项 27 项、全量 141 项软件测试已通过；这些数字只对应当前测试清单，不包含实体板证据。
-TLS、反向代理信任边界、用户
-目录和动态角色、密钥热加载/撤销、速率限制、其他资源的原子准入，以及审计异步持久化
-与完整性保护仍是后续
+toolbusd 重启后的旧租约失效、未知操作恢复和资源阻断。持久控制审计另有 16 项 journal
+内核测试和 6 项 HTTP 集成测试；本阶段 Runtime 全量 164 项软件回归已通过。数字只对应
+当前测试清单，不包含实体板或生产文件系统真实掉电证据。TLS、反向代理信任边界、用户
+目录和动态角色、API 密钥热加载/撤销、控制审计密钥轮换与外部链头锚定、速率限制、
+其他资源的原子准入、跨重启事件历史和主动推送仍是后续
 部署门槛，不能把本轮的软件测试当作公网暴露、真实设备控制或硬件环境的安全实测证据。

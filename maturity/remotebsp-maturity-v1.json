@@ -263,7 +263,7 @@
     {
       "id": "runtime_api",
       "title": "Runtime 与 API",
-      "summary": "Runtime 读取、快照、缓存、告警和增量事件已实现；认证回环 HTTP 已将细粒度权限、短租约、稳定 UUID、节点代次与幂等键映射到 toolbusd GPIO IPC v2，并以安全写低、GPIO_CLOSE 和固件会话所有权完成对象生命周期；持久有界的操作结果账本、跨进程查询与重启恢复、结构化错误信封和统一请求级单调期限也已贯通。TLS、超过保留期的 exactly-once、主动推送、跨重启事件历史和持久审计仍缺失。",
+      "summary": "Runtime 读取、快照、缓存、告警和增量事件已实现；认证回环 HTTP 已将细粒度权限、短租约、稳定 UUID、节点代次与幂等键映射到 toolbusd GPIO IPC v2，并以安全写低、GPIO_CLOSE 和固件会话所有权完成对象生命周期；持久有界的操作结果账本、跨进程查询与重启恢复、结构化错误信封和统一请求级单调期限也已贯通。控制 mutation 另以 HMAC 链 journal 同步记录 intent/terminal/unknown 并在持久化失败时关闭后续写入。TLS、超过保留期的 exactly-once、主动推送和跨重启事件历史仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -272,6 +272,7 @@
           {"id": "runtime_deadline_source", "kind": "source", "path": "runtime_api/deadline.py", "note": "整数纳秒单调绝对期限与不续期的兼容调用边界。"},
           {"id": "runtime_auth_source", "kind": "source", "path": "runtime_api/auth.py", "note": "有界 API key 身份、固定长度摘要比较、读取、控制租约及 runtime.gpio.write 细粒度权限。"},
           {"id": "runtime_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "脱敏、定长身份、有界环形缓冲和非阻塞输出队列。"},
+          {"id": "runtime_control_audit_source", "kind": "source", "path": "runtime_api/control_audit_journal.py", "note": "ControlAuditJournal 使用同步 intent/terminal/unknown、规范记录、跨段 HMAC-SHA256 链、签名 manifest、受限权限、独占锁、硬容量和重启未决恢复。"},
           {"id": "runtime_events_source", "kind": "source", "path": "runtime_api/events.py", "note": "进程实例游标、有界保留、稳定差分和明确过期的增量事件短轮询。"},
           {"id": "runtime_control_lease_source", "kind": "source", "path": "runtime_api/control_leases.py", "note": "短时排他租约、有界终态幂等保护、单租约回滚和 daemon 实例单飞绑定。"},
           {"id": "runtime_daemon_identity_source", "kind": "source", "path": "toolbusd/src/ipc.cpp", "note": "版本化 daemon identity、Runtime GPIO 控制 IPC v2 与严格错误信封 v1；实例身份由 Linux getrandom 生成并绑定远端会话。"},
@@ -290,6 +291,8 @@
           {"id": "runtime_provider_contract_test", "kind": "host_test", "path": "runtime_api/tests/test_toolbusd_provider.py", "note": "严格 JSON、单次快照、阈值和故障隔离测试。"},
           {"id": "runtime_auth_test", "kind": "host_test", "path": "runtime_api/tests/test_auth.py", "note": "身份、权限、固定长度密钥摘要、配置上限和攻击输入测试。"},
           {"id": "runtime_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计脱敏、容量、慢输出非阻塞、丢弃计数、异常隔离和关闭测试。"},
+          {"id": "runtime_control_audit_journal_test", "kind": "host_test", "path": "runtime_api/tests/test_control_audit_journal.py", "note": "16 项日志内核测试覆盖状态机、重启、HMAC/manifest 篡改、尾部截断、权限/链接/锁、分段容量、ENOSPC/EIO 和同步失败。"},
+          {"id": "runtime_control_audit_http_test", "kind": "host_test", "path": "runtime_api/tests/test_control_audit_integration.py", "note": "6 项 HTTP 集成测试覆盖无 journal 失败关闭、intent 先于副作用、真实 journal 重启闭环，以及申请、GPIO 写入和管理员释放 terminal 失败后的不确定恢复。"},
           {"id": "runtime_control_lease_test", "kind": "host_test", "path": "runtime_api/tests/test_control_leases.py", "note": "覆盖 HTTP 权限、并发排他、过期、幂等终态、daemon 重启/不可达、身份单飞和异常输入。"},
           {"id": "runtime_gpio_gate_test", "kind": "host_test", "path": "tests/runtime_control_gate_tests.cpp", "note": "覆盖未知租约拒绝、合同/代次、幂等、首次低电平、释放/过期/关停安全写低与 Close、不确定 Close 冻结/重试、同代复用、异常事务回滚、同资源串行和跨资源并发。"},
           {"id": "runtime_gpio_http_test", "kind": "host_test", "path": "runtime_api/tests/test_gpio_control.py", "note": "覆盖 HTTP GPIO 权限、稳定 UUID/范围、幂等、单租约回滚、剩余 TTL、daemon 重启、revision/CAS 能力状态和错误脱敏。"},
@@ -307,13 +310,14 @@
     {
       "id": "security_boundaries",
       "title": "安全边界",
-      "summary": "API key 身份与读取/控制/GPIO 权限、有界脱敏审计、控制入口回环限制、统一请求级单调期限、Unix 套接字权限及 HTTP 到受信本机 GPIO 最终准入的 UUID/代次映射已实现；GPIO 对象生命周期具备安全写低、显式 Close、失败冻结、固件会话所有权和持久操作账本，结构化错误强制可能已提交时不可直接重试。TLS、持久审计完整性、速率限制和总线消息认证仍缺失。",
+      "summary": "API key 身份与读取/控制/GPIO 权限、有界脱敏普通请求审计、控制入口回环限制、统一请求级单调期限、Unix 套接字权限及 HTTP 到受信本机 GPIO 最终准入的 UUID/代次映射已实现；GPIO 对象生命周期具备安全写低、显式 Close、失败冻结、固件会话所有权和持久操作账本，结构化错误强制可能已提交时不可直接重试。控制 mutation 另具备同步、HMAC 链完整性可验证的持久审计和写失败关闭。TLS、密钥生命周期、速率限制和总线消息认证仍缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
           {"id": "security_runtime_source", "kind": "source", "path": "runtime_api/auth.py", "note": "数字回环开发模式、非回环 API key 边界及控制租约/GPIO 写细粒度权限。"},
           {"id": "security_socket_source", "kind": "source", "path": "toolbusd/src/main.cpp", "note": "本地套接字 0660 权限、所有者检查、device/inode 安全清理、GPIO 控制最终准入，以及账本不可用/作用域未知时的失败关闭。"},
           {"id": "security_audit_source", "kind": "source", "path": "runtime_api/audit.py", "note": "不记录密钥或原始目标的结构化审计与非阻塞有界输出。"},
+          {"id": "security_control_audit_source", "kind": "source", "path": "runtime_api/control_audit_journal.py", "note": "持久控制审计检查目录/文件所有者、权限、链接和独占锁，以 HMAC 请求摘要、跨段链和签名 manifest 检测损坏，并在容量或 I/O 失败时关闭 mutation。"},
           {"id": "security_threat_document", "kind": "document", "path": "docs/security-threat-model.md", "note": "保护目标、信任边界、攻击者、控制、剩余风险和验收口径。"}
         ],
         "blocker_ids": ["auth_and_threat_model"]
@@ -325,6 +329,8 @@
           {"id": "security_control_test", "kind": "host_test", "path": "runtime_api/tests/test_control_leases.py", "note": "控制权限、越权撤销、非回环失败关闭、头部/请求体总期限和请求走私边界测试。"},
           {"id": "security_gpio_http_test", "kind": "host_test", "path": "runtime_api/tests/test_gpio_control.py", "note": "GPIO 双权限、所有者/范围、UUID/代次、普通失败隔离、后端错误脱敏和能力关闭测试。"},
           {"id": "security_audit_test", "kind": "host_test", "path": "runtime_api/tests/test_audit.py", "note": "审计容量、脱敏、非阻塞输出、丢弃和异常隔离测试。"},
+          {"id": "security_control_audit_journal_test", "kind": "host_test", "path": "runtime_api/tests/test_control_audit_journal.py", "note": "16 项 Linux 主机测试覆盖错误密钥、manifest/记录篡改、非法文件类型与权限、符号/硬链接、双实例锁、容量及持久化故障；不是实体部署验证。"},
+          {"id": "security_control_audit_http_test", "kind": "host_test", "path": "runtime_api/tests/test_control_audit_integration.py", "note": "6 项 HTTP 集成测试证明控制审计不可用或同步失败时 mutation 失败关闭，并保留已开始下游操作的查询与恢复边界。"},
           {"id": "security_socket_test", "kind": "host_test", "path": "tests/e2e_vcan.sh", "note": "进程级回归校验 toolbusd 套接字权限及未登记 Runtime GPIO 租约失败关闭。"},
           {"id": "security_protocol_test", "kind": "host_test", "path": "tests/protocol_tests.cpp", "note": "协议长度、版本和字段边界测试。"},
           {"id": "security_operation_ledger_test", "kind": "host_test", "path": "tests/operation_ledger_tests.cpp", "note": "覆盖不安全目录与文件权限、符号链接、双进程锁、篡改/损坏、持久化失败、容量耗尽和权威查询失败关闭；仅为 Linux 主机软件安全测试。"}
@@ -373,8 +379,8 @@
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
     {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "Studio 尚未完成烧录、重启、回读配置哈希和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、回读身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
-    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2、显式对象销毁、同代安全复用、固件会话所有权、结构化错误、统一控制期限及可查询的跨进程不确定提交账本已完成；仍缺主动推送、跨重启事件历史、TLS、持久审计完整性和系统级资源耗尽验证。", "requires_hardware": false, "closure_evidence": "实现 TLS/密钥生命周期、主动推送、跨重启事件历史和持久审计完整性，并完成进程/线程/磁盘/IPC 容量耗尽攻击测试。"},
-    {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限和有界审计已建立，但 TLS/密钥生命周期、审计完整性、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、持久审计完整性、攻击面测试、总线认证和部署加固验证。"},
+    {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2、显式对象销毁、同代安全复用、固件会话所有权、结构化错误、统一控制期限、可查询的跨进程不确定提交账本及 HMAC 链持久控制审计已完成；仍缺主动推送、跨重启事件历史、TLS/密钥生命周期和系统级资源耗尽验证。", "requires_hardware": false, "closure_evidence": "实现 TLS/密钥生命周期、主动推送和跨重启事件历史，并完成进程/线程/磁盘/IPC 容量耗尽攻击测试。"},
+    {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限、有界普通审计和 HMAC 链持久控制审计已建立，但 TLS/密钥生命周期、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、攻击面测试、总线认证和部署加固验证。"},
     {"id": "hardware_records_not_reproducible", "dimension_id": "hardware_evidence", "summary": "现有实体结果主要散落在文档，缺少统一机器记录和原始测量附件。", "requires_hardware": true, "closure_evidence": "用版本化生产/验收记录绑定板卡、接线、环境、固件哈希、工具和原始数据。"},
     {"id": "hardware_evidence_incomplete", "dimension_id": null, "summary": "核心维度仍存在 absent 或 partial 的实体硬件证据。", "requires_hardware": true, "closure_evidence": "所有适用维度达到 hardware_verified=verified，且证据不来自 Mock 或仅交叉编译。"},
     {"id": "no_comparative_benchmark", "dimension_id": null, "summary": "已有机器可校验的公平对照草案和运行记录完整性规则，但尚未锁定双方版本与实体环境，也没有执行数据。", "requires_hardware": true, "closure_evidence": "把草案转为预注册计划，公开两侧版本、配置、硬件、工作负载、原始数据、统计方法，并完成至少三次可重复配对运行。"}

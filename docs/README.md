@@ -30,6 +30,7 @@
 - [Runtime 不确定提交恢复与操作结果账本](runtime-operation-ledger.md)
 - [遥测与健康契约](telemetry-health-contract.md)
 - [安全威胁模型](security-threat-model.md)
+- [Runtime 持久控制审计](runtime-control-audit.md)
 - [可审计成熟度基线](../maturity/README.md)
 - [RemoteBSP / Klipper 可复现对照基准](../benchmarks/README.md)
 
@@ -74,7 +75,7 @@ flowchart LR
 | Studio | 构建阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料、`.config`与GPIO/UART/PWM/定时位流静态表生成；构建归档纳入源码/依赖/工具链身份并拒绝构建期漂移，自动烧录回读待实现 |
 | I2C / SPI | 协议、Mock、Studio、主机运行时及嵌入式公共Core竖切已实现 | `toolbusd`已增加合同首访单飞、父总线仲裁和节点代次失效；默认关闭的STM32公共Core固定端点合同、设备级租约和原子事务边界；三板真实HAL与实板验收待完成 |
 | 高速 Stream | H2N/N2H Mock会话已实现、已测试 | 连续序号、精确ACK信用、两阶段交付、背压、故障与旧缓冲隔离已覆盖；双向及USB/Ethernet真实数据面待实现 |
-| Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误与统一单调期限已贯通；TLS、主动推送、持久审计完整性及实体失效安全验收待实现 |
+| Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误与统一单调期限已贯通；持久控制审计以 HMAC 链和同步 intent/terminal/unknown 失败关闭 mutation，16 项日志内核及 6 项集成测试已覆盖。TLS、主动推送、跨重启事件历史及实体失效安全验收待实现 |
 | 遥测健康契约 | toolbusd 软件生产链已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd 已贯通生产者、只读 IPC、CLI 与 Runtime 可信投影，MCU/Remote Core 与实体采样仍待实现 |
 | 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；对照 v1 可锁定公平性、版本、环境和阈值，但硬拒绝 executed/胜出，待实体环境确定后实现仪器原始数据重算和完整失败运行索引 |
 | ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
