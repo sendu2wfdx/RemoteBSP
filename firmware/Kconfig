@@ -572,7 +572,8 @@ config REMOTEBSP_PWM
 
 config PWM_RESOURCE_COUNT
     int "PWM 通道编译期容量"
-    range 1 4
+    range 1 1 if BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6
+    range 1 2 if BOARD_STM32G431CBU6
     default 1
     depends on REMOTEBSP_PWM
 
@@ -580,19 +581,35 @@ choice
     prompt "PWM 0 输出引脚"
     depends on REMOTEBSP_PWM
     default PWM0_PIN_PA6 if BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6
+    default PWM0_PIN_PB10 if BOARD_STM32G431CBU6 && PWM_RESOURCE_COUNT > 1
     default PWM0_PIN_PC6 if BOARD_STM32G431CBU6
 
 config PWM0_PIN_PA6
     bool "PA6（TIM3_CH1）"
-    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    depends on PWM_RESOURCE_COUNT = 1
     depends on !REMOTEBSP_MOTION || !MOTION_PIN_PA6_USED_25
 
 config PWM0_PIN_PC6
     bool "PC6（TIM3_CH1，WeAct G431 板载 LED）"
-    depends on BOARD_STM32G431CBU6
+    depends on BOARD_STM32G431CBU6 && PWM_RESOURCE_COUNT = 1
     depends on !REMOTEBSP_MOTION || !MOTION_PIN_PC6_USED_25
 
+config PWM0_PIN_PB10
+    bool "PB10（TIM2_CH3，与 USART3 TX 互斥）"
+    depends on BOARD_STM32G431CBU6 && PWM_RESOURCE_COUNT = 2
+    depends on HARDWARE_UART_RESOURCE_COUNT < 3
+    depends on !REMOTEBSP_MOTION
+
 endchoice
+
+config PWM1_PIN_PB11
+    bool
+    default y
+    depends on PWM0_PIN_PB10 && PWM_RESOURCE_COUNT = 2
+    help
+      PWM 1 固定使用 PB11（TIM2_CH4）。它与 PWM 0 共享 TIM2 频率，且
+      PB10/PB11 与 USART3 互斥，因此双 PWM 配置最多启用两路硬件 UART。
 
 config PWM_MAX_FREQUENCY_HZ
     int "PWM 允许的最高频率（Hz）"

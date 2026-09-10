@@ -326,11 +326,16 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
         for item in board.get("uart", {}).get("endpoints", [])
         if item.get("backend_status") == "implemented"
     }
+    implemented_pwm_channels = {
+        int(item["channel"])
+        for item in board.get("waveform", {}).get("pwm", [])
+        if item.get("backend_status") == "implemented"
+    }
     if len(uart) > len(implemented_uart_ports) or \
-            len(pwm) > 1 or len(strips) > 1:
+            len(pwm) > len(implemented_pwm_channels) or len(strips) > 1:
         raise ProjectConfigError(
             f"当前板卡最多支持{len(implemented_uart_ports)}路硬件UART、"
-            "1路PWM和1路WS2812")
+            f"{len(implemented_pwm_channels)}路PWM和1路WS2812")
     if len(axes) > 5:
         raise ProjectConfigError("当前单板静态固件最多支持5个运动轴")
 
@@ -395,6 +400,9 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
         claim(endpoint["tx_pin"], f"UART {index + 1} TX", True)
 
     pwm_catalog = board.get("waveform", {}).get("pwm", [])
+    pwm_channels: list[int] = []
+    pwm_frequency_groups: dict[str, int] = {}
+    pwm_symbols: set[str] = set()
     for index, item in enumerate(pwm):
         endpoint = _find(pwm_catalog, "endpoint_id", item.get("endpoint_id"))
         if endpoint is None or endpoint.get("backend_status") != "implemented":
@@ -403,12 +411,27 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
                 item.get("pin") != endpoint.get("pin"):
             raise ProjectConfigError(
                 f"PWM {index + 1}通道或引脚与端点目录不一致")
-        _endpoint_kconfig_symbol(endpoint, f"PWM {index + 1}")
+        pwm_symbols.add(_endpoint_kconfig_symbol(endpoint, f"PWM {index + 1}"))
+        pwm_channels.append(int(endpoint["channel"]))
         frequency = int(item.get("frequency_hz", 0))
         if frequency < 1_000 or frequency > 2_000_000:
             raise ProjectConfigError(
                 f"PWM {index + 1}频率必须位于1000～2000000 Hz")
+        frequency_group = str(endpoint.get("frequency_group") or "")
+        if frequency_group in pwm_frequency_groups and \
+                pwm_frequency_groups[frequency_group] != frequency:
+            raise ProjectConfigError(
+                f"共享{frequency_group}的PWM通道必须使用相同频率")
+        pwm_frequency_groups[frequency_group] = frequency
         claim(item.get("pin") or endpoint["pin"], f"PWM {index + 1}")
+    if sorted(pwm_channels) != list(range(len(pwm_channels))):
+        raise ProjectConfigError("PWM通道必须从0开始连续启用")
+    g431_dual_symbols = {"PWM0_PIN_PB10", "PWM1_PIN_PB11"}
+    if pwm_symbols.intersection(g431_dual_symbols) and \
+            not g431_dual_symbols.issubset(pwm_symbols):
+        raise ProjectConfigError("G431 TIM2 双PWM必须同时启用PB10和PB11")
+    if axes and "TIM2" in pwm_frequency_groups:
+        raise ProjectConfigError("G431双PWM与运动模块共用TIM2，不能同时启用")
 
     strip_catalog = board.get("waveform", {}).get("ws2812", [])
     for index, item in enumerate(strips):
@@ -685,15 +708,20 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
             pwm = resources["pwm"]
             set_value("REMOTEBSP_PWM", bool(pwm))
             if pwm:
-                set_value("PWM_RESOURCE_COUNT", 1)
-                endpoint = _find(
-                    board.get("waveform", {}).get("pwm", []),
-                    "endpoint_id", pwm[0]["endpoint_id"])
-                if endpoint is None:
-                    raise ProjectConfigError("已校验PWM端点在生成期间丢失")
-                set_value(_endpoint_kconfig_symbol(endpoint, "PWM"), True)
+                set_value("PWM_RESOURCE_COUNT", len(pwm))
+                for item in pwm:
+                    endpoint = _find(
+                        board.get("waveform", {}).get("pwm", []),
+                        "endpoint_id", item["endpoint_id"])
+                    if endpoint is None:
+                        raise ProjectConfigError(
+                            "已校验PWM端点在生成期间丢失")
+                    set_value(
+                        _endpoint_kconfig_symbol(endpoint, "PWM"), True)
                 set_value("PWM_MAX_FREQUENCY_HZ",
-                          max(1000, int(pwm[0]["frequency_hz"])))
+                          max(1000, max(
+                              int(item["frequency_hz"])
+                              for item in pwm)))
 
             strips = resources["strips"]
             set_value("REMOTEBSP_TIMED_BITSTREAM", bool(strips))

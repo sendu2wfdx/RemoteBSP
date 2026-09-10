@@ -80,6 +80,32 @@ def append_derived_uart_config(output: Path, values: Mapping[str, str]) -> None:
     output.write_text("\n".join(lines), encoding="utf-8")
 
 
+def validate_pwm_config(values: Mapping[str, str]) -> None:
+    """校验共享定时器和固定复用引脚形成的 PWM 组合约束。"""
+    if values.get("CONFIG_REMOTEBSP_PWM") != "y":
+        return
+    pwm_count = int(values.get("CONFIG_PWM_RESOURCE_COUNT", "1"), 0)
+    dual_g431 = (
+        values.get("CONFIG_PWM0_PIN_PB10") == "y"
+        and values.get("CONFIG_PWM1_PIN_PB11") == "y"
+    )
+    if pwm_count == 2 and not dual_g431:
+        raise SystemExit(
+            "两路 PWM 仅支持 G431 的 PB10=TIM2_CH3、PB11=TIM2_CH4 完整映射"
+        )
+    if not dual_g431:
+        return
+    if values.get("CONFIG_BOARD_STM32G431CBU6") != "y" or pwm_count != 2:
+        raise SystemExit("PB10/PB11 双 PWM 仅支持 G431 的两通道配置")
+    hardware_uart_count = int(values.get(
+        "CONFIG_HARDWARE_UART_RESOURCE_COUNT", "3"), 0)
+    if hardware_uart_count > 2 or \
+            values.get("CONFIG_UART2_PINS_PB10_PB11") == "y":
+        raise SystemExit("G431 PB10/PB11 双 PWM 与 USART3 引脚冲突")
+    if values.get("CONFIG_REMOTEBSP_MOTION") == "y":
+        raise SystemExit("G431 PB10/PB11 双 PWM 与运动模块共用 TIM2")
+
+
 def validate_kconfig(kconf: "kconfiglib.Kconfig") -> dict[str, str]:
     """检查 Kconfig 难以表达的跨配置约束，并返回显式值。"""
     values = {
@@ -117,6 +143,7 @@ def validate_kconfig(kconf: "kconfiglib.Kconfig") -> dict[str, str]:
                 raise SystemExit(
                     f"槽 {index} 使用 TMC2209，但单线端口容量只有 {capacity}"
                 )
+    validate_pwm_config(values)
     return values
 
 
@@ -124,6 +151,7 @@ def write_explicit_config(config: Path, output: Path) -> None:
     """在未安装 kconfiglib 时转换完整 defconfig。"""
     lines = ["/* 由显式 defconfig 生成；请勿手工修改。 */", "#pragma once", ""]
     values = parse_explicit_config(config)
+    validate_pwm_config(values)
     for name, value in values.items():
         if value == "n":
             continue

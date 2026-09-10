@@ -17,9 +17,30 @@
 
 #if defined(CONFIG_REMOTEBSP_PWM)
 static TIM_HandleTypeDef pwm_timer;
+#if defined(CONFIG_PWM0_PIN_PB10)
+static uint32_t pwm_period_ticks[2];
+static uint32_t pwm_prescaler;
+static bool pwm_running[2];
+
+static uint32_t pwm_timer_channel(uint8_t channel) {
+    return channel == 0U ? TIM_CHANNEL_3 : TIM_CHANNEL_4;
+}
+
+static void pwm_gpio_init(uint8_t channel) {
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef pin = {0};
+    pin.Pin = channel == 0U ? GPIO_PIN_10 : GPIO_PIN_11;
+    pin.Mode = GPIO_MODE_AF_PP;
+    pin.Pull = GPIO_NOPULL;
+    pin.Speed = GPIO_SPEED_FREQ_HIGH;
+    pin.Alternate = GPIO_AF1_TIM2;
+    HAL_GPIO_Init(GPIOB, &pin);
+}
+#else
 static uint32_t pwm_period_ticks;
 
-static void pwm_gpio_init(void) {
+static void pwm_gpio_init(uint8_t channel) {
+    (void)channel;
 #if defined(CONFIG_PWM0_PIN_PC6)
     __HAL_RCC_GPIOC_CLK_ENABLE();
     GPIO_InitTypeDef pin = {0};
@@ -39,11 +60,16 @@ static void pwm_gpio_init(void) {
 #else
     pin.Pull = GPIO_NOPULL;
     pin.Speed = GPIO_SPEED_FREQ_HIGH;
+#if defined(STM32G431xx)
+    pin.Alternate = GPIO_AF2_TIM3;
+#else
     pin.Alternate = GPIO_AF1_TIM3;
+#endif
 #endif
     HAL_GPIO_Init(GPIOA, &pin);
 #endif
 }
+#endif
 
 bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
                               uint16_t duty, bool active_low) {
@@ -54,7 +80,11 @@ bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
         return false;
     }
 #endif
+#if defined(CONFIG_PWM0_PIN_PB10)
+    if (channel >= 2U || frequency_hz == 0U || duty > 10000U) {
+#else
     if (channel != 0U || frequency_hz == 0U || duty > 10000U) {
+#endif
         return false;
     }
     const uint32_t timer_hz = CONFIG_SYSTEM_CLOCK_HZ;
@@ -71,9 +101,38 @@ bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
         return false;
     }
 
+#if defined(CONFIG_PWM0_PIN_PB10)
+    const uint8_t other = (uint8_t)(channel ^ 1U);
+    const uint32_t timer_channel = pwm_timer_channel(channel);
+    if (pwm_running[other] &&
+        (pwm_prescaler != prescaler ||
+         pwm_period_ticks[other] != divider)) {
+        /* TIM2_CH3/CH4 共用 PSC/ARR，运行中的两路必须使用同一频率。 */
+        return false;
+    }
+    if (pwm_running[channel]) {
+        (void)HAL_TIM_PWM_Stop(&pwm_timer, timer_channel);
+        pwm_running[channel] = false;
+    }
+    __HAL_RCC_TIM2_CLK_ENABLE();
+    pwm_gpio_init(channel);
+    if (!pwm_running[other]) {
+        pwm_timer.Instance = TIM2;
+        pwm_timer.Init.Prescaler = prescaler;
+        pwm_timer.Init.CounterMode = TIM_COUNTERMODE_UP;
+        pwm_timer.Init.Period = divider - 1U;
+        pwm_timer.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+        pwm_timer.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+        if (HAL_TIM_PWM_Init(&pwm_timer) != HAL_OK) {
+            return false;
+        }
+        pwm_prescaler = prescaler;
+    }
+    pwm_period_ticks[channel] = divider;
+#else
     (void)HAL_TIM_PWM_Stop(&pwm_timer, TIM_CHANNEL_1);
     __HAL_RCC_TIM3_CLK_ENABLE();
-    pwm_gpio_init();
+    pwm_gpio_init(channel);
     pwm_period_ticks = divider;
     pwm_timer.Instance = TIM3;
     pwm_timer.Init.Prescaler = prescaler;
@@ -86,15 +145,25 @@ bool rbsp_board_pwm_configure(uint8_t channel, uint32_t frequency_hz,
     if (HAL_TIM_PWM_Init(&pwm_timer) != HAL_OK) {
         return false;
     }
+#endif
     TIM_OC_InitTypeDef output = {0};
     output.OCMode = TIM_OCMODE_PWM1;
     output.Pulse = (divider * duty) / 10000U;
     output.OCPolarity = active_low ? TIM_OCPOLARITY_LOW
                                    : TIM_OCPOLARITY_HIGH;
     output.OCFastMode = TIM_OCFAST_DISABLE;
+#if defined(CONFIG_PWM0_PIN_PB10)
+    const bool started = HAL_TIM_PWM_ConfigChannel(
+                             &pwm_timer, &output, timer_channel) == HAL_OK &&
+                         HAL_TIM_PWM_Start(
+                             &pwm_timer, timer_channel) == HAL_OK;
+    pwm_running[channel] = started;
+    return started;
+#else
     return HAL_TIM_PWM_ConfigChannel(
                &pwm_timer, &output, TIM_CHANNEL_1) == HAL_OK &&
            HAL_TIM_PWM_Start(&pwm_timer, TIM_CHANNEL_1) == HAL_OK;
+#endif
 }
 
 bool rbsp_board_pwm_write(uint8_t channel, uint16_t duty) {
@@ -105,11 +174,21 @@ bool rbsp_board_pwm_write(uint8_t channel, uint16_t duty) {
         return false;
     }
 #endif
+#if defined(CONFIG_PWM0_PIN_PB10)
+    if (channel >= 2U || duty > 10000U || !pwm_running[channel] ||
+        pwm_period_ticks[channel] == 0U) {
+        return false;
+    }
+    __HAL_TIM_SET_COMPARE(
+        &pwm_timer, pwm_timer_channel(channel),
+        (pwm_period_ticks[channel] * duty) / 10000U);
+#else
     if (channel != 0U || duty > 10000U || pwm_period_ticks == 0U) {
         return false;
     }
     __HAL_TIM_SET_COMPARE(&pwm_timer, TIM_CHANNEL_1,
                           (pwm_period_ticks * duty) / 10000U);
+#endif
     return true;
 }
 
@@ -121,11 +200,25 @@ bool rbsp_board_pwm_stop(uint8_t channel) {
         return false;
     }
 #endif
+#if defined(CONFIG_PWM0_PIN_PB10)
+    if (channel >= 2U || !pwm_running[channel]) {
+        return false;
+    }
+    const uint32_t timer_channel = pwm_timer_channel(channel);
+    __HAL_TIM_SET_COMPARE(&pwm_timer, timer_channel, 0U);
+    const bool stopped = HAL_TIM_PWM_Stop(&pwm_timer, timer_channel) == HAL_OK;
+    if (stopped) {
+        pwm_running[channel] = false;
+        pwm_period_ticks[channel] = 0U;
+    }
+    return stopped;
+#else
     if (channel != 0U) {
         return false;
     }
     __HAL_TIM_SET_COMPARE(&pwm_timer, TIM_CHANNEL_1, 0U);
     return HAL_TIM_PWM_Stop(&pwm_timer, TIM_CHANNEL_1) == HAL_OK;
+#endif
 }
 
 #endif
@@ -352,7 +445,15 @@ void DMA1_Channel1_IRQHandler(void) {
 
 bool rbsp_board_waveform_init(void) {
 #if defined(CONFIG_REMOTEBSP_PWM)
+#if defined(CONFIG_PWM0_PIN_PB10)
+    pwm_period_ticks[0] = 0U;
+    pwm_period_ticks[1] = 0U;
+    pwm_prescaler = 0U;
+    pwm_running[0] = false;
+    pwm_running[1] = false;
+#else
     pwm_period_ticks = 0U;
+#endif
 #endif
 #if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
     timed_period_ticks = 0U;

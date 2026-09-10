@@ -996,9 +996,60 @@
             "active_low": false
           },
           {
-            "endpoint_id": "tim3_ch2_pa7",
+            "endpoint_id": "tim3_ch1_pa6",
+            "kconfig_symbol": "PWM0_PIN_PA6",
+            "enabled": false,
+            "name": "pwm_0",
+            "channel": 0,
+            "pin": "PA6",
+            "capable_pins": [
+              "PA6"
+            ],
+            "timer": "TIM3_CH1",
+            "frequency_group": "TIM3",
+            "backend_status": "implemented",
+            "frequency_hz": 1000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim2_ch3_pb10",
+            "kconfig_symbol": "PWM0_PIN_PB10",
+            "enabled": false,
+            "name": "pwm_0",
+            "channel": 0,
+            "pin": "PB10",
+            "capable_pins": [
+              "PB10"
+            ],
+            "timer": "TIM2_CH3",
+            "frequency_group": "TIM2",
+            "backend_status": "implemented",
+            "frequency_hz": 10000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim2_ch4_pb11",
+            "kconfig_symbol": "PWM1_PIN_PB11",
             "enabled": false,
             "name": "pwm_1",
+            "channel": 1,
+            "pin": "PB11",
+            "capable_pins": [
+              "PB11"
+            ],
+            "timer": "TIM2_CH4",
+            "frequency_group": "TIM2",
+            "backend_status": "implemented",
+            "frequency_hz": 10000,
+            "default_duty_percent": 50,
+            "active_low": false
+          },
+          {
+            "endpoint_id": "tim3_ch2_pa7",
+            "enabled": false,
+            "name": "pwm_4",
             "channel": 1,
             "pin": "PA7",
             "capable_pins": [
@@ -1014,7 +1065,7 @@
           {
             "endpoint_id": "tim3_ch3_pb0",
             "enabled": false,
-            "name": "pwm_2",
+            "name": "pwm_5",
             "channel": 2,
             "pin": "PB0",
             "capable_pins": [
@@ -1030,7 +1081,7 @@
           {
             "endpoint_id": "tim3_ch4_pb1",
             "enabled": false,
-            "name": "pwm_3",
+            "name": "pwm_6",
             "channel": 3,
             "pin": "PB1",
             "capable_pins": [

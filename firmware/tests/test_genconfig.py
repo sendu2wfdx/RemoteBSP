@@ -77,6 +77,47 @@ def test_invalid_tmc_capacity() -> None:
         assert "槽 1 使用 TMC2209" in result.stderr
 
 
+def test_g431_dual_pwm_layout_and_uart_conflict() -> None:
+    source = FIRMWARE_ROOT / "tests" / "configs" / (
+        "stm32g431_weact_core_dual_pwm_pb10_pb11_defconfig"
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        temporary = Path(directory)
+        output = temporary / "dual_pwm.h"
+        result = generate(source, output)
+        assert result.returncode == 0, result.stderr
+        values = read_integer_defines(output)
+        assert values["CONFIG_PWM_RESOURCE_COUNT"] == 2
+        assert values["CONFIG_PWM0_PIN_PB10"] == 1
+        assert values["CONFIG_PWM1_PIN_PB11"] == 1
+        assert values["CONFIG_HARDWARE_UART_RESOURCE_COUNT"] == 2
+        assert "CONFIG_UART2_PINS_PB10_PB11" not in values
+
+        invalid = temporary / "invalid_dual_pwm_uart3_defconfig"
+        invalid.write_text(
+            source.read_text(encoding="utf-8").replace(
+                "CONFIG_HARDWARE_UART_RESOURCE_COUNT=2",
+                "CONFIG_HARDWARE_UART_RESOURCE_COUNT=3",
+            ),
+            encoding="utf-8",
+        )
+        result = generate(invalid, temporary / "invalid_dual_pwm.h")
+        assert result.returncode != 0
+        assert "两路 PWM" in result.stderr or "USART3" in result.stderr
+
+    pa6_source = FIRMWARE_ROOT / "tests" / "configs" / (
+        "stm32g431_weact_core_pwm_pa6_dl16_defconfig"
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "pa6_pwm.h"
+        result = generate(pa6_source, output)
+        assert result.returncode == 0, result.stderr
+        values = read_integer_defines(output)
+        assert values["CONFIG_PWM_RESOURCE_COUNT"] == 1
+        assert values["CONFIG_PWM0_PIN_PA6"] == 1
+        assert values["CONFIG_HARDWARE_UART_RESOURCE_COUNT"] == 3
+
+
 def test_remote_budget_menu_visibility() -> None:
     kconf = kconfiglib.Kconfig(str(KCONFIG))
     edit = kconf.syms["REMOTE_BUDGET_EDIT"]
@@ -163,6 +204,7 @@ def main() -> None:
     )
     assert_layout("configs/stm32g431_weact_core_katapult_defconfig", 3, 0)
     test_invalid_tmc_capacity()
+    test_g431_dual_pwm_layout_and_uart_conflict()
     test_remote_budget_menu_visibility()
     test_shared_enable_derivation()
     test_primary_transport_choice()

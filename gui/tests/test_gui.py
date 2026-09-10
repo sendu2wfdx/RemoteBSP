@@ -285,6 +285,65 @@ class GuiTest(unittest.TestCase):
         with self.assertRaisesRegex(ProjectConfigError, "端点目录不一致"):
             generate_project_config(broken, catalog)
 
+    def test_g431_dual_pwm_project_uses_tim2_and_disables_usart3(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        board = next(item for item in catalog["boards"]
+                     if item["id"] == "weact-g431-core-v10")
+        project = copy.deepcopy(self._default_project(board))
+        project["motion"]["axes"] = []
+        project["uart"]["ports"] = project["uart"]["ports"][:2]
+        endpoints = {
+            item["endpoint_id"]: copy.deepcopy(item)
+            for item in board["waveform"]["pwm"]
+        }
+        project["pwm"]["channels"] = [
+            endpoints["tim2_ch3_pb10"], endpoints["tim2_ch4_pb11"]]
+        result = generate_project_config(project, catalog)
+        self.assertIn("CONFIG_HARDWARE_UART_RESOURCE_COUNT=2", result.config)
+        self.assertNotIn("CONFIG_UART2_PINS_PB10_PB11=y", result.config)
+        self.assertIn("CONFIG_PWM_RESOURCE_COUNT=2", result.config)
+        self.assertIn("CONFIG_PWM0_PIN_PB10=y", result.config)
+        self.assertIn("CONFIG_PWM1_PIN_PB11=y", result.config)
+        self.assertIn("#define RBSP_STUDIO_PWM_RESOURCE_COUNT 2U",
+                      result.static_resource_header)
+        self.assertIn("{0U, 26U, UINT32_C(10000)}",
+                      result.static_resource_header)
+        self.assertIn("{1U, 27U, UINT32_C(10000)}",
+                      result.static_resource_header)
+
+        mismatched = copy.deepcopy(project)
+        mismatched["pwm"]["channels"][1]["frequency_hz"] = 20_000
+        with self.assertRaisesRegex(ProjectConfigError, "必须使用相同频率"):
+            generate_project_config(mismatched, catalog)
+
+        non_contiguous = copy.deepcopy(project)
+        non_contiguous["pwm"]["channels"] = [
+            non_contiguous["pwm"]["channels"][1]]
+        with self.assertRaisesRegex(ProjectConfigError, "从0开始连续"):
+            generate_project_config(non_contiguous, catalog)
+
+        incomplete = copy.deepcopy(project)
+        incomplete["pwm"]["channels"] = [
+            incomplete["pwm"]["channels"][0]]
+        with self.assertRaisesRegex(ProjectConfigError, "必须同时启用"):
+            generate_project_config(incomplete, catalog)
+
+    def test_g431_pa6_single_pwm_project(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        board = next(item for item in catalog["boards"]
+                     if item["id"] == "weact-g431-core-v10")
+        project = copy.deepcopy(self._default_project(board))
+        endpoint = next(
+            copy.deepcopy(item) for item in board["waveform"]["pwm"]
+            if item["endpoint_id"] == "tim3_ch1_pa6")
+        project["pwm"]["channels"] = [endpoint]
+        result = generate_project_config(project, catalog)
+        self.assertIn("CONFIG_PWM_RESOURCE_COUNT=1", result.config)
+        self.assertIn("CONFIG_PWM0_PIN_PA6=y", result.config)
+        self.assertIn("CONFIG_HARDWARE_UART_RESOURCE_COUNT=3", result.config)
+        self.assertIn("{0U, 6U, UINT32_C(1000)}",
+                      result.static_resource_header)
+
     def test_static_gpio_table_is_deterministic_and_detects_drift(self):
         catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
         board = next(item for item in catalog["boards"]

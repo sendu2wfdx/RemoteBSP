@@ -56,6 +56,7 @@ _Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
 #if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 3
 #error "G431 最多提供 USART1、USART2、USART3 三路硬件 UART"
 #endif
+
 #if !defined(CONFIG_UART0_PINS_PA9_PA10) && \
     !defined(CONFIG_UART0_PINS_PB6_PB7)
 #error "启用 G431 UART 时必须选择 USART1 引脚组"
@@ -70,6 +71,21 @@ _Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
 #endif
 #if CONFIG_UART_RX_BUFFER_SIZE < 2 || CONFIG_UART_TX_BUFFER_SIZE < 2
 #error "UART 环形缓冲至少需要两个字节"
+#endif
+#endif
+
+#if defined(CONFIG_PWM0_PIN_PB10) || defined(CONFIG_PWM1_PIN_PB11)
+#if !defined(CONFIG_REMOTEBSP_PWM) || CONFIG_PWM_RESOURCE_COUNT != 2
+#error "G431 PB10/PB11 PWM 映射必须启用两路 PWM 资源"
+#endif
+#if CONFIG_HARDWARE_UART_RESOURCE_COUNT > 2 || defined(CONFIG_UART2_PINS_PB10_PB11)
+#error "G431 PB10/PB11 PWM 与 USART3 引脚冲突"
+#endif
+#ifdef CONFIG_REMOTEBSP_MOTION
+#error "G431 PB10/PB11 PWM 与运动模块共用 TIM2，不能同时启用"
+#endif
+#if !defined(CONFIG_PWM0_PIN_PB10) || !defined(CONFIG_PWM1_PIN_PB11)
+#error "G431 双 PWM 必须完整映射 PB10=TIM2_CH3、PB11=TIM2_CH4"
 #endif
 #endif
 

@@ -69,6 +69,12 @@ case "${target}" in
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core
         ;;
+    weact-stm32g431cbu6-core-dual-pwm)
+        build_one g431-weact-core-dual-pwm \
+            tests/configs/stm32g431_weact_core_dual_pwm_pb10_pb11_defconfig \
+            remotebsp-stm32g431cbu6 \
+            remotebsp-stm32g431-weact-core-dual-pwm
+        ;;
     weact-stm32g431cbu6-core-usb|g431-usb)
         build_one g431-weact-core-usb \
             configs/stm32g431_weact_core_usb_defconfig \
@@ -114,7 +120,7 @@ case "${target}" in
             remotebsp-stm32g431-weact-core
         ;;
     *)
-        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all]\n' \
+        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all]\n' \
             "$0" >&2
         exit 2
         ;;
