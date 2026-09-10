@@ -508,8 +508,10 @@ public:
                       clock_sync_config,
                    remotebsp::toolbusd::MotionGroupServiceConfig
                        motion_group_config,
-                   std::string operation_ledger_directory,
-                   const ToolbusDaemonTestOptions& test_options)
+                  std::string operation_ledger_directory,
+                   const ToolbusDaemonTestOptions& test_options,
+                   std::unique_ptr<remotebsp::toolbusd::LinkRecordingController>
+                       recording)
         : transport_(std::move(transport)),
           fragmenter_(transport_->mtu()),
           reassembler_(transport_->mtu(), std::chrono::milliseconds(500)),
@@ -518,6 +520,7 @@ public:
           motion_group_(std::move(motion_group_config)),
           operation_ledger_(operation_ledger_options(
               operation_ledger_directory, test_options)),
+          recording_(std::move(recording)),
 #ifdef REMOTEBSP_TEST_HOOKS
           gpio_post_lookup_barrier_(
               test_options.gpio_post_lookup_barrier_participants == 0U
@@ -2135,6 +2138,43 @@ private:
                         snapshot));
                 return;
             }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        LogicalRecordingStart) {
+                if (!recording_) throw std::runtime_error(
+                    "toolbusd 未配置逻辑链路录制固定目录");
+                recording_->start(ipc_request.logical_recording_name);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok, {});
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        LogicalRecordingStop) {
+                if (!recording_) throw std::runtime_error(
+                    "toolbusd 未配置逻辑链路录制固定目录");
+                const auto path = recording_->stop();
+                const auto name = std::filesystem::path(path).filename().string();
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    std::vector<std::uint8_t>(name.begin(), name.end()));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        LogicalRecordingStatus) {
+                remotebsp::toolbusd::IpcLogicalRecordingStatus result;
+                result.configured = static_cast<bool>(recording_);
+                if (recording_) {
+                    const auto source = recording_->status();
+                    result.active = source.active;
+                    result.output_name = source.output_name;
+                    result.event_count = source.event_count;
+                    result.maximum_events = source.maximum_events;
+                    result.maximum_file_bytes = source.maximum_file_bytes;
+                }
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_logical_recording_status(result));
+                return;
+            }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite) {
                 remotebsp::toolbusd::write_ipc_response(
@@ -2411,6 +2451,64 @@ private:
                         chunk));
                 return;
             }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::StreamRead) {
+                if (remotebsp::transport::is_can_link(transport_->kind())) {
+                    throw std::runtime_error(
+                        "STREAM 数据面只允许显式 USB 链路，禁止自动降级到 CAN");
+                }
+                std::unique_lock<std::mutex> lock(state_mutex_);
+                const auto* node = nodes_.find_by_node_id(ipc_request.node_id);
+                if (node == nullptr || !node->online || !node->assigned) {
+                    throw std::runtime_error("目标节点尚未发现或已经离线");
+                }
+                const bool available = state_changed_.wait_for(
+                    lock, std::chrono::milliseconds(ipc_request.timeout_ms), [&] {
+                        const auto found = event_queues_.find(ipc_request.node_id);
+                        if (found != event_queues_.end() &&
+                            std::any_of(found->second.begin(), found->second.end(),
+                                [&](const auto& packet) {
+                                    if (packet.header.command != static_cast<std::uint16_t>(
+                                            remotebsp::protocol::Command::StreamData)) return false;
+                                    try { return remotebsp::protocol::decode_stream_data(packet.payload)
+                                                     .stream_id == ipc_request.stream_id; }
+                                    catch (const std::exception&) { return false; }
+                                })) return true;
+                        const auto* current = nodes_.find_by_node_id(ipc_request.node_id);
+                        return !running_ || current == nullptr || !current->online;
+                    });
+                auto found = event_queues_.find(ipc_request.node_id);
+                if (!available || found == event_queues_.end()) {
+                    lock.unlock();
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::TimedOut, {});
+                    return;
+                }
+                const auto event = std::find_if(found->second.begin(), found->second.end(),
+                    [&](const auto& packet) {
+                        if (packet.header.command != static_cast<std::uint16_t>(
+                                remotebsp::protocol::Command::StreamData)) return false;
+                        try { return remotebsp::protocol::decode_stream_data(packet.payload)
+                                         .stream_id == ipc_request.stream_id; }
+                        catch (const std::exception&) { return false; }
+                    });
+                if (event == found->second.end()) {
+                    lock.unlock();
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::TimedOut, {});
+                    return;
+                }
+                const auto data = remotebsp::protocol::decode_stream_data(event->payload);
+                if (data.sequence != ipc_request.expected_sequence) {
+                    throw std::runtime_error("STREAM 序号不连续，拒绝消费和归还信用");
+                }
+                const auto encoded = event->payload;
+                found->second.erase(event);
+                lock.unlock();
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok, encoded);
+                return;
+            }
             auto request = std::move(ipc_request.packet);
             if (request.header.message_type !=
                 remotebsp::protocol::MessageType::Request) {
@@ -2418,6 +2516,18 @@ private:
             }
             const auto command = static_cast<remotebsp::protocol::Command>(
                 request.header.command);
+            const bool stream_command =
+                command == remotebsp::protocol::Command::StreamContract ||
+                command == remotebsp::protocol::Command::StreamOpen ||
+                command == remotebsp::protocol::Command::StreamData ||
+                command == remotebsp::protocol::Command::StreamCredit ||
+                command == remotebsp::protocol::Command::StreamStatus ||
+                command == remotebsp::protocol::Command::StreamStop;
+            if (stream_command &&
+                remotebsp::transport::is_can_link(transport_->kind())) {
+                throw std::invalid_argument(
+                    "STREAM 控制面和数据面必须显式绑定 USB 链路，禁止自动降级到 CAN");
+            }
             if (command ==
                     remotebsp::protocol::Command::MotionGroupPrepare ||
                 command ==
@@ -2775,6 +2885,15 @@ private:
         std::unique_lock<std::mutex> lock(client_mutex_);
         clients_finished_.wait(lock,
                                [this] { return active_clients_ == 0; });
+        lock.unlock();
+        if (recording_ && recording_->status().active) {
+            try {
+                std::cout << "逻辑链路证据已原子保存: "
+                          << recording_->stop() << '\n';
+            } catch (const std::exception& error) {
+                std::cerr << "逻辑链路录制收口失败: " << error.what() << '\n';
+            }
+        }
     }
 
     void close_server() noexcept {
@@ -2804,6 +2923,7 @@ private:
     remotebsp::toolbusd::ClockSyncManager clock_sync_;
     remotebsp::toolbusd::MotionGroupService motion_group_;
     remotebsp::toolbusd::OperationLedger operation_ledger_;
+    std::unique_ptr<remotebsp::toolbusd::LinkRecordingController> recording_;
 #ifdef REMOTEBSP_TEST_HOOKS
     std::unique_ptr<OneShotTestBarrier> gpio_post_lookup_barrier_;
 #endif
@@ -2996,10 +3116,10 @@ int main(int argc, char** argv) {
             throw std::invalid_argument(
                 "必须显式指定 --runtime-operation-ledger-dir");
         }
-        if (logical_recording_directory.has_value() !=
-            logical_recording_name.has_value()) {
+        if (logical_recording_name.has_value() &&
+            !logical_recording_directory.has_value()) {
             throw std::invalid_argument(
-                "逻辑链路录制必须同时指定固定目录和输出文件名");
+                "逻辑链路录制文件名要求先配置固定目录");
         }
         if (!mock_usb && !usb &&
             mode == remotebsp::transport::CanMode::Classical) {
@@ -3027,19 +3147,17 @@ int main(int argc, char** argv) {
             recording = std::make_unique<
                 remotebsp::toolbusd::LinkRecordingController>(
                     *logical_recording_directory);
-            transport = recording->start(
-                std::move(transport), *logical_recording_name);
+            transport = recording->wrap(std::move(transport));
+            if (logical_recording_name.has_value()) {
+                recording->start(*logical_recording_name);
+            }
         }
         ToolbusDaemon daemon(std::move(transport), std::move(socket_path),
                              traffic_config, clock_sync_config,
                              motion_group_config,
                              std::move(*operation_ledger_directory),
-                             test_options);
+                             test_options, std::move(recording));
         daemon.run();
-        if (recording) {
-            std::cout << "逻辑链路证据已原子保存: "
-                      << recording->stop() << '\n';
-        }
     } catch (const std::exception& error) {
         std::cerr << "toolbusd 启动失败: " << error.what() << '\n';
         return 1;

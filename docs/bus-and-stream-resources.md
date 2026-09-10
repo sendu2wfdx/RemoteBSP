@@ -130,14 +130,19 @@ N2H 的 `stream_id` 是不可复用的会话代次，重新打开得到新 ID，
 与 BSP，因此单节点故障也不会共享或污染其他节点状态。资源状态对 N2H 使用 TX 缓冲、
 TX 溢出和后端故障字段，对 H2N 保持 RX 方向语义。
 
-以上只证明协议编解码、Mock BSP、Remote Core 事件生成和 MockNode 分片的纯软件闭环。
-运行中的 Mock 可执行程序尚未配置真实高速生产源，STM32 固件也未实现 N2H BSP；真实
-CAN/CAN-FD、USB Bulk 或 Ethernet 数据面、链路选择、热插拔和吞吐/时延均未完成，不能
-把 Mock 事件测试作为实体链路证据。双向流仍明确不支持。
+运行中的 Mock 可执行程序可用 `--stream-source` 在 `usb-mock` 上配置确定性的 N2H
+生产源。`libremotebsp::Client::stream_read()` 通过专用版本化 IPC 按节点、`stream_id`
+和预期序号定向取一个块，校验成功后只归还该块的精确字节信用；错误序号不会删除事件，
+也不会归还信用。普通事件仍留在原有队列中，不会被 STREAM 消费接口误取。
+`remote-cli` 已提供合同、打开、读、写、状态和停止入口。真实进程回归使用
+`toolbusd + mock_mcu + remote-cli` 经 Mock USB 验证连续块、精确信用恢复和错误序号拒绝。
 
-`StreamOpen v1` 尚未携带所选链路，Mock Remote Core 也不知道包实际来自 CAN 还是
-USB，因此目前不能强制 `transport_mask`。把流会话绑定到 USB Bulk/Ethernet 的实际
-LinkTransport，并拒绝错链路打开，是接入真实高速数据面之前的强制前置条件。
+当前 toolbusd 是单链路进程，所有 STREAM 命令和专用读取 IPC 都硬绑定到该进程启动时
+显式选择的 USB/Mock USB `LinkTransport`；若进程运行在 Classical CAN 或 CAN-FD，
+请求在发送前即被拒绝，绝不自动降级到 CAN。`StreamOpen v1` 本身仍未携带多链路选择器，
+因此这只完成“单 toolbusd 实例、单节点、单显式 USB 链路”的软件闭环。STM32 N2H BSP、
+同一进程多链路选择/热插拔、实体 USB 吞吐与时延仍未完成，不能把 Mock 回归作为实体证据。
+双向合同仍明确不支持；H2N 与 N2H 目前使用各自的单向静态合同。
 
 控制面负责发现、打开、停止、状态、错误和安全策略。数据面负责带序号的数据块，
 按合同可附节点时间戳。建议的链路选择是：

@@ -41,7 +41,12 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeControlReleaseOperation = 15,
     RuntimeOperationQuery = 16,
     RuntimeOperationLookup = 17,
+    StreamRead = 18,
+    LogicalRecordingStart = 19,
+    LogicalRecordingStop = 20,
+    LogicalRecordingStatus = 21,
 };
+constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
 constexpr std::uint16_t kHealthSnapshotIpcVersion = 1U;
@@ -183,6 +188,8 @@ struct IpcRequest {
     std::uint32_t object_id{};
     std::uint32_t maximum_length{};
     std::uint32_t timeout_ms{};
+    std::uint32_t stream_id{};
+    std::uint32_t expected_sequence{};
     MotionGroupPlan motion_group_plan;
     std::uint64_t transaction_id{};
     std::uint32_t group_id{};
@@ -192,6 +199,18 @@ struct IpcRequest {
     RuntimeControlReleaseRequest runtime_control_release;
     RuntimeOperationQuery runtime_operation_query;
     RuntimeOperationLookup runtime_operation_lookup;
+    std::string logical_recording_name;
+};
+
+struct IpcLogicalRecordingStatus {
+    std::uint16_t version{kLogicalRecordingIpcVersion};
+    bool configured{};
+    bool active{};
+    std::string evidence_scope{"logical-link-boundary-only"};
+    std::string output_name;
+    std::uint64_t event_count{};
+    std::uint64_t maximum_events{};
+    std::uint64_t maximum_file_bytes{};
 };
 
 struct UartStreamChunk {
@@ -275,6 +294,9 @@ void write_ipc_traffic_status_request(int socket);
 void write_ipc_uart_stream_read_request(
     int socket, std::uint32_t node_id, std::uint32_t object_id,
     std::uint32_t maximum_length, std::uint32_t timeout_ms);
+void write_ipc_stream_read_request(
+    int socket, std::uint32_t node_id, std::uint32_t stream_id,
+    std::uint32_t expected_sequence, std::uint32_t timeout_ms);
 void write_ipc_runtime_snapshot_request(
     int socket, std::uint16_t maximum_resources,
     std::uint32_t timeout_ms);
@@ -302,6 +324,10 @@ void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request);
 void write_ipc_runtime_operation_lookup_request(
     int socket, const RuntimeOperationLookup& request);
+void write_ipc_logical_recording_start_request(int socket,
+                                               const std::string& output_name);
+void write_ipc_logical_recording_stop_request(int socket);
+void write_ipc_logical_recording_status_request(int socket);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -363,6 +389,10 @@ RuntimeOperationLookup decode_ipc_runtime_operation_lookup(
 std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
     const RuntimeOperationOutcome& outcome);
 RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_logical_recording_status(
+    const IpcLogicalRecordingStatus& status);
+IpcLogicalRecordingStatus decode_ipc_logical_recording_status(
     const std::vector<std::uint8_t>& body);
 const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept;
 const char* runtime_operation_state_name(RuntimeOperationState state) noexcept;

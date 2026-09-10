@@ -34,6 +34,7 @@ constexpr std::size_t kIpcErrorEnvelopeHeaderSize = 12U;
 constexpr std::size_t kRuntimeOperationQueryHeaderSize = 56U;
 constexpr std::size_t kRuntimeOperationLookupHeaderSize = 44U;
 constexpr std::size_t kRuntimeOperationOutcomeSize = 88U;
+constexpr std::size_t kMaximumLogicalRecordingNameBytes = 128U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -409,18 +410,33 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::RuntimeOperationLookup)) {
+                      IpcRequestKind::LogicalRecordingStatus)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
     if (kind == IpcRequestKind::ListNodes ||
         kind == IpcRequestKind::TrafficStatus ||
-        kind == IpcRequestKind::DaemonIdentity) {
+        kind == IpcRequestKind::DaemonIdentity ||
+        kind == IpcRequestKind::LogicalRecordingStop ||
+        kind == IpcRequestKind::LogicalRecordingStatus) {
         if (body.size() != 1) {
             throw IpcException("本地状态请求载荷无效");
         }
         IpcRequest request;
         request.kind = kind;
+        return request;
+    }
+    if (kind == IpcRequestKind::LogicalRecordingStart) {
+        if (body.size() < 2U ||
+            body.size() > 1U + kMaximumLogicalRecordingNameBytes) {
+            throw IpcException("逻辑链路录制文件名长度无效", kind);
+        }
+        IpcRequest request;
+        request.kind = kind;
+        request.logical_recording_name.assign(body.begin() + 1U, body.end());
+        if (request.logical_recording_name.find('\0') != std::string::npos) {
+            throw IpcException("逻辑链路录制文件名包含空字节", kind);
+        }
         return request;
     }
     if (kind == IpcRequestKind::HealthSnapshot) {
@@ -466,6 +482,22 @@ IpcRequest read_ipc_request(int socket) {
         request.object_id = object_id;
         request.maximum_length = maximum_length;
         request.timeout_ms = timeout_ms;
+        return request;
+    }
+    if (kind == IpcRequestKind::StreamRead) {
+        if (body.size() != 17U) {
+            throw IpcException("STREAM 读取请求载荷无效", kind);
+        }
+        IpcRequest request;
+        request.kind = kind;
+        request.node_id = get_u32(body.data() + 1U);
+        request.stream_id = get_u32(body.data() + 5U);
+        request.expected_sequence = get_u32(body.data() + 9U);
+        request.timeout_ms = get_u32(body.data() + 13U);
+        if (request.node_id == 0U || request.node_id > 127U ||
+            request.stream_id == 0U || request.timeout_ms > 60000U) {
+            throw IpcException("STREAM 读取参数无效", kind);
+        }
         return request;
     }
     if (kind == IpcRequestKind::RuntimeSnapshot) {
@@ -617,6 +649,28 @@ void write_ipc_daemon_identity_request(int socket) {
               {static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)});
 }
 
+void write_ipc_logical_recording_start_request(
+    int socket, const std::string& output_name) {
+    if (output_name.empty() ||
+        output_name.size() > kMaximumLogicalRecordingNameBytes) {
+        throw IpcException("逻辑链路录制文件名长度无效");
+    }
+    std::vector<std::uint8_t> body{
+        static_cast<std::uint8_t>(IpcRequestKind::LogicalRecordingStart)};
+    body.insert(body.end(), output_name.begin(), output_name.end());
+    send_body(socket, body);
+}
+
+void write_ipc_logical_recording_stop_request(int socket) {
+    send_body(socket, {static_cast<std::uint8_t>(
+                          IpcRequestKind::LogicalRecordingStop)});
+}
+
+void write_ipc_logical_recording_status_request(int socket) {
+    send_body(socket, {static_cast<std::uint8_t>(
+                          IpcRequestKind::LogicalRecordingStatus)});
+}
+
 void write_ipc_health_snapshot_request(int socket) {
     std::vector<std::uint8_t> body{
         static_cast<std::uint8_t>(IpcRequestKind::HealthSnapshot)};
@@ -716,6 +770,22 @@ void write_ipc_uart_stream_read_request(
     append_u32(body, node_id);
     append_u32(body, object_id);
     append_u32(body, maximum_length);
+    append_u32(body, timeout_ms);
+    send_body(socket, body);
+}
+
+void write_ipc_stream_read_request(
+    int socket, std::uint32_t node_id, std::uint32_t stream_id,
+    std::uint32_t expected_sequence, std::uint32_t timeout_ms) {
+    if (node_id == 0U || node_id > 127U || stream_id == 0U ||
+        timeout_ms > 60000U) {
+        throw IpcException("STREAM 读取参数无效");
+    }
+    std::vector<std::uint8_t> body{
+        static_cast<std::uint8_t>(IpcRequestKind::StreamRead)};
+    append_u32(body, node_id);
+    append_u32(body, stream_id);
+    append_u32(body, expected_sequence);
     append_u32(body, timeout_ms);
     send_body(socket, body);
 }
@@ -2052,6 +2122,57 @@ void write_ipc_response(int socket, IpcStatus status,
     const std::uint8_t status_byte = static_cast<std::uint8_t>(status);
     send_all(socket, &status_byte, 1);
     send_body(socket, body);
+}
+
+std::vector<std::uint8_t> encode_ipc_logical_recording_status(
+    const IpcLogicalRecordingStatus& status) {
+    if (status.version != kLogicalRecordingIpcVersion ||
+        status.evidence_scope != "logical-link-boundary-only" ||
+        status.evidence_scope.size() > 255U ||
+        status.output_name.size() > 255U) {
+        throw IpcException("逻辑链路录制状态无效");
+    }
+    std::vector<std::uint8_t> out;
+    append_u16(out, status.version);
+    out.push_back(status.configured ? 1U : 0U);
+    out.push_back(status.active ? 1U : 0U);
+    append_u64(out, status.event_count);
+    append_u64(out, status.maximum_events);
+    append_u64(out, status.maximum_file_bytes);
+    out.push_back(static_cast<std::uint8_t>(status.evidence_scope.size()));
+    out.push_back(static_cast<std::uint8_t>(status.output_name.size()));
+    out.insert(out.end(), status.evidence_scope.begin(),
+               status.evidence_scope.end());
+    out.insert(out.end(), status.output_name.begin(),
+               status.output_name.end());
+    return out;
+}
+
+IpcLogicalRecordingStatus decode_ipc_logical_recording_status(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < 30U ||
+        get_u16(body.data()) != kLogicalRecordingIpcVersion ||
+        body[2] > 1U || body[3] > 1U) {
+        throw IpcException("逻辑链路录制状态载荷无效");
+    }
+    const auto scope_size = body[28];
+    const auto name_size = body[29];
+    if (body.size() != 30U + scope_size + name_size) {
+        throw IpcException("逻辑链路录制状态长度无效");
+    }
+    IpcLogicalRecordingStatus result;
+    result.configured = body[2] != 0U;
+    result.active = body[3] != 0U;
+    result.event_count = get_u64(body.data() + 4U);
+    result.maximum_events = get_u64(body.data() + 12U);
+    result.maximum_file_bytes = get_u64(body.data() + 20U);
+    result.evidence_scope.assign(body.begin() + 30U,
+                                 body.begin() + 30U + scope_size);
+    result.output_name.assign(body.begin() + 30U + scope_size, body.end());
+    if (result.evidence_scope != "logical-link-boundary-only") {
+        throw IpcException("逻辑链路录制证据范围无效");
+    }
+    return result;
 }
 
 IpcResponse read_ipc_response(int socket) {

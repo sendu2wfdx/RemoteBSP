@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace remotebsp::toolbusd {
@@ -28,6 +29,11 @@ public:
     std::unique_ptr<transport::LinkTransport> start(
         std::unique_ptr<transport::LinkTransport> inner,
         const std::string& output_name);
+    // 运行期控制使用：先把链路永久包裹一次，之后 start/stop 只切换观察器，
+    // 不替换正在被工作线程使用的 transport 对象。
+    std::unique_ptr<transport::LinkTransport> wrap(
+        std::unique_ptr<transport::LinkTransport> inner);
+    void start(const std::string& output_name);
     std::string stop();
     LinkRecordingStatus status() const;
 
@@ -35,11 +41,24 @@ public:
         const std::string& fixed_directory, const std::string& output_name);
 
 private:
+    class SwitchTransport;
+    void record_frame(mock_mcu::TransportReplayDirection,
+                      std::uint32_t, const transport::LinkFrame&) noexcept;
+    void record_send_failure(mock_mcu::TransportReplayDirection,
+                             std::uint32_t,
+                             const transport::LinkFrame&) noexcept;
+    void record_receive_empty(mock_mcu::TransportReplayDirection,
+                              std::uint32_t,
+                              std::chrono::milliseconds) noexcept;
+    void record_receive_failure(mock_mcu::TransportReplayDirection,
+                                std::uint32_t,
+                                std::chrono::milliseconds) noexcept;
     static std::string safe_path(const std::string&, const std::string&);
     std::string directory_;
     std::string output_name_;
     std::shared_ptr<mock_mcu::TransportSessionRecorder> recorder_;
     bool active_{};
+    mutable std::mutex mutex_;
 };
 
 }  // namespace remotebsp::toolbusd

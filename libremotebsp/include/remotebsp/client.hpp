@@ -49,6 +49,16 @@ struct ToolbusdHealthSnapshot {
     protocol::HealthSnapshot health;
 };
 
+struct LogicalRecordingStatus {
+    bool configured{};
+    bool active{};
+    std::string evidence_scope;
+    std::string output_name;
+    std::uint64_t event_count{};
+    std::uint64_t maximum_events{};
+    std::uint64_t maximum_file_bytes{};
+};
+
 struct RuntimeGpioWriteResult {
     std::uint32_t object_id{};
     bool value{};
@@ -309,6 +319,9 @@ public:
     std::vector<DiscoveredNode> list_nodes() const;
     DaemonIdentity daemon_identity() const;
     ToolbusdHealthSnapshot health_snapshot() const;
+    void logical_recording_start(const std::string& output_name) const;
+    std::string logical_recording_stop() const;
+    LogicalRecordingStatus logical_recording_status() const;
     void runtime_control_acquire(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
@@ -386,6 +399,10 @@ public:
         const protocol::StreamOpenRequest& request) const;
     void stream_write(const protocol::StreamDataPayload& data) const;
     void stream_credit(const protocol::StreamCreditPayload& credit) const;
+    // 仅从当前 stream_id 定向消费一个连续块；成功后精确归还该块信用。
+    std::optional<protocol::StreamDataPayload> stream_read(
+        std::uint32_t stream_id, std::uint32_t expected_sequence,
+        std::uint32_t timeout_ms = 1000U) const;
     protocol::StreamStatusPayload stream_status(
         std::uint32_t stream_id) const;
     void stream_stop(std::uint32_t stream_id) const;

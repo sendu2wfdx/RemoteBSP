@@ -353,6 +353,38 @@ ToolbusdHealthSnapshot Client::health_snapshot() const {
     return {source.version, source.daemon_instance_id, source.health};
 }
 
+void Client::logical_recording_start(const std::string& output_name) const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_logical_recording_start_request(socket.get(), output_name);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok || !response.body.empty()) {
+        throw ClientException(std::string(response.body.begin(), response.body.end()));
+    }
+}
+
+std::string Client::logical_recording_stop() const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_logical_recording_stop_request(socket.get());
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(std::string(response.body.begin(), response.body.end()));
+    }
+    return std::string(response.body.begin(), response.body.end());
+}
+
+LogicalRecordingStatus Client::logical_recording_status() const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_logical_recording_status_request(socket.get());
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(std::string(response.body.begin(), response.body.end()));
+    }
+    const auto source = toolbusd::decode_ipc_logical_recording_status(response.body);
+    return {source.configured, source.active, source.evidence_scope,
+            source.output_name, source.event_count, source.maximum_events,
+            source.maximum_file_bytes};
+}
+
 void Client::runtime_control_acquire(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::array<std::uint8_t, 16>& lease_id,
@@ -784,6 +816,35 @@ void Client::stream_credit(
     const protocol::StreamCreditPayload& credit) const {
     body(command(protocol::Command::StreamCredit,
                  protocol::encode_stream_credit(credit)));
+}
+
+std::optional<protocol::StreamDataPayload> Client::stream_read(
+    std::uint32_t stream_id, std::uint32_t expected_sequence,
+    std::uint32_t timeout_ms) const {
+    if (stream_id == 0U || timeout_ms > 60000U) {
+        throw ClientException("STREAM 读取参数无效");
+    }
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_stream_read_request(
+        socket.get(), node_id_, stream_id, expected_sequence, timeout_ms);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status == toolbusd::IpcStatus::TimedOut) {
+        return std::nullopt;
+    }
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(std::string(response.body.begin(),
+                                          response.body.end()));
+    }
+    auto data = protocol::decode_stream_data(response.body);
+    if (data.stream_id != stream_id || data.sequence != expected_sequence) {
+        throw ClientException("toolbusd 返回了错误 STREAM 会话或序号");
+    }
+    if (data.data.empty()) {
+        throw ClientException("STREAM 数据块不能为空");
+    }
+    stream_credit({stream_id, static_cast<std::uint32_t>(data.data.size()),
+                   data.sequence});
+    return data;
 }
 
 protocol::StreamStatusPayload Client::stream_status(

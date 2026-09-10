@@ -1,0 +1,29 @@
+{
+  "schema_version": 4,
+  "name": "Mock USB N2H Stream",
+  "board_type": 1398035021,
+  "uuid": "00112233445566778899aabbccddee44",
+  "firmware_version": [0, 2, 0],
+  "firmware_identity": {"project_sha256": null, "config_sha256": null, "firmware_input_sha256": null},
+  "capabilities": ["stream"],
+  "resource_groups": [{
+    "type": "stream", "first_instance": 1, "count": 1,
+    "id_base": 251658241, "source": "native",
+    "rx_capacity": 64, "tx_capacity": 64,
+    "contract": {
+      "access": ["read", "shared_read", "lease_supported", "lease_required"],
+      "timing_resolution_ns": 1000, "worst_case_latency_us": 1000,
+      "maximum_operations_per_second": 1000, "queue_capacity": 64,
+      "maximum_rx_bits_per_second": 0, "maximum_tx_bits_per_second": 1000000
+    }
+  }],
+  "bus_resources": [],
+  "stream_resources": [{
+    "resource_id": 251658241, "direction": "node_to_host",
+    "transports": ["usb"], "flags": ["lossless", "credit_required"],
+    "maximum_chunk_bytes": 16, "buffer_capacity_bytes": 64,
+    "sustained_bits_per_second": 100000, "peak_bits_per_second": 1000000,
+    "maximum_latency_us": 1000, "maximum_jitter_us": 100
+  }],
+  "reserved_resources": []
+}

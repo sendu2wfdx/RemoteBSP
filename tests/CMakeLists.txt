@@ -102,6 +102,19 @@ target_compile_options(stream_n2h_session_tests PRIVATE
 )
 add_test(NAME stream_n2h_session_tests COMMAND stream_n2h_session_tests)
 
+add_executable(stream_ipc_tests stream_ipc_tests.cpp)
+target_link_libraries(stream_ipc_tests PRIVATE remotebsp_request_manager)
+target_compile_options(stream_ipc_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME stream_ipc_tests COMMAND stream_ipc_tests)
+
+add_test(NAME stream_process_e2e_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/stream_process_e2e.sh
+            $<TARGET_FILE:toolbusd> $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:remote-cli>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_stream_n2h_board_v4.json)
+set_tests_properties(stream_process_e2e_tests PROPERTIES TIMEOUT 20)
+
 add_executable(bus_resource_tests bus_resource_tests.cpp)
 target_link_libraries(bus_resource_tests PRIVATE remotebsp_remote_core)
 target_compile_options(bus_resource_tests PRIVATE
@@ -559,6 +572,17 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_unavailable_board_v3.json
 )
 set_tests_properties(firmware_identity_process_e2e_tests PROPERTIES
+    RUN_SERIAL TRUE)
+
+add_test(
+    NAME logical_recording_process_e2e_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/logical_recording_process_e2e.sh
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_board_v3.json
+)
+set_tests_properties(logical_recording_process_e2e_tests PROPERTIES
     RUN_SERIAL TRUE)
 
 add_executable(digital_twin_replay_tests digital_twin_replay_tests.cpp)

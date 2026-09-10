@@ -1,7 +1,7 @@
 # toolbusd 逻辑链路录制
 
-toolbusd 的录制功能默认关闭。启动时同时提供固定目录和新的 `.rbsplog` 简单文件名，
-才会在 LinkTransport 边界记录收发帧、空接收和链路错误：
+toolbusd 的录制功能默认关闭。启动时配置固定目录后，可由本地 IPC 在运行期启停；
+也可同时提供初始文件名，在启动后立即记录：
 
 ```text
 toolbusd can0 fd /run/toolbusd.sock \
@@ -17,5 +17,14 @@ toolbusd can0 fd /run/toolbusd.sock \
 录制器会拒绝生成看似完整的证据。
 
 离线消费使用同一 `TransportReplaySession` 解析、摘要和校验和验证，再执行确定性回放。
-当前启动入口适合维护窗口整段录制；运行中 IPC 启停与状态查询仍需接入守护进程控制面，
-在该接口完成前不得把启动参数能力描述成在线动态录制。
+
+```text
+remote-cli logical-recording-status
+remote-cli logical-recording-start maintenance-002.rbsplog
+remote-cli logical-recording-stop
+```
+
+IPC 只能提交简单文件名，目录仍由守护进程启动配置固定；未配置目录时 start/stop
+失败关闭，status 明确返回 `configured=0`。状态公开活动标志、输出名、事件数和固定上限。
+SIGINT、SIGTERM 与正常退出都会等待链路工作线程和 IPC 客户端退出后再收口活动会话。
+这些文件始终只代表 `logical-link-boundary-only`，不得称为物理 CAN 抓包或电气证据。

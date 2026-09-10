@@ -413,6 +413,9 @@ void print_usage() {
         << "  traffic-status\n"
         << "  daemon-identity\n"
         << "  health-snapshot\n"
+        << "  logical-recording-start <文件名.rbsplog>\n"
+        << "  logical-recording-stop\n"
+        << "  logical-recording-status\n"
         << "  node-health-snapshot\n"
         << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <租约ms>\n"
@@ -440,6 +443,12 @@ void print_usage() {
         << "  resource-renew <资源ID> <租约ID> <毫秒>\n"
         << "  resource-release <资源ID> <租约ID>\n"
         << "  resource-lease-status <资源ID>\n"
+        << "  stream-contract <资源ID>\n"
+        << "  stream-open <资源ID> <块字节> <flags> <初始信用字节>\n"
+        << "  stream-read <stream ID> <预期序号> [超时毫秒]\n"
+        << "  stream-write-hex <stream ID> <序号> <十六进制字节串>\n"
+        << "  stream-status <stream ID>\n"
+        << "  stream-stop <stream ID>\n"
         << "  param-status\n"
         << "  param-list\n"
         << "  param-get <名称|参数ID>\n"
@@ -491,6 +500,45 @@ int run(const std::vector<std::string>& arguments,
     }
     const auto& name = arguments[0];
     remotebsp::Client client(socket_path, node_id);
+
+    if (name == "logical-recording-start" && arguments.size() == 2) {
+        client.logical_recording_start(arguments[1]);
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":\"logical-recording-start\",\"data\":{}}\n";
+        } else std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "logical-recording-stop" && arguments.size() == 1) {
+        const auto output_name = client.logical_recording_stop();
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":\"logical-recording-stop\",\"data\":{\"output_name\":\""
+                      << output_name << "\"}}\n";
+        } else std::cout << "output_name=" << output_name << '\n';
+        return 0;
+    }
+    if (name == "logical-recording-status" && arguments.size() == 1) {
+        const auto status = client.logical_recording_status();
+        if (json_output) {
+            std::cout << "{\"schema_version\":1,\"command\":\"logical-recording-status\",\"data\":{\"configured\":"
+                      << (status.configured ? "true" : "false")
+                      << ",\"active\":" << (status.active ? "true" : "false")
+                      << ",\"evidence_scope\":\"" << status.evidence_scope
+                      << "\",\"output_name\":\"" << status.output_name
+                      << "\",\"event_count\":" << status.event_count
+                      << ",\"maximum_events\":" << status.maximum_events
+                      << ",\"maximum_file_bytes\":" << status.maximum_file_bytes
+                      << "}}\n";
+        } else {
+            std::cout << "configured=" << (status.configured ? 1 : 0)
+                      << " active=" << (status.active ? 1 : 0)
+                      << " evidence_scope=" << status.evidence_scope
+                      << " output_name=" << status.output_name
+                      << " events=" << status.event_count
+                      << " maximum_events=" << status.maximum_events
+                      << " maximum_file_bytes=" << status.maximum_file_bytes << '\n';
+        }
+        return 0;
+    }
 
     if (name == "daemon-identity" && arguments.size() == 1) {
         const auto identity = client.daemon_identity();
@@ -778,6 +826,70 @@ int run(const std::vector<std::string>& arguments,
                   << std::dec << " data_hex=";
         print_hex(event->payload);
         std::cout << '\n';
+        return 0;
+    }
+    if (name == "stream-contract" && arguments.size() == 2) {
+        const auto contract = client.stream_contract(
+            parse_u32(arguments[1], "STREAM 资源 ID"));
+        std::cout << "resource_id=" << contract.resource_id
+                  << " direction=" << static_cast<unsigned>(contract.direction)
+                  << " transport_mask=" << static_cast<unsigned>(contract.transport_mask)
+                  << " flags=" << contract.flags
+                  << " maximum_chunk_bytes=" << contract.maximum_chunk_bytes
+                  << " buffer_capacity_bytes=" << contract.buffer_capacity_bytes
+                  << '\n';
+        return 0;
+    }
+    if (name == "stream-open" && arguments.size() == 5) {
+        const auto opened = client.stream_open({
+            parse_u32(arguments[1], "STREAM 资源 ID"),
+            static_cast<std::uint16_t>(parse_u32(arguments[2], "块字节")),
+            static_cast<std::uint16_t>(parse_u32(arguments[3], "flags")),
+            parse_u32(arguments[4], "初始信用字节")});
+        std::cout << "stream_id=" << opened.stream_id
+                  << " negotiated_chunk_bytes=" << opened.negotiated_chunk_bytes
+                  << " negotiated_flags=" << opened.negotiated_flags
+                  << " available_credit_bytes=" << opened.available_credit_bytes
+                  << '\n';
+        return 0;
+    }
+    if (name == "stream-read" &&
+        (arguments.size() == 3 || arguments.size() == 4)) {
+        const auto data = client.stream_read(
+            parse_u32(arguments[1], "stream ID"),
+            parse_u32(arguments[2], "预期序号"),
+            arguments.size() == 4 ? parse_u32(arguments[3], "超时毫秒") : 1000U);
+        if (!data.has_value()) {
+            std::cout << "timeout\n";
+            return 3;
+        }
+        std::cout << "stream_id=" << data->stream_id
+                  << " sequence=" << data->sequence << " data_hex=";
+        print_hex(data->data);
+        std::cout << '\n';
+        return 0;
+    }
+    if (name == "stream-write-hex" && arguments.size() == 4) {
+        client.stream_write({parse_u32(arguments[1], "stream ID"),
+                             parse_u32(arguments[2], "序号"), 0U, 0U,
+                             parse_hex(arguments[3])});
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "stream-status" && arguments.size() == 2) {
+        const auto status = client.stream_status(
+            parse_u32(arguments[1], "stream ID"));
+        std::cout << "stream_id=" << status.stream_id
+                  << " state=" << static_cast<unsigned>(status.state)
+                  << " buffered_bytes=" << status.buffered_bytes
+                  << " available_credit_bytes=" << status.available_credit_bytes
+                  << " dropped_bytes=" << status.dropped_bytes
+                  << " next_sequence=" << status.next_sequence << '\n';
+        return 0;
+    }
+    if (name == "stream-stop" && arguments.size() == 2) {
+        client.stream_stop(parse_u32(arguments[1], "stream ID"));
+        std::cout << "ok\n";
         return 0;
     }
     if (name == "ping" && arguments.size() == 2) {
