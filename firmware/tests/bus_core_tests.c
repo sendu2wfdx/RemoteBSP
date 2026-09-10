@@ -20,6 +20,16 @@ static unsigned spi_calls;
 static rbsp_bus_transaction_status_t i2c_status = RBSP_BUS_TRANSACTION_OK;
 static bool i2c_claims_unwritten_data;
 static bool i2c_returns_short_success;
+static unsigned bus_reset_calls;
+static bool bus_reset_must_fail;
+static uint32_t last_reset_resource_id;
+
+static bool health_sample(rbsp_mcu_health_sample_t* sample) {
+    assert(sample != NULL);
+    memset(sample, 0, sizeof(*sample));
+    sample->producer_generation = 1U;
+    return true;
+}
 
 static const rbsp_bus_resource_config_t resources[] = {
     {I2C_BUS_ID, 0U, 400000U, 100U, 100000U, 1000U,
@@ -149,6 +159,13 @@ static rbsp_bus_transaction_status_t spi_transfer(
     return RBSP_BUS_TRANSACTION_OK;
 }
 
+static bool bus_reset(const rbsp_bus_resource_config_t* resource) {
+    assert(resource != NULL);
+    ++bus_reset_calls;
+    last_reset_resource_id = resource->resource_id;
+    return !bus_reset_must_fail;
+}
+
 static void feed(rbsp_core_t* core, const uint8_t* packet, uint16_t size,
                  uint16_t transfer_id) {
     uint16_t offset = 0U;
@@ -210,10 +227,12 @@ int main(void) {
     rbsp_hal_t hal = {
         .link_send = send_frame,
         .milliseconds = milliseconds,
+        .health_sample = health_sample,
         .bus_resources = resources,
         .bus_resource_count = 5U,
         .i2c_transfer = i2c_transfer,
         .spi_transfer = spi_transfer,
+        .bus_reset = bus_reset,
     };
     const rbsp_node_info_t info = {
         .uuid = {0},
@@ -318,6 +337,17 @@ int main(void) {
     assert(exchange(&core, request, size, 44U, output) == 25U);
     assert(output[24U] == 7U);
 
+    /* HAL 合同违约锁存在单个设备，供状态和 MCU 健康快照持续观测。 */
+    put_u32(status_query, I2C_DEVICE_ID);
+    size = make_request(request, 0x0032U, 11U, 45U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 45U, output) == 50U);
+    assert(output[24U] == 0U && output[29U] == 3U);
+    assert((get_u32(output + 30U) & 4U) != 0U);
+    size = make_request(request, 0x0021U, 11U, 451U, NULL, 0U);
+    assert(exchange(&core, request, size, 451U, output) == 193U);
+    assert(output[24U] == 0U && output[28U] == 3U);
+
     /* 同一 I2C 控制器的一次 Busy 只属于该事务，不污染另一个设备。 */
     acquire(&core, I2C_DEVICE_2_ID, 33U, 41U);
     put_u32(transfer, I2C_DEVICE_2_ID);
@@ -325,6 +355,37 @@ int main(void) {
     assert(exchange(&core, request, size, 42U, output) == 32U);
     assert(output[24U] == 0U && output[25U] == RBSP_BUS_TRANSACTION_OK);
     assert(i2c_calls == 6U);
+
+    /* 同控制器上的另一个设备保持 Busy，而不是被错误标记为 Failed。 */
+    put_u32(status_query, I2C_DEVICE_2_ID);
+    size = make_request(request, 0x0032U, 33U, 46U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 46U, output) == 50U);
+    assert(output[24U] == 0U && output[29U] == 1U);
+    assert((get_u32(output + 30U) & 4U) == 0U);
+
+    /* 非所有者不能复位；失败继续锁存，成功仅清除目标设备并释放其租约。 */
+    put_u32(status_query, I2C_DEVICE_ID);
+    const unsigned resets_before = bus_reset_calls;
+    size = make_request(request, 0x0033U, 33U, 47U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 47U, output) == 25U);
+    assert(output[24U] == 4U && bus_reset_calls == resets_before);
+    bus_reset_must_fail = true;
+    size = make_request(request, 0x0033U, 11U, 48U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 48U, output) == 25U);
+    assert(output[24U] == 7U && core.bus_status[1U].backend_failed);
+    bus_reset_must_fail = false;
+    size = make_request(request, 0x0033U, 11U, 49U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 49U, output) == 25U);
+    assert(output[24U] == 0U && last_reset_resource_id == I2C_DEVICE_ID);
+    assert(!core.bus_status[1U].backend_failed &&
+           !core.bus_leases[1U].active && core.bus_leases[2U].active);
+    size = make_request(request, 0x0021U, 11U, 491U, NULL, 0U);
+    assert(exchange(&core, request, size, 491U, output) == 193U);
+    assert(output[24U] == 0U && output[28U] == 0U);
 
     acquire(&core, SPI_DEVICE_ID, 22U, 7U);
     put_u32(status_query, SPI_DEVICE_ID);

@@ -287,6 +287,8 @@ typedef struct {
         const uint8_t* transmit_data, uint16_t transmit_length,
         uint8_t* receive_data, uint16_t receive_length,
         uint16_t* transmitted, uint16_t* received);
+    /* 仅复位指定总线资源；不得连带改变同控制器上的其他设备状态。 */
+    bool (*bus_reset)(const rbsp_bus_resource_config_t* resource);
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)
     bool (*pwm_configure)(uint8_t channel, uint32_t frequency_hz,
@@ -439,6 +441,8 @@ typedef struct {
 #endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     rbsp_bus_lease_t bus_leases[CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT];
+    rbsp_core_resource_counters_t
+        bus_status[CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT];
     uint64_t next_bus_lease_id;
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)

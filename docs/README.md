@@ -22,6 +22,7 @@
 - [产品定位与上位机配套架构](product-positioning-and-host-stack.md)
 - [Studio 与上位机运行时边界](studio-runtime-design.md)
 - [总线设备与高速流资源设计](bus-and-stream-resources.md)
+- [单板 I2C/SPI 故障隔离与资源复位](single-board-bus-fault-isolation.md)
 - [STM32F072/F103 I2C/SPI HAL](f0-f1-i2c-spi-hal.md)
 - [运动可靠性与跨板同步验证计划](motion-reliability-plan.md)
 - [主机时钟同步模型](clock-synchronization.md)

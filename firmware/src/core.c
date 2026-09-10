@@ -282,6 +282,12 @@ static uint64_t active_lease_count(const rbsp_core_t* core) {
 static uint64_t resource_fault_count(const rbsp_core_t* core) {
     uint64_t count = 0U;
     (void)core;
+#if defined(CONFIG_REMOTEBSP_BUS)
+    for (size_t index = 0U; index < CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT;
+         ++index) {
+        if (core->bus_status[index].backend_failed) ++count;
+    }
+#endif
 #if CONFIG_UART_RESOURCE_COUNT > 0
     for (size_t index = 0U; index < CONFIG_UART_RESOURCE_COUNT; ++index) {
         if (core->uart_status[index].backend_failed) ++count;
@@ -469,10 +475,14 @@ static bool handle_bus_command(rbsp_core_t* core,
                     transmitted > write_length || received > read_length ||
                     (status == RBSP_BUS_TRANSACTION_OK &&
                      (transmitted != write_length || received != read_length))) {
+                    core->bus_status[resource_index].backend_failed = true;
                     response_size = make_status_response(
                         core, request, RBSP_STATUS_RESOURCE_FAILED,
                         0U, NULL, 0U);
                 } else {
+                    if (status == RBSP_BUS_TRANSACTION_FAULT) {
+                        core->bus_status[resource_index].backend_failed = true;
+                    }
                     result[0U] = (uint8_t)status;
                     put_u16(result + 1U, transmitted);
                     put_u16(result + 3U, received);
@@ -568,10 +578,14 @@ static bool handle_bus_command(rbsp_core_t* core,
                     (resource->bits_per_word == 16U &&
                      ((transmitted & 1U) != 0U ||
                       (received & 1U) != 0U))) {
+                    core->bus_status[resource_index].backend_failed = true;
                     response_size = make_status_response(
                         core, request, RBSP_STATUS_RESOURCE_FAILED,
                         0U, NULL, 0U);
                 } else {
+                    if (status == RBSP_BUS_TRANSACTION_FAULT) {
+                        core->bus_status[resource_index].backend_failed = true;
+                    }
                     result[0U] = (uint8_t)status;
                     put_u16(result + 1U, transmitted);
                     put_u16(result + 3U, received);
@@ -1625,6 +1639,19 @@ static rbsp_core_resource_counters_t* resource_counters(
     const uint16_t instance = descriptor->instance;
     (void)core;
     (void)instance;
+#if defined(CONFIG_REMOTEBSP_BUS)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_I2C_BUS ||
+        descriptor->type == RBSP_RESOURCE_TYPE_I2C_DEVICE ||
+        descriptor->type == RBSP_RESOURCE_TYPE_SPI_BUS ||
+        descriptor->type == RBSP_RESOURCE_TYPE_SPI_DEVICE) {
+        size_t resource_index = 0U;
+        if (find_bus_resource(core, descriptor->resource_id,
+                              &resource_index) != NULL &&
+            resource_index < CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT) {
+            return &core->bus_status[resource_index];
+        }
+    }
+#endif
 #if CONFIG_UART_RESOURCE_COUNT > 0
     if (descriptor->type == RBSP_RESOURCE_TYPE_UART &&
         instance < CONFIG_UART_RESOURCE_COUNT) {
@@ -2402,6 +2429,34 @@ static bool process_request(rbsp_core_t* core,
             } else {
                 bool owned_by_peer = false;
                 (void)owned_by_peer;
+#if defined(CONFIG_REMOTEBSP_BUS)
+                size_t bus_resource_index = 0U;
+                const rbsp_bus_resource_config_t* const bus_resource =
+                    find_bus_resource(core, descriptor.resource_id,
+                                      &bus_resource_index);
+                if (bus_resource != NULL &&
+                    bus_resource_index < CONFIG_REMOTEBSP_BUS_RESOURCE_COUNT &&
+                    core->hal.bus_reset != NULL) {
+                    const rbsp_bus_lease_t* const lease =
+                        &core->bus_leases[bus_resource_index];
+                    owned_by_peer = lease->active &&
+                                    lease->owner_session_id !=
+                                        request->session_id;
+                    if (owned_by_peer) {
+                        status = RBSP_STATUS_ACCESS_DENIED;
+                    } else if (!core->hal.bus_reset(bus_resource)) {
+                        core->bus_status[bus_resource_index].backend_failed =
+                            true;
+                        status = RBSP_STATUS_RESOURCE_FAILED;
+                    } else {
+                        memset(&core->bus_leases[bus_resource_index], 0,
+                               sizeof(core->bus_leases[bus_resource_index]));
+                        memset(&core->bus_status[bus_resource_index], 0,
+                               sizeof(core->bus_status[bus_resource_index]));
+                        status = RBSP_STATUS_OK;
+                    }
+                } else
+#endif
 #if CONFIG_UART_RESOURCE_COUNT > 0
                 if (descriptor.type == RBSP_RESOURCE_TYPE_UART &&
                     descriptor.instance < CONFIG_UART_RESOURCE_COUNT &&
