@@ -5,16 +5,24 @@ from __future__ import annotations
 
 import secrets
 import re
+import hashlib
+import json
+import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from deployment_attempt import (
-    EXECUTION_CONFIRMATION, create_absent_attempt, execute_deployment_plan)
+    EXECUTION_CONFIRMATION, create_absent_attempt, execute_deployment_plan,
+    validate_deployment_attempt)
 from firmware_deployment import (
     FirmwareDeploymentError, create_can_katapult_deployment_plan,
     create_stlink_deployment_plan, create_usb_katapult_deployment_plan)
+from firmware_deployment import (
+    validate_can_katapult_deployment_plan, validate_stlink_deployment_plan,
+    validate_usb_katapult_deployment_plan)
 
 _UUID = re.compile(r"[0-9a-f]{32}")
 
@@ -32,6 +40,8 @@ class StudioDeploymentWorkflow:
                                       not attempt_root.is_dir()):
             raise FirmwareDeploymentError("部署尝试目录无效")
         attempt_root.mkdir(parents=False, exist_ok=True)
+        self.plan_root = attempt_root / "plans"
+        self.plan_root.mkdir(exist_ok=True)
         self.output_root = output_root
         self.attempt_root = attempt_root
         self.reader_factory = reader_factory
@@ -74,6 +84,8 @@ class StudioDeploymentWorkflow:
         else:
             raise FirmwareDeploymentError("Studio部署后端无效")
         absent = create_absent_attempt(plan)
+        plan_path = self.plan_root / f"{plan['sha256']}-部署计划-v1.json"
+        self._atomic_json(plan_path, plan)
         token = secrets.token_urlsafe(32)
         with self._lock:
             now = self.monotonic()
@@ -84,6 +96,80 @@ class StudioDeploymentWorkflow:
             self._tokens[token] = {"expires": now + self.token_ttl,
                                    "plan": plan, "expected_uuid": expected_uuid}
         return self._view(plan, absent, token)
+
+    @staticmethod
+    def _atomic_json(path: Path, value: dict) -> None:
+        content = (json.dumps(value, ensure_ascii=False, allow_nan=False,
+                              sort_keys=True, indent=2) + "\n").encode()
+        if path.exists():
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+                raise FirmwareDeploymentError("同哈希部署计划归档不一致")
+            return
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.",
+                                             suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content); stream.flush(); os.fsync(stream.fileno())
+            os.link(temporary, path); temporary.unlink()
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def history(self, *, build_id: str = "", backend: str = "") -> dict:
+        """只读恢复历史；任何损坏项隔离，不成为可执行令牌。"""
+        if len(build_id) > 96 or len(backend) > 32:
+            raise FirmwareDeploymentError("部署历史筛选条件过长")
+        valid, damaged = [], []
+        validators = {
+            "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1": validate_stlink_deployment_plan,
+            "REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1": validate_can_katapult_deployment_plan,
+            "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1": validate_usb_katapult_deployment_plan}
+        files = sorted(self.attempt_root.glob("*-部署尝试-v1.json"))[:1024]
+        for path in files:
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+                    raise FirmwareDeploymentError("文件类型或大小无效")
+                attempt = json.loads(path.read_text(encoding="utf-8"))
+                attempt = validate_deployment_attempt(attempt)
+                plan_path = self.plan_root / f"{attempt['plan_sha256']}-部署计划-v1.json"
+                if plan_path.is_symlink() or not plan_path.is_file() or plan_path.stat().st_size > 2 * 1024 * 1024:
+                    raise FirmwareDeploymentError("绑定计划不存在或无效")
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                validator = validators.get(plan.get("format"))
+                if validator is None:
+                    raise FirmwareDeploymentError("绑定计划类型无效")
+                plan = validator(plan, output_root=self.output_root)
+                validate_deployment_attempt(attempt, plan)
+                if (not build_id or attempt["build_id"] == build_id) and \
+                        (not backend or attempt["backend"] == backend):
+                    valid.append({**self._view(plan, attempt, None, path.name),
+                                  "plan_filename": plan_path.name})
+            except (OSError, UnicodeError, json.JSONDecodeError,
+                    FirmwareDeploymentError) as error:
+                damaged.append({"filename": path.name,
+                                "error_type": type(error).__name__,
+                                "status": "damaged_isolated"})
+        return {"ok": True, "format": "STUDIO_DEPLOYMENT_HISTORY_V1",
+                "items": valid, "damaged": damaged, "read_only": True,
+                "reexecution_allowed": False}
+
+    def export_manifest(self, *, build_id: str = "", backend: str = "") -> dict:
+        history = self.history(build_id=build_id, backend=backend)
+        references = []
+        for item in history["items"]:
+            references.extend((
+                {"kind": "plan", "filename": f"plans/{item['plan_filename']}",
+                 "sha256": item["plan_sha256"]},
+                {"kind": "attempt", "filename": item["attempt"]["filename"],
+                 "sha256": item["attempt"]["sha256"]}))
+        manifest = {"format": "STUDIO_DEPLOYMENT_EVIDENCE_MANIFEST_V1",
+                    "schema_version": 1, "references": references,
+                    "damaged_excluded": [x["filename"] for x in history["damaged"]],
+                    "files_copied": False, "reexecution_allowed": False}
+        encoded = json.dumps(manifest, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode()
+        manifest["sha256"] = hashlib.sha256(encoded).hexdigest()
+        return manifest
 
     def execute(self, *, confirmation_token: object, execute: object,
                 confirmation: object, expected_uuid: object = None,

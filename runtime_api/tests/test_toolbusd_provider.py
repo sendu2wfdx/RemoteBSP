@@ -573,6 +573,21 @@ class RemoteCliIpcClientTest(unittest.TestCase):
 
 
 class ToolbusdSnapshotProviderTest(unittest.TestCase):
+    def test_bus_health_detail_uses_stable_status_and_explicit_unknown_total(self):
+        with patch("runtime_api.toolbusd_provider.time.monotonic_ns",
+                   return_value=2_000_000_000):
+            detail = ToolbusdSnapshotProvider._bus_health_detail({
+                "last_status_valid": True, "last_status": 2,
+                "consecutive_failures": 3,
+                "peak_consecutive_failures": 8,
+                "last_result_time_us": 1_900_000})
+        self.assertEqual(detail["last_status"], "timeout")
+        self.assertEqual(detail["last_result_age_ms"], 100)
+        self.assertEqual(detail["consecutive_failures"], 3)
+        self.assertEqual(detail["peak_consecutive_failures"], 8)
+        self.assertIsNone(detail["cumulative_failures"])
+        self.assertEqual(detail["cumulative_availability"], "unavailable")
+
     def test_pwm_target_resolution_reuses_verified_structure_cache(self):
         provider = ToolbusdSnapshotProvider(FakeToolbusClient(), cache_ttl_ms=0)
         provider._cached_snapshot = {

@@ -2662,6 +2662,29 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         return result
 
     @staticmethod
+    def _bus_health_detail(value: dict | None) -> dict:
+        """把稳定状态码投影为带单位的 Web 模型；缺失累计值明确未知。"""
+        if value is None or not value["last_status_valid"]:
+            return {"availability": "unknown", "last_status": "unknown",
+                    "last_result_age_ms": None, "consecutive_failures": 0,
+                    "peak_consecutive_failures": 0,
+                    "cumulative_failures": None,
+                    "cumulative_availability": "unavailable"}
+        status_names = ("ok", "nack", "timeout", "busy", "fault",
+                        "limit_exceeded")
+        now_us = time.monotonic_ns() // 1000
+        last_us = int(value["last_result_time_us"])
+        age_ms = max(0, (now_us - last_us) // 1000) if last_us <= now_us else 0
+        return {"availability": "available",
+                "last_status": status_names[int(value["last_status"])],
+                "last_result_age_ms": age_ms,
+                "consecutive_failures": int(value["consecutive_failures"]),
+                "peak_consecutive_failures": int(
+                    value["peak_consecutive_failures"]),
+                "cumulative_failures": None,
+                "cumulative_availability": "unavailable"}
+
+    @staticmethod
     def _clock_age_at_capture_ns(clock: dict, captured_at_ms: int) -> int:
         reported_age_ns = int(clock["sample_age_ns"])
         last_sample_ns = int(clock["last_sample_host_time_ns"])
@@ -2814,6 +2837,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         source_client: ToolbusIpcClient = self.client
         source_sequence: int | None = None
         source_clocks: dict[int, dict] = {}
+        source_bus_health: dict[tuple[int, int], dict] = {}
         snapshot_reader = getattr(self.client, "runtime_snapshot", None)
         structured_output = getattr(self.client, "structured_output", True)
         if callable(snapshot_reader) and structured_output:
@@ -2832,6 +2856,11 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             source_clocks = {
                 int(clock["node_id"]): copy.deepcopy(clock)
                 for clock in source["clocks"]
+            }
+            source_bus_health = {
+                (int(item["node_id"]), int(item["resource_id"])):
+                    copy.deepcopy(item)
+                for item in source["bus_health"]
             }
             captured_at_ms = self._clock_value()
         try:
@@ -2968,6 +2997,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                             "source": descriptor["source"],
                             "rx_capacity": descriptor["rx_capacity"],
                             "tx_capacity": descriptor["tx_capacity"],
+                            "bus_health": self._bus_health_detail(
+                                source_bus_health.get(
+                                    (numeric_id, raw_resource_id))),
                         },
                     })
                     if health in {"degraded", "failed"} or \

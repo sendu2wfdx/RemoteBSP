@@ -413,6 +413,9 @@ def _authenticator():
         ApiKeyCredential(
             "lease-only", "d" * 32,
             frozenset({CONTROL_LEASE_ACQUIRE_PERMISSION})),
+        ApiKeyCredential(
+            "viewer", "e" * 32,
+            frozenset({RUNTIME_READ_PERMISSION})),
     ])
 
 
@@ -524,6 +527,13 @@ class GpioControlHttpTest(unittest.TestCase):
                       self.provider.lookup_calls)
 
     def test_bus_reset_http_lease_scope_commit_and_query(self):
+        with urlopen(self._request("GET", "/api/v1", "a" * 32)) as response:
+            capability = json.loads(response.read())["data"]["capabilities"]["bus_reset"]
+        self.assertTrue(capability["available"])
+        self.assertTrue(capability["permitted"])
+        with urlopen(self._request("GET", "/api/v1", "e" * 32)) as response:
+            denied_capability = json.loads(response.read())["data"]["capabilities"]["bus_reset"]
+        self.assertFalse(denied_capability["permitted"])
         lease_body = {"node_id": "mock-node-1", "resource_id": "i2c-1",
             "command_group": "bus.reset", "ttl_ms": 1000,
             "idempotency_key": "bus-lease-1"}

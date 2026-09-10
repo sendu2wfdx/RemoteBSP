@@ -31,7 +31,8 @@ class StudioDeploymentWorkflowHttpTests(unittest.TestCase):
                 reader_factory=reader_factory,
                 backend_config={"stlink-openocd": {"probe_serial": None}},
                 executor=executor)
-            plan = {"format": "PLAN", "sha256": "a" * 64,
+            plan = {"format": "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1",
+                    "sha256": "a" * 64,
                     "build_id": "board-build-01234567",
                     "backend": "stlink-openocd", "hardware_access": False,
                     "flash_performed": False, "expected_identity": {
@@ -72,6 +73,24 @@ class StudioDeploymentWorkflowHttpTests(unittest.TestCase):
                 self.assertEqual(result["attempt"]["failure_type"],
                                  "MockFlashError")
                 reader_factory.assert_called_once_with("ab" * 16)
+                with patch.object(workflow, "history", return_value={
+                        "ok": True, "format": "STUDIO_DEPLOYMENT_HISTORY_V1",
+                        "items": [], "damaged": [], "read_only": True,
+                        "reexecution_allowed": False}) as history:
+                    restored = json.loads(urlopen(
+                        base + "/api/deployment/history?backend=stlink-openocd"
+                    ).read())
+                self.assertTrue(restored["read_only"])
+                history.assert_called_once_with(build_id="",
+                                                backend="stlink-openocd")
+                with patch.object(workflow, "export_manifest", return_value={
+                        "format": "STUDIO_DEPLOYMENT_EVIDENCE_MANIFEST_V1",
+                        "references": [], "sha256": "f" * 64}) as export:
+                    manifest = post("/api/deployment/history/export", {
+                        "build_id": "", "backend": "stlink-openocd"})
+                self.assertEqual(manifest["sha256"], "f" * 64)
+                export.assert_called_once_with(build_id="",
+                                               backend="stlink-openocd")
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 

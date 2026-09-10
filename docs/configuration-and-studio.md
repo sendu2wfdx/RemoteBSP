@@ -252,6 +252,13 @@ execution/readback 三态与有界错误类型；不能由页面参数直接填�
 `/api/deployment/usb-katapult/preflight` 及其 execute 配对接口已桥接该模型；服务端启用
 新工作流后优先使用版本化计划和 attempt，浏览器不接收命令、工具路径或可自填的终态。
 
+部署历史从 `attempts/` 与 `attempts/plans/` 中的版本化 JSON 只读恢复。每个 attempt 会先
+验证自哈希，再按 `plan_sha256` 找到计划、重验计划与当前受保护构建证据，最后验证二者绑定；
+单个文件损坏、过大、符号链接、缺少计划或摘要漂移只会进入 `damaged_isolated`，不会阻断
+其他记录。历史支持按构建 ID、后端筛选，但不产生确认令牌，也没有重新执行入口。
+“导出证据包清单”只列出已存在的计划/attempt 相对文件名及 SHA-256，并明确
+`files_copied=false`、`reexecution_allowed=false`；清单本身也带 SHA-256。
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

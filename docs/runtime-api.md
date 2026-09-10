@@ -788,6 +788,15 @@ POST /api/v1/control/bus/reset
 `unknown/scope_blocked`，只能通过既有 operation status/lookup 查询，不能盲目再次复位。
 阻断键精确到单个节点资源，不影响同节点其他 I2C/SPI 设备。
 
+Web 控制台会在 I2C/SPI 设备详情中显示 `bus_health`：最后远端状态、距最后结果的
+毫秒数、当前连续失败数和历史连续失败峰值。当前快照合同没有累计失败计数，页面明确
+显示“当前协议未提供”，不得用零冒充测量值。只有根能力响应同时表明
+`bus_reset.available=true` 且当前 API 身份的 `bus_reset.permitted=true` 时，页面才提供
+复位租约流程；先成功取得独占 `bus.reset` 租约，才显示确认 Reset。复位返回
+`unknown` 后页面保存服务端 `Location` 和 operation ID、禁止重复提交，只提供操作状态
+查询；查询得到安全终态后才解除前端冻结。这个前端状态只是防误操作，权威冻结仍位于
+toolbusd 持久账本。
+
 控制请求现在从读取请求行之前建立一次不可续期的单调绝对期限。头部、请求体、daemon
 身份单飞、目标快照、资源状态 fanout、`remote-cli` 子进程、租约登记、GPIO 写入与释放
 都消费同一份剩余预算；旧接口即使不识别 deadline，也会在调用前后校验，且兼容 fanout

@@ -58,7 +58,7 @@ class RuntimeDashboard:
         health = resource["state"].get("health")
         if health not in {"healthy", "degraded", "fault", "unknown"}:
             health = "unknown"
-        return {
+        projected = {
             **copy.deepcopy(resource),
             "availability": availability,
             "health": health,
@@ -66,6 +66,17 @@ class RuntimeDashboard:
                               if item["resource_id"] == resource["resource_id"]
                               and item["active"]],
         }
+        if resource.get("kind") in {"i2c_device", "spi_device"}:
+            detail = resource.get("state", {}).get("bus_health")
+            if not isinstance(detail, dict):
+                detail = {"availability": "unknown", "last_status": "unknown",
+                          "last_result_age_ms": None,
+                          "consecutive_failures": 0,
+                          "peak_consecutive_failures": 0,
+                          "cumulative_failures": None,
+                          "cumulative_availability": "unavailable"}
+            projected["bus_health"] = copy.deepcopy(detail)
+        return projected
 
     def _toolbusd_health(self, value: dict | None, *, scope: str = "toolbusd") -> dict:
         if not isinstance(value, dict) or value.get("available") is not True:

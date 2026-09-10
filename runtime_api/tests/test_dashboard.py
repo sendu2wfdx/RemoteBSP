@@ -1,10 +1,20 @@
 import unittest
+from pathlib import Path
 
 from runtime_api.dashboard import RuntimeDashboard
 from runtime_api.provider import mock_snapshot
 
 
 class RuntimeDashboardTests(unittest.TestCase):
+    def test_web_bus_reset_requires_capability_lease_and_locks_unknown(self):
+        script = (Path(__file__).parents[1] / "static" / "dashboard.js").read_text()
+        self.assertIn("busResetPermitted", script)
+        self.assertIn('command_group:"bus.reset"', script)
+        self.assertIn('state.busLeases.get(key)', script)
+        self.assertIn('state.unknownBusOperations.set', script)
+        self.assertIn("禁止重复提交", script)
+        self.assertIn("查询操作状态", script)
+
     def test_node_health_preserves_unavailable_instead_of_zero(self):
         snapshot = mock_snapshot()
         snapshot["nodes"][0]["runtime"]["health_snapshot"] = {
@@ -64,6 +74,20 @@ class RuntimeDashboardTests(unittest.TestCase):
         self.assertEqual(alerts[0]["critical_threshold"], 950)
         self.assertEqual(view["toolbusd_health"]["trend"]["peaks"][
             "cpu_load_permille"], 960)
+
+    def test_bus_health_detail_preserves_units_and_unknown_cumulative(self):
+        snapshot = mock_snapshot()
+        resource = snapshot["nodes"][0]["resources"][0]
+        resource["kind"] = "i2c_device"
+        resource["state"]["bus_health"] = {
+            "availability": "available", "last_status": "timeout",
+            "last_result_age_ms": 125, "consecutive_failures": 3,
+            "peak_consecutive_failures": 7, "cumulative_failures": None,
+            "cumulative_availability": "unavailable"}
+        projected = RuntimeDashboard().observe(snapshot)["nodes"][0]["resources"][0]
+        self.assertEqual(projected["bus_health"]["last_status"], "timeout")
+        self.assertEqual(projected["bus_health"]["last_result_age_ms"], 125)
+        self.assertIsNone(projected["bus_health"]["cumulative_failures"])
 
 
 if __name__ == "__main__":

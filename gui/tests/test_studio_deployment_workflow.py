@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +34,12 @@ class StudioDeploymentWorkflowTests(unittest.TestCase):
 
     @staticmethod
     def plan(backend):
-        return {"format": "PLAN", "sha256": "a" * 64,
+        formats = {"stlink-openocd": "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1",
+                   "can-katapult": "REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1",
+                   "usb-katapult": "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1"}
+        hashes = {"stlink-openocd": "a", "can-katapult": "e",
+                  "usb-katapult": "f"}
+        return {"format": formats[backend], "sha256": hashes[backend] * 64,
                 "build_id": "board-build-01234567", "backend": backend,
                 "hardware_access": False, "flash_performed": False,
                 "expected_identity": {"board_id": "board",
@@ -52,7 +58,7 @@ class StudioDeploymentWorkflowTests(unittest.TestCase):
                 view = self.workflow.preflight(
                     backend=backend, build_id="board-build-01234567",
                     expected_uuid="ab" * 16, target=target)
-            self.assertEqual(view["plan_sha256"], "a" * 64)
+            self.assertEqual(len(view["plan_sha256"]), 64)
             self.assertEqual(view["attempt"]["execution_status"], "absent")
             self.assertEqual(view["attempt"]["readback_status"], "absent")
             self.assertFalse(view["hardware_access_performed"])
@@ -84,6 +90,38 @@ class StudioDeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(result["attempt"]["failure_type"], "MockToolError")
         self.assertFalse(result["attempt"]["hardware_success_claimed"])
         self.reader_factory.assert_called_once_with("ab" * 16)
+
+    def test_restart_history_is_read_only_filters_and_isolates_damage(self):
+        plan = self.plan("stlink-openocd")
+        with patch("studio_deployment_workflow.create_stlink_deployment_plan",
+                   return_value=plan):
+            self.workflow.preflight(
+                backend="stlink-openocd", build_id=plan["build_id"],
+                expected_uuid="ab" * 16)
+        from deployment_attempt import create_absent_attempt
+        attempt = create_absent_attempt(plan)
+        attempt_path = self.workflow.attempt_root / \
+            f"{plan['build_id']}-0000000000000000-部署尝试-v1.json"
+        attempt_path.write_text(json.dumps(attempt), encoding="utf-8")
+        (self.workflow.attempt_root / "broken-部署尝试-v1.json").write_text(
+            "{", encoding="utf-8")
+        restarted = StudioDeploymentWorkflow(
+            output_root=self.root, attempt_root=self.workflow.attempt_root,
+            reader_factory=self.reader_factory,
+            backend_config=self.workflow.backend_config,
+            executor=self.executor)
+        with patch("studio_deployment_workflow.validate_stlink_deployment_plan",
+                   return_value=plan):
+            history = restarted.history(backend="stlink-openocd")
+            manifest = restarted.export_manifest(backend="stlink-openocd")
+        self.assertEqual(len(history["items"]), 1)
+        self.assertEqual(len(history["damaged"]), 1)
+        self.assertFalse(history["reexecution_allowed"])
+        self.assertEqual(len(manifest["references"]), 2)
+        self.assertFalse(manifest["files_copied"])
+        self.assertEqual(len(manifest["sha256"]), 64)
+        self.reader_factory.assert_not_called()
+        self.executor.assert_not_called()
 
 
 if __name__ == "__main__":

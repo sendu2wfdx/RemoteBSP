@@ -58,6 +58,8 @@
   与 Mock 回读验证，不构成实体烧录结论；
   Studio 构建记录页已增加统一部署工作流模型，默认离线预检并展示计划哈希、执行/回读三态、
   错误类型和不可伪造提示；危险执行需一次性令牌、执行勾选及二次确认，自动测试仍仅用 Mock；
+  部署计划与 attempt 已支持重启后只读恢复、按构建/后端筛选、损坏项隔离及只引用既有文件
+  和 SHA-256 的证据清单；历史不会生成执行令牌，也不能重新执行；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，

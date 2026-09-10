@@ -2812,6 +2812,14 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "configured": self.gpio_control_configured,
                         "operational": gpio_control_operational,
                     },
+                    "bus_reset": {
+                        "available": bool(getattr(
+                            self.provider, "bus_reset_control_available", False)),
+                        "permitted": isinstance(
+                            auth_context, AuthenticatedPrincipal) and
+                            BUS_RESET_PERMISSION in auth_context.permissions,
+                        "command_group": BUS_RESET_COMMAND_GROUP,
+                    },
                     "operation_ledger": {
                         "configured": self.gpio_control_configured,
                         "operational": gpio_backend_operational,

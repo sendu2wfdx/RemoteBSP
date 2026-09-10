@@ -300,6 +300,27 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/production-history/status":
             self._send_json(self.production_history.status())
             return
+        if path == "/api/deployment/history":
+            workflow = self.studio_deployment_workflow
+            if workflow is None:
+                self._send_json({"ok": False, "error": "Studio部署历史未启用"},
+                                HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                pairs = parse_qsl(parsed.query, keep_blank_values=True,
+                                  max_num_fields=2)
+                names = [name for name, _ in pairs]
+                if set(names) - {"build_id", "backend"} or \
+                        len(names) != len(set(names)):
+                    raise FirmwareDeploymentError("部署历史筛选参数无效")
+                query = dict(pairs)
+                self._send_json(workflow.history(
+                    build_id=query.get("build_id", ""),
+                    backend=query.get("backend", "")))
+            except FirmwareDeploymentError as error:
+                self._send_json({"ok": False, "error": str(error)},
+                                HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/production-history/search":
             try:
                 pairs = parse_qsl(urlparse(self.path).query,
@@ -459,6 +480,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/deployment/can-katapult/execute",
                         "/api/deployment/usb-katapult/preflight",
                         "/api/deployment/usb-katapult/execute",
+                        "/api/deployment/history/export",
                         "/api/device-parameters/write-preflight",
                         "/api/device-parameters/restore-preflight",
                         "/api/device-parameters/execute",
@@ -476,6 +498,19 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
             if path.startswith("/api/deployment/"):
+                if path == "/api/deployment/history/export":
+                    workflow = self.studio_deployment_workflow
+                    if workflow is None:
+                        self._send_json({"ok": False,
+                            "error": "Studio部署历史未启用"},
+                            HTTPStatus.SERVICE_UNAVAILABLE)
+                        return
+                    if set(request) != {"build_id", "backend"}:
+                        raise FirmwareDeploymentError("部署证据清单筛选字段无效")
+                    response = workflow.export_manifest(
+                        build_id=request["build_id"], backend=request["backend"])
+                    self._send_json(response)
+                    return
                 can_katapult = path.startswith("/api/deployment/can-katapult/")
                 usb_katapult = path.startswith("/api/deployment/usb-katapult/")
                 workflow = self.studio_deployment_workflow
