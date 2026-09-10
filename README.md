@@ -64,9 +64,10 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
 | 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理。实体 I2C/SPI BSP、双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及显式 H2N/N2H 逻辑传输钩子可确定性回放 delay/drop/duplicate/reboot，且不冒充真实 CAN/USB 物理层 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与 GPIO/UART/PWM/定时位流只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。自动烧录/回读尚未实现 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；HTTP 短时控制租约通过强随机 daemon identity 绑定 `toolbusd` 启动，但仍不下发设备命令。`toolbusd` 另有受信本机 GPIO 租约/写入 IPC 竖切，已在 USB Mock、vcan Classical CAN 与 CAN-FD 验证，尚未接入 HTTP、TLS 或持久审计 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行资源级安全停机，能力证明绑定 daemon 身份与单调 revision；USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。`GPIO_CLOSE`、结构化 IPC 错误、TLS、统一控制总期限、跨过期 exactly-once、主动推送和持久审计仍待实现 |
+| 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。当前仅有协议契约，尚未接入 MCU/Remote Core/toolbusd 生产者或实体采样 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -182,18 +183,22 @@ CAN/CAN-FD帧、SocketCAN、USB帧、固件USB编解码和USB Mock端到端链�
 数字孪生、主机时钟模型、运动欠载/限位停机、PWM/定时位流/WS2812、CAN-FD BRS、
 流量准入、Kconfig生成、Studio总线图形编辑到Mock清单的黄金路径、TimeSync v1
 四时间戳闭环、跨板事务纯软件状态机和双节点进程级闭环、GUI API，以及默认使用版本化
-`remote-cli --json` 的只读 Runtime API。Runtime 已通过单次本地 IPC 快照消除一次刷新
+`remote-cli --json` 的 Runtime 读取 API，以及认证回环 HTTP 到 `toolbusd` 的 GPIO
+最小控制闭环。Runtime 已通过单次本地 IPC 快照消除一次刷新
 中的 N+1 进程与套接字连接，并保留拓扑稳定校验、资源/节点故障隔离和显式旧文本兼容；
 Provider 另提供 250 ms 单飞短缓存和 HTTP 活动请求上限，失败不会回退陈旧快照；
 缓存有效期还会受时钟样本陈旧阈值约束，不能跨过阈值继续返回无告警旧结果。
 RuntimeSnapshot IPC 已升级到 v2，把每个节点的启动代次、模型代次、同步状态、样本数、
 漂移及误差估计贯通到 Runtime API；Runtime 会按可配置误差与样本年龄阈值输出稳定
 质量告警，旧文本源只标记观测能力未知。这些是软件模型观测值，不代表硬件已达到相同精度。
-Runtime 的认证授权已包含 API key 身份、`runtime.read` 及控制租约申请/释放/撤销权限：
+Runtime 的认证授权已包含 API key 身份、`runtime.read`、`runtime.gpio.write` 及控制租约
+申请/释放/撤销权限：
 密钥以固定长度摘要比较，审计使用脱敏请求 ID、有界环形缓冲和非阻塞输出。控制租约仅在
 回环监听且启用认证时开放，按节点+资源排他并有 100～30000 ms TTL、终态幂等保护和请求
-总期限；它仍是进程内协调元数据，不调用 `toolbusd`、不代表设备执行成功，也不提供链路
-加密或持久完整性。增量事件采用带进程实例标识的严格游标、有界分页和过期重同步，
+读取期限。`gpio.write` 租约会以剩余 TTL、稳定节点 UUID、当前节点代次和幂等键登记到
+`toolbusd` IPC v2；守护进程在实际写入前再次核对当前节点注册表和静态 GPIO 合同。
+这仍不提供链路加密、跨租约过期的 exactly-once 或持久审计完整性。增量事件采用带进程
+实例标识的严格游标、有界分页和过期重同步，
 只表示成功快照之间的差分，不是 WebSocket，也不能捕获两次轮询间出现后又恢复的瞬态。
 非回环部署仍必须由受控 TLS 反向代理、密钥文件权限和限速补齐。
 `toolbusd` 本地控制套接字固定为 `0660`，拒绝删除其他用户的同名对象，并在退出时按
@@ -446,7 +451,8 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [总线设备与高速流资源设计](docs/bus-and-stream-resources.md)
 - [运动可靠性与跨板同步验证计划](docs/motion-reliability-plan.md)
 - [主机时钟同步模型](docs/clock-synchronization.md)
-- [只读 Runtime API](docs/runtime-api.md)
+- [Runtime API](docs/runtime-api.md)
+- [遥测与健康契约](docs/telemetry-health-contract.md)
 - [智能实时资源与多轴运动控制设计](docs/intelligent-motion-resources.md)
 - [libremotebsp 客户端 API](docs/libremotebsp-api.md)
 - [STM32 硬件与接线](docs/stm32-hardware-plan.md)
