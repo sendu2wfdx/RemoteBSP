@@ -115,8 +115,12 @@ protocol::HealthSnapshot ToolbusdHealthProducer::capture(
 
     protocol::HealthSnapshot snapshot;
     snapshot.source = protocol::HealthSource::Toolbusd;
-    // 当前输入只有累计计数，不能据此证明系统此刻 Healthy 或 Fault。
-    snapshot.overall = protocol::OverallHealth::Unknown;
+    // 账本不可写会关闭 Runtime mutation capability，属于可证明的软件降级；
+    // 其余仅有累计计数时仍不臆测系统 Healthy 或 Fault。
+    snapshot.overall =
+        observation.operation_ledger_mutation_available == false
+            ? protocol::OverallHealth::Degraded
+            : protocol::OverallHealth::Unknown;
     snapshot.sample_sequence = next_sequence_++;
     snapshot.sample_time_ms = observation.sample_time_ms - started_at_ms_;
     snapshot.node_id = 0U;
@@ -175,6 +179,28 @@ protocol::HealthSnapshot ToolbusdHealthProducer::capture(
         extension(ToolbusdHealthMetricId::TrafficEstimatedWireTimeNs,
                   kToolbusdNanosecondsUnit,
                   observation.traffic.estimated_wire_time_ns),
+        observation.operation_ledger_mutation_available.has_value()
+            ? extension(
+                  ToolbusdHealthMetricId::
+                      RuntimeOperationLedgerMutationAvailable,
+                  HealthMetricUnit::Count,
+                  *observation.operation_ledger_mutation_available ? 1U : 0U)
+            : unknown(
+                  static_cast<HealthMetricId>(
+                      ToolbusdHealthMetricId::
+                          RuntimeOperationLedgerMutationAvailable),
+                  HealthMetricUnit::Count),
+        observation.operation_ledger_operation_count.has_value()
+            ? extension(
+                  ToolbusdHealthMetricId::
+                      RuntimeOperationLedgerOperationCount,
+                  HealthMetricUnit::Count,
+                  *observation.operation_ledger_operation_count)
+            : unknown(
+                  static_cast<HealthMetricId>(
+                      ToolbusdHealthMetricId::
+                          RuntimeOperationLedgerOperationCount),
+                  HealthMetricUnit::Count),
     };
     last_sample_time_ms_ = observation.sample_time_ms;
 

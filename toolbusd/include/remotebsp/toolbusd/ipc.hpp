@@ -37,6 +37,10 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeGpioWrite = 11,
     RuntimeControlRelease = 12,
     HealthSnapshot = 13,
+    RuntimeGpioWriteOperation = 14,
+    RuntimeControlReleaseOperation = 15,
+    RuntimeOperationQuery = 16,
+    RuntimeOperationLookup = 17,
 };
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
@@ -48,6 +52,8 @@ constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
 constexpr std::uint16_t kMaximumIpcMotionGroupMembers = 32U;
 constexpr std::uint16_t kIpcErrorEnvelopeVersion = 1U;
 constexpr std::size_t kMaximumIpcErrorMessageBytes = 256U;
+constexpr std::uint16_t kRuntimeOperationIpcVersion = 1U;
+constexpr std::size_t kRuntimeOperationIdBytes = 32U;
 
 enum class IpcErrorCategory : std::uint8_t {
     Request = 1U,
@@ -88,6 +94,72 @@ struct IpcErrorEnvelope {
     std::string message;
 };
 
+enum class RuntimeOperationKind : std::uint8_t {
+    Unknown = 0U,
+    GpioWrite = 1U,
+    ControlRelease = 2U,
+};
+
+enum class RuntimeOperationState : std::uint8_t {
+    Pending = 1U,
+    Committed = 2U,
+    Rejected = 3U,
+    Unknown = 4U,
+    ExpiredUnknown = 5U,
+};
+
+enum class RuntimeOperationRecovery : std::uint8_t {
+    None = 0U,
+    NotSent = 1U,
+    SafeClosed = 2U,
+    ScopeBlocked = 3U,
+    AwaitingReboot = 4U,
+    NodeRebootConfirmed = 5U,
+};
+
+enum class RuntimeOperationError : std::uint16_t {
+    None = 0U,
+    Rejected = 1U,
+    Deadline = 2U,
+    Backend = 3U,
+    Persistence = 4U,
+    HistoryExpired = 5U,
+};
+
+using RuntimeOperationId =
+    std::array<std::uint8_t, kRuntimeOperationIdBytes>;
+
+struct RuntimeOperationQuery {
+    std::uint16_t version{kRuntimeOperationIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    RuntimeOperationId operation_id{};
+    std::string owner_key_id;
+};
+
+struct RuntimeOperationLookup {
+    std::uint16_t version{kRuntimeOperationIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    RuntimeOperationKind kind{RuntimeOperationKind::GpioWrite};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+};
+
+struct RuntimeOperationOutcome {
+    std::uint16_t version{kRuntimeOperationIpcVersion};
+    RuntimeOperationKind kind{RuntimeOperationKind::GpioWrite};
+    RuntimeOperationState state{RuntimeOperationState::Pending};
+    RuntimeOperationRecovery recovery{RuntimeOperationRecovery::None};
+    bool replayed{};
+    RuntimeOperationId operation_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::uint32_t resource_id{};
+    std::uint32_t object_id{};
+    RuntimeOperationError error{RuntimeOperationError::None};
+    bool value{};
+};
+
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
     std::vector<std::uint8_t> body;
@@ -118,6 +190,8 @@ struct IpcRequest {
     RuntimeControlAcquireRequest runtime_control_acquire;
     RuntimeGpioWriteRequest runtime_gpio_write;
     RuntimeControlReleaseRequest runtime_control_release;
+    RuntimeOperationQuery runtime_operation_query;
+    RuntimeOperationLookup runtime_operation_lookup;
 };
 
 struct UartStreamChunk {
@@ -220,6 +294,14 @@ void write_ipc_runtime_gpio_write_request(
     int socket, const RuntimeGpioWriteRequest& request);
 void write_ipc_runtime_control_release_request(
     int socket, const RuntimeControlReleaseRequest& request);
+void write_ipc_runtime_gpio_write_operation_request(
+    int socket, const RuntimeGpioWriteRequest& request);
+void write_ipc_runtime_control_release_operation_request(
+    int socket, const RuntimeControlReleaseRequest& request);
+void write_ipc_runtime_operation_query_request(
+    int socket, const RuntimeOperationQuery& request);
+void write_ipc_runtime_operation_lookup_request(
+    int socket, const RuntimeOperationLookup& request);
 IpcRequest read_ipc_request(int socket);
 
 std::vector<std::uint8_t> encode_ipc_node_list(
@@ -270,6 +352,23 @@ std::vector<std::uint8_t> encode_ipc_runtime_gpio_write_result(
     const RuntimeGpioWriteResult& result);
 RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
     const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
+    const RuntimeOperationQuery& query);
+RuntimeOperationQuery decode_ipc_runtime_operation_query(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_operation_lookup(
+    const RuntimeOperationLookup& lookup);
+RuntimeOperationLookup decode_ipc_runtime_operation_lookup(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
+    const RuntimeOperationOutcome& outcome);
+RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
+    const std::vector<std::uint8_t>& body);
+const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept;
+const char* runtime_operation_state_name(RuntimeOperationState state) noexcept;
+const char* runtime_operation_recovery_name(
+    RuntimeOperationRecovery recovery) noexcept;
+const char* runtime_operation_error_name(RuntimeOperationError error) noexcept;
 std::vector<std::uint8_t> encode_ipc_error_envelope(
     const IpcErrorEnvelope& error);
 IpcErrorEnvelope decode_ipc_error_envelope(

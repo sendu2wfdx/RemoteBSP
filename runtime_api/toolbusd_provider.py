@@ -9,7 +9,11 @@ import struct
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeout,
+)
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -32,6 +36,7 @@ from .provider import (
 
 
 _UUID = re.compile(r"^[0-9a-fA-F]{32}$")
+_OPERATION_ID = re.compile(r"^[0-9a-f]{64}$")
 _RESOURCE_KINDS = {
     "gpio", "uart", "spi", "i2c", "adc", "pwm", "timer", "storage",
     "stepgen-axis", "timed-bitstream", "i2c-bus", "i2c-device",
@@ -48,7 +53,24 @@ _TRAFFIC_CLASSES = (
     "safety", "motion", "system", "interactive", "streaming", "bulk")
 _CONTROL_OPERATIONS = {
     "runtime-control-acquire", "runtime-gpio-write",
-    "runtime-control-release",
+    "runtime-control-release", "runtime-gpio-write-operation",
+    "runtime-control-release-operation",
+}
+_OPERATION_FIELDS = {
+    "operation_id", "lease_id", "expected_node_uuid", "resource_id",
+    "kind", "state", "replayed", "recovery", "object_id", "value",
+    "error_code",
+}
+_OPERATION_KINDS = {"gpio_write", "control_release"}
+_OPERATION_STATES = {
+    "pending", "committed", "rejected", "unknown", "expired_unknown",
+}
+_OPERATION_RECOVERIES = {
+    "none", "not_sent", "safe_closed", "scope_blocked",
+    "awaiting_reboot", "node_reboot_confirmed",
+}
+_OPERATION_ERRORS = {
+    "rejected", "deadline", "backend", "persistence", "history_expired",
 }
 
 
@@ -193,6 +215,23 @@ class ToolbusIpcClient(Protocol):
     def runtime_control_release(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str) -> None: ...
+
+    def runtime_gpio_write_operation(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, value: bool) -> dict: ...
+
+    def runtime_control_release_operation(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str) -> dict: ...
+
+    def runtime_operation_status(
+            self, daemon_instance_id: str, owner_key_id: str,
+            operation_id: str) -> dict: ...
+
+    def runtime_operation_lookup(
+            self, daemon_instance_id: str, owner_key_id: str,
+            kind: str, lease_id: str, idempotency_key: str) -> dict: ...
 
     def list_nodes(self) -> list[dict]: ...
 
@@ -424,6 +463,120 @@ class RemoteCliIpcClient:
             raise ToolbusIpcProtocolError(
                 f"{command}结构化输出命令不匹配：{returned_command}")
         return _json_object(root["data"], command + ".data")
+
+    @staticmethod
+    def _json_operation_outcome(output: str, command: str, *,
+                                expected_kind: str | None = None,
+                                expected_operation_id: str | None = None,
+                                expected_value: bool | None = None,
+                                allow_unknown_kind: bool = False) -> dict:
+        """严格验证 operation ledger 的状态组合，镜像 C++ wire 合同。"""
+        data = RemoteCliIpcClient._document(output, command)
+        _exact_fields(data, _OPERATION_FIELDS, command + ".data")
+        operation_id = _json_string(
+            data["operation_id"], command + ".operation_id")
+        if _OPERATION_ID.fullmatch(operation_id) is None or \
+                operation_id == "0" * 64:
+            raise ToolbusIpcProtocolError("operation_id必须是非零64位小写十六进制")
+        if expected_operation_id is not None and \
+                operation_id != expected_operation_id:
+            raise ToolbusIpcProtocolError("操作查询返回了错误的operation_id")
+        raw_lease_id = data["lease_id"]
+        lease_id = None if raw_lease_id is None else _json_string(
+            raw_lease_id, command + ".lease_id")
+        if lease_id is not None and (
+                not _UUID.fullmatch(lease_id) or lease_id == "0" * 32 or
+                lease_id != lease_id.lower()):
+            raise ToolbusIpcProtocolError("操作结果lease_id无效")
+        raw_node_uuid = data["expected_node_uuid"]
+        node_uuid = None if raw_node_uuid is None else _json_string(
+            raw_node_uuid, command + ".expected_node_uuid")
+        if node_uuid is not None and (
+                not _UUID.fullmatch(node_uuid) or node_uuid == "0" * 32 or
+                node_uuid != node_uuid.lower()):
+            raise ToolbusIpcProtocolError("操作结果expected_node_uuid无效")
+        raw_resource = data["resource_id"]
+        resource_id = None if raw_resource is None else _json_integer(
+            raw_resource, command + ".resource_id", minimum=1,
+            maximum=0xFFFFFFFF)
+        raw_kind = data["kind"]
+        if raw_kind is None:
+            kind = None
+        else:
+            kind = _json_string(raw_kind, command + ".kind")
+            if kind not in _OPERATION_KINDS:
+                raise ToolbusIpcProtocolError("操作结果包含未知kind")
+        if kind is None and not allow_unknown_kind:
+            raise ToolbusIpcProtocolError("该操作响应不得省略kind")
+        if expected_kind is not None and kind != expected_kind:
+            raise ToolbusIpcProtocolError("操作结果kind与请求不匹配")
+        state = _json_string(data["state"], command + ".state")
+        recovery = _json_string(data["recovery"], command + ".recovery")
+        if state not in _OPERATION_STATES or \
+                recovery not in _OPERATION_RECOVERIES:
+            raise ToolbusIpcProtocolError("操作结果包含未知状态或恢复状态")
+        replayed = _json_boolean(data["replayed"], command + ".replayed")
+        raw_object = data["object_id"]
+        object_id = None if raw_object is None else _json_integer(
+            raw_object, command + ".object_id", minimum=1,
+            maximum=0xFFFFFFFF)
+        raw_value = data["value"]
+        value = None if raw_value is None else _json_boolean(
+            raw_value, command + ".value")
+        raw_error = data["error_code"]
+        error_code = None if raw_error is None else _json_string(
+            raw_error, command + ".error_code")
+        if error_code is not None and error_code not in _OPERATION_ERRORS:
+            raise ToolbusIpcProtocolError("操作结果包含未知error_code")
+
+        valid = False
+        if kind is None:
+            valid = state == "expired_unknown" and recovery == "none" and \
+                lease_id is None and node_uuid is None and \
+                resource_id is None and \
+                object_id is None and value is None and \
+                error_code == "history_expired"
+        elif state == "pending":
+            valid = recovery == "none" and object_id is None and \
+                value is None and error_code is None
+        elif state == "committed" and kind == "gpio_write":
+            valid = recovery == "none" and object_id is not None and \
+                value is not None and error_code is None
+        elif state == "committed" and kind == "control_release":
+            valid = recovery == "safe_closed" and object_id is None and \
+                value is None and error_code is None
+        elif state == "rejected":
+            valid = recovery in {"not_sent", "safe_closed"} and \
+                object_id is None and value is None and \
+                error_code in {"rejected", "deadline", "backend",
+                               "persistence"}
+        elif state == "unknown":
+            valid = recovery in {"safe_closed", "scope_blocked",
+                                 "awaiting_reboot",
+                                 "node_reboot_confirmed"} and \
+                object_id is None and value is None and \
+                error_code in {"deadline", "backend", "persistence"}
+        elif state == "expired_unknown":
+            valid = recovery == "none" and lease_id is None and \
+                node_uuid is None and resource_id is None and \
+                object_id is None and \
+                value is None and error_code == "history_expired"
+        if state != "expired_unknown" and (
+                lease_id is None or node_uuid is None or resource_id is None):
+            valid = False
+        if not valid:
+            raise ToolbusIpcProtocolError("操作结果字段组合无效")
+        if expected_value is not None and state == "committed" and \
+                value != expected_value:
+            raise ToolbusIpcProtocolError("GPIO提交结果与请求目标电平不一致")
+        return {
+            "operation_id": operation_id, "lease_id": lease_id,
+            "expected_node_uuid": node_uuid, "resource_id": resource_id,
+            "kind": kind, "state": state,
+            "replayed": replayed, "recovery": recovery,
+            "object_id": object_id, "value": value,
+            "error_code": error_code,
+        }
 
     @staticmethod
     def _json_traffic(output: str) -> dict:
@@ -1024,6 +1177,90 @@ class RemoteCliIpcClient:
         data = self._document(output, "runtime-control-release")
         _exact_fields(data, set(), "runtime-control-release.data")
 
+    @staticmethod
+    def _operation_id(value: str) -> str:
+        if not isinstance(value, str) or \
+                _OPERATION_ID.fullmatch(value) is None or value == "0" * 64:
+            raise ToolbusIpcProtocolError(
+                "operation_id必须是非零64位小写十六进制")
+        return value
+
+    def runtime_gpio_write_operation(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, value: bool, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if type(value) is not bool:
+            raise ToolbusIpcProtocolError("GPIO目标电平必须是布尔值")
+        output = self._run(
+            "runtime-gpio-write-operation", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), idempotency_key,
+                       "1" if value else "0"), deadline=deadline)
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("操作账本要求结构化remote-cli输出")
+        return self._json_operation_outcome(
+            output, "runtime-gpio-write-operation",
+            expected_kind="gpio_write", expected_value=value)
+
+    def runtime_control_release_operation(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        output = self._run(
+            "runtime-control-release-operation",
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       owner_key_id), deadline=deadline)
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("操作账本要求结构化remote-cli输出")
+        return self._json_operation_outcome(
+            output, "runtime-control-release-operation",
+            expected_kind="control_release")
+
+    def runtime_operation_status(
+            self, daemon_instance_id: str, owner_key_id: str,
+            operation_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        operation_id = self._operation_id(operation_id)
+        output = self._run(
+            "runtime-operation-status",
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       owner_key_id, operation_id), deadline=deadline)
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("操作账本查询要求结构化remote-cli输出")
+        outcome = self._json_operation_outcome(
+            output, "runtime-operation-status",
+            expected_operation_id=operation_id, allow_unknown_kind=True)
+        if not outcome["replayed"]:
+            raise ToolbusIpcProtocolError("操作状态查询必须标记replayed")
+        return outcome
+
+    def runtime_operation_lookup(
+            self, daemon_instance_id: str, owner_key_id: str,
+            kind: str, lease_id: str, idempotency_key: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if kind not in _OPERATION_KINDS:
+            raise ToolbusIpcProtocolError("操作定位kind无效")
+        if kind == "control_release" and idempotency_key != "release:v1":
+            raise ToolbusIpcProtocolError(
+                "control_release定位必须使用release:v1")
+        output = self._run(
+            "runtime-operation-lookup",
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       owner_key_id, kind,
+                       self._control_id(lease_id, "控制租约ID"),
+                       idempotency_key), deadline=deadline)
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("操作账本定位要求结构化remote-cli输出")
+        outcome = self._json_operation_outcome(
+            output, "runtime-operation-lookup", expected_kind=kind)
+        if not outcome["replayed"]:
+            raise ToolbusIpcProtocolError("操作定位查询必须标记replayed")
+        return outcome
+
     def list_nodes(self) -> list[dict]:
         output = self._run("node-list")
         if self.structured_output:
@@ -1248,6 +1485,11 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self._health_daemon_instance_id: str | None = None
         self._health_generation: int | None = None
         self._health_projection: TrustedToolbusdHealthProjection | None = None
+        self._operation_lock = threading.Lock()
+        self._operation_inflight: dict[tuple[str, ...], Future] = {}
+        self._operation_inflight_capacity = 128
+        self._operation_executor = ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="runtime-operation-query")
 
     def runtime_capabilities(self) -> dict:
         structured_output = bool(
@@ -1323,11 +1565,65 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
 
     @property
     def gpio_control_available(self) -> bool:
-        """只有新版结构化客户端完整提供三个命令时才声明可写。"""
+        """只有新版结构化客户端完整提供 operation ledger 时才声明可写。"""
         return bool(getattr(self.client, "structured_output", True)) and all(
             callable(getattr(self.client, name, None)) for name in (
-                "runtime_control_acquire", "runtime_gpio_write",
-                "runtime_control_release"))
+                "runtime_control_acquire", "runtime_gpio_write_operation",
+                "runtime_control_release_operation",
+                "runtime_operation_status", "runtime_operation_lookup"))
+
+    def _operation_singleflight(
+            self, key: tuple[str, ...], operation: Callable[[], dict], *,
+            deadline: MonotonicDeadline | None) -> dict:
+        """同一查询只启动一个CLI；短等待者超时不会取消共享查询。"""
+        created = False
+        with self._operation_lock:
+            future = self._operation_inflight.get(key)
+            if future is None:
+                if len(self._operation_inflight) >= \
+                        self._operation_inflight_capacity:
+                    raise RuntimeProviderOperationError(
+                        "backend_unavailable", category="transport",
+                        retryable=True, possibly_committed=False)
+                future = self._operation_executor.submit(operation)
+                self._operation_inflight[key] = future
+                created = True
+
+        if created:
+            def remove(completed: Future, *,
+                       operation_key: tuple[str, ...] = key,
+                       submitted: Future = future) -> None:
+                del completed
+                with self._operation_lock:
+                    current = self._operation_inflight.get(operation_key)
+                    if current is submitted:
+                        self._operation_inflight.pop(operation_key, None)
+
+            # add_done_callback 对已完成 Future 会同步调用；必须在互斥锁外注册，
+            # 否则极快的本地 CLI/Fake 会重入同一非递归锁而死锁。
+            future.add_done_callback(remove)
+        if future is None:
+            raise RuntimeProviderError("操作查询单飞状态无效")
+        timeout = None if deadline is None else deadline.remaining_seconds()
+        try:
+            return copy.deepcopy(future.result(timeout=timeout))
+        except FutureTimeout as error:
+            raise RequestDeadlineExceeded(
+                "操作查询未在统一期限内完成") from error
+
+    @staticmethod
+    def _operation_query_error(error: ToolbusIpcError
+                               ) -> RuntimeProviderOperationError:
+        mapped = _provider_operation_error(error)
+        # status/lookup 均为只读；即使响应损坏或传输断开，也不存在提交未知。
+        if mapped.possibly_committed:
+            return RuntimeProviderOperationError(
+                mapped.code, category=mapped.category,
+                retryable=False, possibly_committed=False,
+                detail=mapped.detail,
+                invalidates_global_operational=
+                mapped.invalidates_global_operational)
+        return mapped
 
     def _resolve_gpio_target(
             self, node_id: str, resource_id: str, *,
@@ -1384,6 +1680,12 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     node_id, resource_id, deadline=deadline)
             ttl_ms = call_with_deadline(
                 remaining_ttl_ms, deadline=deadline)
+            # 用不存在的规范ID只读探测 ledger IPC；旧 daemon 必须在任何
+            # 本地租约登记前失败关闭，不能静默降级到仅RAM幂等。
+            call_with_deadline(
+                self.client.runtime_operation_status,
+                daemon_instance_id, owner_key_id, "f" * 64,
+                deadline=deadline)
         except RuntimeProviderOperationError:
             raise
         except RequestDeadlineExceeded as error:
@@ -1391,6 +1693,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             raise RuntimeProviderOperationError(
                 "deadline_exceeded", category="timeout", retryable=True,
                 possibly_committed=False) from error
+        except ToolbusIpcError as error:
+            raise self._operation_query_error(error) from error
         except RuntimeProviderError as error:
             # 快照读取、缓存或目标解析失败均发生在 daemon acquire 之前；
             # 明确标记为确定未提交，让 HTTP 层回滚本次本地租约。
@@ -1432,7 +1736,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 possibly_committed=False, detail=str(error)) from error
         try:
             return call_with_deadline(
-                self.client.runtime_gpio_write,
+                self.client.runtime_gpio_write_operation,
                 daemon_instance_id, lease_id, node_uuid, owner_key_id,
                 numeric_node, numeric_resource, idempotency_key, value,
                 deadline=deadline)
@@ -1443,18 +1747,72 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
 
     def gpio_control_release(self, daemon_instance_id: str, lease_id: str,
                              owner_key_id: str, *,
-                             deadline: MonotonicDeadline | None = None) -> None:
+                             deadline: MonotonicDeadline | None = None) -> dict:
         if not self.gpio_control_available:
             raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
         try:
-            call_with_deadline(
-                self.client.runtime_control_release,
+            return call_with_deadline(
+                self.client.runtime_control_release_operation,
                 daemon_instance_id, lease_id, owner_key_id,
                 deadline=deadline)
         except RequestDeadlineExceeded:
             raise
         except ToolbusIpcError as error:
             raise _provider_operation_error(error) from error
+
+    def operation_status(
+            self, daemon_instance_id: str, owner_key_id: str,
+            operation_id: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.gpio_control_available:
+            raise RuntimeProviderOperationError(
+                "protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False,
+                invalidates_global_operational=True)
+
+        def invoke() -> dict:
+            backend_deadline = MonotonicDeadline.after_seconds(
+                self.refresh_wait_timeout_ms / 1000.0)
+            try:
+                return call_with_deadline(
+                    self.client.runtime_operation_status,
+                    daemon_instance_id, owner_key_id, operation_id,
+                    deadline=backend_deadline)
+            except RequestDeadlineExceeded:
+                raise
+            except ToolbusIpcError as error:
+                raise self._operation_query_error(error) from error
+
+        return self._operation_singleflight(
+            ("status", daemon_instance_id, owner_key_id, operation_id),
+            invoke, deadline=deadline)
+
+    def operation_lookup(
+            self, daemon_instance_id: str, owner_key_id: str, kind: str,
+            lease_id: str, idempotency_key: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.gpio_control_available:
+            raise RuntimeProviderOperationError(
+                "protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False,
+                invalidates_global_operational=True)
+
+        def invoke() -> dict:
+            backend_deadline = MonotonicDeadline.after_seconds(
+                self.refresh_wait_timeout_ms / 1000.0)
+            try:
+                return call_with_deadline(
+                    self.client.runtime_operation_lookup,
+                    daemon_instance_id, owner_key_id, kind, lease_id,
+                    idempotency_key, deadline=backend_deadline)
+            except RequestDeadlineExceeded:
+                raise
+            except ToolbusIpcError as error:
+                raise self._operation_query_error(error) from error
+
+        return self._operation_singleflight(
+            ("lookup", daemon_instance_id, owner_key_id, kind, lease_id,
+             idempotency_key), invoke, deadline=deadline)
 
     @staticmethod
     def _link_kind(mode: str) -> str:

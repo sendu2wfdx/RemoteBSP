@@ -54,6 +54,52 @@ struct RuntimeGpioWriteResult {
     bool replayed{};
 };
 
+enum class RuntimeOperationKind : std::uint8_t {
+    Unknown = 0U,
+    GpioWrite = 1U,
+    ControlRelease = 2U,
+};
+
+enum class RuntimeOperationState : std::uint8_t {
+    Pending = 1U,
+    Committed = 2U,
+    Rejected = 3U,
+    Unknown = 4U,
+    ExpiredUnknown = 5U,
+};
+
+enum class RuntimeOperationRecovery : std::uint8_t {
+    None = 0U,
+    NotSent = 1U,
+    SafeClosed = 2U,
+    ScopeBlocked = 3U,
+    AwaitingReboot = 4U,
+    NodeRebootConfirmed = 5U,
+};
+
+enum class RuntimeOperationError : std::uint16_t {
+    None = 0U,
+    Rejected = 1U,
+    Deadline = 2U,
+    Backend = 3U,
+    Persistence = 4U,
+    HistoryExpired = 5U,
+};
+
+struct RuntimeOperationOutcome {
+    std::array<std::uint8_t, 32> operation_id{};
+    std::optional<std::array<std::uint8_t, 16>> lease_id;
+    std::optional<std::array<std::uint8_t, 16>> expected_node_uuid;
+    std::optional<std::uint32_t> resource_id;
+    RuntimeOperationKind kind{RuntimeOperationKind::GpioWrite};
+    RuntimeOperationState state{RuntimeOperationState::Pending};
+    RuntimeOperationRecovery recovery{RuntimeOperationRecovery::None};
+    bool replayed{};
+    std::optional<std::uint32_t> object_id;
+    std::optional<bool> value;
+    std::optional<RuntimeOperationError> error;
+};
+
 enum class CanTrafficClass : std::uint8_t {
     Safety = 0,
     Motion = 1,
@@ -276,6 +322,25 @@ public:
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
         const std::string& owner_key_id) const;
+    RuntimeOperationOutcome runtime_gpio_write_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key, bool value) const;
+    RuntimeOperationOutcome runtime_control_release_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& owner_key_id) const;
+    RuntimeOperationOutcome runtime_operation_status(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::string& owner_key_id,
+        const std::array<std::uint8_t, 32>& operation_id) const;
+    RuntimeOperationOutcome runtime_operation_lookup(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::string& owner_key_id, RuntimeOperationKind kind,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& idempotency_key) const;
     CanTrafficStatus traffic_status() const;
     RuntimeSnapshot runtime_snapshot(
         std::uint16_t maximum_resources = 128U,

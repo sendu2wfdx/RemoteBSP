@@ -2,6 +2,7 @@ import json
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 
 from runtime_api.control_leases import (
     ControlLeaseManager,
@@ -111,6 +112,17 @@ class DeadlineContractTest(unittest.TestCase):
 
 
 class UnifiedControlBudgetTest(unittest.TestCase):
+    @staticmethod
+    def _operation_outcome(operation_id="a" * 64):
+        return {
+            "operation_id": operation_id, "lease_id": "2" * 32,
+            "expected_node_uuid": "3" * 32,
+            "resource_id": 0x01000005, "kind": "gpio_write",
+            "state": "committed", "replayed": True,
+            "recovery": "none", "object_id": 9, "value": True,
+            "error_code": None,
+        }
+
     def test_structured_cli_error_survives_provider_mapping(self):
         class FailingClient:
             structured_output = True
@@ -124,6 +136,15 @@ class UnifiedControlBudgetTest(unittest.TestCase):
             def runtime_control_release(self, *arguments):
                 raise ToolbusIpcOperationError(
                     105, 3, False, False, "目标合同拒绝")
+
+            runtime_gpio_write_operation = runtime_gpio_write
+            runtime_control_release_operation = runtime_control_release
+
+            def runtime_operation_status(self, *arguments):
+                raise AssertionError
+
+            def runtime_operation_lookup(self, *arguments):
+                raise AssertionError
 
         provider = ToolbusdSnapshotProvider(FailingClient())
         with self.assertRaises(RuntimeProviderOperationError) as caught:
@@ -153,12 +174,22 @@ class UnifiedControlBudgetTest(unittest.TestCase):
             timeouts.append(timeout_seconds)
             operation = next(item for item in (
                 "daemon-identity", "runtime-snapshot",
+                "runtime-operation-status",
                 "runtime-control-acquire") if item in command)
             clock.advance_ms(100)
             if operation == "daemon-identity":
                 data = {"ipc_version": 1, "instance_id": "1" * 32}
             elif operation == "runtime-snapshot":
                 return json.dumps(document)
+            elif operation == "runtime-operation-status":
+                data = {
+                    "operation_id": "f" * 64, "lease_id": None,
+                    "expected_node_uuid": None, "resource_id": None,
+                    "kind": None, "state": "expired_unknown",
+                    "replayed": True, "recovery": "none",
+                    "object_id": None, "value": None,
+                    "error_code": "history_expired",
+                }
             else:
                 data = {}
             return json.dumps({
@@ -187,7 +218,7 @@ class UnifiedControlBudgetTest(unittest.TestCase):
                 lease.lease_id, requester_key_id="operator",
                 deadline=deadline),
             deadline=deadline)
-        self.assertEqual(len(timeouts), 4)
+        self.assertEqual(len(timeouts), 5)
         self.assertTrue(all(earlier > later for earlier, later in zip(
             timeouts, timeouts[1:])))
         self.assertLessEqual(timeouts[0], 1.0)
@@ -209,6 +240,15 @@ class UnifiedControlBudgetTest(unittest.TestCase):
 
             def runtime_control_release(self, *_arguments, **_keywords):
                 raise AssertionError("本用例不应执行租约释放")
+
+            runtime_gpio_write_operation = runtime_gpio_write
+            runtime_control_release_operation = runtime_control_release
+
+            def runtime_operation_status(self, *_arguments, **_keywords):
+                raise AssertionError("本用例不应探测账本")
+
+            def runtime_operation_lookup(self, *_arguments, **_keywords):
+                raise AssertionError("本用例不应定位操作")
 
         class SlowTargetProvider(ToolbusdSnapshotProvider):
             def read_snapshot(self, *, deadline=None):
@@ -306,6 +346,109 @@ class UnifiedControlBudgetTest(unittest.TestCase):
             self.assertEqual(started, [1])
         # 等待唯一已运行任务结束，避免后台线程影响后续用例。
         time.sleep(0.14)
+
+    def test_operation_singleflight_short_leader_does_not_cancel_long_waiter(
+            self):
+        started = threading.Event()
+        calls = []
+
+        class Client:
+            structured_output = True
+
+            def runtime_control_acquire(self, *args): pass
+            def runtime_gpio_write_operation(self, *args): pass
+            def runtime_control_release_operation(self, *args): pass
+            def runtime_operation_lookup(self, *args): pass
+
+            def runtime_operation_status(self, *_arguments, **_keywords):
+                calls.append(1)
+                started.set()
+                time.sleep(0.08)
+                return UnifiedControlBudgetTest._operation_outcome()
+
+        provider = ToolbusdSnapshotProvider(Client())
+        results = []
+
+        def short_waiter():
+            try:
+                provider.operation_status(
+                    "1" * 32, "operator", "a" * 64,
+                    deadline=MonotonicDeadline.after_seconds(0.02))
+            except Exception as error:
+                results.append(type(error))
+
+        worker = threading.Thread(target=short_waiter)
+        worker.start()
+        self.assertTrue(started.wait(timeout=1))
+        outcome = provider.operation_status(
+            "1" * 32, "operator", "a" * 64,
+            deadline=MonotonicDeadline.after_seconds(0.3))
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [RequestDeadlineExceeded])
+        self.assertEqual(outcome["state"], "committed")
+        self.assertEqual(calls, [1])
+
+    def test_operation_singleflight_capacity_is_bounded(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class Client:
+            structured_output = True
+
+            def runtime_control_acquire(self, *args): pass
+            def runtime_gpio_write_operation(self, *args): pass
+            def runtime_control_release_operation(self, *args): pass
+            def runtime_operation_lookup(self, *args): pass
+
+            def runtime_operation_status(self, _daemon, _owner,
+                                         operation_id, **_keywords):
+                started.set()
+                release.wait(timeout=1)
+                return UnifiedControlBudgetTest._operation_outcome(operation_id)
+
+        provider = ToolbusdSnapshotProvider(Client())
+        provider._operation_inflight_capacity = 1  # type: ignore[attr-defined]
+        first = threading.Thread(target=lambda: provider.operation_status(
+            "1" * 32, "operator", "a" * 64,
+            deadline=MonotonicDeadline.after_seconds(1)))
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        with self.assertRaises(RuntimeProviderOperationError) as caught:
+            provider.operation_status(
+                "1" * 32, "operator", "b" * 64,
+                deadline=MonotonicDeadline.after_seconds(0.2))
+        self.assertEqual(caught.exception.code, "backend_unavailable")
+        release.set()
+        first.join(timeout=1)
+        self.assertFalse(first.is_alive())
+
+    def test_operation_singleflight_accepts_already_completed_future(self):
+        class Client:
+            structured_output = True
+
+            def runtime_control_acquire(self, *args): pass
+            def runtime_gpio_write_operation(self, *args): pass
+            def runtime_control_release_operation(self, *args): pass
+            def runtime_operation_lookup(self, *args): pass
+
+            def runtime_operation_status(self, *_arguments, **_keywords):
+                return UnifiedControlBudgetTest._operation_outcome()
+
+        class ImmediateExecutor:
+            @staticmethod
+            def submit(operation):
+                future = Future()
+                future.set_result(operation())
+                return future
+
+        provider = ToolbusdSnapshotProvider(Client())
+        provider._operation_executor = ImmediateExecutor()  # type: ignore[attr-defined]
+        outcome = provider.operation_status(
+            "1" * 32, "operator", "a" * 64,
+            deadline=MonotonicDeadline.after_seconds(0.2))
+        self.assertEqual(outcome["state"], "committed")
+        self.assertEqual(provider._operation_inflight, {})  # type: ignore[attr-defined]
 
     def test_repeated_legacy_timeouts_keep_one_bounded_generation(self):
         release = threading.Event()

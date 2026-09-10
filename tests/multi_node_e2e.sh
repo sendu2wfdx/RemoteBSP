@@ -24,6 +24,7 @@ mock2_log="/tmp/remotebsp-multi-mock2-${can_mode}-$$.log"
 daemon_log="/tmp/remotebsp-multi-daemon-${can_mode}-$$.log"
 node1_output="/tmp/remotebsp-node1-$$.out"
 node2_output="/tmp/remotebsp-node2-$$.out"
+ledger_dir="$(mktemp -d "/tmp/remotebsp-multi-ledger-${can_mode}-XXXXXX")"
 mock1_pid=""
 mock2_pid=""
 daemon_pid=""
@@ -50,6 +51,7 @@ cleanup() {
     fi
     rm -f -- "$socket_path" "$mock1_log" "$mock2_log" "$daemon_log" \
         "$node1_output" "$node2_output"
+    rm -rf -- "$ledger_dir"
     if [[ "$can_mode" == "usb-mock" ]]; then
         rm -f -- "$can_interface"
     fi
@@ -64,6 +66,7 @@ mock1_pid=$!
     >"$mock2_log" 2>&1 &
 mock2_pid=$!
 "$toolbusd_bin" "$can_interface" "$can_mode" "$socket_path" \
+    --runtime-operation-ledger-dir "$ledger_dir" \
     "${motion_clock_args[@]}" \
     >"$daemon_log" 2>&1 &
 daemon_pid=$!

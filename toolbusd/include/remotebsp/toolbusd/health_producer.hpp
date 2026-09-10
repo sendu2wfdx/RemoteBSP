@@ -17,6 +17,8 @@ enum class ToolbusdHealthMetricId : std::uint16_t {
     TrafficGuaranteedOverrunTotal = 0x8003U,
     TrafficAdmittedFrameTotal = 0x8004U,
     TrafficEstimatedWireTimeNs = 0x8005U,
+    RuntimeOperationLedgerMutationAvailable = 0x8006U,
+    RuntimeOperationLedgerOperationCount = 0x8007U,
 };
 
 // v1 公共单位暂不含纳秒；扩展单位仍按协议的未知枚举前向兼容规则传递。
@@ -29,6 +31,8 @@ struct ToolbusdHealthObservation {
     TrafficSnapshot traffic;
     std::optional<std::uint64_t> active_lease_count;
     std::optional<std::uint64_t> resource_fault_count;
+    std::optional<bool> operation_ledger_mutation_available;
+    std::optional<std::uint64_t> operation_ledger_operation_count;
 };
 
 enum class ToolbusdHealthProducerError {

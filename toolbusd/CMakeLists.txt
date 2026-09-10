@@ -7,6 +7,7 @@ add_library(remotebsp_request_manager
     src/motion_group_coordinator.cpp
     src/motion_group_service.cpp
     src/node_registry.cpp
+    src/operation_ledger.cpp
     src/request_manager.cpp
     src/runtime_control.cpp
     src/traffic_control.cpp

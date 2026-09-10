@@ -161,6 +161,29 @@ MotionGroupTransactionStatus motion_group_status_from_ipc(
     }
 }
 
+RuntimeOperationOutcome public_operation_outcome(
+    const toolbusd::RuntimeOperationOutcome& source) {
+    RuntimeOperationOutcome result;
+    result.operation_id = source.operation_id;
+    if (source.resource_id != 0U) {
+        result.lease_id = source.lease_id;
+        result.expected_node_uuid = source.expected_node_uuid;
+        result.resource_id = source.resource_id;
+    }
+    result.kind = static_cast<RuntimeOperationKind>(source.kind);
+    result.state = static_cast<RuntimeOperationState>(source.state);
+    result.recovery = static_cast<RuntimeOperationRecovery>(source.recovery);
+    result.replayed = source.replayed;
+    if (source.object_id != 0U) {
+        result.object_id = source.object_id;
+        result.value = source.value;
+    }
+    if (source.error != toolbusd::RuntimeOperationError::None) {
+        result.error = static_cast<RuntimeOperationError>(source.error);
+    }
+    return result;
+}
+
 }
 
 IpcErrorException::IpcErrorException(
@@ -388,6 +411,101 @@ void Client::runtime_control_release(
     if (!response.body.empty()) {
         throw ClientException("Runtime 控制租约释放响应载荷无效");
     }
+}
+
+RuntimeOperationOutcome Client::runtime_gpio_write_operation(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key, bool value) const {
+    toolbusd::RuntimeGpioWriteRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.expected_node_uuid = expected_node_uuid;
+    request.owner_key_id = owner_key_id;
+    request.node_id = node_id_;
+    request.resource_id = resource_id;
+    request.idempotency_key = idempotency_key;
+    request.value = value;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_gpio_write_operation_request(
+        socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime GPIO 操作提交失败");
+    }
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_control_release_operation(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id) const {
+    toolbusd::RuntimeControlReleaseRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_control_release_operation_request(
+        socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime Release 操作提交失败");
+    }
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_operation_status(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::string& owner_key_id,
+    const std::array<std::uint8_t, 32>& operation_id) const {
+    toolbusd::RuntimeOperationQuery request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.operation_id = operation_id;
+    request.owner_key_id = owner_key_id;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_operation_query_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime 操作查询失败");
+    }
+    const auto outcome =
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body);
+    if (outcome.operation_id != operation_id || !outcome.replayed) {
+        throw ClientException(
+            "Runtime 操作查询返回了错误的 operation ID 或 replayed 标志");
+    }
+    return public_operation_outcome(outcome);
+}
+
+RuntimeOperationOutcome Client::runtime_operation_lookup(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::string& owner_key_id, RuntimeOperationKind kind,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& idempotency_key) const {
+    toolbusd::RuntimeOperationLookup request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.kind = static_cast<toolbusd::RuntimeOperationKind>(kind);
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    request.idempotency_key = idempotency_key;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_operation_lookup_request(
+        socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime 操作定位查询失败");
+    }
+    const auto outcome =
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body);
+    if (outcome.kind != request.kind || !outcome.replayed) {
+        throw ClientException(
+            "Runtime 操作定位查询返回了错误的操作类型或 replayed 标志");
+    }
+    return public_operation_outcome(outcome);
 }
 
 CanTrafficStatus Client::traffic_status() const {

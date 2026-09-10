@@ -1381,6 +1381,211 @@ void check_ipc_error_envelope_is_strict_and_bounded() {
                        false, false, std::string("x\n")});
 }
 
+void check_gpio_durability_orders_disk_boundaries_around_io() {
+    std::uint64_t now = 30000000000ULL;
+    std::vector<std::string> events;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 41U;
+    const auto command = request(daemon, lease);
+    gate.acquire(acquire_request(command), daemon, 201U, descriptor(),
+                 contract());
+
+    const auto result = gate.gpio_write(
+        command, daemon, 201U, descriptor(), contract(),
+        toolbusd::RuntimeControlGate::GpioIo{
+            [&] {
+                events.emplace_back("create");
+                return 301U;
+            },
+            [&](std::uint32_t object_id, bool value) {
+                assert(object_id == 301U && value);
+                events.emplace_back("write");
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                events.emplace_back("safe");
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                events.emplace_back("close");
+            }},
+        toolbusd::RuntimeControlGate::GpioDurability{
+            [&] { events.emplace_back("pending"); },
+            [&](const toolbusd::RuntimeGpioWriteResult& durable) {
+                assert(durable.object_id == 301U && durable.value);
+                events.emplace_back("committed");
+            },
+            [&](auto, auto) { events.emplace_back("failed"); }});
+    assert(result.object_id == 301U);
+    assert((events == std::vector<std::string>{
+                          "pending", "create", "write", "committed"}));
+}
+
+void check_gpio_pending_failure_rolls_back_without_remote_io() {
+    std::uint64_t now = 31000000000ULL;
+    std::uint32_t io_calls = 0U;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 42U;
+    const auto command = request(daemon, lease);
+    gate.acquire(acquire_request(command), daemon, 202U, descriptor(),
+                 contract());
+    try {
+        static_cast<void>(gate.gpio_write(
+            command, daemon, 202U, descriptor(), contract(),
+            test_io([&](std::optional<std::uint32_t>) {
+                ++io_calls;
+                return 302U;
+            }),
+            toolbusd::RuntimeControlGate::GpioDurability{
+                [] { throw std::runtime_error("pending sync failure"); },
+                [](const auto&) {}, [](auto, auto) { assert(false); }}));
+        assert(false);
+    } catch (const std::runtime_error&) {
+    }
+    assert(io_calls == 0U);
+    const auto retried = gate.gpio_write(
+        command, daemon, 202U, descriptor(), contract(),
+        test_io([&](std::optional<std::uint32_t>) {
+            ++io_calls;
+            return 302U;
+        }));
+    assert(retried.object_id == 302U);
+    assert(io_calls == 1U);
+}
+
+void check_gpio_terminal_sync_failure_forces_safe_cleanup() {
+    std::uint64_t now = 32000000000ULL;
+    std::uint32_t safe_calls = 0U;
+    std::uint32_t close_calls = 0U;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 43U;
+    const auto command = request(daemon, lease);
+    gate.acquire(acquire_request(command), daemon, 203U, descriptor(),
+                 contract());
+    try {
+        static_cast<void>(gate.gpio_write(
+            command, daemon, 203U, descriptor(), contract(),
+            toolbusd::RuntimeControlGate::GpioIo{
+                [] { return 303U; }, [](std::uint32_t, bool) {},
+                [&](std::uint32_t, std::uint64_t,
+                    const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                    ++safe_calls;
+                },
+                [&](std::uint32_t, std::uint64_t,
+                    const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                    ++close_calls;
+                }},
+            toolbusd::RuntimeControlGate::GpioDurability{
+                [] {},
+                [](const auto&) {
+                    throw std::runtime_error("terminal sync failure");
+                },
+                [](auto, auto) { assert(false); }}));
+        assert(false);
+    } catch (const std::runtime_error&) {
+    }
+    assert(safe_calls == 1U);
+    assert(close_calls == 1U);
+    expect_error(toolbusd::RuntimeControlError::LeaseNotFound, [&] {
+        static_cast<void>(gate.gpio_write(
+            command, daemon, 203U, descriptor(), contract(),
+            test_io([](std::optional<std::uint32_t>) { return 304U; })));
+    });
+}
+
+void check_release_durability_uses_server_scope_and_reserves_it() {
+    std::uint64_t now = 33000000000ULL;
+    std::vector<std::string> events;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 44U;
+    auto command = request(daemon, lease);
+    command.value = false;
+    gate.acquire(acquire_request(command), daemon, 204U, descriptor(),
+                 contract());
+    static_cast<void>(gate.gpio_write(
+        command, daemon, 204U, descriptor(), contract(),
+        toolbusd::RuntimeControlGate::GpioIo{
+            [] { return 305U; }, [](std::uint32_t, bool) {},
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                events.emplace_back("safe");
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&, std::uint32_t) {
+                events.emplace_back("close");
+            }}));
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon;
+    release.lease_id = lease;
+    release.owner_key_id = command.owner_key_id;
+    gate.release(
+        release, daemon,
+        toolbusd::RuntimeControlGate::ReleaseDurability{
+            [&](const toolbusd::RuntimeControlGate::ResolvedReleaseLease&
+                    resolved) {
+                assert(resolved.expected_node_uuid ==
+                       command.expected_node_uuid);
+                assert(resolved.node_id == command.node_id);
+                assert(resolved.resource_id == command.resource_id);
+                assert(resolved.permissions == command.permissions);
+                events.emplace_back("pending");
+            },
+            [&] { events.emplace_back("committed"); },
+            [&](auto, auto) { events.emplace_back("failed"); }});
+    assert((events == std::vector<std::string>{
+                          "pending", "safe", "close", "committed"}));
+}
+
+void check_release_readonly_resolution_tracks_lease_lifecycle() {
+    toolbusd::RuntimeControlGate gate(
+        4U, [] { return 1000000000ULL; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 0x71U;
+    lease[0] = 0x72U;
+    auto first = request(daemon, lease);
+    gate.acquire(acquire_request(first), daemon, 1U,
+                 descriptor(first.resource_id), contract(first.resource_id));
+
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon;
+    release.lease_id = lease;
+    release.owner_key_id = first.owner_key_id;
+    const auto first_resolved = gate.resolve_release_lease(release, daemon);
+    assert(first_resolved.has_value());
+    assert(first_resolved->resource_id == first.resource_id);
+    assert(first_resolved->admission_id != 0U);
+    gate.release(release, daemon);
+    assert(!gate.resolve_release_lease(release, daemon).has_value());
+
+    auto second = first;
+    second.resource_id = 0x01000006U;
+    gate.acquire(acquire_request(second), daemon, 1U,
+                 descriptor(second.resource_id), contract(second.resource_id));
+    const auto second_resolved = gate.resolve_release_lease(release, daemon);
+    assert(second_resolved.has_value());
+    assert(second_resolved->resource_id == second.resource_id);
+    assert(second_resolved->admission_id != first_resolved->admission_id);
+
+    auto wrong_owner = release;
+    wrong_owner.owner_key_id = "operator-b";
+    expect_error(toolbusd::RuntimeControlError::PermissionDenied, [&] {
+        static_cast<void>(gate.resolve_release_lease(wrong_owner, daemon));
+    });
+}
+
 }  // namespace
 
 int main() {
@@ -1405,4 +1610,9 @@ int main() {
     check_create_registration_copy_failure_has_no_remote_side_effect();
     check_cleanup_task_copy_failure_rolls_back_in_flight();
     check_shutdown_task_copy_failure_is_memoized();
+    check_gpio_durability_orders_disk_boundaries_around_io();
+    check_gpio_pending_failure_rolls_back_without_remote_io();
+    check_gpio_terminal_sync_failure_forces_safe_cleanup();
+    check_release_durability_uses_server_scope_and_reserves_it();
+    check_release_readonly_resolution_tracks_lease_lifecycle();
 }

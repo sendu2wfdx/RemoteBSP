@@ -7,6 +7,7 @@
 #include "remotebsp/toolbusd/motion_group_service.hpp"
 #include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
 #include "remotebsp/toolbusd/node_registry.hpp"
+#include "remotebsp/toolbusd/operation_ledger.hpp"
 #include "remotebsp/toolbusd/request_manager.hpp"
 #include "remotebsp/toolbusd/runtime_control.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
@@ -139,12 +140,199 @@ private:
     bool possibly_committed_;
 };
 
+class OperationReplayException : public std::exception {
+public:
+    const char* what() const noexcept override {
+        return "Runtime 操作由持久账本回放";
+    }
+};
+
+class OperationLedgerAfterPendingException : public std::runtime_error {
+public:
+    explicit OperationLedgerAfterPendingException(const std::string& message)
+        : std::runtime_error(message) {}
+};
+
 bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
     using Kind = remotebsp::toolbusd::IpcRequestKind;
     return kind == Kind::RuntimeControlAcquire ||
            kind == Kind::RuntimeGpioWrite ||
            kind == Kind::RuntimeControlRelease ||
+           kind == Kind::RuntimeGpioWriteOperation ||
+           kind == Kind::RuntimeControlReleaseOperation ||
+           kind == Kind::RuntimeOperationQuery ||
+           kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
+}
+
+remotebsp::toolbusd::IpcErrorEnvelope ledger_error_envelope(
+    const remotebsp::toolbusd::OperationLedgerException& error) {
+    using Category = remotebsp::toolbusd::IpcErrorCategory;
+    using Code = remotebsp::toolbusd::IpcErrorCode;
+    using LedgerCode = remotebsp::toolbusd::OperationLedgerError;
+    switch (error.code()) {
+        case LedgerCode::InvalidRequest:
+            return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                    Code::InvalidRequest, Category::Request, false, false,
+                    "Runtime 操作账本请求字段无效"};
+        case LedgerCode::PermissionDenied:
+            return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                    Code::PermissionDenied, Category::Authorization,
+                    false, false, "无权查询该 Runtime 操作"};
+        case LedgerCode::IdempotencyConflict:
+        case LedgerCode::InvalidTransition:
+            return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                    Code::IdempotencyConflict, Category::Conflict,
+                    false, false, "Runtime 操作幂等状态冲突"};
+        case LedgerCode::CapacityExceeded:
+            return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                    Code::CapacityExceeded, Category::Unavailable,
+                    true, false, "Runtime 操作账本容量已满"};
+        case LedgerCode::DirectoryUnsafe:
+        case LedgerCode::AlreadyLocked:
+        case LedgerCode::IoFailure:
+        case LedgerCode::Corrupt:
+        case LedgerCode::MutationUnavailable:
+            return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                    Code::BackendUnavailable, Category::Unavailable,
+                    true, false, "Runtime 操作账本不可用"};
+    }
+    return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+            Code::InternalFailure, Category::Internal, false, false,
+            "Runtime 操作账本内部失败"};
+}
+
+struct ToolbusDaemonTestOptions {
+#ifdef REMOTEBSP_TEST_HOOKS
+    std::uint32_t fail_terminal_record_sync_ordinal{};
+    std::uint32_t gpio_post_lookup_barrier_participants{};
+#endif
+};
+
+#ifdef REMOTEBSP_TEST_HOOKS
+class OneShotTestBarrier {
+public:
+    explicit OneShotTestBarrier(std::uint32_t participants)
+        : participants_(participants) {}
+
+    void arrive_and_wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ++arrived_;
+        if (arrived_ == participants_) {
+            released_ = true;
+            condition_.notify_all();
+            return;
+        }
+        if (!condition_.wait_for(lock, std::chrono::seconds(5),
+                                 [&] { return released_; })) {
+            throw std::runtime_error("Runtime GPIO 测试屏障等待超时");
+        }
+    }
+
+private:
+    const std::uint32_t participants_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::uint32_t arrived_{};
+    bool released_{};
+};
+#endif
+
+remotebsp::toolbusd::OperationLedgerOptions operation_ledger_options(
+    const std::string& directory,
+    const ToolbusDaemonTestOptions& test_options) {
+    remotebsp::toolbusd::OperationLedgerOptions options;
+    options.directory = directory;
+#ifdef REMOTEBSP_TEST_HOOKS
+    if (test_options.fail_terminal_record_sync_ordinal != 0U) {
+        const auto terminal_syncs =
+            std::make_shared<std::atomic<std::uint32_t>>(0U);
+        const auto fail_ordinal =
+            test_options.fail_terminal_record_sync_ordinal;
+        options.fault_hook = [terminal_syncs, fail_ordinal](
+                                 remotebsp::toolbusd::LedgerIoPoint point) {
+            if (point == remotebsp::toolbusd::LedgerIoPoint::
+                             TerminalRecordDataSync &&
+                terminal_syncs->fetch_add(1U) + 1U == fail_ordinal) {
+                throw std::system_error(
+                    ENOSPC, std::generic_category(),
+                    "测试注入 terminal 账本同步失败");
+            }
+        };
+    }
+#else
+    static_cast<void>(test_options);
+#endif
+    return options;
+}
+
+remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
+    const remotebsp::toolbusd::OperationRecord& record, bool replayed) {
+    using LedgerKind = remotebsp::toolbusd::OperationKind;
+    using LedgerRecovery = remotebsp::toolbusd::OperationRecovery;
+    using LedgerState = remotebsp::toolbusd::OperationState;
+    using IpcError = remotebsp::toolbusd::RuntimeOperationError;
+    using IpcKind = remotebsp::toolbusd::RuntimeOperationKind;
+    using IpcRecovery = remotebsp::toolbusd::RuntimeOperationRecovery;
+    using IpcState = remotebsp::toolbusd::RuntimeOperationState;
+
+    remotebsp::toolbusd::RuntimeOperationOutcome outcome;
+    outcome.kind = record.kind == LedgerKind::RuntimeGpioWrite
+                       ? IpcKind::GpioWrite
+                       : IpcKind::ControlRelease;
+    switch (record.state) {
+        case LedgerState::Pending: outcome.state = IpcState::Pending; break;
+        case LedgerState::Committed:
+            outcome.state = IpcState::Committed; break;
+        case LedgerState::Rejected: outcome.state = IpcState::Rejected; break;
+        case LedgerState::Unknown: outcome.state = IpcState::Unknown; break;
+    }
+    switch (record.recovery) {
+        case LedgerRecovery::None: outcome.recovery = IpcRecovery::None; break;
+        case LedgerRecovery::NotSent:
+            outcome.recovery = IpcRecovery::NotSent; break;
+        case LedgerRecovery::SafeClosed:
+            outcome.recovery = IpcRecovery::SafeClosed; break;
+        case LedgerRecovery::ScopeBlocked:
+            outcome.recovery = IpcRecovery::ScopeBlocked; break;
+        case LedgerRecovery::AwaitingReboot:
+            outcome.recovery = IpcRecovery::AwaitingReboot; break;
+        case LedgerRecovery::NodeRebootConfirmed:
+            outcome.recovery = IpcRecovery::NodeRebootConfirmed; break;
+    }
+    outcome.replayed = replayed;
+    outcome.operation_id = record.operation_id;
+    outcome.lease_id = record.lease_id;
+    outcome.expected_node_uuid = record.scope.expected_node_uuid;
+    outcome.resource_id = record.scope.resource_id;
+    outcome.object_id = record.result.object_id.value_or(0U);
+    if (record.state == LedgerState::Committed &&
+        record.kind == LedgerKind::RuntimeGpioWrite) {
+        outcome.value = record.result.value.value_or(false);
+    }
+    switch (record.result.stable_error_code) {
+        case 0U: outcome.error = IpcError::None; break;
+        case 1U: outcome.error = IpcError::Rejected; break;
+        case 2U: outcome.error = IpcError::Deadline; break;
+        case 4U: outcome.error = IpcError::Persistence; break;
+        default: outcome.error = IpcError::Backend; break;
+    }
+    return outcome;
+}
+
+remotebsp::toolbusd::RuntimeOperationOutcome expired_operation_outcome(
+    const remotebsp::toolbusd::OperationDigest& operation_id,
+    remotebsp::toolbusd::RuntimeOperationKind kind =
+        remotebsp::toolbusd::RuntimeOperationKind::Unknown) {
+    remotebsp::toolbusd::RuntimeOperationOutcome outcome;
+    outcome.kind = kind;
+    outcome.state =
+        remotebsp::toolbusd::RuntimeOperationState::ExpiredUnknown;
+    outcome.error =
+        remotebsp::toolbusd::RuntimeOperationError::HistoryExpired;
+    outcome.operation_id = operation_id;
+    outcome.replayed = true;
+    return outcome;
 }
 
 remotebsp::toolbusd::IpcErrorEnvelope gate_error_envelope(
@@ -210,6 +398,13 @@ remotebsp::toolbusd::IpcErrorEnvelope generic_error_envelope(
     const std::exception& error) {
     using Category = remotebsp::toolbusd::IpcErrorCategory;
     using Code = remotebsp::toolbusd::IpcErrorCode;
+    if (dynamic_cast<const OperationLedgerAfterPendingException*>(&error) !=
+        nullptr) {
+        return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                Code::BackendUnavailable, Category::Unavailable,
+                false, true,
+                "Runtime 操作持久终态不可用，提交状态未知"};
+    }
     if (const auto* target = dynamic_cast<const RuntimeTargetException*>(&error)) {
         const auto category = target->code() == Code::DeadlineExceeded
                                   ? Category::Timeout
@@ -310,14 +505,25 @@ public:
                   remotebsp::toolbusd::TrafficConfig traffic_config,
                   remotebsp::toolbusd::ClockSyncManagerConfig
                       clock_sync_config,
-                  remotebsp::toolbusd::MotionGroupServiceConfig
-                      motion_group_config)
+                   remotebsp::toolbusd::MotionGroupServiceConfig
+                       motion_group_config,
+                   std::string operation_ledger_directory,
+                   const ToolbusDaemonTestOptions& test_options)
         : transport_(std::move(transport)),
           fragmenter_(transport_->mtu()),
           reassembler_(transport_->mtu(), std::chrono::milliseconds(500)),
           traffic_(std::move(traffic_config)),
           clock_sync_(std::move(clock_sync_config)),
           motion_group_(std::move(motion_group_config)),
+          operation_ledger_(operation_ledger_options(
+              operation_ledger_directory, test_options)),
+#ifdef REMOTEBSP_TEST_HOOKS
+          gpio_post_lookup_barrier_(
+              test_options.gpio_post_lookup_barrier_participants == 0U
+                  ? nullptr
+                  : std::make_unique<OneShotTestBarrier>(
+                        test_options.gpio_post_lookup_barrier_participants)),
+#endif
           socket_path_(std::move(socket_path)) {}
 
     ~ToolbusDaemon() {
@@ -972,6 +1178,24 @@ private:
 
     void runtime_control_acquire(
         const remotebsp::toolbusd::RuntimeControlAcquireRequest& request) {
+        if (request.daemon_instance_id != daemon_instance_id_) {
+            throw remotebsp::toolbusd::RuntimeControlException(
+                remotebsp::toolbusd::RuntimeControlError::
+                    DaemonIdentityMismatch,
+                "Runtime 控制租约绑定了其他 toolbusd 实例");
+        }
+        const auto blocked = operation_ledger_.blocked_scopes();
+        const auto scope_blocked = std::any_of(
+            blocked.begin(), blocked.end(), [&](const auto& scope) {
+                return scope.expected_node_uuid ==
+                           request.expected_node_uuid &&
+                       scope.resource_id == request.resource_id;
+            });
+        if (scope_blocked) {
+            throw remotebsp::toolbusd::RuntimeControlException(
+                remotebsp::toolbusd::RuntimeControlError::LeaseConflict,
+                "Runtime 操作账本仍阻塞该节点资源，拒绝登记新租约");
+        }
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(1800);
         std::uint64_t node_generation = 0U;
@@ -1008,12 +1232,31 @@ private:
                     "Runtime 控制租约登记期间节点代次变化");
             }
         }
+        // 合同查询在锁外执行。查询期间其他操作的 terminal fsync 可能把
+        // 账本切到不可用，因此在 Gate 最终登记前与账本写边界线性化地
+        // 二次检查；策略锁不覆盖任何远端 I/O。
+        std::lock_guard<std::mutex> policy_lock(
+            runtime_operation_policy_mutex_);
+        const auto final_blocked = operation_ledger_.blocked_scopes();
+        if (std::any_of(
+                final_blocked.begin(), final_blocked.end(),
+                [&](const auto& scope) {
+                    return scope.expected_node_uuid ==
+                               request.expected_node_uuid &&
+                           scope.resource_id == request.resource_id;
+                })) {
+            throw remotebsp::toolbusd::RuntimeControlException(
+                remotebsp::toolbusd::RuntimeControlError::LeaseConflict,
+                "Runtime 操作账本在合同查询期间阻塞了该节点资源");
+        }
         runtime_control_.acquire(request, daemon_instance_id_,
                                  node_generation, descriptor, contract);
     }
 
     remotebsp::toolbusd::RuntimeGpioWriteResult runtime_gpio_write(
-        const remotebsp::toolbusd::RuntimeGpioWriteRequest& request) {
+        const remotebsp::toolbusd::RuntimeGpioWriteRequest& request,
+        const remotebsp::toolbusd::RuntimeControlGate::GpioDurability&
+            durability) {
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(1800);
         std::uint64_t node_generation = 0U;
@@ -1106,7 +1349,361 @@ private:
                         remotebsp::protocol::encode_gpio_close(), object_id,
                         close_deadline));
                 }
-            });
+            }, durability);
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome
+    runtime_gpio_write_operation(
+        const remotebsp::toolbusd::RuntimeGpioWriteRequest& request) {
+        using namespace remotebsp::toolbusd;
+        if (request.daemon_instance_id != daemon_instance_id_) {
+            throw RuntimeControlException(
+                RuntimeControlError::DaemonIdentityMismatch,
+                "Runtime GPIO 操作绑定了其他 toolbusd 实例");
+        }
+        RuntimeGpioWriteOperation operation;
+        operation.daemon_origin = request.daemon_instance_id;
+        operation.lease_id = request.lease_id;
+        operation.expected_node_uuid = request.expected_node_uuid;
+        operation.owner_key_id = request.owner_key_id;
+        operation.idempotency_key = request.idempotency_key;
+        operation.permissions = request.permissions;
+        operation.node_id = request.node_id;
+        operation.resource_id = request.resource_id;
+        operation.value = request.value;
+
+        const auto operation_id = OperationLedger::derive_operation_id(
+            operation);
+        const auto request_digest = OperationLedger::derive_request_digest(
+            operation);
+        const auto existing = operation_ledger_.lookup(
+            operation_id, request.owner_key_id);
+        if (existing.disposition == OperationLookupDisposition::Found) {
+            if (existing.record->request_digest != request_digest) {
+                throw OperationLedgerException(
+                    OperationLedgerError::IdempotencyConflict,
+                    "相同 Runtime GPIO operation_id 绑定了不同请求");
+            }
+            return operation_outcome(*existing.record, true);
+        }
+#ifdef REMOTEBSP_TEST_HOOKS
+        if (gpio_post_lookup_barrier_) {
+            gpio_post_lookup_barrier_->arrive_and_wait();
+        }
+#endif
+
+        std::optional<OperationBeginResult> begun;
+        std::optional<OperationRecord> durable_terminal;
+        const auto finish_durable = [&](OperationState state,
+                                        OperationRecovery recovery,
+                                        const OperationTerminalResult& result) {
+            if (!begun.has_value() ||
+                begun->disposition !=
+                    OperationBeginDisposition::StartedDurablePending) {
+                throw std::logic_error(
+                    "Runtime GPIO 缺少持久 pending");
+            }
+            try {
+                std::lock_guard<std::mutex> policy_lock(
+                    runtime_operation_policy_mutex_);
+                return operation_ledger_.finish(
+                    begun->record.operation_id, begun->record.request_digest,
+                    state, recovery, result);
+            } catch (const OperationLedgerException& error) {
+                throw OperationLedgerAfterPendingException(error.what());
+            }
+        };
+        const auto finish_failed = [&](RuntimeControlGate::DurableRecovery recovery,
+                                       RuntimeControlError) {
+            if (!begun.has_value() ||
+                begun->disposition !=
+                    OperationBeginDisposition::StartedDurablePending) {
+                return;
+            }
+            durable_terminal = finish_durable(
+                recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                    ? OperationState::Rejected
+                    : OperationState::Unknown,
+                recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                    ? OperationRecovery::SafeClosed
+                    : OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt,
+                 static_cast<std::uint16_t>(RuntimeOperationError::Backend)});
+        };
+        try {
+            const auto result = runtime_gpio_write(
+                request,
+                RuntimeControlGate::GpioDurability{
+                    [&] {
+                        std::lock_guard<std::mutex> policy_lock(
+                            runtime_operation_policy_mutex_);
+                        begun = operation_ledger_.begin_gpio_write(operation);
+                        if (begun->disposition !=
+                            OperationBeginDisposition::StartedDurablePending) {
+                            throw OperationReplayException{};
+                        }
+                    },
+                    [&](const RuntimeGpioWriteResult& committed) {
+                        durable_terminal = finish_durable(
+                            OperationState::Committed,
+                            OperationRecovery::None,
+                            {committed.object_id, committed.value, 0U});
+                    },
+                    finish_failed});
+            if (!durable_terminal.has_value()) {
+                const auto replay = operation_ledger_.lookup(
+                    operation_id, request.owner_key_id);
+                if (replay.disposition ==
+                    OperationLookupDisposition::Found) {
+                    if (replay.record->request_digest != request_digest) {
+                        throw OperationLedgerException(
+                            OperationLedgerError::IdempotencyConflict,
+                            "Runtime GPIO Gate 回放与持久请求摘要不一致");
+                    }
+                    return operation_outcome(*replay.record, true);
+                }
+                throw std::logic_error(
+                    "Runtime GPIO Gate 回放缺少持久账本记录");
+            }
+            static_cast<void>(result);
+            return operation_outcome(*durable_terminal, false);
+        } catch (const OperationReplayException&) {
+            if (!begun.has_value()) {
+                throw;
+            }
+            return operation_outcome(begun->record, true);
+        } catch (const OperationLedgerAfterPendingException&) {
+            throw;
+        } catch (const RuntimeControlException& error) {
+            if (durable_terminal.has_value()) {
+                return operation_outcome(*durable_terminal, false);
+            }
+            if (!begun.has_value()) {
+                throw;
+            }
+            const auto stable_error =
+                error.code() == RuntimeControlError::SafeStopFailed
+                    ? RuntimeOperationError::Backend
+                    : RuntimeOperationError::Rejected;
+            durable_terminal = finish_durable(
+                OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt,
+                 static_cast<std::uint16_t>(stable_error)});
+            return operation_outcome(*durable_terminal, false);
+        } catch (const RuntimeTargetException& error) {
+            if (durable_terminal.has_value()) {
+                return operation_outcome(*durable_terminal, false);
+            }
+            if (!begun.has_value()) {
+                throw;
+            }
+            const auto stable_error =
+                error.code() == IpcErrorCode::DeadlineExceeded
+                    ? RuntimeOperationError::Deadline
+                    : RuntimeOperationError::Backend;
+            durable_terminal = finish_durable(
+                OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt,
+                 static_cast<std::uint16_t>(stable_error)});
+            return operation_outcome(*durable_terminal, false);
+        } catch (const OperationLedgerException&) {
+            throw;
+        } catch (const std::exception&) {
+            if (durable_terminal.has_value()) {
+                return operation_outcome(*durable_terminal, false);
+            }
+            if (!begun.has_value()) {
+                throw;
+            }
+            durable_terminal = finish_durable(
+                OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt,
+                 static_cast<std::uint16_t>(
+                     RuntimeOperationError::Backend)});
+            return operation_outcome(*durable_terminal, false);
+        }
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome
+    runtime_control_release_operation(
+        const remotebsp::toolbusd::RuntimeControlReleaseRequest& request) {
+        using namespace remotebsp::toolbusd;
+        if (request.daemon_instance_id != daemon_instance_id_) {
+            throw RuntimeControlException(
+                RuntimeControlError::DaemonIdentityMismatch,
+                "Runtime Release 操作绑定了其他 toolbusd 实例");
+        }
+        RuntimeControlReleaseOperation operation;
+        operation.daemon_origin = request.daemon_instance_id;
+        operation.lease_id = request.lease_id;
+        operation.owner_key_id = request.owner_key_id;
+        const auto operation_id =
+            OperationLedger::derive_operation_id(operation);
+        const auto resolved_release = runtime_control_.resolve_release_lease(
+            request, daemon_instance_id_);
+        const auto existing = operation_ledger_.lookup(
+            operation_id, request.owner_key_id);
+        if (existing.disposition == OperationLookupDisposition::Found) {
+            if (existing.record->daemon_origin !=
+                request.daemon_instance_id) {
+                throw OperationLedgerException(
+                    OperationLedgerError::IdempotencyConflict,
+                    "相同 Runtime Release operation_id 来自其他 daemon");
+            }
+            if (resolved_release.has_value()) {
+                const ServerResolvedLease lease{
+                    resolved_release->expected_node_uuid,
+                    resolved_release->node_id,
+                    resolved_release->resource_id,
+                    resolved_release->permissions,
+                    resolved_release->admission_id};
+                if (existing.record->request_digest !=
+                    OperationLedger::derive_request_digest(operation, lease)) {
+                    throw OperationLedgerException(
+                        OperationLedgerError::IdempotencyConflict,
+                        "Runtime Release 历史记录与当前租约范围不一致");
+                }
+            }
+            return operation_outcome(*existing.record, true);
+        }
+
+        std::optional<OperationBeginResult> begun;
+        std::optional<OperationRecord> durable_terminal;
+        const auto finish_durable = [&](OperationState state,
+                                        OperationRecovery recovery,
+                                        const OperationTerminalResult& result =
+                                            OperationTerminalResult{}) {
+            if (!begun.has_value() ||
+                begun->disposition !=
+                    OperationBeginDisposition::StartedDurablePending) {
+                throw std::logic_error(
+                    "Runtime Release 缺少持久 pending");
+            }
+            try {
+                std::lock_guard<std::mutex> policy_lock(
+                    runtime_operation_policy_mutex_);
+                return operation_ledger_.finish(
+                    begun->record.operation_id, begun->record.request_digest,
+                    state, recovery, result);
+            } catch (const OperationLedgerException& error) {
+                throw OperationLedgerAfterPendingException(error.what());
+            }
+        };
+        try {
+            runtime_control_.release(
+                request, daemon_instance_id_,
+                RuntimeControlGate::ReleaseDurability{
+                    [&](const RuntimeControlGate::ResolvedReleaseLease& lease) {
+                        std::lock_guard<std::mutex> policy_lock(
+                            runtime_operation_policy_mutex_);
+                        begun = operation_ledger_.begin_release(
+                            operation,
+                            {lease.expected_node_uuid, lease.node_id,
+                             lease.resource_id, lease.permissions,
+                             lease.admission_id});
+                        if (begun->disposition !=
+                            OperationBeginDisposition::StartedDurablePending) {
+                            throw OperationReplayException{};
+                        }
+                    },
+                    [&] {
+                        durable_terminal = finish_durable(
+                            OperationState::Committed,
+                            OperationRecovery::SafeClosed);
+                    },
+                    [&](RuntimeControlGate::DurableRecovery recovery,
+                        RuntimeControlError) {
+                        if (!begun.has_value()) {
+                            return;
+                        }
+                        durable_terminal = finish_durable(
+                            recovery == RuntimeControlGate::DurableRecovery::
+                                            SafeClosed
+                                ? OperationState::Rejected
+                                : OperationState::Unknown,
+                            recovery == RuntimeControlGate::DurableRecovery::
+                                            SafeClosed
+                                ? OperationRecovery::SafeClosed
+                                : OperationRecovery::ScopeBlocked,
+                            {std::nullopt, std::nullopt,
+                             static_cast<std::uint16_t>(
+                                 RuntimeOperationError::Backend)});
+                    }});
+            if (!durable_terminal.has_value()) {
+                throw std::logic_error(
+                    "Runtime Release Gate 未提交持久终态");
+            }
+            return operation_outcome(*durable_terminal, false);
+        } catch (const OperationReplayException&) {
+            if (!begun.has_value()) {
+                throw;
+            }
+            return operation_outcome(begun->record, true);
+        } catch (const OperationLedgerAfterPendingException&) {
+            throw;
+        } catch (const RuntimeControlException&) {
+            if (durable_terminal.has_value()) {
+                return operation_outcome(*durable_terminal, false);
+            }
+            throw;
+        } catch (const OperationLedgerException&) {
+            throw;
+        } catch (const std::exception&) {
+            if (!begun.has_value()) {
+                throw;
+            }
+            durable_terminal = finish_durable(
+                OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt,
+                 static_cast<std::uint16_t>(
+                     RuntimeOperationError::Backend)});
+            return operation_outcome(*durable_terminal, false);
+        }
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_operation_query(
+        const remotebsp::toolbusd::RuntimeOperationQuery& request) {
+        using namespace remotebsp::toolbusd;
+        if (request.daemon_instance_id != daemon_instance_id_) {
+            throw RuntimeControlException(
+                RuntimeControlError::DaemonIdentityMismatch,
+                "Runtime 操作查询绑定了其他 toolbusd 实例");
+        }
+        const auto found = operation_ledger_.lookup(
+            request.operation_id, request.owner_key_id);
+        return found.disposition == OperationLookupDisposition::Found
+                   ? operation_outcome(*found.record, true)
+                   : expired_operation_outcome(request.operation_id);
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_operation_lookup(
+        const remotebsp::toolbusd::RuntimeOperationLookup& request) {
+        using namespace remotebsp::toolbusd;
+        if (request.daemon_instance_id != daemon_instance_id_) {
+            throw RuntimeControlException(
+                RuntimeControlError::DaemonIdentityMismatch,
+                "Runtime 操作定位绑定了其他 toolbusd 实例");
+        }
+        OperationDigest operation_id{};
+        if (request.kind == RuntimeOperationKind::GpioWrite) {
+            RuntimeGpioWriteOperation operation;
+            operation.daemon_origin = request.daemon_instance_id;
+            operation.lease_id = request.lease_id;
+            operation.owner_key_id = request.owner_key_id;
+            operation.idempotency_key = request.idempotency_key;
+            operation_id = OperationLedger::derive_operation_id(operation);
+        } else {
+            RuntimeControlReleaseOperation operation;
+            operation.daemon_origin = request.daemon_instance_id;
+            operation.lease_id = request.lease_id;
+            operation.owner_key_id = request.owner_key_id;
+            operation_id = OperationLedger::derive_operation_id(operation);
+        }
+        const auto found = operation_ledger_.lookup(
+            operation_id, request.owner_key_id);
+        return found.disposition == OperationLookupDisposition::Found
+                   ? operation_outcome(*found.record, true)
+                   : expired_operation_outcome(operation_id, request.kind);
     }
 
     void invalidate_bus_node_locked(std::uint32_t node_id) {
@@ -1454,6 +2051,12 @@ private:
         }
         observation.active_lease_count =
             runtime_control_.active_lease_count();
+        observation.operation_ledger_mutation_available =
+            operation_ledger_.mutation_available();
+        if (*observation.operation_ledger_mutation_available) {
+            observation.operation_ledger_operation_count =
+                operation_ledger_.operation_count();
+        }
         observation.sample_time_ms = steady_time_ms();
 
         remotebsp::toolbusd::IpcToolbusdHealthSnapshot result;
@@ -1533,22 +2136,71 @@ private:
             }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite) {
-                const auto result = runtime_gpio_write(
-                    ipc_request.runtime_gpio_write);
                 remotebsp::toolbusd::write_ipc_response(
-                    client, remotebsp::toolbusd::IpcStatus::Ok,
-                    remotebsp::toolbusd::
-                        encode_ipc_runtime_gpio_write_result(result));
+                    client, remotebsp::toolbusd::IpcStatus::Error,
+                    remotebsp::toolbusd::encode_ipc_error_envelope(
+                        {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                         remotebsp::toolbusd::IpcErrorCode::UnsupportedRequest,
+                         remotebsp::toolbusd::IpcErrorCategory::Request,
+                         false, false,
+                         "旧版 Runtime GPIO 写接口未接入持久账本，已拒绝"}));
                 return;
             }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::
                     RuntimeControlRelease) {
-                runtime_control_.release(
-                    ipc_request.runtime_control_release,
-                    daemon_instance_id_);
                 remotebsp::toolbusd::write_ipc_response(
-                    client, remotebsp::toolbusd::IpcStatus::Ok, {});
+                    client, remotebsp::toolbusd::IpcStatus::Error,
+                    remotebsp::toolbusd::encode_ipc_error_envelope(
+                        {remotebsp::toolbusd::kIpcErrorEnvelopeVersion,
+                         remotebsp::toolbusd::IpcErrorCode::UnsupportedRequest,
+                         remotebsp::toolbusd::IpcErrorCategory::Request,
+                         false, false,
+                         "旧版 Runtime Release 接口未接入持久账本，已拒绝"}));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::
+                    RuntimeGpioWriteOperation) {
+                const auto outcome = runtime_gpio_write_operation(
+                    ipc_request.runtime_gpio_write);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::
+                        encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::
+                    RuntimeControlReleaseOperation) {
+                const auto outcome = runtime_control_release_operation(
+                    ipc_request.runtime_control_release);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::
+                        encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::
+                    RuntimeOperationQuery) {
+                const auto outcome = runtime_operation_query(
+                    ipc_request.runtime_operation_query);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::
+                        encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::
+                    RuntimeOperationLookup) {
+                const auto outcome = runtime_operation_lookup(
+                    ipc_request.runtime_operation_lookup);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::
+                        encode_ipc_runtime_operation_outcome(outcome));
                 return;
             }
             if (ipc_request.kind ==
@@ -2002,6 +2654,20 @@ private:
                 }
             } catch (...) {
             }
+        } catch (const remotebsp::toolbusd::OperationLedgerException& error) {
+            try {
+                if (structured_error_kind.has_value()) {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        remotebsp::toolbusd::encode_ipc_error_envelope(
+                            ledger_error_envelope(error)));
+                } else {
+                    remotebsp::toolbusd::write_ipc_response(
+                        client, remotebsp::toolbusd::IpcStatus::Error,
+                        text_body(error.what()));
+                }
+            } catch (...) {
+            }
         } catch (const std::exception& error) {
             try {
                 if (structured_error_kind.has_value()) {
@@ -2136,6 +2802,10 @@ private:
     remotebsp::toolbusd::RequestManager requests_;
     remotebsp::toolbusd::ClockSyncManager clock_sync_;
     remotebsp::toolbusd::MotionGroupService motion_group_;
+    remotebsp::toolbusd::OperationLedger operation_ledger_;
+#ifdef REMOTEBSP_TEST_HOOKS
+    std::unique_ptr<OneShotTestBarrier> gpio_post_lookup_barrier_;
+#endif
     remotebsp::toolbusd::NodeRegistry nodes_;
     remotebsp::toolbusd::BusRuntime bus_runtime_;
     std::array<std::uint64_t, kMaximumNodeId + 1U>
@@ -2153,6 +2823,8 @@ private:
     std::mutex send_mutex_;
     remotebsp::toolbusd::MotionGroupDispatchGate motion_dispatch_gate_;
     remotebsp::toolbusd::RuntimeControlGate runtime_control_;
+    // 只串行化账本可用性/阻断检查与持久写边界，不得覆盖远端 I/O。
+    std::mutex runtime_operation_policy_mutex_;
     std::timed_mutex runtime_snapshot_mutex_;
     std::mutex state_mutex_;
     std::condition_variable state_changed_;
@@ -2187,7 +2859,13 @@ int main(int argc, char** argv) {
                      "[--data-bitrate bit/s] "
                      "[--max-utilization-permille 1..1000] "
                      "[--burst-window-ms 毫秒] "
-                     "[--motion-max-clock-error-ns 纳秒]\n";
+                     "[--motion-max-clock-error-ns 纳秒] "
+                     "--runtime-operation-ledger-dir 账本目录"
+#ifdef REMOTEBSP_TEST_HOOKS
+                     " [--test-operation-ledger-fail-terminal-sync 序号]"
+                     " [--test-runtime-gpio-post-lookup-barrier 参与数]"
+#endif
+                     "\n";
         return 2;
     }
     try {
@@ -2203,6 +2881,8 @@ int main(int argc, char** argv) {
         remotebsp::toolbusd::TrafficConfig traffic_config;
         remotebsp::toolbusd::ClockSyncManagerConfig clock_sync_config;
         remotebsp::toolbusd::MotionGroupServiceConfig motion_group_config;
+        std::optional<std::string> operation_ledger_directory;
+        ToolbusDaemonTestOptions test_options;
         traffic_config.mode = (mock_usb || usb)
                                   ? remotebsp::toolbusd::TrafficBusMode::Usb
                                   : mode == remotebsp::transport::CanMode::Classical
@@ -2228,6 +2908,16 @@ int main(int argc, char** argv) {
             if (index >= argc) {
                 throw std::invalid_argument(
                     "toolbusd 选项缺少参数");
+            }
+            if (option == "--runtime-operation-ledger-dir") {
+                const std::string directory = argv[index++];
+                if (directory.empty() ||
+                    operation_ledger_directory.has_value()) {
+                    throw std::invalid_argument(
+                        "Runtime 操作账本目录必须显式且只能指定一次");
+                }
+                operation_ledger_directory = directory;
+                continue;
             }
             const std::uint32_t value =
                 parse_positive_u32(argv[index++], option.c_str());
@@ -2261,9 +2951,31 @@ int main(int argc, char** argv) {
                 // 高于模型默认 250 us 的配置变成表面可配、实际无效。
                 clock_sync_config.clock_model_config.maximum_error_bound_ns =
                     value;
+#ifdef REMOTEBSP_TEST_HOOKS
+            } else if (option ==
+                       "--test-operation-ledger-fail-terminal-sync") {
+                if (value > 1024U ||
+                    test_options.fail_terminal_record_sync_ordinal != 0U) {
+                    throw std::invalid_argument(
+                        "terminal 账本测试故障序号必须为 1～1024 且只能指定一次");
+                }
+                test_options.fail_terminal_record_sync_ordinal = value;
+            } else if (option ==
+                       "--test-runtime-gpio-post-lookup-barrier") {
+                if (value < 2U || value > 64U ||
+                    test_options.gpio_post_lookup_barrier_participants != 0U) {
+                    throw std::invalid_argument(
+                        "Runtime GPIO 测试屏障参与数必须为 2～64 且只能指定一次");
+                }
+                test_options.gpio_post_lookup_barrier_participants = value;
+#endif
             } else {
                 throw std::invalid_argument("未知 toolbusd 选项");
             }
+        }
+        if (!operation_ledger_directory.has_value()) {
+            throw std::invalid_argument(
+                "必须显式指定 --runtime-operation-ledger-dir");
         }
         if (!mock_usb && !usb &&
             mode == remotebsp::transport::CanMode::Classical) {
@@ -2287,7 +2999,9 @@ int main(int argc, char** argv) {
         }
         ToolbusDaemon daemon(std::move(transport), std::move(socket_path),
                              traffic_config, clock_sync_config,
-                             motion_group_config);
+                             motion_group_config,
+                             std::move(*operation_ledger_directory),
+                             test_options);
         daemon.run();
     } catch (const std::exception& error) {
         std::cerr << "toolbusd 启动失败: " << error.what() << '\n';

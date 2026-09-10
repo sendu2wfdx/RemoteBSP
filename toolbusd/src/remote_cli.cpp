@@ -156,6 +156,33 @@ std::array<std::uint8_t, 16> parse_hex_id(const std::string& text,
     return result;
 }
 
+std::array<std::uint8_t, 32> parse_operation_id(const std::string& text) {
+    if (text.size() != 64U ||
+        !std::all_of(text.begin(), text.end(), [](char value) {
+            return (value >= '0' && value <= '9') ||
+                   (value >= 'a' && value <= 'f');
+        })) {
+        throw std::invalid_argument(
+            "operation ID 必须是64位规范小写十六进制");
+    }
+    const auto bytes = parse_hex(text);
+    std::array<std::uint8_t, 32> result{};
+    std::copy(bytes.begin(), bytes.end(), result.begin());
+    return result;
+}
+
+remotebsp::RuntimeOperationKind parse_runtime_operation_kind(
+    const std::string& text) {
+    if (text == "gpio_write") {
+        return remotebsp::RuntimeOperationKind::GpioWrite;
+    }
+    if (text == "control_release") {
+        return remotebsp::RuntimeOperationKind::ControlRelease;
+    }
+    throw std::invalid_argument(
+        "Runtime 操作类型必须是 gpio_write 或 control_release");
+}
+
 std::uint16_t parse_device_parameter_id(const std::string& text) {
     if (text == "serial-number" || text == "sn") {
         return RBSP_DEVICE_PARAM_SERIAL_NUMBER;
@@ -392,6 +419,14 @@ void print_usage() {
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <幂等键> <0|1>\n"
         << "  runtime-control-release <daemon实例ID> <控制租约ID> "
            "<调用者ID>\n"
+        << "  runtime-gpio-write-operation <daemon实例ID> <控制租约ID> "
+           "<预期节点UUID> <调用者ID> <GPIO资源ID> <幂等键> <0|1>\n"
+        << "  runtime-control-release-operation <daemon实例ID> "
+           "<控制租约ID> <调用者ID>\n"
+        << "  runtime-operation-status <daemon实例ID> <调用者ID> "
+           "<operation ID>\n"
+        << "  runtime-operation-lookup <daemon实例ID> <调用者ID> "
+           "<gpio_write|control_release> <控制租约ID> <幂等键>\n"
         << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
         << "  event-wait\n"
         << "  get-info | get-capability\n"
@@ -544,6 +579,69 @@ int run(const std::vector<std::string>& arguments,
         } else {
             std::cout << "ok\n";
         }
+        return 0;
+    }
+
+    if (name == "runtime-gpio-write-operation" &&
+        arguments.size() == 8) {
+        if (!json_output) {
+            throw std::invalid_argument(
+                "runtime-gpio-write-operation 必须与 --json 一起使用");
+        }
+        const auto value = parse_u32(arguments[7], "GPIO 电平");
+        if (value > 1U) {
+            throw std::invalid_argument("GPIO 电平必须是0或1");
+        }
+        const auto outcome = client.runtime_gpio_write_operation(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4],
+            parse_u32(arguments[5], "GPIO资源ID"), arguments[6],
+            value != 0U);
+        remotebsp::cli_json::write_runtime_operation_outcome(
+            std::cout, name, outcome);
+        return 0;
+    }
+
+    if (name == "runtime-control-release-operation" &&
+        arguments.size() == 4) {
+        if (!json_output) {
+            throw std::invalid_argument(
+                "runtime-control-release-operation 必须与 --json 一起使用");
+        }
+        const auto outcome = client.runtime_control_release_operation(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"), arguments[3]);
+        remotebsp::cli_json::write_runtime_operation_outcome(
+            std::cout, name, outcome);
+        return 0;
+    }
+
+    if (name == "runtime-operation-status" && arguments.size() == 4) {
+        if (!json_output) {
+            throw std::invalid_argument(
+                "runtime-operation-status 必须与 --json 一起使用");
+        }
+        const auto outcome = client.runtime_operation_status(
+            parse_hex_id(arguments[1], "daemon实例ID"), arguments[2],
+            parse_operation_id(arguments[3]));
+        remotebsp::cli_json::write_runtime_operation_outcome(
+            std::cout, name, outcome);
+        return 0;
+    }
+
+    if (name == "runtime-operation-lookup" && arguments.size() == 6) {
+        if (!json_output) {
+            throw std::invalid_argument(
+                "runtime-operation-lookup 必须与 --json 一起使用");
+        }
+        const auto kind = parse_runtime_operation_kind(arguments[3]);
+        const auto outcome = client.runtime_operation_lookup(
+            parse_hex_id(arguments[1], "daemon实例ID"), arguments[2],
+            kind, parse_hex_id(arguments[4], "控制租约ID"),
+            arguments[5]);
+        remotebsp::cli_json::write_runtime_operation_outcome(
+            std::cout, name, outcome);
         return 0;
     }
 
@@ -1327,6 +1425,10 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-control-acquire" &&
              arguments[0] != "runtime-gpio-write" &&
              arguments[0] != "runtime-control-release" &&
+             arguments[0] != "runtime-gpio-write-operation" &&
+             arguments[0] != "runtime-control-release-operation" &&
+             arguments[0] != "runtime-operation-status" &&
+             arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(

@@ -10,6 +10,7 @@ socket_path="/tmp/remotebsp-traffic-$$.sock"
 mock_log="/tmp/remotebsp-traffic-mock-$$.log"
 daemon_log="/tmp/remotebsp-traffic-daemon-$$.log"
 reject_log="/tmp/remotebsp-traffic-reject-$$.out"
+ledger_dir="$(mktemp -d /tmp/remotebsp-traffic-ledger-XXXXXX)"
 mock_pid=""
 daemon_pid=""
 
@@ -28,6 +29,7 @@ cleanup() {
         sed -n '1,300p' "$daemon_log" 2>/dev/null || true
     fi
     rm -f -- "$socket_path" "$mock_log" "$daemon_log" "$reject_log"
+    rm -rf -- "$ledger_dir"
     exit "$result"
 }
 trap cleanup EXIT INT TERM
@@ -36,6 +38,7 @@ trap cleanup EXIT INT TERM
     >"$mock_log" 2>&1 &
 mock_pid=$!
 "$toolbusd_bin" "$can_interface" classical "$socket_path" \
+    --runtime-operation-ledger-dir "$ledger_dir" \
     --max-utilization-permille 100 \
     --burst-window-ms 20 \
     >"$daemon_log" 2>&1 &

@@ -44,6 +44,24 @@ target_compile_options(toolbusd_health_ipc_tests PRIVATE
 )
 add_test(NAME toolbusd_health_ipc_tests COMMAND toolbusd_health_ipc_tests)
 
+add_executable(runtime_operation_ipc_tests
+    runtime_operation_ipc_tests.cpp)
+target_link_libraries(runtime_operation_ipc_tests PRIVATE
+    remotebsp
+    remotebsp_request_manager)
+target_compile_options(runtime_operation_ipc_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME runtime_operation_ipc_tests
+    COMMAND runtime_operation_ipc_tests)
+
+# operation_id 是对外恢复选择器，CLI 仅接受规范小写十六进制。
+add_test(NAME runtime_operation_cli_uppercase_id_rejected
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/runtime_operation_cli_id_test.sh
+            $<TARGET_FILE:remote-cli>)
+
 add_executable(bus_stream_protocol_tests bus_stream_protocol_tests.cpp)
 target_link_libraries(bus_stream_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(bus_stream_protocol_tests PRIVATE
@@ -410,6 +428,33 @@ target_compile_options(runtime_control_gate_tests PRIVATE
 )
 add_test(NAME runtime_control_gate_tests
     COMMAND runtime_control_gate_tests)
+
+add_executable(operation_ledger_tests
+    operation_ledger_tests.cpp)
+target_link_libraries(operation_ledger_tests PRIVATE
+    remotebsp_request_manager)
+target_compile_options(operation_ledger_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME operation_ledger_tests
+    COMMAND operation_ledger_tests)
+
+add_executable(toolbusd_operation_ledger_process_tests
+    toolbusd_operation_ledger_process_tests.cpp)
+target_compile_definitions(toolbusd PRIVATE REMOTEBSP_TEST_HOOKS=1)
+target_link_libraries(toolbusd_operation_ledger_process_tests PRIVATE
+    remotebsp
+    remotebsp_request_manager)
+add_dependencies(toolbusd_operation_ledger_process_tests
+    toolbusd
+    mock_mcu)
+target_compile_options(toolbusd_operation_ledger_process_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+add_test(NAME toolbusd_operation_ledger_process_tests
+    COMMAND toolbusd_operation_ledger_process_tests
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:mock_mcu>)
 
 add_executable(discovery_tests discovery_tests.cpp)
 target_link_libraries(discovery_tests PRIVATE

@@ -16,6 +16,7 @@ socket_path="/tmp/remotebsp-e2e-${can_mode}-$$.sock"
 mock_log="/tmp/remotebsp-mock-${can_mode}-$$.log"
 daemon_log="/tmp/remotebsp-daemon-${can_mode}-$$.log"
 trace_log="/tmp/remotebsp-can-${can_mode}-$$.log"
+ledger_dir="$(mktemp -d "/tmp/remotebsp-ledger-${can_mode}-XXXXXX")"
 mock_pid=""
 daemon_pid=""
 trace_pid=""
@@ -43,6 +44,7 @@ cleanup() {
         sed -n '1,300p' "$trace_log" 2>/dev/null || true
     fi
     rm -f -- "$socket_path" "$mock_log" "$daemon_log" "$trace_log"
+    rm -rf -- "$ledger_dir"
     if [[ "$can_mode" == "usb-mock" ]]; then
         rm -f -- "$can_interface"
     fi
@@ -59,6 +61,7 @@ fi
     >"$mock_log" 2>&1 &
 mock_pid=$!
 "$toolbusd_bin" "$can_interface" "$can_mode" "$socket_path" \
+    --runtime-operation-ledger-dir "$ledger_dir" \
     >"$daemon_log" 2>&1 &
 daemon_pid=$!
 
@@ -206,7 +209,7 @@ runtime_gpio_resource="0x1000005"
 set +e
 runtime_unknown_error="$($remote_cli_bin --socket "$socket_path" --node 1 \
     --json \
-    runtime-gpio-write "$daemon_instance_id" "$unknown_runtime_lease_id" \
+    runtime-gpio-write-operation "$daemon_instance_id" "$unknown_runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
     unknown-before-acquire 1 \
     2>/dev/null)"
@@ -216,7 +219,7 @@ if [[ "$runtime_unknown_status" -eq 0 ]]; then
     echo "未登记的 Runtime 控制租约不应允许 GPIO 写入" >&2
     exit 1
 fi
-grep -Fq '"command":"runtime-gpio-write"' <<<"$runtime_unknown_error"
+grep -Fq '"command":"runtime-gpio-write-operation"' <<<"$runtime_unknown_error"
 grep -Fq '"code":103' <<<"$runtime_unknown_error"
 grep -Fq '"category":4' <<<"$runtime_unknown_error"
 grep -Fq '"retryable":false' <<<"$runtime_unknown_error"
@@ -225,29 +228,47 @@ grep -Fq '"possibly_committed":false' <<<"$runtime_unknown_error"
     runtime-control-acquire "$daemon_instance_id" "$runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" 5000 >/dev/null
 runtime_gpio_first="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
-    runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
+    --json runtime-gpio-write-operation "$daemon_instance_id" "$runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
     gpio-e2e-command 1)"
-grep -Fq 'value=1 replayed=no' <<<"$runtime_gpio_first"
+grep -Fq '"state":"committed"' <<<"$runtime_gpio_first"
+grep -Fq '"value":true' <<<"$runtime_gpio_first"
+grep -Fq '"replayed":false' <<<"$runtime_gpio_first"
+runtime_operation_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["operation_id"])' \
+    <<<"$runtime_gpio_first")"
+[[ "$runtime_operation_id" =~ ^[0-9a-f]{64}$ ]]
 runtime_gpio_replay="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
-    runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
+    --json runtime-gpio-write-operation "$daemon_instance_id" "$runtime_lease_id" \
     "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
     gpio-e2e-command 1)"
-grep -Fq 'value=1 replayed=yes' <<<"$runtime_gpio_replay"
+grep -Fq '"state":"committed"' <<<"$runtime_gpio_replay"
+grep -Fq '"replayed":true' <<<"$runtime_gpio_replay"
+runtime_status="$("$remote_cli_bin" --socket "$socket_path" --json \
+    runtime-operation-status "$daemon_instance_id" e2e-runtime \
+    "$runtime_operation_id")"
+grep -Fq '"state":"committed"' <<<"$runtime_status"
+grep -Fq '"replayed":true' <<<"$runtime_status"
+runtime_lookup="$("$remote_cli_bin" --socket "$socket_path" --json \
+    runtime-operation-lookup "$daemon_instance_id" e2e-runtime gpio_write \
+    "$runtime_lease_id" gpio-e2e-command)"
+grep -Fq "\"operation_id\":\"$runtime_operation_id\"" <<<"$runtime_lookup"
 set +e
 runtime_release_error="$($remote_cli_bin --socket "$socket_path" --json \
-    runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
+    runtime-control-release-operation "$daemon_instance_id" "$runtime_lease_id" \
     other-runtime-owner 2>/dev/null)"
 runtime_release_status=$?
 set -e
 [[ "$runtime_release_status" -ne 0 ]]
-grep -Fq '"command":"runtime-control-release"' <<<"$runtime_release_error"
+grep -Fq '"command":"runtime-control-release-operation"' <<<"$runtime_release_error"
 grep -Fq '"code":101' <<<"$runtime_release_error"
 grep -Fq '"category":3' <<<"$runtime_release_error"
 grep -Fq '"possibly_committed":false' <<<"$runtime_release_error"
-"$remote_cli_bin" --socket "$socket_path" --node 1 \
-    runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
-    e2e-runtime >/dev/null
+runtime_release="$("$remote_cli_bin" --socket "$socket_path" --node 1 --json \
+    runtime-control-release-operation "$daemon_instance_id" \
+    "$runtime_lease_id" e2e-runtime)"
+grep -Fq '"kind":"control_release"' <<<"$runtime_release"
+grep -Fq '"state":"committed"' <<<"$runtime_release"
+grep -Fq '"recovery":"safe_closed"' <<<"$runtime_release"
 
 pwm_create_output="$("$remote_cli_bin" --socket "$socket_path" \
     pwm-create 0 20000 4200 active-high)"

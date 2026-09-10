@@ -31,6 +31,9 @@ constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
 constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
 constexpr std::size_t kIpcErrorEnvelopeHeaderSize = 12U;
+constexpr std::size_t kRuntimeOperationQueryHeaderSize = 56U;
+constexpr std::size_t kRuntimeOperationLookupHeaderSize = 44U;
+constexpr std::size_t kRuntimeOperationOutcomeSize = 88U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value));
@@ -207,6 +210,96 @@ bool error_flags_allowed(IpcErrorCode code, bool retryable,
     return false;
 }
 
+template <std::size_t Size>
+bool nonzero_id(const std::array<std::uint8_t, Size>& value) noexcept {
+    return std::any_of(value.begin(), value.end(),
+                       [](std::uint8_t byte) { return byte != 0U; });
+}
+
+bool valid_operation_text(const std::string& value, std::size_t maximum,
+                          bool allow_colon) noexcept {
+    if (value.empty() || value.size() > maximum) return false;
+    return std::all_of(value.begin(), value.end(), [allow_colon](char item) {
+        const auto byte = static_cast<unsigned char>(item);
+        return (byte >= 'A' && byte <= 'Z') ||
+               (byte >= 'a' && byte <= 'z') ||
+               (byte >= '0' && byte <= '9') || item == '.' || item == '_' ||
+               item == '-' || (allow_colon && item == ':');
+    });
+}
+
+bool valid_operation_kind(RuntimeOperationKind kind) noexcept {
+    return kind == RuntimeOperationKind::GpioWrite ||
+           kind == RuntimeOperationKind::ControlRelease;
+}
+
+bool valid_operation_error(RuntimeOperationError error) noexcept {
+    return static_cast<std::uint16_t>(error) <=
+           static_cast<std::uint16_t>(
+               RuntimeOperationError::HistoryExpired);
+}
+
+bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
+    if (outcome.version != kRuntimeOperationIpcVersion ||
+        (outcome.kind != RuntimeOperationKind::Unknown &&
+         !valid_operation_kind(outcome.kind)) ||
+        !nonzero_id(outcome.operation_id) ||
+        !valid_operation_error(outcome.error)) {
+        return false;
+    }
+    const bool has_result = outcome.object_id != 0U;
+    const bool has_error = outcome.error != RuntimeOperationError::None;
+    const bool has_scope = nonzero_id(outcome.lease_id) &&
+                           nonzero_id(outcome.expected_node_uuid) &&
+                           outcome.resource_id != 0U;
+    const bool empty_scope = !nonzero_id(outcome.lease_id) &&
+                             !nonzero_id(outcome.expected_node_uuid) &&
+                             outcome.resource_id == 0U;
+    if (outcome.kind == RuntimeOperationKind::Unknown) {
+        return outcome.state == RuntimeOperationState::ExpiredUnknown &&
+               outcome.recovery == RuntimeOperationRecovery::None &&
+               empty_scope &&
+               !has_result &&
+               outcome.error == RuntimeOperationError::HistoryExpired &&
+               !outcome.value;
+    }
+    switch (outcome.state) {
+        case RuntimeOperationState::Pending:
+            return outcome.recovery == RuntimeOperationRecovery::None &&
+                   has_scope && !has_result && !has_error && !outcome.value;
+        case RuntimeOperationState::Committed:
+            if (outcome.kind == RuntimeOperationKind::GpioWrite) {
+                return outcome.recovery == RuntimeOperationRecovery::None &&
+                       has_scope && has_result && !has_error;
+            }
+            return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
+                   has_scope && !has_result && !has_error && !outcome.value;
+        case RuntimeOperationState::Rejected:
+            return (outcome.recovery == RuntimeOperationRecovery::NotSent ||
+                    outcome.recovery == RuntimeOperationRecovery::SafeClosed) &&
+                   has_scope && !has_result && has_error &&
+                   outcome.error != RuntimeOperationError::HistoryExpired &&
+                   !outcome.value;
+        case RuntimeOperationState::Unknown:
+            return (outcome.recovery == RuntimeOperationRecovery::SafeClosed ||
+                    outcome.recovery == RuntimeOperationRecovery::ScopeBlocked ||
+                    outcome.recovery == RuntimeOperationRecovery::AwaitingReboot ||
+                    outcome.recovery ==
+                        RuntimeOperationRecovery::NodeRebootConfirmed) &&
+                   has_scope && !has_result &&
+                   (outcome.error == RuntimeOperationError::Deadline ||
+                    outcome.error == RuntimeOperationError::Backend ||
+                    outcome.error == RuntimeOperationError::Persistence) &&
+                   !outcome.value;
+        case RuntimeOperationState::ExpiredUnknown:
+            return outcome.recovery == RuntimeOperationRecovery::None &&
+                   empty_scope && !has_result &&
+                   outcome.error == RuntimeOperationError::HistoryExpired &&
+                   !outcome.value;
+    }
+    return false;
+}
+
 void send_all(int socket, const std::uint8_t* data, std::size_t size) {
     std::size_t offset = 0;
     while (offset < size) {
@@ -316,7 +409,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::HealthSnapshot)) {
+                      IpcRequestKind::RuntimeOperationLookup)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -454,6 +547,53 @@ IpcRequest read_ipc_request(int socket) {
         }
         return request;
     }
+    if (kind == IpcRequestKind::RuntimeGpioWriteOperation) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_gpio_write = decode_ipc_runtime_gpio_write(
+                {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeControlReleaseOperation) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_control_release =
+                decode_ipc_runtime_control_release(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeOperationQuery) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_operation_query =
+                decode_ipc_runtime_operation_query(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeOperationLookup) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_operation_lookup =
+                decode_ipc_runtime_operation_lookup(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
     if (body.size() < 1 + sizeof(std::uint32_t)) {
         throw IpcException("本地 IPC 请求缺少目标节点 ID");
     }
@@ -506,6 +646,40 @@ void write_ipc_runtime_control_release_request(
     auto body = encode_ipc_runtime_control_release(request);
     body.insert(body.begin(), static_cast<std::uint8_t>(
                                   IpcRequestKind::RuntimeControlRelease));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_gpio_write_operation_request(
+    int socket, const RuntimeGpioWriteRequest& request) {
+    auto body = encode_ipc_runtime_gpio_write(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeGpioWriteOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_control_release_operation_request(
+    int socket, const RuntimeControlReleaseRequest& request) {
+    auto body = encode_ipc_runtime_control_release(request);
+    body.insert(
+        body.begin(),
+        static_cast<std::uint8_t>(
+            IpcRequestKind::RuntimeControlReleaseOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_operation_query_request(
+    int socket, const RuntimeOperationQuery& request) {
+    auto body = encode_ipc_runtime_operation_query(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeOperationQuery));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_operation_lookup_request(
+    int socket, const RuntimeOperationLookup& request) {
+    auto body = encode_ipc_runtime_operation_lookup(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeOperationLookup));
     send_body(socket, body);
 }
 
@@ -1524,6 +1698,254 @@ RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
     }
     return {get_u16(body.data()), get_u32(body.data() + 2U),
             body[6U] != 0U, body[7U] != 0U};
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
+    const RuntimeOperationQuery& query) {
+    if (query.version != kRuntimeOperationIpcVersion ||
+        !nonzero_id(query.daemon_instance_id) ||
+        !nonzero_id(query.operation_id) ||
+        !valid_operation_text(query.owner_key_id,
+                              kMaximumRuntimeControlIdentityBytes, false)) {
+        throw IpcException("Runtime 操作查询字段无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeOperationQueryHeaderSize + query.owner_key_id.size());
+    append_u16(body, query.version);
+    append_u16(body, static_cast<std::uint16_t>(
+                         kRuntimeOperationQueryHeaderSize));
+    body.insert(body.end(), query.daemon_instance_id.begin(),
+                query.daemon_instance_id.end());
+    body.insert(body.end(), query.operation_id.begin(),
+                query.operation_id.end());
+    append_u16(body, static_cast<std::uint16_t>(query.owner_key_id.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), query.owner_key_id.begin(),
+                query.owner_key_id.end());
+    return body;
+}
+
+RuntimeOperationQuery decode_ipc_runtime_operation_query(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeOperationQueryHeaderSize ||
+        get_u16(body.data()) != kRuntimeOperationIpcVersion ||
+        get_u16(body.data() + 2U) != kRuntimeOperationQueryHeaderSize ||
+        get_u16(body.data() + 54U) != 0U) {
+        throw IpcException("Runtime 操作查询版本、长度或保留位无效");
+    }
+    const auto owner_size = get_u16(body.data() + 52U);
+    if (owner_size == 0U ||
+        owner_size > kMaximumRuntimeControlIdentityBytes ||
+        body.size() != kRuntimeOperationQueryHeaderSize + owner_size) {
+        throw IpcException("Runtime 操作查询身份长度无效");
+    }
+    RuntimeOperationQuery query;
+    std::copy_n(body.begin() + 4U, query.daemon_instance_id.size(),
+                query.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, query.operation_id.size(),
+                query.operation_id.begin());
+    query.owner_key_id.assign(
+        body.begin() + static_cast<std::ptrdiff_t>(
+                           kRuntimeOperationQueryHeaderSize),
+        body.end());
+    if (!nonzero_id(query.daemon_instance_id) ||
+        !nonzero_id(query.operation_id) ||
+        !valid_operation_text(query.owner_key_id,
+                              kMaximumRuntimeControlIdentityBytes, false)) {
+        throw IpcException("Runtime 操作查询身份或ID无效");
+    }
+    return query;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_operation_lookup(
+    const RuntimeOperationLookup& lookup) {
+    if (lookup.version != kRuntimeOperationIpcVersion ||
+        !nonzero_id(lookup.daemon_instance_id) ||
+        !nonzero_id(lookup.lease_id) || !valid_operation_kind(lookup.kind) ||
+        !valid_operation_text(lookup.owner_key_id,
+                              kMaximumRuntimeControlIdentityBytes, false) ||
+        !valid_operation_text(lookup.idempotency_key,
+                              kMaximumRuntimeControlIdempotencyBytes, true) ||
+        (lookup.kind == RuntimeOperationKind::ControlRelease &&
+         lookup.idempotency_key != "release:v1")) {
+        throw IpcException("Runtime 操作定位字段无效");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeOperationLookupHeaderSize +
+                 lookup.owner_key_id.size() + lookup.idempotency_key.size());
+    append_u16(body, lookup.version);
+    append_u16(body, static_cast<std::uint16_t>(
+                         kRuntimeOperationLookupHeaderSize));
+    body.insert(body.end(), lookup.daemon_instance_id.begin(),
+                lookup.daemon_instance_id.end());
+    body.insert(body.end(), lookup.lease_id.begin(), lookup.lease_id.end());
+    body.push_back(static_cast<std::uint8_t>(lookup.kind));
+    body.push_back(0U);
+    append_u16(body, static_cast<std::uint16_t>(lookup.owner_key_id.size()));
+    append_u16(body, static_cast<std::uint16_t>(
+                         lookup.idempotency_key.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), lookup.owner_key_id.begin(),
+                lookup.owner_key_id.end());
+    body.insert(body.end(), lookup.idempotency_key.begin(),
+                lookup.idempotency_key.end());
+    return body;
+}
+
+RuntimeOperationLookup decode_ipc_runtime_operation_lookup(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimeOperationLookupHeaderSize ||
+        get_u16(body.data()) != kRuntimeOperationIpcVersion ||
+        get_u16(body.data() + 2U) != kRuntimeOperationLookupHeaderSize ||
+        body[37U] != 0U || get_u16(body.data() + 42U) != 0U) {
+        throw IpcException("Runtime 操作定位版本、长度或保留位无效");
+    }
+    const auto owner_size = get_u16(body.data() + 38U);
+    const auto idempotency_size = get_u16(body.data() + 40U);
+    if (owner_size == 0U ||
+        owner_size > kMaximumRuntimeControlIdentityBytes ||
+        idempotency_size == 0U ||
+        idempotency_size > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != kRuntimeOperationLookupHeaderSize + owner_size +
+                           idempotency_size) {
+        throw IpcException("Runtime 操作定位字符串长度无效");
+    }
+    RuntimeOperationLookup lookup;
+    lookup.kind = static_cast<RuntimeOperationKind>(body[36U]);
+    std::copy_n(body.begin() + 4U, lookup.daemon_instance_id.size(),
+                lookup.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, lookup.lease_id.size(),
+                lookup.lease_id.begin());
+    const auto strings = body.begin() + static_cast<std::ptrdiff_t>(
+                                      kRuntimeOperationLookupHeaderSize);
+    lookup.owner_key_id.assign(
+        strings, strings + static_cast<std::ptrdiff_t>(owner_size));
+    lookup.idempotency_key.assign(
+        strings + static_cast<std::ptrdiff_t>(owner_size), body.end());
+    if (!nonzero_id(lookup.daemon_instance_id) ||
+        !nonzero_id(lookup.lease_id) || !valid_operation_kind(lookup.kind) ||
+        !valid_operation_text(lookup.owner_key_id,
+                              kMaximumRuntimeControlIdentityBytes, false) ||
+        !valid_operation_text(lookup.idempotency_key,
+                              kMaximumRuntimeControlIdempotencyBytes, true) ||
+        (lookup.kind == RuntimeOperationKind::ControlRelease &&
+         lookup.idempotency_key != "release:v1")) {
+        throw IpcException("Runtime 操作定位身份、选择器或ID无效");
+    }
+    return lookup;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
+    const RuntimeOperationOutcome& outcome) {
+    if (!valid_operation_outcome(outcome)) {
+        throw IpcException("Runtime 操作结果状态组合无效");
+    }
+    const bool has_result = outcome.object_id != 0U;
+    const bool has_error = outcome.error != RuntimeOperationError::None;
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimeOperationOutcomeSize);
+    append_u16(body, outcome.version);
+    append_u16(body, static_cast<std::uint16_t>(
+                         kRuntimeOperationOutcomeSize));
+    body.push_back(static_cast<std::uint8_t>(outcome.kind));
+    body.push_back(static_cast<std::uint8_t>(outcome.state));
+    body.push_back(static_cast<std::uint8_t>(outcome.recovery));
+    body.push_back(static_cast<std::uint8_t>(
+        (outcome.replayed ? 0x01U : 0U) | (has_result ? 0x02U : 0U) |
+        (has_error ? 0x04U : 0U)));
+    body.insert(body.end(), outcome.operation_id.begin(),
+                outcome.operation_id.end());
+    body.insert(body.end(), outcome.lease_id.begin(), outcome.lease_id.end());
+    body.insert(body.end(), outcome.expected_node_uuid.begin(),
+                outcome.expected_node_uuid.end());
+    append_u32(body, outcome.resource_id);
+    append_u32(body, outcome.object_id);
+    append_u16(body, static_cast<std::uint16_t>(outcome.error));
+    body.push_back(outcome.value ? 1U : 0U);
+    body.insert(body.end(), 5U, 0U);
+    return body;
+}
+
+RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() != kRuntimeOperationOutcomeSize ||
+        get_u16(body.data()) != kRuntimeOperationIpcVersion ||
+        get_u16(body.data() + 2U) != kRuntimeOperationOutcomeSize ||
+        (body[7U] & ~0x07U) != 0U || body[82U] > 1U ||
+        std::any_of(body.begin() + 83U, body.end(),
+                    [](std::uint8_t byte) { return byte != 0U; })) {
+        throw IpcException("Runtime 操作结果版本、长度或保留位无效");
+    }
+    RuntimeOperationOutcome outcome;
+    outcome.kind = static_cast<RuntimeOperationKind>(body[4U]);
+    outcome.state = static_cast<RuntimeOperationState>(body[5U]);
+    outcome.recovery = static_cast<RuntimeOperationRecovery>(body[6U]);
+    outcome.replayed = (body[7U] & 0x01U) != 0U;
+    std::copy_n(body.begin() + 8U, outcome.operation_id.size(),
+                outcome.operation_id.begin());
+    std::copy_n(body.begin() + 40U, outcome.lease_id.size(),
+                outcome.lease_id.begin());
+    std::copy_n(body.begin() + 56U, outcome.expected_node_uuid.size(),
+                outcome.expected_node_uuid.begin());
+    outcome.resource_id = get_u32(body.data() + 72U);
+    outcome.object_id = get_u32(body.data() + 76U);
+    outcome.error = static_cast<RuntimeOperationError>(
+        get_u16(body.data() + 80U));
+    outcome.value = body[82U] != 0U;
+    const bool encoded_result = (body[7U] & 0x02U) != 0U;
+    const bool encoded_error = (body[7U] & 0x04U) != 0U;
+    if (encoded_result != (outcome.object_id != 0U) ||
+        encoded_error != (outcome.error != RuntimeOperationError::None) ||
+        !valid_operation_outcome(outcome)) {
+        throw IpcException("Runtime 操作结果标志或状态组合无效");
+    }
+    return outcome;
+}
+
+const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept {
+    switch (kind) {
+        case RuntimeOperationKind::Unknown: return "unknown";
+        case RuntimeOperationKind::GpioWrite: return "gpio_write";
+        case RuntimeOperationKind::ControlRelease: return "control_release";
+    }
+    return "unknown";
+}
+
+const char* runtime_operation_state_name(RuntimeOperationState state) noexcept {
+    switch (state) {
+        case RuntimeOperationState::Pending: return "pending";
+        case RuntimeOperationState::Committed: return "committed";
+        case RuntimeOperationState::Rejected: return "rejected";
+        case RuntimeOperationState::Unknown: return "unknown";
+        case RuntimeOperationState::ExpiredUnknown: return "expired_unknown";
+    }
+    return "unknown_enum";
+}
+
+const char* runtime_operation_recovery_name(
+    RuntimeOperationRecovery recovery) noexcept {
+    switch (recovery) {
+        case RuntimeOperationRecovery::None: return "none";
+        case RuntimeOperationRecovery::NotSent: return "not_sent";
+        case RuntimeOperationRecovery::SafeClosed: return "safe_closed";
+        case RuntimeOperationRecovery::ScopeBlocked: return "scope_blocked";
+        case RuntimeOperationRecovery::AwaitingReboot: return "awaiting_reboot";
+        case RuntimeOperationRecovery::NodeRebootConfirmed:
+            return "node_reboot_confirmed";
+    }
+    return "unknown";
+}
+
+const char* runtime_operation_error_name(RuntimeOperationError error) noexcept {
+    switch (error) {
+        case RuntimeOperationError::None: return "none";
+        case RuntimeOperationError::Rejected: return "rejected";
+        case RuntimeOperationError::Deadline: return "deadline";
+        case RuntimeOperationError::Backend: return "backend";
+        case RuntimeOperationError::Persistence: return "persistence";
+        case RuntimeOperationError::HistoryExpired: return "history_expired";
+    }
+    return "unknown";
 }
 
 std::vector<std::uint8_t> encode_ipc_error_envelope(

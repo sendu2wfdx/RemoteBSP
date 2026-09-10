@@ -6,17 +6,21 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import re
 import secrets
 import socket
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 
 from .auth import (
+    CONTROL_OPERATION_READ_PERMISSION,
     CONTROL_LEASE_ACQUIRE_PERMISSION,
     CONTROL_LEASE_RELEASE_PERMISSION,
     CONTROL_LEASE_REVOKE_PERMISSION,
@@ -81,9 +85,14 @@ from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 API_VERSION = "v1"
 GPIO_WRITE_COMMAND_GROUP = "gpio.write"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
+_OPERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+_OPERATION_KINDS = {"gpio_write", "control_release"}
 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
 MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
 MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS = 30.0
+_FOREIGN_RECOVERY_LOCATOR_CAPACITY = 256
+_FOREIGN_RECOVERY_LOCATOR_RETENTION_NS = 24 * 60 * 60 * 1_000_000_000
+_FOREIGN_RECOVERY_RESERVATIONS_PER_LOCATOR = 256
 _QUERY_CREDENTIAL_NAMES = {
     "api_key", "api-key", "apikey", "x-api-key", "access_token", "token",
 }
@@ -96,6 +105,147 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
             raise ValueError(f"请求体包含重复字段：{key}")
         value[key] = item
     return value
+
+
+@dataclass
+class _ForeignOperationRecoveryEntry:
+    owner_key_id: str
+    operation_id: str | None
+    expires_at_ns: int
+    reservations: set[str] = field(default_factory=set)
+    retained_for_lookup: bool = False
+
+
+class _ForeignOperationRecoveryIndex:
+    """有界保存管理员代释放所需的真实 owner，不把 owner 交给客户端。"""
+
+    def __init__(self, capacity: int = _FOREIGN_RECOVERY_LOCATOR_CAPACITY,
+                 *, monotonic_ns: Callable[[], int] = time.monotonic_ns):
+        if capacity < 1:
+            raise ValueError("管理员恢复定位容量必须大于零")
+        self.capacity = capacity
+        self._monotonic_ns = monotonic_ns
+        self._lock = threading.Lock()
+        self._entries: dict[
+            tuple[str, str, str, str], _ForeignOperationRecoveryEntry] = {}
+
+    def _purge_expired_locked(self, now_ns: int) -> None:
+        expired = [key for key, entry in self._entries.items()
+                   if entry.expires_at_ns <= now_ns]
+        for key in expired:
+            self._entries.pop(key, None)
+
+    @staticmethod
+    def _key(requester_key_id: str, kind: str, lease_id: str,
+             idempotency_key: str) -> tuple[str, str, str, str]:
+        return requester_key_id, kind, lease_id, idempotency_key
+
+    def reserve(self, requester_key_id: str, owner_key_id: str, *, kind: str,
+                lease_id: str,
+                idempotency_key: str) -> tuple[str | None, str | None]:
+        """在下游写前预留；返回独立随机token及可选错误。"""
+        key = self._key(requester_key_id, kind, lease_id, idempotency_key)
+        now_ns = self._monotonic_ns()
+        with self._lock:
+            self._purge_expired_locked(now_ns)
+            existing = self._entries.get(key)
+            if existing is not None and existing.owner_key_id != owner_key_id:
+                return None, "conflict"
+            if existing is None and len(self._entries) >= self.capacity:
+                return None, "capacity"
+            if existing is not None and len(existing.reservations) >= \
+                    _FOREIGN_RECOVERY_RESERVATIONS_PER_LOCATOR:
+                return None, "capacity"
+            deadline_ns = min(
+                (1 << 63) - 1,
+                now_ns + _FOREIGN_RECOVERY_LOCATOR_RETENTION_NS)
+            if existing is None:
+                existing = _ForeignOperationRecoveryEntry(
+                    owner_key_id, None, deadline_ns)
+                self._entries[key] = existing
+            else:
+                existing.expires_at_ns = deadline_ns
+            token = secrets.token_hex(16)
+            while token in existing.reservations:
+                token = secrets.token_hex(16)
+            existing.reservations.add(token)
+            return token, None
+
+    def forget(self, requester_key_id: str, *, kind: str, lease_id: str,
+               idempotency_key: str, reservation_token: str) -> None:
+        key = self._key(requester_key_id, kind, lease_id, idempotency_key)
+        with self._lock:
+            existing = self._entries.get(key)
+            if existing is None or \
+                    reservation_token not in existing.reservations:
+                return
+            existing.reservations.discard(reservation_token)
+            # 一旦有operation绑定，这条恢复证据不再属于任何单次请求，
+            # 后到请求的确定失败不得把它删除。
+            if existing.operation_id is None and \
+                    not existing.retained_for_lookup and \
+                    not existing.reservations:
+                self._entries.pop(key, None)
+
+    def retain_for_lookup(self, requester_key_id: str, *, kind: str,
+                          lease_id: str, idempotency_key: str,
+                          reservation_token: str) -> bool:
+        """不确定响应前消费本次token，仅留下一个有界locator占位。"""
+        key = self._key(requester_key_id, kind, lease_id, idempotency_key)
+        now_ns = self._monotonic_ns()
+        with self._lock:
+            self._purge_expired_locked(now_ns)
+            existing = self._entries.get(key)
+            if existing is None or \
+                    reservation_token not in existing.reservations:
+                return False
+            existing.reservations.discard(reservation_token)
+            existing.retained_for_lookup = True
+            return True
+
+    def bind_operation(self, requester_key_id: str, operation_id: str, *,
+                       kind: str, lease_id: str,
+                       idempotency_key: str,
+                       reservation_token: str | None = None) -> bool:
+        key = self._key(requester_key_id, kind, lease_id, idempotency_key)
+        now_ns = self._monotonic_ns()
+        with self._lock:
+            self._purge_expired_locked(now_ns)
+            existing = self._entries.get(key)
+            if existing is None or (reservation_token is not None and
+                                    reservation_token not in
+                                    existing.reservations):
+                return False
+            if existing.operation_id is not None and \
+                    existing.operation_id != operation_id:
+                return False
+            existing.operation_id = operation_id
+            # operation ID一旦确定，其他并发请求的临时token均不再需要；
+            # 后到forget也无法删除已经绑定的稳定映射。
+            existing.reservations.clear()
+            existing.retained_for_lookup = True
+            return True
+
+    def owner_for_selector(self, requester_key_id: str, *, kind: str,
+                           lease_id: str,
+                           idempotency_key: str) -> str | None:
+        key = self._key(requester_key_id, kind, lease_id, idempotency_key)
+        now_ns = self._monotonic_ns()
+        with self._lock:
+            self._purge_expired_locked(now_ns)
+            entry = self._entries.get(key)
+            return None if entry is None else entry.owner_key_id
+
+    def owner_for_operation(self, requester_key_id: str,
+                            operation_id: str) -> str | None:
+        now_ns = self._monotonic_ns()
+        with self._lock:
+            self._purge_expired_locked(now_ns)
+            for key, entry in self._entries.items():
+                if key[0] == requester_key_id and \
+                        entry.operation_id == operation_id:
+                    return entry.owner_key_id
+        return None
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -322,6 +472,158 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             })
 
     @staticmethod
+    def _public_operation(outcome: dict) -> dict:
+        recovery = outcome["recovery"]
+        error_code = outcome["error_code"]
+        error = None
+        if error_code is not None:
+            error = {
+                "code": error_code,
+                "category": {
+                    "rejected": "operation",
+                    "deadline": "timeout",
+                    "backend": "backend",
+                    "persistence": "persistence",
+                    "history_expired": "history",
+                }[error_code],
+                # ledger 终态原样重放不会再次执行；这里的 retryable
+                # 只能表示“原请求可直接重放”，因此一律为 false。
+                "retryable": False,
+                "possibly_committed": outcome["state"] in {
+                    "unknown", "expired_unknown"},
+            }
+        return {
+            "operation_schema_version": 1,
+            "operation_id": outcome["operation_id"],
+            "lease_id": outcome["lease_id"],
+            "scope": (None if outcome["expected_node_uuid"] is None else {
+                "expected_node_uuid": outcome["expected_node_uuid"],
+                "resource_id": outcome["resource_id"],
+            }),
+            "operation_kind": outcome["kind"],
+            "state": outcome["state"],
+            "recovery": recovery,
+            "scope_blocked": recovery in {
+                "scope_blocked", "awaiting_reboot"},
+            # ledger 终态不会因原请求重放而重新执行；unknown 更不能盲重试。
+            "safe_to_retry": False,
+            "replayed": outcome["replayed"],
+            "result": ({
+                "object_id": outcome["object_id"],
+                "value": outcome["value"],
+            } if outcome["state"] == "committed" and
+                outcome["kind"] == "gpio_write" else ({
+                    "released": True,
+                } if outcome["state"] == "committed" and
+                    outcome["kind"] == "control_release" else None)),
+            "error": error,
+        }
+
+    def _reconcile_operation(
+            self, outcome: dict,
+            principal: AuthenticatedPrincipal | None = None) -> None:
+        node_uuid = outcome.get("expected_node_uuid")
+        resource_id = outcome.get("resource_id")
+        scope = None
+        if isinstance(node_uuid, str) and type(resource_id) is int:
+            scope = ("node-" + node_uuid, f"resource-{resource_id:08x}")
+        should_block = outcome["recovery"] in {
+            "scope_blocked", "awaiting_reboot"} or (
+                outcome["kind"] == "control_release" and
+                outcome["state"] == "rejected" and
+                outcome["recovery"] == "not_sent")
+        safe = outcome["recovery"] in {
+            "safe_closed", "node_reboot_confirmed"}
+        if scope is not None:
+            lock = self.server.operation_scope_lock  # type: ignore[attr-defined]
+            with lock:
+                blocked = self.server.blocked_operation_scopes  # type: ignore[attr-defined]
+                if safe:
+                    blocked.discard(scope)
+                elif should_block and len(blocked) < \
+                        self.server.operation_scope_capacity:  # type: ignore[attr-defined]
+                    blocked.add(scope)
+        if principal is None or not safe or \
+                outcome["kind"] != "control_release" or \
+                not isinstance(outcome.get("lease_id"), str):
+            return
+        try:
+            call_with_deadline(
+                self.control_leases.release, outcome["lease_id"],
+                requester_key_id=principal.key_id,
+                allow_foreign=(CONTROL_LEASE_REVOKE_PERMISSION in
+                               principal.permissions),
+                deadline=self.request_deadline)
+        except (ControlLeaseNotFound, ControlLeaseOwnershipError,
+                RequestDeadlineExceeded):
+            pass
+
+    def _send_operation(self, outcome: dict, *,
+                        audit_result: str,
+                        principal: AuthenticatedPrincipal | None = None) -> None:
+        self._reconcile_operation(outcome, principal)
+        operation = self._public_operation(outcome)
+        location = (f"/api/{API_VERSION}/control/operations/" +
+                    outcome["operation_id"])
+        headers = {"Location": location}
+        state = outcome["state"]
+        if state == "pending":
+            headers["Retry-After"] = "1"
+            self._send_json({
+                "api_version": API_VERSION, "ok": True,
+                "data": {"operation": operation},
+            }, HTTPStatus.ACCEPTED, headers=headers,
+                audit_result=audit_result + "_pending")
+            return
+        if state == "committed":
+            self._send_json({
+                "api_version": API_VERSION, "ok": True,
+                "data": {"operation": operation},
+            }, HTTPStatus.OK, headers=headers,
+                audit_result=audit_result + "_committed")
+            return
+        if state in {"unknown", "expired_unknown"}:
+            code = ("control_operation_expired_unknown" if
+                    state == "expired_unknown" else
+                    "control_operation_unknown")
+            self._error(
+                HTTPStatus.CONFLICT, code,
+                "操作结果不能被安全重放；请依据恢复状态协调资源",
+                headers=headers, details={"operation": operation})
+            return
+        error_code = outcome["error_code"]
+        status, code = {
+            "rejected": (HTTPStatus.CONFLICT,
+                         "control_operation_rejected"),
+            "deadline": (HTTPStatus.GATEWAY_TIMEOUT,
+                         "control_operation_deadline"),
+            "backend": (HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_operation_backend_unavailable"),
+            "persistence": (HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_operation_persistence_failed"),
+        }[error_code]
+        self._error(status, code, "控制操作被持久账本确定拒绝",
+                    headers=headers, details={"operation": operation})
+
+    def _operation_uncertain(self, *, kind: str, lease_id: str,
+                             idempotency_key: str) -> None:
+        self._error(
+            HTTPStatus.CONFLICT, "control_operation_lookup_required",
+            "控制操作可能已提交，必须先查询持久账本，禁止盲目重试",
+            details={
+                "safe_to_retry": False,
+                "lookup": {
+                    "method": "POST",
+                    "path": f"/api/{API_VERSION}/control/operation-lookups",
+                    "body": {
+                        "operation_kind": kind,
+                        "lease_id": lease_id,
+                        "idempotency_key": idempotency_key,
+                    },
+                },
+            })
+
+    @staticmethod
     def _classify_path(target: str) -> str:
         try:
             path = urlparse(target).path
@@ -340,6 +642,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 else parts[2]
         if parts == ["api", API_VERSION, "control", "gpio", "write"]:
             return "gpio_control"
+        if len(parts) >= 3 and parts[:3] == [
+                "api", API_VERSION, "control"] and len(parts) >= 4 and \
+                parts[3] in {"operations", "operation-lookups"}:
+            return "control_operations"
         return "unknown"
 
     def _emit_audit(self, result: str) -> None:
@@ -633,6 +939,157 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return None
         return value
 
+    def _current_operation_daemon(self) -> str:
+        # 查询不要求目标租约仍存活，但必须在同一总期限内确认当前 daemon，
+        # 防止把请求发送给身份已经变化的本地进程。
+        call_with_deadline(
+            self.control_leases.active_count, deadline=self.request_deadline)
+        daemon_id = getattr(
+            self.control_leases, "daemon_instance_id", None)
+        if not isinstance(daemon_id, str):
+            raise ControlLeaseError("toolbusd实例身份尚未绑定")
+        return daemon_id
+
+    def _stable_operation_query(
+            self, query: Callable[[str], dict]) -> dict:
+        """daemon 换代时仅重查一次；结果绝不依赖旧租约是否仍活动。"""
+        daemon_id = self._current_operation_daemon()
+        outcome = query(daemon_id)
+        if call_with_deadline(
+                self.control_leases.matches_current_daemon,
+                daemon_id, deadline=self.request_deadline):
+            return outcome
+        replacement = getattr(
+            self.control_leases, "daemon_instance_id", None)
+        if not isinstance(replacement, str) or replacement == daemon_id:
+            raise ControlLeaseError("toolbusd实例身份无法稳定确认")
+        outcome = query(replacement)
+        if not call_with_deadline(
+                self.control_leases.matches_current_daemon,
+                replacement, deadline=self.request_deadline):
+            raise ControlLeaseError("toolbusd实例身份在重查期间再次变化")
+        return outcome
+
+    def _try_operation_lookup(
+            self, owner_key_id: str, *, kind: str,
+            lease_id: str, idempotency_key: str) -> dict | None:
+        """可能提交后仅做只读恢复；失败时由调用者继续返回冻结locator。"""
+        try:
+            return self._stable_operation_query(
+                lambda daemon_id: call_with_deadline(
+                    self.provider.operation_lookup,  # type: ignore[attr-defined]
+                    daemon_id, owner_key_id, kind, lease_id,
+                    idempotency_key, deadline=self.request_deadline))
+        except (RequestDeadlineExceeded, ControlLeaseError,
+                RuntimeProviderError):
+            return None
+
+    def _finish_local_release_if_safe(
+            self, outcome: dict, lease_id: str,
+            principal: AuthenticatedPrincipal, allow_foreign: bool) -> None:
+        safely_terminal = outcome["state"] == "committed" or (
+            outcome["state"] in {"rejected", "unknown"} and
+            outcome["recovery"] in {
+                "safe_closed", "node_reboot_confirmed"})
+        if not safely_terminal:
+            return
+        try:
+            call_with_deadline(
+                self.control_leases.release, lease_id,
+                requester_key_id=principal.key_id,
+                allow_foreign=allow_foreign,
+                deadline=self.request_deadline)
+        except ControlLeaseNotFound:
+            # TTL 后账本查询仍是权威；本地占位已自然消失。
+            pass
+
+    def _handle_operation_status(
+            self, principal: AuthenticatedPrincipal,
+            operation_id: str) -> None:
+        revision = self._gpio_control_revision()
+        try:
+            if _OPERATION_ID_PATTERN.fullmatch(operation_id) is None or \
+                    operation_id == "0" * 64:
+                raise ValueError("operation_id必须是非零64位小写十六进制")
+            owner_key_id = self.server.foreign_operation_recovery.owner_for_operation(  # type: ignore[attr-defined]
+                principal.key_id, operation_id)
+            outcome = self._stable_operation_query(
+                lambda daemon_id: call_with_deadline(
+                    self.provider.operation_status,  # type: ignore[attr-defined]
+                    daemon_id, owner_key_id or principal.key_id, operation_id,
+                    deadline=self.request_deadline))
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST,
+                        "control_operation_id_invalid", str(error))
+            return
+        except RequestDeadlineExceeded:
+            self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                        "control_operation_query_deadline",
+                        "操作查询未在统一处理期限内完成")
+            return
+        except (ControlLeaseError, RuntimeProviderError):
+            self._clear_gpio_control_operational(expected_revision=revision)
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_operation_ledger_unavailable",
+                        "无法取得可信的操作账本结果")
+            return
+        self._send_operation(
+            outcome, audit_result="control_operation_query",
+            principal=principal)
+
+    def _handle_operation_lookup(
+            self, principal: AuthenticatedPrincipal) -> None:
+        value = self._read_control_json()
+        if value is None:
+            return
+        expected = {"operation_kind", "lease_id", "idempotency_key"}
+        if set(value) != expected:
+            self._error(
+                HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                "操作定位字段必须且只能包含operation_kind、lease_id和idempotency_key")
+            return
+        revision = self._gpio_control_revision()
+        try:
+            kind = value["operation_kind"]
+            if not isinstance(kind, str) or kind not in _OPERATION_KINDS:
+                raise ValueError("operation_kind无效")
+            lease_id = validate_lease_id(value["lease_id"])
+            idempotency_key = validate_idempotency_key(
+                value["idempotency_key"])
+            if kind == "control_release" and \
+                    idempotency_key != "release:v1":
+                raise ValueError("control_release定位必须使用release:v1")
+            owner_key_id = self.server.foreign_operation_recovery.owner_for_selector(  # type: ignore[attr-defined]
+                principal.key_id, kind=kind, lease_id=lease_id,
+                idempotency_key=idempotency_key)
+            outcome = self._stable_operation_query(
+                lambda daemon_id: call_with_deadline(
+                    self.provider.operation_lookup,  # type: ignore[attr-defined]
+                    daemon_id, owner_key_id or principal.key_id, kind, lease_id,
+                    idempotency_key, deadline=self.request_deadline))
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST,
+                        "control_operation_lookup_invalid", str(error))
+            return
+        except RequestDeadlineExceeded:
+            self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                        "control_operation_query_deadline",
+                        "操作定位查询未在统一处理期限内完成")
+            return
+        except (ControlLeaseError, RuntimeProviderError):
+            self._clear_gpio_control_operational(expected_revision=revision)
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "control_operation_ledger_unavailable",
+                        "无法取得可信的操作账本结果")
+            return
+        if owner_key_id is not None:
+            self.server.foreign_operation_recovery.bind_operation(  # type: ignore[attr-defined]
+                principal.key_id, outcome["operation_id"], kind=kind,
+                lease_id=lease_id, idempotency_key=idempotency_key)
+        self._send_operation(
+            outcome, audit_result="control_operation_lookup",
+            principal=principal)
+
     def _handle_control_lease_acquire(self, principal: AuthenticatedPrincipal
                                       ) -> None:
         value = self._read_control_json()
@@ -660,6 +1117,14 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             ttl_ms = validate_ttl_ms(value["ttl_ms"])
             idempotency_key = validate_idempotency_key(
                 value["idempotency_key"])
+            with self.server.operation_scope_lock:  # type: ignore[attr-defined]
+                if (node_id, resource_id) in \
+                        self.server.blocked_operation_scopes:  # type: ignore[attr-defined]
+                    self._error(
+                        HTTPStatus.CONFLICT, "control_scope_blocked",
+                        "目标资源存在提交状态未知的历史操作，必须先完成安全协调",
+                        details={"safe_to_retry": False})
+                    return
             if command_group == GPIO_WRITE_COMMAND_GROUP and \
                     GPIO_WRITE_PERMISSION not in principal.permissions:
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
@@ -742,7 +1207,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else None),
                     expected_revision=operational_revision)
-            self._structured_provider_error(error)
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_operation_ledger_unavailable",
+                            "操作账本不可用，Runtime写能力已失败关闭")
+            else:
+                self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError) as error:
             if downstream_registered and isinstance(daemon_id, str) and \
@@ -792,6 +1261,32 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self.control_leases, "daemon_instance_id", None)
         daemon_id = None
         downstream_started = False
+        outcome = None
+        operation_owner_key_id = principal.key_id
+        foreign_recovery_token: str | None = None
+
+        def bind_foreign_recovery(recovered: dict) -> None:
+            if foreign_recovery_token is not None:
+                self.server.foreign_operation_recovery.bind_operation(  # type: ignore[attr-defined]
+                    principal.key_id, recovered["operation_id"],
+                    kind="control_release", lease_id=lease_id,
+                    idempotency_key="release:v1",
+                    reservation_token=foreign_recovery_token)
+
+        def forget_foreign_recovery() -> None:
+            if foreign_recovery_token is not None:
+                self.server.foreign_operation_recovery.forget(  # type: ignore[attr-defined]
+                    principal.key_id, kind="control_release",
+                    lease_id=lease_id, idempotency_key="release:v1",
+                    reservation_token=foreign_recovery_token)
+
+        def retain_foreign_recovery() -> None:
+            if foreign_recovery_token is not None:
+                self.server.foreign_operation_recovery.retain_for_lookup(  # type: ignore[attr-defined]
+                    principal.key_id, kind="control_release",
+                    lease_id=lease_id, idempotency_key="release:v1",
+                    reservation_token=foreign_recovery_token)
+
         try:
             lease_id = validate_lease_id(lease_id)
             allow_foreign = CONTROL_LEASE_REVOKE_PERMISSION in \
@@ -806,6 +1301,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 lease_id, requester_key_id=principal.key_id,
                 allow_foreign=allow_foreign,
                 deadline=self.request_deadline)
+            # 管理员可以代为撤销，但账本身份始终属于原租约所有者。
+            # 可能提交后的恢复查询必须沿用实际提交时的 owner，不能用
+            # 管理员身份派生出另一个 locator。
+            operation_owner_key_id = lease.owner_key_id
             if lease.command_group == GPIO_WRITE_COMMAND_GROUP:
                 if not self.gpio_control_configured:
                     raise ControlLeaseError("GPIO写控制后端不可用")
@@ -813,18 +1312,41 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     self.control_leases, "daemon_instance_id", None)
                 if not isinstance(daemon_id, str):
                     raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                if lease.owner_key_id != principal.key_id:
+                    token, reserve_error = self.server.foreign_operation_recovery.reserve(  # type: ignore[attr-defined]
+                        principal.key_id, lease.owner_key_id,
+                        kind="control_release", lease_id=lease.lease_id,
+                        idempotency_key="release:v1")
+                    if reserve_error is not None:
+                        status = (HTTPStatus.CONFLICT if
+                                  reserve_error == "conflict" else
+                                  HTTPStatus.SERVICE_UNAVAILABLE)
+                        code = ("control_recovery_locator_conflict" if
+                                reserve_error == "conflict" else
+                                "control_recovery_locator_capacity_exceeded")
+                        self._error(
+                            status, code,
+                            "无法在执行管理员代释放前安全保留恢复定位信息")
+                        return
+                    if token is None:
+                        raise RuntimeError("管理员恢复定位预留未返回token")
+                    foreign_recovery_token = token
                 # 管理员撤销权限来自服务端认证配置；v1 IPC 不携带可伪造的
                 # foreign/admin 位，而是以登记时的真实所有者释放。
                 downstream_started = True
-                call_with_deadline(
+                outcome = call_with_deadline(
                     self.provider.gpio_control_release,  # type: ignore[attr-defined]
                     daemon_id, lease.lease_id, lease.owner_key_id,
                     deadline=self.request_deadline)
-            call_with_deadline(
-                self.control_leases.release,
-                lease_id, requester_key_id=principal.key_id,
-                allow_foreign=allow_foreign,
-                deadline=self.request_deadline)
+                bind_foreign_recovery(outcome)
+                self._finish_local_release_if_safe(
+                    outcome, lease_id, principal, allow_foreign)
+            else:
+                call_with_deadline(
+                    self.control_leases.release,
+                    lease_id, requester_key_id=principal.key_id,
+                    allow_foreign=allow_foreign,
+                    deadline=self.request_deadline)
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, "control_lease_id_invalid",
                         str(error))
@@ -848,55 +1370,118 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         except RequestDeadlineExceeded:
             if downstream_started:
-                self._clear_gpio_control_operational(
-                    expected_instance_id=(daemon_id if isinstance(
-                        daemon_id, str) else daemon_id_before),
-                    expected_revision=operational_revision)
-                self._structured_provider_error(RuntimeProviderOperationError(
-                    "deadline_exceeded", category="timeout",
-                    retryable=False, possibly_committed=True))
+                recovered = self._try_operation_lookup(
+                    operation_owner_key_id, kind="control_release",
+                    lease_id=lease_id,
+                    idempotency_key="release:v1")
+                if recovered is not None:
+                    bind_foreign_recovery(recovered)
+                    self._finish_local_release_if_safe(
+                        recovered, lease_id, principal, allow_foreign)
+                    self._send_operation(
+                        recovered, audit_result="control_release_recovered",
+                        principal=principal)
+                else:
+                    retain_foreign_recovery()
+                    self._operation_uncertain(
+                        kind="control_release", lease_id=lease_id,
+                        idempotency_key="release:v1")
             else:
                 self._error(HTTPStatus.GATEWAY_TIMEOUT,
                             "control_deadline_exceeded",
                             "控制请求未在统一处理期限内完成")
             return
         except RuntimeProviderOperationError as error:
-            if error.invalidates_global_operational or \
-                    error.possibly_committed:
+            if error.invalidates_global_operational:
+                if error.possibly_committed:
+                    retain_foreign_recovery()
+                else:
+                    forget_foreign_recovery()
                 self._clear_gpio_control_operational(
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else daemon_id_before),
                     expected_revision=operational_revision)
-            self._structured_provider_error(error)
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_operation_ledger_unavailable",
+                            "操作账本不可用，Runtime写能力已失败关闭")
+            elif error.possibly_committed:
+                recovered = self._try_operation_lookup(
+                    operation_owner_key_id, kind="control_release",
+                    lease_id=lease_id,
+                    idempotency_key="release:v1")
+                if recovered is not None:
+                    bind_foreign_recovery(recovered)
+                    self._finish_local_release_if_safe(
+                        recovered, lease_id, principal, allow_foreign)
+                    self._send_operation(
+                        recovered, audit_result="control_release_recovered",
+                        principal=principal)
+                else:
+                    retain_foreign_recovery()
+                    self._operation_uncertain(
+                        kind="control_release", lease_id=lease_id,
+                        idempotency_key="release:v1")
+            else:
+                forget_foreign_recovery()
+                self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError):
             try:
                 self.request_deadline.check()
             except RequestDeadlineExceeded:
                 if downstream_started:
-                    self._clear_gpio_control_operational(
-                        expected_instance_id=(daemon_id if isinstance(
-                            daemon_id, str) else daemon_id_before),
-                        expected_revision=operational_revision)
-                    self._structured_provider_error(
-                        RuntimeProviderOperationError(
-                            "deadline_exceeded", category="timeout",
-                            retryable=False, possibly_committed=True))
+                    recovered = self._try_operation_lookup(
+                        operation_owner_key_id, kind="control_release",
+                        lease_id=lease_id,
+                        idempotency_key="release:v1")
+                    if recovered is not None:
+                        bind_foreign_recovery(recovered)
+                        self._finish_local_release_if_safe(
+                            recovered, lease_id, principal, allow_foreign)
+                        self._send_operation(
+                            recovered,
+                            audit_result="control_release_recovered",
+                            principal=principal)
+                    else:
+                        retain_foreign_recovery()
+                        self._operation_uncertain(
+                            kind="control_release", lease_id=lease_id,
+                            idempotency_key="release:v1")
                 else:
+                    forget_foreign_recovery()
                     self._error(HTTPStatus.GATEWAY_TIMEOUT,
                                 "control_deadline_exceeded",
                                 "控制请求未在统一处理期限内完成")
                 return
-            self._clear_gpio_control_operational(
-                expected_instance_id=(daemon_id if isinstance(daemon_id, str)
-                                      else daemon_id_before),
-                expected_revision=operational_revision)
-            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                        "control_lease_unavailable",
-                        "无法安全完成控制租约释放")
+            if downstream_started:
+                recovered = self._try_operation_lookup(
+                    operation_owner_key_id, kind="control_release",
+                    lease_id=lease_id,
+                    idempotency_key="release:v1")
+                if recovered is not None:
+                    bind_foreign_recovery(recovered)
+                    self._finish_local_release_if_safe(
+                        recovered, lease_id, principal, allow_foreign)
+                    self._send_operation(
+                        recovered, audit_result="control_release_recovered",
+                        principal=principal)
+                else:
+                    retain_foreign_recovery()
+                    self._operation_uncertain(
+                        kind="control_release", lease_id=lease_id,
+                        idempotency_key="release:v1")
+            else:
+                forget_foreign_recovery()
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_lease_unavailable",
+                            "无法安全完成控制租约释放")
             return
-        self._send_empty(HTTPStatus.NO_CONTENT,
-                         audit_result="control_lease_released")
+        if outcome is None:
+            self._send_empty(HTTPStatus.NO_CONTENT,
+                             audit_result="control_lease_released")
+        else:
+            self._send_operation(
+                outcome, audit_result="control_release", principal=principal)
 
     def _handle_gpio_write(self, principal: AuthenticatedPrincipal) -> None:
         value = self._read_control_json()
@@ -914,6 +1499,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self.control_leases, "daemon_instance_id", None)
         daemon_id = None
         downstream_started = False
+        result = None
         try:
             lease_id = validate_lease_id(value["lease_id"])
             node_id = validate_control_id(value["node_id"], "node_id")
@@ -967,56 +1553,87 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         except RequestDeadlineExceeded:
             if downstream_started:
-                self._clear_gpio_control_operational(
-                    expected_instance_id=(daemon_id if isinstance(
-                        daemon_id, str) else daemon_id_before),
-                    expected_revision=operational_revision)
-                self._structured_provider_error(RuntimeProviderOperationError(
-                    "deadline_exceeded", category="timeout",
-                    retryable=False, possibly_committed=True))
+                recovered = self._try_operation_lookup(
+                    principal.key_id, kind="gpio_write", lease_id=lease_id,
+                    idempotency_key=idempotency_key)
+                if recovered is not None:
+                    self._send_operation(
+                        recovered, audit_result="gpio_write_recovered",
+                        principal=principal)
+                else:
+                    self._operation_uncertain(
+                        kind="gpio_write", lease_id=lease_id,
+                        idempotency_key=idempotency_key)
             else:
                 self._error(HTTPStatus.GATEWAY_TIMEOUT,
                             "control_deadline_exceeded",
                             "控制请求未在统一处理期限内完成")
             return
         except RuntimeProviderOperationError as error:
-            if error.invalidates_global_operational or \
-                    error.possibly_committed:
+            if error.invalidates_global_operational:
                 self._clear_gpio_control_operational(
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else daemon_id_before),
                     expected_revision=operational_revision)
-            self._structured_provider_error(error)
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_operation_ledger_unavailable",
+                            "操作账本不可用，Runtime写能力已失败关闭")
+            elif error.possibly_committed:
+                recovered = self._try_operation_lookup(
+                    principal.key_id, kind="gpio_write", lease_id=lease_id,
+                    idempotency_key=idempotency_key)
+                if recovered is not None:
+                    self._send_operation(
+                        recovered, audit_result="gpio_write_recovered",
+                        principal=principal)
+                else:
+                    self._operation_uncertain(
+                        kind="gpio_write", lease_id=lease_id,
+                        idempotency_key=idempotency_key)
+            else:
+                self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError):
             try:
                 self.request_deadline.check()
             except RequestDeadlineExceeded:
                 if downstream_started:
-                    self._clear_gpio_control_operational(
-                        expected_instance_id=(daemon_id if isinstance(
-                            daemon_id, str) else daemon_id_before),
-                        expected_revision=operational_revision)
-                    self._structured_provider_error(
-                        RuntimeProviderOperationError(
-                            "deadline_exceeded", category="timeout",
-                            retryable=False, possibly_committed=True))
+                    recovered = self._try_operation_lookup(
+                        principal.key_id, kind="gpio_write",
+                        lease_id=lease_id,
+                        idempotency_key=idempotency_key)
+                    if recovered is not None:
+                        self._send_operation(
+                            recovered, audit_result="gpio_write_recovered",
+                            principal=principal)
+                    else:
+                        self._operation_uncertain(
+                            kind="gpio_write", lease_id=lease_id,
+                            idempotency_key=idempotency_key)
                 else:
                     self._error(HTTPStatus.GATEWAY_TIMEOUT,
                                 "control_deadline_exceeded",
                                 "控制请求未在统一处理期限内完成")
                 return
-            self._clear_gpio_control_operational(
-                expected_instance_id=(daemon_id if isinstance(daemon_id, str)
-                                      else daemon_id_before),
-                expected_revision=operational_revision)
-            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                        "gpio_control_unavailable",
-                        "GPIO写入未获得可验证的下游成功结果")
+            if downstream_started:
+                recovered = self._try_operation_lookup(
+                    principal.key_id, kind="gpio_write", lease_id=lease_id,
+                    idempotency_key=idempotency_key)
+                if recovered is not None:
+                    self._send_operation(
+                        recovered, audit_result="gpio_write_recovered",
+                        principal=principal)
+                else:
+                    self._operation_uncertain(
+                        kind="gpio_write", lease_id=lease_id,
+                        idempotency_key=idempotency_key)
+            else:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "gpio_control_unavailable",
+                            "GPIO写入未获得可验证的下游成功结果")
             return
-        self._success({"lease_id": lease_id, **result},
-                      audit_result=("gpio_write_replayed" if result["replayed"]
-                                    else "gpio_write_completed"))
+        self._send_operation(
+            result, audit_result="gpio_write", principal=principal)
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
@@ -1076,6 +1693,20 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
 
         api_path = len(parts) >= 2 and parts[:2] == ["api", API_VERSION]
+        if len(parts) == 5 and parts[:4] == [
+                "api", API_VERSION, "control", "operations"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "操作查询要求启用API密钥认证")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=CONTROL_OPERATION_READ_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_operation_status(principal, parts[4])
+            return
         if api_path:
             auth_context = self._authorize(
                 parsed.path, public_health=self.command in ("GET", "HEAD"),
@@ -1097,6 +1728,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     "gpio_write": {
                         "configured": self.gpio_control_configured,
                         "operational": gpio_control_operational,
+                    },
+                    "operation_ledger": {
+                        "configured": self.gpio_control_configured,
+                        "operational": gpio_control_operational,
+                        "schema_version": 1,
                     },
                     "control_leases": {
                         "available": self.control_leases_available,
@@ -1125,7 +1761,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     **self._runtime_capabilities(),
                 },
                 "endpoints": ["health", "snapshot", "nodes", "resources",
-                              "alerts", "events", "control-leases"] +
+                              "alerts", "events", "control-leases",
+                              "control/operations/{operation_id}",
+                              "control/operation-lookups"] +
                              (["control/gpio/write"]
                               if self.gpio_control_configured else []),
             })
@@ -1287,6 +1925,20 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return
             self._handle_gpio_write(principal)
             return
+        if self.command == "POST" and parts == [
+                "api", API_VERSION, "control", "operation-lookups"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "操作定位查询要求启用API密钥认证")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=CONTROL_OPERATION_READ_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_operation_lookup(principal)
+            return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
             if self._authorize(parsed.path, public_health=False,
                                required_permission=None) is None:
@@ -1357,6 +2009,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                  headers={"Allow": "POST, OPTIONS"},
                                  audit_result="options")
                 return
+            if parts == ["api", API_VERSION, "control",
+                         "operation-lookups"]:
+                self._send_empty(HTTPStatus.NO_CONTENT,
+                                 headers={"Allow": "POST, OPTIONS"},
+                                 audit_result="options")
+                return
+            if len(parts) == 5 and parts[:4] == [
+                    "api", API_VERSION, "control", "operations"]:
+                self._send_empty(HTTPStatus.NO_CONTENT,
+                                 headers={"Allow": "GET, HEAD, OPTIONS"},
+                                 audit_result="options")
+                return
             self._send_empty(HTTPStatus.NO_CONTENT,
                              headers={"Allow": "GET, HEAD, OPTIONS"},
                              audit_result="options")
@@ -1419,6 +2083,13 @@ def make_server(host: str, port: int,
     server.gpio_control_state_revision = 0  # type: ignore[attr-defined]
     server.gpio_control_admitted_daemon_id = None  # type: ignore[attr-defined]
     server.gpio_control_operational = False  # type: ignore[attr-defined]
+    # 仅作HTTP快速拒绝/展示缓存；持久、权威的scope阻断始终由toolbusd执行。
+    server.operation_scope_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.blocked_operation_scopes = set()  # type: ignore[attr-defined]
+    server.operation_scope_capacity = 256  # type: ignore[attr-defined]
+    # 管理员代释放时，daemon账本仍以原租约owner鉴权。该索引只在服务端
+    # 有界保留调用管理员到真实owner的关联，HTTP locator从不携带owner。
+    server.foreign_operation_recovery = _ForeignOperationRecoveryIndex()  # type: ignore[attr-defined]
     return server
 
 

@@ -53,6 +53,135 @@ inline void write_ipc_error(std::ostream& output, std::string_view command,
     output << "}}\n";
 }
 
+inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
+    switch (kind) {
+        case RuntimeOperationKind::Unknown: return "unknown";
+        case RuntimeOperationKind::GpioWrite: return "gpio_write";
+        case RuntimeOperationKind::ControlRelease: return "control_release";
+    }
+    return "unknown";
+}
+
+inline const char* runtime_operation_state(RuntimeOperationState state) {
+    switch (state) {
+        case RuntimeOperationState::Pending: return "pending";
+        case RuntimeOperationState::Committed: return "committed";
+        case RuntimeOperationState::Rejected: return "rejected";
+        case RuntimeOperationState::Unknown: return "unknown";
+        case RuntimeOperationState::ExpiredUnknown:
+            return "expired_unknown";
+    }
+    return "unknown";
+}
+
+inline const char* runtime_operation_recovery(
+    RuntimeOperationRecovery recovery) {
+    switch (recovery) {
+        case RuntimeOperationRecovery::None: return "none";
+        case RuntimeOperationRecovery::NotSent: return "not_sent";
+        case RuntimeOperationRecovery::SafeClosed: return "safe_closed";
+        case RuntimeOperationRecovery::ScopeBlocked: return "scope_blocked";
+        case RuntimeOperationRecovery::AwaitingReboot:
+            return "awaiting_reboot";
+        case RuntimeOperationRecovery::NodeRebootConfirmed:
+            return "node_reboot_confirmed";
+    }
+    return "unknown";
+}
+
+inline const char* runtime_operation_error(RuntimeOperationError error) {
+    switch (error) {
+        case RuntimeOperationError::None: return "none";
+        case RuntimeOperationError::Rejected: return "rejected";
+        case RuntimeOperationError::Deadline: return "deadline";
+        case RuntimeOperationError::Backend: return "backend";
+        case RuntimeOperationError::Persistence: return "persistence";
+        case RuntimeOperationError::HistoryExpired:
+            return "history_expired";
+    }
+    return "unknown";
+}
+
+inline void write_operation_id(
+    std::ostream& output,
+    const std::array<std::uint8_t, 32>& operation_id) {
+    static constexpr char digits[] = "0123456789abcdef";
+    for (const auto value : operation_id) {
+        output << digits[value >> 4U] << digits[value & 0x0FU];
+    }
+}
+
+inline void write_runtime_scope_id(
+    std::ostream& output,
+    const std::array<std::uint8_t, 16>& identifier) {
+    static constexpr char digits[] = "0123456789abcdef";
+    for (const auto value : identifier) {
+        output << digits[value >> 4U] << digits[value & 0x0FU];
+    }
+}
+
+inline void write_runtime_operation_outcome(
+    std::ostream& output, std::string_view command,
+    const RuntimeOperationOutcome& outcome) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":";
+    write_string(output, command);
+    output << ",\"data\":{\"operation_id\":\"";
+    write_operation_id(output, outcome.operation_id);
+    output << "\",\"lease_id\":";
+    if (outcome.lease_id.has_value()) {
+        output << '"';
+        write_runtime_scope_id(output, *outcome.lease_id);
+        output << '"';
+    } else {
+        output << "null";
+    }
+    output << ",\"expected_node_uuid\":";
+    if (outcome.expected_node_uuid.has_value()) {
+        output << '"';
+        write_runtime_scope_id(output, *outcome.expected_node_uuid);
+        output << '"';
+    } else {
+        output << "null";
+    }
+    output << ",\"resource_id\":";
+    if (outcome.resource_id.has_value()) {
+        output << *outcome.resource_id;
+    } else {
+        output << "null";
+    }
+    output << ",\"kind\":";
+    if (outcome.kind == RuntimeOperationKind::Unknown) {
+        output << "null";
+    } else {
+        output << '"' << runtime_operation_kind(outcome.kind) << '"';
+    }
+    output << ",\"state\":\"" << runtime_operation_state(outcome.state)
+           << "\",\"replayed\":"
+           << (outcome.replayed ? "true" : "false")
+           << ",\"recovery\":\""
+           << runtime_operation_recovery(outcome.recovery)
+           << "\",\"object_id\":";
+    if (outcome.object_id.has_value()) {
+        output << *outcome.object_id;
+    } else {
+        output << "null";
+    }
+    output << ",\"value\":";
+    if (outcome.value.has_value()) {
+        output << (*outcome.value ? "true" : "false");
+    } else {
+        output << "null";
+    }
+    output << ",\"error_code\":";
+    if (outcome.error.has_value()) {
+        write_string(output, runtime_operation_error(*outcome.error));
+    } else {
+        output << "null";
+    }
+    output << "}}\n";
+}
+
 inline const char* resource_type(protocol::ResourceType type) {
     switch (type) {
         case protocol::ResourceType::Gpio: return "gpio";

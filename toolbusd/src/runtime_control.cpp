@@ -331,6 +331,11 @@ void RuntimeControlGate::acquire(
         reject(RuntimeControlError::CapacityExceeded,
                "Runtime 控制租约已达到上限");
     }
+    if (next_admission_id_ == 0U) {
+        reject(RuntimeControlError::CapacityExceeded,
+               "Runtime 控制租约生命周期编号已耗尽");
+    }
+    const auto admission_id = next_admission_id_++;
     const auto ttl_ns = static_cast<std::uint64_t>(request.ttl_ms) *
                         1000000ULL;
     const auto deadline = std::numeric_limits<std::uint64_t>::max() - now_ns <
@@ -342,7 +347,8 @@ void RuntimeControlGate::acquire(
         LeaseState{request.lease_id, request.expected_node_uuid,
                    request.owner_key_id,
                    request.permissions, request.node_id,
-                   request.resource_id, node_generation, deadline});
+                   request.resource_id, node_generation, deadline,
+                   admission_id});
     if (!inserted_lease.second) {
         reject(RuntimeControlError::LeaseConflict,
                "Runtime 控制租约 ID 并发登记冲突");
@@ -368,7 +374,11 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
     std::uint64_t node_generation,
     const protocol::ResourceDescriptor& descriptor,
     const protocol::ResourceContract& contract,
-    const GpioIo& io) {
+    const GpioIo& io,
+    const GpioDurability& durability) {
+    const bool durability_enabled = static_cast<bool>(durability.pending) ||
+                                    static_cast<bool>(durability.committed) ||
+                                    static_cast<bool>(durability.failed);
     if (request.version != kRuntimeControlIpcVersion ||
         !nonzero(request.lease_id) ||
         !nonzero(request.expected_node_uuid) ||
@@ -376,7 +386,10 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         !valid_idempotency(request.idempotency_key) ||
         request.node_id == 0U || request.node_id > 127U ||
         request.resource_id == 0U || !io.create_low || !io.write_value ||
-        !io.safe_stop || !io.close) {
+        !io.safe_stop || !io.close ||
+        (durability_enabled && (!durability.pending ||
+                                !durability.committed ||
+                                !durability.failed))) {
         reject(RuntimeControlError::InvalidRequest,
                "Runtime GPIO 写请求字段无效");
     }
@@ -524,6 +537,23 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
     }
     lock.unlock();
 
+    if (durability_enabled) {
+        try {
+            durability.pending();
+        } catch (...) {
+            lock.lock();
+            if (creating) {
+                gpio_objects_.erase(scope);
+            }
+            completed_.erase(idempotency_key);
+            in_flight_scopes_.erase(scope);
+            lock.unlock();
+            scope_available_.notify_all();
+            expiry_changed_.notify_all();
+            throw;
+        }
+    }
+
     if (creating) {
         try {
             // 首次创建固定使用安全低电平。即使成功响应丢失，本次命令也
@@ -541,6 +571,10 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
             lock.unlock();
             scope_available_.notify_all();
             expiry_changed_.notify_all();
+            if (durability_enabled) {
+                durability.failed(DurableRecovery::ScopeBlocked,
+                                  RuntimeControlError::SafeStopFailed);
+            }
             throw;
         }
         if (object_id == 0U) {
@@ -555,7 +589,11 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
             lock.unlock();
             scope_available_.notify_all();
             expiry_changed_.notify_all();
-            reject(RuntimeControlError::InvalidRequest,
+            if (durability_enabled) {
+                durability.failed(DurableRecovery::ScopeBlocked,
+                                  RuntimeControlError::SafeStopFailed);
+            }
+            reject(RuntimeControlError::SafeStopFailed,
                    "Runtime GPIO_CREATE 未返回可清理的对象 ID");
         }
         // 在任何非安全电平写入之前登记 object_id 与 stopper。reaper 会
@@ -578,6 +616,10 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
                 io.safe_stop(request.node_id, node_generation,
                              request.expected_node_uuid, object_id);
             } catch (...) {
+            }
+            if (durability_enabled) {
+                durability.failed(DurableRecovery::ScopeBlocked,
+                                  RuntimeControlError::SafeStopFailed);
             }
             reject(RuntimeControlError::SafeStopFailed,
                    "Runtime GPIO 对象登记不变量失效");
@@ -613,6 +655,15 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
+        if (durability_enabled) {
+            durability.failed(
+                cleanup == CleanupResult::Closed
+                    ? DurableRecovery::SafeClosed
+                    : DurableRecovery::ScopeBlocked,
+                prewrite_clock_failed
+                    ? RuntimeControlError::SafeStopFailed
+                    : RuntimeControlError::LeaseExpired);
+        }
         if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
                    "目标值写入前租约失效且安全写低未获得确定成功");
@@ -646,6 +697,13 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
+        if (durability_enabled) {
+            durability.failed(
+                cleanup == CleanupResult::Closed
+                    ? DurableRecovery::SafeClosed
+                    : DurableRecovery::ScopeBlocked,
+                RuntimeControlError::SafeStopFailed);
+        }
         if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
                    "GPIO 写响应不确定且安全写低未获得确定成功");
@@ -679,6 +737,14 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
+        if (durability_enabled) {
+            durability.failed(
+                cleanup == CleanupResult::Closed
+                    ? DurableRecovery::SafeClosed
+                    : DurableRecovery::ScopeBlocked,
+                clock_failed ? RuntimeControlError::SafeStopFailed
+                             : RuntimeControlError::LeaseExpired);
+        }
         if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
                    "跨期限 GPIO 写入后安全写低未获得确定成功");
@@ -709,23 +775,91 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
             scope, lease_key, node_generation,
             request.expected_node_uuid, object_id,
             object_close_pending, io.safe_stop, io.close, true));
+        if (durability_enabled) {
+            durability.failed(DurableRecovery::ScopeBlocked,
+                              RuntimeControlError::SafeStopFailed);
+        }
         reject(RuntimeControlError::SafeStopFailed,
                "Runtime GPIO 幂等 pending 不变量失效，已进入安全清理");
     }
+    lock.unlock();
+    if (durability_enabled) {
+        try {
+            durability.committed(result);
+        } catch (...) {
+            static_cast<void>(stop_in_flight_scope(
+                scope, lease_key, node_generation,
+                request.expected_node_uuid, object_id,
+                object_close_pending, io.safe_stop, io.close, true));
+            lock.lock();
+            completed_.erase(idempotency_key);
+            lock.unlock();
+            expiry_changed_.notify_all();
+            throw;
+        }
+    }
+    lock.lock();
+    const auto durable_published = completed_.find(idempotency_key);
+    if (durable_published == completed_.end()) {
+        lock.unlock();
+        static_cast<void>(stop_in_flight_scope(
+            scope, lease_key, node_generation,
+            request.expected_node_uuid, object_id,
+            object_close_pending, io.safe_stop, io.close, true));
+        reject(RuntimeControlError::SafeStopFailed,
+               "Runtime GPIO 持久终态发布前内存镜像失效");
+    }
     // pending 节点已经拥有全部动态字段，此处只更新固定大小值，不分配。
-    published->second.result = result;
-    published->second.retain_until_ns = retain_until;
+    durable_published->second.result = result;
+    durable_published->second.retain_until_ns = retain_until;
     in_flight_scopes_.erase(scope);
     scope_available_.notify_all();
     expiry_changed_.notify_all();
     return result;
 }
 
-void RuntimeControlGate::release(
+std::optional<RuntimeControlGate::ResolvedReleaseLease>
+RuntimeControlGate::resolve_release_lease(
     const RuntimeControlReleaseRequest& request,
     const std::array<std::uint8_t, 16>& current_daemon_instance_id) {
     if (request.version != kRuntimeControlIpcVersion ||
         !nonzero(request.lease_id) || !valid_identity(request.owner_key_id)) {
+        reject(RuntimeControlError::InvalidRequest,
+               "Runtime 控制租约只读解析字段无效");
+    }
+    if (request.daemon_instance_id != current_daemon_instance_id) {
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime 控制租约绑定了其他 toolbusd 实例");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = leases_.find(binary_id(request.lease_id));
+    if (found == leases_.end()) {
+        return std::nullopt;
+    }
+    if (found->second.owner_key_id != request.owner_key_id) {
+        reject(RuntimeControlError::PermissionDenied,
+               "不能解析其他身份的 Runtime 控制租约");
+    }
+    return ResolvedReleaseLease{
+        found->second.expected_node_uuid,
+        found->second.node_id,
+        found->second.resource_id,
+        found->second.permissions,
+        found->second.admission_id};
+}
+
+void RuntimeControlGate::release(
+    const RuntimeControlReleaseRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+    const ReleaseDurability& durability) {
+    const bool durability_enabled = static_cast<bool>(durability.pending) ||
+                                    static_cast<bool>(durability.committed) ||
+                                    static_cast<bool>(durability.failed);
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !valid_identity(request.owner_key_id) ||
+        (durability_enabled && (!durability.pending ||
+                                !durability.committed ||
+                                !durability.failed))) {
         reject(RuntimeControlError::InvalidRequest,
                "Runtime 控制租约释放字段无效");
     }
@@ -737,6 +871,10 @@ void RuntimeControlGate::release(
     const auto lease_key = binary_id(request.lease_id);
     const auto found = leases_.find(lease_key);
     if (found == leases_.end()) {
+        if (durability_enabled) {
+            reject(RuntimeControlError::LeaseNotFound,
+                   "持久化 Runtime Release 找不到服务端租约范围");
+        }
         // 未执行过 GPIO 命令的本地租约不会进入 daemon；释放保持幂等。
         return;
     }
@@ -752,13 +890,44 @@ void RuntimeControlGate::release(
     }
     const auto scope = scope_key(found->second.node_id,
                                  found->second.resource_id);
+    const ResolvedReleaseLease resolved{
+        found->second.expected_node_uuid,
+        found->second.node_id,
+        found->second.resource_id,
+        found->second.permissions,
+        found->second.admission_id};
     const auto object = gpio_objects_.find(scope);
     if (object == gpio_objects_.end()) {
         if (found->second.cleanup_failed) {
             reject(RuntimeControlError::SafeStopFailed,
                    "GPIO_CREATE 结果未知，节点换代前不能释放清理占位");
         }
+        if (!durability_enabled) {
+            erase_lease_locked(lease_key);
+            expiry_changed_.notify_all();
+            return;
+        }
+        if (!in_flight_scopes_.insert(scope).second) {
+            reject(RuntimeControlError::LeaseConflict,
+                   "Runtime GPIO 清理占位冲突");
+        }
+        lock.unlock();
+        try {
+            durability.pending(resolved);
+            durability.committed();
+        } catch (...) {
+            lock.lock();
+            in_flight_scopes_.erase(scope);
+            lock.unlock();
+            scope_available_.notify_all();
+            expiry_changed_.notify_all();
+            throw;
+        }
+        lock.lock();
         erase_lease_locked(lease_key);
+        in_flight_scopes_.erase(scope);
+        lock.unlock();
+        scope_available_.notify_all();
         expiry_changed_.notify_all();
         return;
     }
@@ -770,18 +939,41 @@ void RuntimeControlGate::release(
                "Runtime GPIO 清理占位冲突");
     }
     lock.unlock();
+    if (durability_enabled) {
+        try {
+            durability.pending(resolved);
+        } catch (...) {
+            lock.lock();
+            in_flight_scopes_.erase(scope);
+            lock.unlock();
+            scope_available_.notify_all();
+            expiry_changed_.notify_all();
+            throw;
+        }
+    }
     const auto cleanup = stop_in_flight_scope(
         task.scope, task.lease_key, task.object.node_generation,
         task.object.expected_node_uuid, task.object.object_id,
         task.object.close_pending, task.object.safe_stopper,
         task.object.closer, true);
     if (cleanup == CleanupResult::SafeLowFailed) {
+        if (durability_enabled) {
+            durability.failed(DurableRecovery::ScopeBlocked,
+                              RuntimeControlError::SafeStopFailed);
+        }
         reject(RuntimeControlError::SafeStopFailed,
                "GPIO 安全写低未获得确定成功，租约保持故障占位");
     }
     if (cleanup == CleanupResult::CloseUncertain) {
+        if (durability_enabled) {
+            durability.failed(DurableRecovery::ScopeBlocked,
+                              RuntimeControlError::SafeStopFailed);
+        }
         reject(RuntimeControlError::SafeStopFailed,
                "GPIO_CLOSE 未获得确定成功，租约保持故障占位");
+    }
+    if (durability_enabled) {
+        durability.committed();
     }
 }
 

@@ -112,6 +112,36 @@ public:
         GpioCloser close;
     };
 
+    // 持久操作账本的回调边界。回调始终在 Gate 锁外执行；pending 返回前
+    // 不会调用任何可能改变远端状态的 I/O，committed 返回前也不会把
+    // 进程内结果发布给并发重放者。
+    enum class DurableRecovery {
+        SafeClosed,
+        ScopeBlocked,
+    };
+    using DurableFailure = std::function<void(
+        DurableRecovery recovery, RuntimeControlError error)>;
+    struct GpioDurability {
+        std::function<void()> pending;
+        std::function<void(const RuntimeGpioWriteResult&)> committed;
+        DurableFailure failed;
+    };
+
+    struct ResolvedReleaseLease {
+        std::array<std::uint8_t, 16> expected_node_uuid{};
+        std::uint32_t node_id{};
+        std::uint32_t resource_id{};
+        std::uint16_t permissions{};
+        // daemon 生命周期内单调递增；同一 lease_id 被重新登记也必须拥有
+        // 不同 admission_id，防止旧 Release 终态冒充新租约生命周期。
+        std::uint64_t admission_id{};
+    };
+    struct ReleaseDurability {
+        std::function<void(const ResolvedReleaseLease&)> pending;
+        std::function<void()> committed;
+        DurableFailure failed;
+    };
+
     explicit RuntimeControlGate(std::size_t capacity = 256U,
                                 Clock monotonic_ns = {},
                                 bool start_expiry_worker = true);
@@ -130,11 +160,19 @@ public:
         std::uint64_t node_generation,
         const protocol::ResourceDescriptor& descriptor,
         const protocol::ResourceContract& contract,
-        const GpioIo& io);
+        const GpioIo& io,
+        const GpioDurability& durability = {});
+
+    // 只读解析当前活动租约，供持久账本在历史回放前核对服务端范围。
+    // 返回空值只表示当前 Gate 中没有该租约；身份不匹配仍严格拒绝。
+    std::optional<ResolvedReleaseLease> resolve_release_lease(
+        const RuntimeControlReleaseRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
 
     void release(
         const RuntimeControlReleaseRequest& request,
-        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        const ReleaseDurability& durability = {});
 
     std::size_t active_lease_count();
 
@@ -156,6 +194,7 @@ private:
         std::uint32_t resource_id{};
         std::uint64_t node_generation{};
         std::uint64_t deadline_ns{};
+        std::uint64_t admission_id{};
         bool cleanup_failed{};
     };
 
@@ -219,6 +258,7 @@ private:
     std::unordered_map<std::string, CompletedCommand> completed_;
     std::unordered_map<std::uint64_t, GpioObject> gpio_objects_;
     std::unordered_set<std::uint64_t> in_flight_scopes_;
+    std::uint64_t next_admission_id_{1U};
     std::condition_variable expiry_changed_;
     std::condition_variable shutdown_changed_;
     bool expiry_worker_enabled_{};

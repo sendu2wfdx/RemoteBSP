@@ -63,6 +63,8 @@ void test_real_software_state_to_wire_contract() {
     observation.traffic = make_traffic();
     observation.active_lease_count = 2U;
     observation.resource_fault_count = 0U;
+    observation.operation_ledger_mutation_available = true;
+    observation.operation_ledger_operation_count = 7U;
 
     const auto snapshot = producer.capture(observation);
     CHECK(snapshot.version == protocol::kHealthContractVersion);
@@ -82,6 +84,14 @@ void test_real_software_state_to_wire_contract() {
     const auto* admitted = find_metric(
         snapshot, static_cast<std::uint16_t>(
             toolbusd::ToolbusdHealthMetricId::TrafficAdmittedPacketTotal));
+    const auto* ledger_available = find_metric(
+        snapshot, static_cast<std::uint16_t>(
+            toolbusd::ToolbusdHealthMetricId::
+                RuntimeOperationLedgerMutationAvailable));
+    const auto* ledger_operations = find_metric(
+        snapshot, static_cast<std::uint16_t>(
+            toolbusd::ToolbusdHealthMetricId::
+                RuntimeOperationLedgerOperationCount));
     CHECK(depth != nullptr && depth->value == 1U);
     CHECK(uptime != nullptr && uptime->value == 250U);
     // 准入成功不等价于物理发送成功，标准 Tx 指标必须保持不可用。
@@ -91,11 +101,29 @@ void test_real_software_state_to_wire_contract() {
     CHECK(admitted != nullptr &&
           admitted->availability == protocol::MetricAvailability::Available &&
           admitted->value == 1U);
+    CHECK(ledger_available != nullptr && ledger_available->value == 1U);
+    CHECK(ledger_operations != nullptr && ledger_operations->value == 7U);
 
     const auto wire = protocol::encode_health_snapshot(snapshot);
     const auto decoded = protocol::decode_health_snapshot(wire);
     CHECK(decoded.sample_sequence == snapshot.sample_sequence);
     CHECK(decoded.metrics.size() == snapshot.metrics.size());
+}
+
+void test_ledger_unavailable_degrades_health() {
+    toolbusd::ToolbusdHealthProducer producer(4U, 0U);
+    toolbusd::ToolbusdHealthObservation observation;
+    observation.sample_time_ms = 1U;
+    observation.traffic = make_traffic();
+    observation.operation_ledger_mutation_available = false;
+    observation.operation_ledger_operation_count = 3U;
+    const auto snapshot = producer.capture(observation);
+    CHECK(snapshot.overall == protocol::OverallHealth::Degraded);
+    const auto* available = find_metric(
+        snapshot, static_cast<std::uint16_t>(
+            toolbusd::ToolbusdHealthMetricId::
+                RuntimeOperationLedgerMutationAvailable));
+    CHECK(available != nullptr && available->value == 0U);
 }
 
 void test_unknown_is_not_zero_measurement() {
@@ -190,6 +218,7 @@ void test_generation_and_concurrent_sequences_are_isolated() {
 
 int main() {
     test_real_software_state_to_wire_contract();
+    test_ledger_unavailable_degrades_health();
     test_unknown_is_not_zero_measurement();
     test_invalid_input_isolated_without_consuming_sequence();
     test_generation_and_concurrent_sequences_are_isolated();
