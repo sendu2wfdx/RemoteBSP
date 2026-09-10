@@ -7,7 +7,7 @@ Mock 中得到相同的状态序列。它不是 CAN/CAN-FD 时延仿真器，也
 上电复位证据。
 
 状态回放的输入是已有故障脚本动作：GPIO 外部输入、单路 UART 故障、节点在线/离线、
-运动限位和单个 I2C/SPI 设备的下一事务状态。另有独立的 `TransportReplayRecord v1`
+运动限位和单个 I2C/SPI 设备的下一事务状态。另有独立的 `TransportReplayRecord v2`
 用于 Mock 边界的逻辑帧事件；两种记录不混用 schema，也不把逻辑帧结果伪装成物理链路
 测量。
 
@@ -16,8 +16,9 @@ Mock 中得到相同的状态序列。它不是 CAN/CAN-FD 时延仿真器，也
 `transport_replay.hpp` 提供确定性的纯软件模型，并提供显式的 MockNode 边界适配：
 `deliver_replayed_frame_to_mock_node` 把 H2N 逻辑交付送入现有 `handle_frame`，
 `make_mock_node_reply_replay_events` 把 MockNode 回复转换为 N2H 逻辑帧事件。适配器默认不
-挂入 `mock_mcu` 主循环，也不装饰 `LinkTransport`；测试或数字孪生调用方必须显式启用，
-所以现有 SocketCAN、USB 和 Mock USB 行为保持不变。
+改变 SocketCAN、USB 和 Mock USB 实现；`RecordingLinkTransport` 只在调用方显式包裹现有
+`LinkTransport` 时记录逻辑边界。`mock_mcu` 可用 `--transport-record 文件` 启用该包裹，
+未传此选项时链路行为保持不变。
 输入事件按 `monotonic-relative-ms` 相对时间非递减排列，并用从 1 连续递增的
 `sequence` 消除同一毫秒内的歧义。当前动作如下：
 
@@ -28,6 +29,9 @@ Mock 中得到相同的状态序列。它不是 CAN/CAN-FD 时延仿真器，也
 | `DuplicateNext` | 为同节点、同方向的下一帧增加一个副本，可有限累计 |
 | `NodeReboot` | 清除该节点尚未交付的延迟帧和未消费故障，并推进 `session_generation` |
 | `Frame` | 携带不透明 `route` 和字节载荷；钩子不解释协议或设备业务 |
+| `SendFailure` | 保存发送失败前的目标方向、路由和尝试载荷；不伪造成已交付帧 |
+| `ReceiveEmpty` | 保存一次超时/空结果及调用方给出的 timeout |
+| `ReceiveFailure` | 保存接收调用抛出异常的边界；不伪造成空结果或帧 |
 
 每个帧和一次性故障都必须声明 `HostToNode` 或 `NodeToHost`，两个方向的故障状态互不
 消费；reboot 本身不带方向并同时清理该节点两个方向。某节点 reboot 不会清除其他节点
@@ -36,12 +40,54 @@ Mock 中得到相同的状态序列。它不是 CAN/CAN-FD 时延仿真器，也
 递增。记录包含事件数、`DropNext` 丢弃数、注入副本数、reboot 清除的待交付帧数、
 重启数、最终节点代次和全部逻辑交付；reboot 失效帧不会混入主动丢弃计数。
 `replay_digest` 绑定规范输入与这些输出；`verify_transport_replay` 会重新执行并比较完整
-记录，而不只相信调用方给出的摘要字符串。
+记录，而不只相信调用方给出的摘要字符串。录制器使用可注入的单调相对毫秒时钟；测试
+可完全控制时间，实际 Mock 默认使用 `steady_clock`。每次观察在真实 I/O 前预留事件、
+载荷容量并固定调用起始时间，I/O 后提交不再读取时钟或分配内存。成功
+`send`、失败 `send`、有帧 `receive`、空结果 `receive` 和异常 `receive` 是不同事件。
+故障注入器必须显式调用 `record_fault`/`record_reboot`，录制器不会从普通收发结果臆测
+drop、duplicate 或 reboot。
 
 资源边界均在分配或入队前失败关闭：最多 4096 个事件、1024 个同时待交付帧、32768
 个总交付、单帧 4096 字节、输入总载荷 4 MiB、单节点下一帧累计延迟 60000 ms，且每帧
-最多注入 7 个额外副本。节点号限制为 1～127；相对时间加延迟溢出、非连续序号、时间
-倒退、未知动作和动作携带多余字段均被拒绝。
+最多注入 7 个额外副本。故障和重启事件节点号限制为 1～127；广播帧或无法归属单节点
+的收发结果可使用节点 0。相对时间加延迟溢出、非连续序号、时间倒退、未知动作和动作
+携带多余字段均被拒绝。若容量耗尽、时钟倒退或观察无法规范编码，诊断采集停止且最终
+拒绝生成完整会话；`RecordingLinkTransport` 仍执行和返回真实 I/O，不因录制器状态改变
+发送/接收的成功、失败或可重试语义。该行为只保证有界诊断，不能保证无限时长采集。
+
+节点归属完全来自方向与每帧实际 route：只有 H2N 的定向请求解析节点号，只有 N2H 的
+节点响应和节点事件解析节点号；错方向 route、Discovery 广播、provisional 响应和未知
+route 均记为 0。录制器不把 Mock 的启动 instance 硬套到共享总线上的所有帧，也不解析
+可能跨分片的 `NodeAssign` 载荷；分配发生后，后续定向 route 自然反映当前节点号。回放
+交付给 `MockNode` 时还会再次验证：节点 0 只允许精确的 Discovery 广播，稳定节点必须
+同时匹配记录的 node ID 与 `request_base + node_id`，因此未知或其他节点 route 不会借
+节点 0 绕过生产主循环的过滤。
+
+## 逻辑传输会话文件 v1
+
+`TransportReplaySession` 使用稳定的规范文本格式，文件头为
+`REMOTEBSP_TRANSPORT_SESSION 1`。元数据固定声明
+`evidence_scope logical-link-boundary-only` 和
+`time_base monotonic-relative-ms`；随后是有界事件、派生摘要及覆盖正文的
+`fnv1a64` 校验和。解析器要求逐字节规范编码，拒绝未知/尾随字段、非小写十六进制、
+计数不一致、摘要或校验和不一致。最多 4096 条记录、单载荷 4096 字节、总载荷 4 MiB，
+整个文件最多 16 MiB；文件入口先检查长度，并检测读取过程中增长。
+
+写入使用 `mkstemp` 在同目录创建唯一且独占的临时文件，完整刷新并关闭后用硬链接原子
+创建目标，再删除本次临时文件。策略固定为 **no-clobber**：目标已存在即报错，不覆盖、
+不删除旧记录；失败只清理自己创建的临时文件。当前没有对文件或父目录执行 `fsync`，
+因此只保证并发可见性与不覆盖，不承诺掉电后的持久性。`load_transport_replay_session`
+解析后重新运行确定性调度并校验全部摘要。该校验用于发现损坏和不一致，不是密码学签名。
+
+Mock 录制示例：
+
+```text
+mock_mcu mock-endpoint usb-mock --instance 7 \
+  --transport-record run.transport-session.txt
+```
+
+正常退出或主循环异常退出时都会尝试落盘。若记录容量耗尽或输出失败，会报告诊断错误且
+不生成伪装成完整证据的新文件；运行中的 Mock 数据面不会因此退出或改变 I/O 结果。
 
 该钩子只证明 Mock 调度、隔离和会话代次逻辑可确定重放。它不模拟 CAN 仲裁、总线负载、
 CAN-FD 位时序、USB transaction、主机调度、电气噪声或真实设备复位时长，因此不能作为
@@ -117,7 +163,9 @@ verify_digital_twin_replay(manifest, scenario, 1, loaded);
 - GPIO 预注入、UART 故障、节点掉线/恢复和 I2C/SPI 一次性故障均进入摘要；
 - 纯代码构造的乱序场景也会被拒绝，不依赖先经过 JSON 解析器。
 - 逻辑传输钩子的 delay/drop/duplicate/reboot 组合可重复得到相同交付顺序和摘要；
-  单节点 reboot 不影响其他节点的延迟帧，篡改交付内容会在验证时被拒绝。
+  单节点 reboot 不影响其他节点的延迟帧，篡改交付内容会在验证时被拒绝；
+- 真实 `LinkTransport` 包装测试覆盖成功/失败发送、有帧/空结果/异常接收、方向、节点
+  隔离和可注入单调时钟；会话文件往返一致，载荷篡改、尾随内容和超限输入均被拒绝。
 
 这些结论来自 Ubuntu WSL 的单元测试，没有访问 `vcan0`，也没有实体板卡、电气或
 实时性能结论。

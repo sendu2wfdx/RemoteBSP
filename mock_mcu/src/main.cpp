@@ -1,5 +1,6 @@
 #include "remotebsp/mock_mcu/board_manifest.hpp"
 #include "remotebsp/mock_mcu/mock_node.hpp"
+#include "remotebsp/mock_mcu/transport_replay.hpp"
 #include "remotebsp/mock_mcu/visual_state.hpp"
 #include "remotebsp/transport/link_routes.hpp"
 #include "remotebsp/transport/link_transport.hpp"
@@ -80,10 +81,15 @@ int main(int argc, char** argv) {
         std::cerr << "用法: mock_mcu <链路端点> <classical|fd|usb-mock> "
                      "[--instance 1..127] [--uart-stream] "
                      "[--board JSON] [--fault-scenario JSON] "
-                     "[--visual-state JSON]\n";
+                     "[--visual-state JSON] "
+                     "[--transport-record 文件]\n";
         return 2;
     }
 
+    std::shared_ptr<remotebsp::mock_mcu::TransportSessionRecorder>
+        session_recorder;
+    std::string session_record_path;
+    bool session_write_attempted = false;
     try {
         const std::string mode_text = argv[2];
         const bool mock_usb = mode_text == "usb-mock";
@@ -103,14 +109,21 @@ int main(int argc, char** argv) {
                 continue;
             }
             if ((option == "--board" || option == "--fault-scenario" ||
-                 option == "--visual-state") &&
+                 option == "--visual-state" ||
+                 option == "--transport-record") &&
                 index + 1 < argc) {
                 if (option == "--board") {
                     board_path = argv[index + 1];
                 } else if (option == "--fault-scenario") {
                     fault_scenario_path = argv[index + 1];
-                } else {
+                } else if (option == "--visual-state") {
                     visual_state_path = argv[index + 1];
+                } else {
+                    session_record_path = argv[index + 1];
+                    if (session_record_path.empty()) {
+                        throw std::invalid_argument(
+                            "--transport-record 文件路径不能为空");
+                    }
                 }
                 index += 2;
                 continue;
@@ -162,6 +175,15 @@ int main(int argc, char** argv) {
             transport =
                 std::make_unique<remotebsp::transport::SocketCanTransport>(
                     argv[1], mode);
+        }
+        if (!session_record_path.empty()) {
+            session_recorder = std::make_shared<
+                remotebsp::mock_mcu::TransportSessionRecorder>();
+            transport = std::make_unique<
+                remotebsp::mock_mcu::RecordingLinkTransport>(
+                std::move(transport),
+                remotebsp::mock_mcu::RecordingTransportRole::Node,
+                session_recorder);
         }
         remotebsp::mock_mcu::MockNode node(
             remotebsp::mock_mcu::make_remote_core(twin, instance),
@@ -287,8 +309,23 @@ int main(int argc, char** argv) {
                 std::cerr << "忽略无效请求: " << error.what() << '\n';
             }
         }
+        if (session_recorder) {
+            session_write_attempted = true;
+            remotebsp::mock_mcu::write_transport_replay_session(
+                session_recorder->snapshot(), session_record_path);
+        }
         std::cout << "Mock MCU 已退出\n";
     } catch (const std::exception& error) {
+        if (session_recorder && !session_write_attempted) {
+            try {
+                session_write_attempted = true;
+                remotebsp::mock_mcu::write_transport_replay_session(
+                    session_recorder->snapshot(), session_record_path);
+            } catch (const std::exception& record_error) {
+                std::cerr << "保存逻辑传输会话失败: "
+                          << record_error.what() << '\n';
+            }
+        }
         std::cerr << "Mock MCU 启动失败: " << error.what() << '\n';
         return 1;
     }

@@ -16,6 +16,14 @@ target_compile_options(time_sync_protocol_tests PRIVATE
 )
 add_test(NAME time_sync_protocol_tests COMMAND time_sync_protocol_tests)
 
+add_executable(health_contract_tests health_contract_tests.cpp)
+target_link_libraries(health_contract_tests PRIVATE remotebsp_protocol)
+target_compile_options(health_contract_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME health_contract_tests COMMAND health_contract_tests)
+
 add_executable(bus_stream_protocol_tests bus_stream_protocol_tests.cpp)
 target_link_libraries(bus_stream_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(bus_stream_protocol_tests PRIVATE
@@ -472,6 +480,9 @@ add_test(NAME digital_twin_replay_tests COMMAND digital_twin_replay_tests)
 
 add_executable(transport_replay_tests transport_replay_tests.cpp)
 target_link_libraries(transport_replay_tests PRIVATE remotebsp_remote_core)
+target_compile_definitions(transport_replay_tests PRIVATE
+    TEST_TRANSPORT_REPLAY_OUTPUT="${CMAKE_CURRENT_BINARY_DIR}/transport-session-v1.txt"
+)
 target_compile_options(transport_replay_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>

@@ -24,6 +24,7 @@ target_link_libraries(remotebsp_remote_core
     PUBLIC
         remotebsp_protocol
         remotebsp_device_params
+        remotebsp_transport
 )
 
 target_compile_options(remotebsp_remote_core PRIVATE

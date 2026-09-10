@@ -32,6 +32,7 @@ enum class Command : std::uint16_t {
     BootloaderEnter = 0x0013,
     BootloaderEnterUsb = 0x0014,
     TimeSync = 0x0020,
+    HealthSnapshot = 0x0021,
     ResourceEnum = 0x0030,
     ResourceDescribe = 0x0031,
     ResourceStatus = 0x0032,

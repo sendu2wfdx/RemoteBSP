@@ -4,6 +4,7 @@ add_library(remotebsp_protocol
     src/device_parameters.cpp
     src/discovery.cpp
     src/fragmentation.cpp
+    src/health.cpp
     src/motion.cpp
     src/motion_group.cpp
     src/packet.cpp
