@@ -27,6 +27,7 @@ from runtime_api.provider import (
     RuntimeProviderOperationError,
 )
 from runtime_api.server import _ForeignOperationRecoveryIndex, make_server
+from runtime_api.tests.control_audit_support import FakeControlAuditJournal
 from runtime_api.toolbusd_provider import (
     RemoteCliIpcClient,
     ToolbusIpcOperationError,
@@ -361,7 +362,8 @@ class GpioControlHttpTest(unittest.TestCase):
             lambda: self.identity, manager=inner)
         self.server = make_server(
             "127.0.0.1", 0, self.provider,
-            authenticator=_authenticator(), control_lease_manager=manager)
+            authenticator=_authenticator(), control_lease_manager=manager,
+            control_audit_journal=FakeControlAuditJournal())
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -1240,7 +1242,8 @@ class GpioControlHttpTest(unittest.TestCase):
             0, now[0] + 101_000_000)
         server = make_server(
             "127.0.0.1", 0, provider, authenticator=_authenticator(),
-            control_lease_manager=manager)
+            control_lease_manager=manager,
+            control_audit_journal=FakeControlAuditJournal())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

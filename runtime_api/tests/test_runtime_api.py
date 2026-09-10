@@ -561,6 +561,16 @@ class RuntimeServerCliTest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     runtime_server.main()
 
+    def test_control_audit_paths_must_be_configured_as_a_pair(self):
+        for arguments in (
+                ["--control-audit-dir", "/tmp/runtime-audit"],
+                ["--control-audit-key-file", "/tmp/runtime-audit.key"]):
+            with self.subTest(arguments=arguments), patch(
+                    "sys.argv", ["runtime-api", *arguments]), patch(
+                    "sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    runtime_server.main()
+
     def test_clock_warning_thresholds_are_forwarded_and_bounded(self):
         class DummyIpcClient:
             @staticmethod

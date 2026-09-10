@@ -25,6 +25,7 @@ from runtime_api.control_leases import (
 )
 from runtime_api.provider import MockSnapshotProvider
 from runtime_api.server import make_server
+from runtime_api.tests.control_audit_support import FakeControlAuditJournal
 
 
 class FakeClock:
@@ -338,7 +339,8 @@ class ControlLeaseHttpTest(unittest.TestCase):
     def setUp(self):
         self.server = make_server(
             "127.0.0.1", 0, MockSnapshotProvider(),
-            authenticator=authenticator(), control_lease_capacity=8)
+            authenticator=authenticator(), control_lease_capacity=8,
+            control_audit_journal=FakeControlAuditJournal())
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -468,7 +470,8 @@ class ControlLeaseHttpTest(unittest.TestCase):
         manager = DaemonBoundControlLeaseManager(reader, capacity=4)
         server = make_server(
             "127.0.0.1", 0, MockSnapshotProvider(),
-            authenticator=authenticator(), control_lease_manager=manager)
+            authenticator=authenticator(), control_lease_manager=manager,
+            control_audit_journal=FakeControlAuditJournal())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"

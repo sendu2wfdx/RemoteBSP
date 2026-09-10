@@ -14,7 +14,7 @@ import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
@@ -47,6 +47,12 @@ from .control_leases import (
     validate_lease_id,
     validate_ttl_ms,
     validate_idempotency_key,
+)
+from .control_audit_journal import (
+    CONTROL_AUDIT_SCHEMA_VERSION,
+    ControlAuditError,
+    ControlAuditJournal,
+    ControlAuditRecord,
 )
 from .audit import (
     BoundedAuditSink,
@@ -291,6 +297,10 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            control_audit = getattr(self, "control_audit_journal", None)
+            close_control_audit = getattr(control_audit, "close", None)
+            if callable(close_control_audit):
+                close_control_audit()
             audit_sink = getattr(self, "audit_sink", None)
             close = getattr(audit_sink, "close", None)
             if callable(close):
@@ -367,11 +377,184 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         return self.server.control_leases_available  # type: ignore[attr-defined]
 
     @property
+    def control_mutation_available(self) -> bool:
+        return self.control_leases_available and self._control_audit_ready()
+
+    @property
+    def control_audit(self) -> ControlAuditJournal | None:
+        return self.server.control_audit_journal  # type: ignore[attr-defined]
+
+    def _control_audit_ready(self) -> bool:
+        journal = self.control_audit
+        if journal is None:
+            return False
+        lock = self.server.control_audit_state_lock  # type: ignore[attr-defined]
+        with lock:
+            failed = self.server.control_audit_failed  # type: ignore[attr-defined]
+        try:
+            return not failed and bool(journal.operational)
+        except Exception:
+            return False
+
+    def _mark_control_audit_failed(self) -> None:
+        lock = self.server.control_audit_state_lock  # type: ignore[attr-defined]
+        with lock:
+            self.server.control_audit_failed = True  # type: ignore[attr-defined]
+
+    def _control_audit_health(self) -> dict:
+        journal = self.control_audit
+        if journal is None:
+            return {
+                "configured": False,
+                "operational": False,
+                "schema_version": CONTROL_AUDIT_SCHEMA_VERSION,
+                "integrity": "hmac_sha256_chain",
+                "durability": "synchronous",
+                "records": 0,
+                "segments": 0,
+                "bytes": 0,
+                "last_sequence": 0,
+                "dangling_intents": 0,
+            }
+        try:
+            health = asdict(journal.health_snapshot())
+        except Exception:
+            self._mark_control_audit_failed()
+            health = {
+                "operational": False, "records": 0, "segments": 0,
+                "bytes": 0, "last_sequence": 0, "dangling_intents": 0,
+            }
+        health["configured"] = True
+        health["operational"] = bool(
+            health.get("operational") and self._control_audit_ready())
+        health["schema_version"] = CONTROL_AUDIT_SCHEMA_VERSION
+        health["integrity"] = "hmac_sha256_chain"
+        health["durability"] = "synchronous"
+        return health
+
+    def _control_request_digest(self, action: str, fields: dict) -> str:
+        encoded = json.dumps(
+            {"action": action, **fields}, ensure_ascii=True,
+            sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")
+        journal = self.control_audit
+        if journal is None:
+            raise ControlAuditError("控制审计日志未配置")
+        return journal.request_digest(encoded)
+
+    def _control_audit_failure(
+            self, *, possibly_committed: bool,
+            intent_recorded: bool,
+            outcome: dict | None = None,
+            lease: object | None = None,
+            lookup: dict | None = None) -> None:
+        self._mark_control_audit_failed()
+        details: dict[str, object] = {
+            "possibly_committed": possibly_committed,
+            "safe_to_retry": not possibly_committed,
+        }
+        if outcome is not None:
+            details["operation"] = self._public_operation(outcome)
+        if lookup is not None:
+            details["lookup"] = lookup
+        if lease is not None:
+            to_dict = getattr(lease, "to_dict", None)
+            if callable(to_dict):
+                public_lease = to_dict()
+                public_lease.pop("owner_key_id", None)
+                details["lease"] = public_lease
+        self._error(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            ("control_audit_persistence_failed" if intent_recorded else
+             "control_audit_unavailable"),
+            "控制审计无法同步持久化，新的控制变更已失败关闭",
+            details=details)
+
+    def _begin_control_audit(
+            self, principal: AuthenticatedPrincipal, *, action: str,
+            fields: dict, lease_id: str | None = None
+            ) -> ControlAuditRecord | None:
+        journal = self.control_audit
+        if journal is None or not self._control_audit_ready():
+            self._control_audit_failure(
+                possibly_committed=False, intent_recorded=False)
+            return None
+        try:
+            return journal.append_intent(
+                request_id=self._audit_request_id,
+                key_id=principal.key_id,
+                action=action,
+                request_digest=self._control_request_digest(action, fields),
+                lease_id=lease_id,
+                node_id=None,
+                resource_id=None)
+        except ControlAuditError:
+            self._control_audit_failure(
+                possibly_committed=False, intent_recorded=False)
+            return None
+
+    def _complete_control_audit(
+            self, intent: ControlAuditRecord, *, result: str | None = None,
+            unknown_reason: str | None = None,
+            operation_id: str | None = None,
+            possibly_committed: bool,
+            outcome: dict | None = None,
+            lease: object | None = None,
+            lookup: dict | None = None) -> bool:
+        journal = self.control_audit
+        if journal is None:
+            self._control_audit_failure(
+                possibly_committed=possibly_committed, intent_recorded=True,
+                outcome=outcome,
+                lease=lease, lookup=lookup)
+            return False
+        try:
+            if unknown_reason is not None:
+                journal.append_unknown(
+                    intent.sequence, unknown_reason,
+                    operation_id=operation_id)
+            elif result is not None:
+                journal.append_terminal(
+                    intent.sequence, result, operation_id=operation_id)
+            else:
+                raise ValueError("控制审计终态缺少result或unknown_reason")
+        except ControlAuditError:
+            self._control_audit_failure(
+                possibly_committed=possibly_committed, intent_recorded=True,
+                outcome=outcome,
+                lease=lease, lookup=lookup)
+            return False
+        return True
+
+    def _complete_operation_audit(
+            self, intent: ControlAuditRecord, outcome: dict, *,
+            action: str, lookup: dict | None = None) -> bool:
+        state = outcome["state"]
+        operation_id = outcome.get("operation_id")
+        if state == "committed":
+            result = "released" if action == "release" else "committed"
+            return self._complete_control_audit(
+                intent, result=result, operation_id=operation_id,
+                possibly_committed=True, outcome=outcome, lookup=lookup)
+        if state == "rejected":
+            return self._complete_control_audit(
+                intent, result="rejected", operation_id=operation_id,
+                possibly_committed=False, outcome=outcome, lookup=lookup)
+        return self._complete_control_audit(
+            intent, unknown_reason="downstream_uncertain",
+            operation_id=operation_id, possibly_committed=True,
+            outcome=outcome, lookup=lookup)
+
+    @property
     def gpio_control_configured(self) -> bool:
         return self.server.gpio_control_configured  # type: ignore[attr-defined]
 
     @property
     def gpio_control_operational(self) -> bool:
+        return self._control_audit_ready() and \
+            self._gpio_backend_operational()
+
+    def _gpio_backend_operational(self) -> bool:
         if not self.gpio_control_configured or not isinstance(
                 self.control_leases, DaemonBoundControlLeaseManager):
             return False
@@ -1107,6 +1290,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         downstream_registered = False
         downstream_started = False
         daemon_id = None
+        audit_intent = None
         operational_revision = self._gpio_control_revision()
         try:
             node_id = validate_control_id(value["node_id"], "node_id")
@@ -1135,6 +1319,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                             "gpio_control_unavailable",
                             "GPIO写控制后端不可用")
+                return
+            audit_intent = self._begin_control_audit(
+                principal, action="acquire", fields={
+                    "node_id": node_id,
+                    "resource_id": resource_id,
+                    "command_group": command_group,
+                    "ttl_ms": ttl_ms,
+                    "idempotency_key": idempotency_key,
+                })
+            if audit_intent is None:
                 return
             lease, replayed = call_with_deadline(
                 self.control_leases.acquire,
@@ -1171,14 +1365,26 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._admit_gpio_control(
                     daemon_id, operational_revision)
         except ValueError as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
                         str(error))
             return
         except ControlLeaseConflict as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.CONFLICT, "control_lease_conflict",
                         str(error))
             return
         except ControlLeaseCapacityExceeded as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="failed",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "control_lease_capacity_exceeded", str(error))
             return
@@ -1188,6 +1394,14 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             if lease is not None and not replayed and not downstream_started:
                 self.control_leases.rollback_acquire(
                     lease.lease_id, owner_key_id=lease.owner_key_id)
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent,
+                    unknown_reason=("deadline_exceeded" if downstream_started
+                                    else None),
+                    result=(None if downstream_started else "failed"),
+                    possibly_committed=downstream_started,
+                    lease=lease):
+                return
             if downstream_started:
                 self._structured_provider_error(RuntimeProviderOperationError(
                     "deadline_exceeded", category="timeout",
@@ -1207,10 +1421,28 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else None),
                     expected_revision=operational_revision)
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        unknown_reason=("provider_unavailable" if
+                                        error.possibly_committed else None),
+                        result=(None if error.possibly_committed else "failed"),
+                        possibly_committed=error.possibly_committed,
+                        lease=lease):
+                    return
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                            "control_operation_ledger_unavailable",
-                            "操作账本不可用，Runtime写能力已失败关闭")
+                             "control_operation_ledger_unavailable",
+                             "操作账本不可用，Runtime写能力已失败关闭")
             else:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        unknown_reason=("downstream_uncertain" if
+                                        error.possibly_committed else None),
+                        result=(None if error.possibly_committed else
+                                ("rejected" if error.code == "target_rejected"
+                                 else "failed")),
+                        possibly_committed=error.possibly_committed,
+                        lease=lease):
+                    return
                 self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError) as error:
@@ -1229,6 +1461,14 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             try:
                 self.request_deadline.check()
             except RequestDeadlineExceeded:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        unknown_reason=("deadline_exceeded" if
+                                        downstream_started else None),
+                        result=(None if downstream_started else "failed"),
+                        possibly_committed=downstream_started,
+                        lease=lease):
+                    return
                 if downstream_started:
                     self._structured_provider_error(
                         RuntimeProviderOperationError(
@@ -1245,9 +1485,23 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             # IPC v2 尚无结构化业务/传输错误码。RuntimeProviderError 可能只是
             # 错误节点、资源或合同拒绝，不能由任意请求污染全局 operational；
             # 下一次 GET 会独立核验 daemon 身份，失败或换代时再降级。
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent,
+                    unknown_reason=("provider_unavailable" if
+                                    downstream_started else None),
+                    result=(None if downstream_started else "failed"),
+                    possibly_committed=downstream_started,
+                    lease=lease):
+                return
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "control_lease_unavailable",
                         "无法安全完成控制租约登记")
+            return
+        if audit_intent is None:
+            raise RuntimeError("控制租约成功但缺少持久审计intent")
+        if not self._complete_control_audit(
+                audit_intent, result="committed",
+                possibly_committed=True, lease=lease):
             return
         self._success({"lease": lease.to_dict(), "replayed": replayed},
                       HTTPStatus.OK if replayed else HTTPStatus.CREATED,
@@ -1264,6 +1518,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         outcome = None
         operation_owner_key_id = principal.key_id
         foreign_recovery_token: str | None = None
+        audit_intent = None
 
         def bind_foreign_recovery(recovered: dict) -> None:
             if foreign_recovery_token is not None:
@@ -1295,6 +1550,14 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     principal.permissions and not allow_foreign:
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
                             "当前API密钥没有释放控制租约的权限")
+                return
+            audit_intent = self._begin_control_audit(
+                principal, action="release", lease_id=lease_id,
+                fields={
+                    "lease_id": lease_id,
+                    "allow_foreign": allow_foreign,
+                })
+            if audit_intent is None:
                 return
             lease = call_with_deadline(
                 self.control_leases.authorize,
@@ -1339,8 +1602,6 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     daemon_id, lease.lease_id, lease.owner_key_id,
                     deadline=self.request_deadline)
                 bind_foreign_recovery(outcome)
-                self._finish_local_release_if_safe(
-                    outcome, lease_id, principal, allow_foreign)
             else:
                 call_with_deadline(
                     self.control_leases.release,
@@ -1348,6 +1609,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     allow_foreign=allow_foreign,
                     deadline=self.request_deadline)
         except ValueError as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.BAD_REQUEST, "control_lease_id_invalid",
                         str(error))
             return
@@ -1361,10 +1626,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._clear_gpio_control_operational(
                     expected_instance_id=daemon_id_before,
                     expected_revision=operational_revision)
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found",
                         str(error))
             return
         except ControlLeaseOwnershipError as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
                         str(error))
             return
@@ -1376,6 +1649,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     idempotency_key="release:v1")
                 if recovered is not None:
                     bind_foreign_recovery(recovered)
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered, action="release"):
+                        return
                     self._finish_local_release_if_safe(
                         recovered, lease_id, principal, allow_foreign)
                     self._send_operation(
@@ -1383,10 +1660,20 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         principal=principal)
                 else:
                     retain_foreign_recovery()
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="deadline_exceeded",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="control_release", lease_id=lease_id,
                         idempotency_key="release:v1")
             else:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent, result="failed",
+                        possibly_committed=False):
+                    return
                 self._error(HTTPStatus.GATEWAY_TIMEOUT,
                             "control_deadline_exceeded",
                             "控制请求未在统一处理期限内完成")
@@ -1401,8 +1688,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else daemon_id_before),
                     expected_revision=operational_revision)
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        unknown_reason=("provider_unavailable" if
+                                        error.possibly_committed else None),
+                        result=(None if error.possibly_committed else "failed"),
+                        possibly_committed=error.possibly_committed):
+                    return
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                            "control_operation_ledger_unavailable",
+                             "control_operation_ledger_unavailable",
                             "操作账本不可用，Runtime写能力已失败关闭")
             elif error.possibly_committed:
                 recovered = self._try_operation_lookup(
@@ -1411,6 +1705,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     idempotency_key="release:v1")
                 if recovered is not None:
                     bind_foreign_recovery(recovered)
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered, action="release"):
+                        return
                     self._finish_local_release_if_safe(
                         recovered, lease_id, principal, allow_foreign)
                     self._send_operation(
@@ -1418,11 +1716,23 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         principal=principal)
                 else:
                     retain_foreign_recovery()
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="downstream_uncertain",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="control_release", lease_id=lease_id,
                         idempotency_key="release:v1")
             else:
                 forget_foreign_recovery()
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        result=("rejected" if error.code == "target_rejected"
+                                else "failed"),
+                        possibly_committed=False):
+                    return
                 self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError):
@@ -1436,6 +1746,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         idempotency_key="release:v1")
                     if recovered is not None:
                         bind_foreign_recovery(recovered)
+                        if audit_intent is not None and not \
+                                self._complete_operation_audit(
+                                    audit_intent, recovered,
+                                    action="release"):
+                            return
                         self._finish_local_release_if_safe(
                             recovered, lease_id, principal, allow_foreign)
                         self._send_operation(
@@ -1444,11 +1759,22 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                             principal=principal)
                     else:
                         retain_foreign_recovery()
+                        if audit_intent is not None and not \
+                                self._complete_control_audit(
+                                    audit_intent,
+                                    unknown_reason="deadline_exceeded",
+                                    possibly_committed=True):
+                            return
                         self._operation_uncertain(
                             kind="control_release", lease_id=lease_id,
                             idempotency_key="release:v1")
                 else:
                     forget_foreign_recovery()
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent, result="failed",
+                                possibly_committed=False):
+                        return
                     self._error(HTTPStatus.GATEWAY_TIMEOUT,
                                 "control_deadline_exceeded",
                                 "控制请求未在统一处理期限内完成")
@@ -1460,6 +1786,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     idempotency_key="release:v1")
                 if recovered is not None:
                     bind_foreign_recovery(recovered)
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered, action="release"):
+                        return
                     self._finish_local_release_if_safe(
                         recovered, lease_id, principal, allow_foreign)
                     self._send_operation(
@@ -1467,19 +1797,42 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         principal=principal)
                 else:
                     retain_foreign_recovery()
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="provider_unavailable",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="control_release", lease_id=lease_id,
                         idempotency_key="release:v1")
             else:
                 forget_foreign_recovery()
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent, result="failed",
+                        possibly_committed=False):
+                    return
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                             "control_lease_unavailable",
                             "无法安全完成控制租约释放")
             return
         if outcome is None:
+            if audit_intent is None:
+                raise RuntimeError("控制租约释放成功但缺少持久审计intent")
+            if not self._complete_control_audit(
+                    audit_intent, result="released",
+                    possibly_committed=True):
+                return
             self._send_empty(HTTPStatus.NO_CONTENT,
                              audit_result="control_lease_released")
         else:
+            if audit_intent is None:
+                raise RuntimeError("控制租约释放成功但缺少持久审计intent")
+            if not self._complete_operation_audit(
+                    audit_intent, outcome, action="release"):
+                return
+            self._finish_local_release_if_safe(
+                outcome, lease_id, principal, allow_foreign)
             self._send_operation(
                 outcome, audit_result="control_release", principal=principal)
 
@@ -1500,6 +1853,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         daemon_id = None
         downstream_started = False
         result = None
+        audit_intent = None
         try:
             lease_id = validate_lease_id(value["lease_id"])
             node_id = validate_control_id(value["node_id"], "node_id")
@@ -1510,6 +1864,17 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             desired = value["value"]
             if type(desired) is not bool:
                 raise ValueError("value必须是布尔值")
+            audit_intent = self._begin_control_audit(
+                principal, action="gpio_write", lease_id=lease_id,
+                fields={
+                    "lease_id": lease_id,
+                    "node_id": node_id,
+                    "resource_id": resource_id,
+                    "idempotency_key": idempotency_key,
+                    "value": desired,
+                })
+            if audit_intent is None:
+                return
             lease = call_with_deadline(
                 self.control_leases.authorize, lease_id,
                 requester_key_id=principal.key_id,
@@ -1529,6 +1894,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 resource_id, idempotency_key, desired,
                 deadline=self.request_deadline)
         except ValueError as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
                         str(error))
             return
@@ -1540,14 +1909,26 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._clear_gpio_control_operational(
                     expected_instance_id=daemon_id_before,
                     expected_revision=operational_revision)
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found",
                         str(error))
             return
         except ControlLeaseOwnershipError as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
                         str(error))
             return
         except ControlLeaseConflict as error:
+            if audit_intent is not None and not self._complete_control_audit(
+                    audit_intent, result="rejected",
+                    possibly_committed=False):
+                return
             self._error(HTTPStatus.CONFLICT, "control_lease_conflict",
                         str(error))
             return
@@ -1557,14 +1938,29 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     principal.key_id, kind="gpio_write", lease_id=lease_id,
                     idempotency_key=idempotency_key)
                 if recovered is not None:
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered,
+                                action="gpio_write"):
+                        return
                     self._send_operation(
                         recovered, audit_result="gpio_write_recovered",
                         principal=principal)
                 else:
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="deadline_exceeded",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="gpio_write", lease_id=lease_id,
                         idempotency_key=idempotency_key)
             else:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent, result="failed",
+                        possibly_committed=False):
+                    return
                 self._error(HTTPStatus.GATEWAY_TIMEOUT,
                             "control_deadline_exceeded",
                             "控制请求未在统一处理期限内完成")
@@ -1575,22 +1971,46 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     expected_instance_id=(daemon_id if isinstance(
                         daemon_id, str) else daemon_id_before),
                     expected_revision=operational_revision)
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        unknown_reason=("provider_unavailable" if
+                                        error.possibly_committed else None),
+                        result=(None if error.possibly_committed else "failed"),
+                        possibly_committed=error.possibly_committed):
+                    return
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                            "control_operation_ledger_unavailable",
+                             "control_operation_ledger_unavailable",
                             "操作账本不可用，Runtime写能力已失败关闭")
             elif error.possibly_committed:
                 recovered = self._try_operation_lookup(
                     principal.key_id, kind="gpio_write", lease_id=lease_id,
                     idempotency_key=idempotency_key)
                 if recovered is not None:
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered,
+                                action="gpio_write"):
+                        return
                     self._send_operation(
                         recovered, audit_result="gpio_write_recovered",
                         principal=principal)
                 else:
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="downstream_uncertain",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="gpio_write", lease_id=lease_id,
                         idempotency_key=idempotency_key)
             else:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent,
+                        result=("rejected" if error.code == "target_rejected"
+                                else "failed"),
+                        possibly_committed=False):
+                    return
                 self._structured_provider_error(error)
             return
         except (ControlLeaseError, RuntimeProviderError):
@@ -1603,14 +2023,30 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         lease_id=lease_id,
                         idempotency_key=idempotency_key)
                     if recovered is not None:
+                        if audit_intent is not None and not \
+                                self._complete_operation_audit(
+                                    audit_intent, recovered,
+                                    action="gpio_write"):
+                            return
                         self._send_operation(
                             recovered, audit_result="gpio_write_recovered",
                             principal=principal)
                     else:
+                        if audit_intent is not None and not \
+                                self._complete_control_audit(
+                                    audit_intent,
+                                    unknown_reason="deadline_exceeded",
+                                    possibly_committed=True):
+                            return
                         self._operation_uncertain(
                             kind="gpio_write", lease_id=lease_id,
                             idempotency_key=idempotency_key)
                 else:
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent, result="failed",
+                                possibly_committed=False):
+                        return
                     self._error(HTTPStatus.GATEWAY_TIMEOUT,
                                 "control_deadline_exceeded",
                                 "控制请求未在统一处理期限内完成")
@@ -1620,17 +2056,37 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     principal.key_id, kind="gpio_write", lease_id=lease_id,
                     idempotency_key=idempotency_key)
                 if recovered is not None:
+                    if audit_intent is not None and not \
+                            self._complete_operation_audit(
+                                audit_intent, recovered,
+                                action="gpio_write"):
+                        return
                     self._send_operation(
                         recovered, audit_result="gpio_write_recovered",
                         principal=principal)
                 else:
+                    if audit_intent is not None and not \
+                            self._complete_control_audit(
+                                audit_intent,
+                                unknown_reason="provider_unavailable",
+                                possibly_committed=True):
+                        return
                     self._operation_uncertain(
                         kind="gpio_write", lease_id=lease_id,
                         idempotency_key=idempotency_key)
             else:
+                if audit_intent is not None and not self._complete_control_audit(
+                        audit_intent, result="failed",
+                        possibly_committed=False):
+                    return
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                             "gpio_control_unavailable",
                             "GPIO写入未获得可验证的下游成功结果")
+            return
+        if audit_intent is None:
+            raise RuntimeError("GPIO写成功但缺少持久审计intent")
+        if not self._complete_operation_audit(
+                audit_intent, result, action="gpio_write"):
             return
         self._send_operation(
             result, audit_result="gpio_write", principal=principal)
@@ -1719,23 +2175,31 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return
 
         if parts == ["api", API_VERSION]:
-            gpio_control_operational = self.gpio_control_operational
+            gpio_backend_operational = self._gpio_backend_operational()
+            control_audit = self._control_audit_health()
+            gpio_control_operational = bool(
+                gpio_backend_operational and control_audit["operational"])
             self._success({
                 "snapshot_schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 "capabilities": {
-                    "read_only": not self.control_leases_available,
-                    "write_commands": gpio_control_operational,
+                    "read_only": not self.control_mutation_available,
+                    "write_commands": (
+                        gpio_control_operational and
+                        self.control_mutation_available),
+                    "control_audit": control_audit,
                     "gpio_write": {
                         "configured": self.gpio_control_configured,
                         "operational": gpio_control_operational,
                     },
                     "operation_ledger": {
                         "configured": self.gpio_control_configured,
-                        "operational": gpio_control_operational,
+                        "operational": gpio_backend_operational,
                         "schema_version": 1,
                     },
                     "control_leases": {
                         "available": self.control_leases_available,
+                        "mutation_available":
+                            self.control_mutation_available,
                         "schema_version": CONTROL_LEASE_SCHEMA_VERSION,
                         "maximum_active": self.control_leases.capacity,
                         "backend_binding":
@@ -1783,7 +2247,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                "snapshot_id": snapshot["snapshot_id"],
                                "capabilities":
                                    self._runtime_capabilities(),
-                               "toolbusd_health": toolbusd_health},
+                               "toolbusd_health": toolbusd_health,
+                               "runtime_control_audit":
+                                   self._control_audit_health()},
                               read=read)
             return
         if parts == ["api", API_VERSION, "events"]:
@@ -2043,6 +2509,7 @@ def make_server(host: str, port: int,
                 event_incarnation: str | None = None,
                 control_lease_capacity: int = DEFAULT_CONTROL_LEASE_CAPACITY,
                 control_lease_manager: ControlLeaseManager | None = None,
+                control_audit_journal: ControlAuditJournal | None = None,
                 request_io_timeout_seconds: float =
                 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS,
                 ) -> ThreadingHTTPServer:
@@ -2071,6 +2538,9 @@ def make_server(host: str, port: int,
         capacity=audit_capacity, output=audit_output)
     server.event_log = event_log  # type: ignore[attr-defined]
     server.control_leases = resolved_control_leases  # type: ignore[attr-defined]
+    server.control_audit_journal = control_audit_journal  # type: ignore[attr-defined]
+    server.control_audit_state_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.control_audit_failed = False  # type: ignore[attr-defined]
     server.control_leases_available = (  # type: ignore[attr-defined]
         loopback and authenticator is not None)
     server.gpio_control_configured = (  # type: ignore[attr-defined]
@@ -2100,6 +2570,12 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8780, help="监听端口")
     parser.add_argument("--api-key-file", type=Path,
                         help="版本化API密钥JSON文件；不支持命令行明文密钥")
+    parser.add_argument(
+        "--control-audit-dir", type=Path,
+        help="持久控制审计目录；必须与--control-audit-key-file成对配置")
+    parser.add_argument(
+        "--control-audit-key-file", type=Path,
+        help="32～64字节原始控制审计HMAC密钥文件；不接受命令行明文密钥")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--snapshot", type=Path,
                         help="Runtime v1 快照JSON；省略数据源时使用内置Mock")
@@ -2173,6 +2649,10 @@ def main() -> int:
         parser.error("--remote-cli必须与--toolbusd-socket一起使用")
     if args.toolbusd_legacy_text and not args.toolbusd_socket:
         parser.error("--toolbusd-legacy-text必须与--toolbusd-socket一起使用")
+    if (args.control_audit_dir is None) != \
+            (args.control_audit_key_file is None):
+        parser.error(
+            "--control-audit-dir与--control-audit-key-file必须成对配置")
     if not args.toolbusd_legacy_text and \
             args.maximum_resource_queries > 128:
         parser.error("结构化Runtime快照最多允许128项资源")
@@ -2210,17 +2690,31 @@ def main() -> int:
         provider = FileSnapshotProvider(args.snapshot)
     else:
         provider = MockSnapshotProvider()
-    server = make_server(args.host, args.port, provider,
-                         maximum_workers=args.http_workers,
-                         authenticator=authenticator,
-                         event_capacity=args.event_capacity,
-                         control_lease_manager=control_lease_manager,
-                         control_lease_capacity=(
-                             DEFAULT_CONTROL_LEASE_CAPACITY
-                             if control_lease_manager is not None
-                             else args.control_lease_capacity),
-                         request_io_timeout_seconds=
-                         args.http_request_timeout_ms / 1000.0)
+    control_audit_journal = None
+    if args.control_audit_dir is not None:
+        try:
+            control_audit_journal = ControlAuditJournal(
+                args.control_audit_dir, args.control_audit_key_file)
+        except ControlAuditError as error:
+            parser.error(f"控制审计配置无效：{error}")
+    try:
+        server = make_server(
+            args.host, args.port, provider,
+            maximum_workers=args.http_workers,
+            authenticator=authenticator,
+            event_capacity=args.event_capacity,
+            control_lease_manager=control_lease_manager,
+            control_audit_journal=control_audit_journal,
+            control_lease_capacity=(
+                DEFAULT_CONTROL_LEASE_CAPACITY
+                if control_lease_manager is not None
+                else args.control_lease_capacity),
+            request_io_timeout_seconds=
+                args.http_request_timeout_ms / 1000.0)
+    except BaseException:
+        if control_audit_journal is not None:
+            control_audit_journal.close()
+        raise
     display_host = f"[{args.host}]" if ":" in args.host else args.host
     auth_mode = "API密钥认证" if authenticator is not None else "回环开发模式"
     print(f"RemoteBSP Runtime API已启动：http://{display_host}:"
