@@ -68,6 +68,21 @@ class DeviceParameterTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(
             result["parameters"][0]["value_base64"]), b"old")
 
+    def test_backup_v2_detects_tampering_and_v1_remains_restorable(self):
+        runner = FakeRunner()
+        manager = self.manager(runner)
+        backup = manager.backup()
+        self.assertEqual(backup["schema_version"], 2)
+        self.assertEqual(len(backup["sha256"]), 64)
+        changed = json.loads(json.dumps(backup))
+        changed["parameters"][0]["value_base64"] = base64.b64encode(b"bad").decode()
+        with self.assertRaisesRegex(DeviceParameterError, "完整性"):
+            manager.restore(changed, expected_uuid=UUID, expected_generation=4,
+                            confirmation=WRITE_CONFIRMATION)
+        legacy = manager.snapshot()
+        manager.restore(legacy, expected_uuid=UUID, expected_generation=4,
+                        confirmation=WRITE_CONFIRMATION)
+
     def test_write_requires_confirmation_uuid_and_generation(self):
         runner = FakeRunner()
         manager = self.manager(runner)
@@ -162,6 +177,13 @@ class DeviceParameterTests(unittest.TestCase):
                     headers={"Content-Type": "application/json"}, method="POST")
                 snapshot = json.loads(urlopen(read).read())["snapshot"]
                 self.assertEqual(snapshot["node_uuid"], UUID)
+                backup_request = Request(
+                    base + "/api/device-parameters/backup", data=b"{}",
+                    headers={"Content-Type": "application/json"}, method="POST")
+                backup_response = json.loads(urlopen(backup_request).read())
+                self.assertEqual(backup_response["format"],
+                                 "DEVICE_PARAMETER_BACKUP_V2")
+                self.assertEqual(backup_response["backup"]["schema_version"], 2)
 
                 for path in ("write", "restore"):
                     write = Request(

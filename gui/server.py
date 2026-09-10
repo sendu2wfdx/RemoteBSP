@@ -287,13 +287,18 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                             "/api/device-parameters/backup"):
                     if set(request):
                         raise DeviceParameterError("只读请求不接受额外字段")
-                    snapshot = manager.snapshot()
+                    backup = manager.backup() if path.endswith("/backup") else None
+                    snapshot = ({key: value for key, value in backup.items()
+                                 if key not in ("format", "sha256")}
+                                if backup is not None else manager.snapshot())
+                    if backup is not None:
+                        snapshot["schema_version"] = 1
                     response = {
                         "ok": True,
-                        "format": ("DEVICE_PARAMETER_BACKUP_V1" if
+                        "format": ("DEVICE_PARAMETER_BACKUP_V2" if
                                    path.endswith("/backup") else
                                    "DEVICE_PARAMETER_SNAPSHOT_V1"),
-                        "backup": snapshot if path.endswith("/backup") else None,
+                        "backup": backup,
                         "snapshot": snapshot,
                     }
                 else:
@@ -341,7 +346,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 response = production_record_response(
                     generate_production_record(
                         project, catalog, build_record=build_record,
-                        build_record_sha256=build_record_sha256))
+                        build_record_sha256=build_record_sha256,
+                        deployment_record=request.get("deployment_record")))
             elif path == "/api/project/generate-reports":
                 generated = generate_project_reports(project, catalog)
                 response = {

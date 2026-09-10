@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import math
 import re
@@ -24,6 +26,7 @@ MAX_CLI_OUTPUT = 64 * 1024
 MAX_PARAMETERS = 64
 MAX_VALUE_BYTES = 64
 MAX_BACKUP_BYTES = 32 * 1024
+BACKUP_SCHEMA_VERSION = 2
 
 _STATUS = re.compile(
     r"^version=(\d+) generation=(\d+) stored=(\d+) definitions=(\d+) "
@@ -172,6 +175,22 @@ class DeviceParameterManager:
                     "parameters": values}
 
     @staticmethod
+    def _backup_digest(backup: dict) -> str:
+        content = {key: value for key, value in backup.items()
+                   if key != "sha256"}
+        canonical = json.dumps(content, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def backup(self) -> dict:
+        """生成带完整性摘要的可移植备份；快照协议保持 v1。"""
+        snapshot = self.snapshot()
+        backup = {**snapshot, "schema_version": BACKUP_SCHEMA_VERSION,
+                  "format": "REMOTEBSP_DEVICE_PARAMETERS"}
+        backup["sha256"] = self._backup_digest(backup)
+        return backup
+
+    @staticmethod
     def _decode_value(item: object) -> bytes:
         if not isinstance(item, dict) or set(item) - {
                 "id", "name", "type", "flags", "generation", "byte_count",
@@ -207,11 +226,19 @@ class DeviceParameterManager:
         except (TypeError, ValueError) as error:
             raise DeviceParameterError("备份不是合法JSON对象") from error
         if len(encoded) > MAX_BACKUP_BYTES or not isinstance(backup, dict) or \
-                backup.get("schema_version") != 1 or \
+                backup.get("schema_version") not in (1, BACKUP_SCHEMA_VERSION) or \
                 backup.get("node_uuid") != expected_uuid or \
                 not isinstance(backup.get("parameters"), list) or \
                 len(backup["parameters"]) > MAX_PARAMETERS:
             raise DeviceParameterError("备份格式、大小或目标UUID无效")
+        if backup["schema_version"] == BACKUP_SCHEMA_VERSION:
+            if backup.get("format") != "REMOTEBSP_DEVICE_PARAMETERS" or \
+                    not isinstance(backup.get("sha256"), str) or \
+                    not re.fullmatch(r"[0-9a-f]{64}", backup["sha256"]):
+                raise DeviceParameterError("设备参数备份v2元数据无效")
+            if not hmac.compare_digest(
+                    backup["sha256"], self._backup_digest(backup)):
+                raise DeviceParameterError("设备参数备份完整性校验失败")
         self._mutate(expected_uuid, expected_generation,
                      backup["parameters"], confirmation)
         return self.snapshot()
