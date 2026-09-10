@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "mock-identity-v1-unavailable",
+  "board_type": 66577,
+  "uuid": "00112233445566778899aabbccddee00",
+  "firmware_version": [0, 2, 0],
+  "capabilities": [],
+  "resource_groups": [],
+  "reserved_resources": []
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 3,
+  "name": "mock-identity-v3-unavailable",
+  "board_type": 66577,
+  "uuid": "00112233445566778899aabbccddee00",
+  "firmware_version": [0, 2, 0],
+  "firmware_identity": {
+    "project_sha256": null,
+    "config_sha256": null,
+    "firmware_input_sha256": null
+  },
+  "capabilities": [],
+  "resource_groups": [],
+  "bus_resources": [],
+  "reserved_resources": []
+}

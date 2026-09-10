@@ -16,7 +16,7 @@
 
 namespace remotebsp::mock_mcu {
 
-constexpr std::uint32_t kBoardManifestSchemaVersion = 2;
+constexpr std::uint32_t kBoardManifestSchemaVersion = 3;
 constexpr std::uint32_t kFaultScenarioSchemaVersion = 1;
 
 struct ReservedResource {

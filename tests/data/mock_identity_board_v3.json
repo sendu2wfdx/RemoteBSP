@@ -1,0 +1,16 @@
+{
+  "schema_version": 3,
+  "name": "mock-identity-v3",
+  "board_type": 66577,
+  "uuid": "00112233445566778899aabbccddee00",
+  "firmware_version": [0, 2, 0],
+  "firmware_identity": {
+    "project_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "firmware_input_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "capabilities": [],
+  "resource_groups": [],
+  "bus_resources": [],
+  "reserved_resources": []
+}

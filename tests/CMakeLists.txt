@@ -532,11 +532,26 @@ target_compile_definitions(board_manifest_tests PRIVATE
     TEST_BOARD_MANIFEST=\"${CMAKE_SOURCE_DIR}/boards/mock-generic-v1.json\"
     TEST_FLY_D5_MANIFEST=\"${CMAKE_SOURCE_DIR}/boards/mellow-fly-d5-v1.json\"
     TEST_FAULT_SCENARIO=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mock_fault_scenario.json\"
+    TEST_IDENTITY_V3_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_board_v3.json\"
+    TEST_IDENTITY_UNAVAILABLE_V3_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_unavailable_board_v3.json\"
+    TEST_IDENTITY_V1_MANIFEST=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_board_v1.json\"
 )
 target_compile_options(board_manifest_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 add_test(NAME board_manifest_tests COMMAND board_manifest_tests)
+
+add_test(
+    NAME firmware_identity_process_e2e_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/firmware_identity_process_e2e.sh
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli>
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_board_v3.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/mock_identity_unavailable_board_v3.json
+)
+set_tests_properties(firmware_identity_process_e2e_tests PROPERTIES
+    RUN_SERIAL TRUE)
 
 add_executable(digital_twin_replay_tests digital_twin_replay_tests.cpp)
 target_link_libraries(digital_twin_replay_tests PRIVATE remotebsp_remote_core)

@@ -637,6 +637,35 @@ std::array<std::uint8_t, 16> parse_uuid(const std::string& text) {
     return output;
 }
 
+std::array<std::uint8_t, 32> parse_sha256(const JsonValue& value,
+                                         const char* field,
+                                         bool& available) {
+    std::array<std::uint8_t, 32> output{};
+    if (value.type == JsonValue::Type::Null) {
+        available = false;
+        return output;
+    }
+    if (value.type != JsonValue::Type::String || value.string.size() != 64U) {
+        schema_error(ManifestError::InvalidSchema,
+                     std::string(field) +
+                         " 必须是 null 或 64 个十六进制字符");
+    }
+    for (std::size_t index = 0; index < output.size(); ++index) {
+        const auto hex = value.string.substr(index * 2U, 2U);
+        unsigned parsed = 0U;
+        const auto result = std::from_chars(
+            hex.data(), hex.data() + hex.size(), parsed, 16);
+        if (result.ec != std::errc() ||
+            result.ptr != hex.data() + hex.size()) {
+            schema_error(ManifestError::InvalidValue,
+                         std::string(field) + " 包含非十六进制字符");
+        }
+        output[index] = static_cast<std::uint8_t>(parsed);
+    }
+    available = true;
+    return output;
+}
+
 std::string read_file(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -678,7 +707,7 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
                     "firmware_version", "capabilities",
                     "resource_groups", "reserved_resources", "bus_resources",
                     "motion_axes", "motion_maximum_total_step_rate_hz",
-                    "waveform_endpoints"},
+                    "waveform_endpoints", "firmware_identity"},
                    "板卡描述根");
 
     BoardManifest manifest;
@@ -691,6 +720,11 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
     if (manifest.schema_version == 1 && root.count("bus_resources") != 0) {
         schema_error(ManifestError::InvalidSchema,
                      "schema_version 1 不能声明 bus_resources");
+    }
+    if (manifest.schema_version < 3U &&
+        root.count("firmware_identity") != 0U) {
+        schema_error(ManifestError::InvalidSchema,
+                     "schema_version 1/2 不能声明 firmware_identity");
     }
     manifest.name = require_string(root, "name");
     if (manifest.name.empty() || manifest.name.size() > 64) {
@@ -719,6 +753,38 @@ BoardManifest parse_board_manifest(std::string_view json_text) {
     manifest.node_info.firmware_major = version[0];
     manifest.node_info.firmware_minor = version[1];
     manifest.node_info.firmware_patch = version[2];
+
+    if (manifest.schema_version >= 3U) {
+        const auto& identity = require_object(
+            require_field(root, "firmware_identity"), "firmware_identity");
+        reject_unknown(identity,
+                       {"project_sha256", "config_sha256",
+                        "firmware_input_sha256"},
+                       "firmware_identity");
+        auto& output = manifest.node_info.firmware_identity;
+        bool available = false;
+        output.project_sha256 = parse_sha256(
+            require_field(identity, "project_sha256"),
+            "firmware_identity.project_sha256", available);
+        if (available) {
+            output.available_fields |= static_cast<std::uint16_t>(
+                protocol::FirmwareIdentityField::ProjectSha256);
+        }
+        output.config_sha256 = parse_sha256(
+            require_field(identity, "config_sha256"),
+            "firmware_identity.config_sha256", available);
+        if (available) {
+            output.available_fields |= static_cast<std::uint16_t>(
+                protocol::FirmwareIdentityField::ConfigSha256);
+        }
+        output.firmware_input_sha256 = parse_sha256(
+            require_field(identity, "firmware_input_sha256"),
+            "firmware_identity.firmware_input_sha256", available);
+        if (available) {
+            output.available_fields |= static_cast<std::uint16_t>(
+                protocol::FirmwareIdentityField::FirmwareInputSha256);
+        }
+    }
 
     for (const auto& value : require_array(root, "capabilities")) {
         if (value.type != JsonValue::Type::String) {

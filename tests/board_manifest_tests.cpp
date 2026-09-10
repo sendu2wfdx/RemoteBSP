@@ -165,6 +165,54 @@ void test_fault_file_and_schema_rejection() {
     }
 }
 
+void test_versioned_firmware_identity_manifest() {
+    const auto full = remotebsp::mock_mcu::load_board_manifest(
+        TEST_IDENTITY_V3_MANIFEST);
+    assert(full.schema_version == 3U);
+    assert(full.node_info.firmware_identity.available(
+        remotebsp::protocol::FirmwareIdentityField::ProjectSha256));
+    assert(full.node_info.firmware_identity.available(
+        remotebsp::protocol::FirmwareIdentityField::ConfigSha256));
+    assert(full.node_info.firmware_identity.available(
+        remotebsp::protocol::FirmwareIdentityField::FirmwareInputSha256));
+    assert(full.node_info.firmware_identity.project_sha256[0] == 0x11U);
+    assert(full.node_info.firmware_identity.config_sha256[0] == 0x22U);
+    assert(full.node_info.firmware_identity.firmware_input_sha256[0] == 0x33U);
+
+    const auto unavailable = remotebsp::mock_mcu::load_board_manifest(
+        TEST_IDENTITY_UNAVAILABLE_V3_MANIFEST);
+    assert(unavailable.schema_version == 3U);
+    assert(unavailable.node_info.firmware_identity.available_fields == 0U);
+
+    const auto legacy = remotebsp::mock_mcu::load_board_manifest(
+        TEST_IDENTITY_V1_MANIFEST);
+    assert(legacy.schema_version == 1U);
+    assert(legacy.node_info.firmware_identity.available_fields == 0U);
+
+    const std::string invalid = R"json({
+      "schema_version": 3,
+      "name": "bad-identity",
+      "board_type": 1,
+      "uuid": "00112233445566778899aabbccddee00",
+      "firmware_version": [0, 2, 0],
+      "firmware_identity": {
+        "project_sha256": "xyz",
+        "config_sha256": null,
+        "firmware_input_sha256": null
+      },
+      "capabilities": [],
+      "resource_groups": [],
+      "bus_resources": [],
+      "reserved_resources": []
+    })json";
+    try {
+        static_cast<void>(remotebsp::mock_mcu::parse_board_manifest(invalid));
+        assert(false);
+    } catch (const ManifestException& error) {
+        assert(error.code() == ManifestError::InvalidSchema);
+    }
+}
+
 }
 
 int main() {
@@ -172,4 +220,5 @@ int main() {
     test_fly_d5_board_manifest();
     test_digital_twin_fault_isolation();
     test_fault_file_and_schema_rejection();
+    test_versioned_firmware_identity_manifest();
 }
