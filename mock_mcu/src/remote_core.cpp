@@ -940,6 +940,13 @@ protocol::Packet RemoteCore::handle_resource_status(
             status.error_flags |= protocol::kResourceErrorBackendFailure;
             status.health = protocol::ResourceHealth::Failed;
         }
+    } else if ((found->type == protocol::ResourceType::I2cDevice ||
+                found->type == protocol::ResourceType::SpiDevice) &&
+               bus_bsp_) {
+        if (bus_bsp_->failed(resource_id)) {
+            status.error_flags |= protocol::kResourceErrorBackendFailure;
+            status.health = protocol::ResourceHealth::Failed;
+        }
     } else if (found->type == protocol::ResourceType::Pwm) {
         const bool active = std::any_of(
             pwm_objects_.begin(), pwm_objects_.end(), [&](const auto& entry) {
@@ -1043,6 +1050,23 @@ protocol::Packet RemoteCore::handle_resource_reset(
          !session_has_exclusive_lease(resource_id,
                                       request.header.session_id))) {
         return make_response(request, StatusCode::AccessDenied);
+    }
+    if ((found->type == protocol::ResourceType::I2cDevice ||
+         found->type == protocol::ResourceType::SpiDevice)) {
+        if (!bus_bsp_ ||
+            !session_has_exclusive_lease(resource_id,
+                                         request.header.session_id)) {
+            return make_response(request, StatusCode::AccessDenied);
+        }
+        try {
+            if (!bus_bsp_->reset(resource_id)) {
+                return make_response(request, StatusCode::ResourceFailed);
+            }
+        } catch (const MockBusException&) {
+            return make_response(request, StatusCode::ResourceFailed);
+        }
+        leases_.erase(resource_id);
+        return make_response(request, StatusCode::Ok);
     }
     if (found->type == protocol::ResourceType::StepgenAxis && motion_) {
         try {

@@ -202,6 +202,30 @@ studio_cli.py deployment-preflight-can-katapult --build-id <ID> \
 studio_cli.py deployment-plan-validate --plan can-katapult-plan.json
 ```
 
+## 部署尝试与回读证据
+
+离线计划和“已经烧录并核验”之间使用独立的
+`REMOTEBSP_DEPLOYMENT_ATTEMPT_V1`，不能用计划文件冒充执行结果。初始记录只能是
+`outcome=absent`，开始/结束时间、退出码和输出摘要均为空，且
+`hardware_success_claimed=false`。执行整合层完成真实工具调用后可派生终态记录，保存原始
+计划 SHA-256、前一状态 SHA-256、UTC 开始/结束时间、工具退出码、stdout 字节数及
+SHA-256；stdout 原文不进入记录。
+
+工具失败时 execution 为 `failed`，未进行回读时 readback 保持 `absent`；工具成功但
+回读失败时 readback 为 `failed` 并记录有界错误类型。只有工具确实被调用、退出码为零、
+执行无错误、四重预期身份全部匹配且读到合法设备 UUID，才允许
+`outcome=verified` 和 `hardware_success_claimed=true`。离线 CLI 故意不提供填写执行结果或
+生成 verified 的选项，只能创建未执行记录并验证它和当前计划的绑定：
+
+```text
+studio_cli.py deployment-attempt-create --plan stlink-plan.json \
+  --attempt-output attempt.json
+studio_cli.py deployment-attempt-validate --plan stlink-plan.json \
+  --attempt attempt.json
+```
+
+时间来自执行整合层并明确只是记录字段；本框架不把主机 UTC 伪装成可信时间证明。
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

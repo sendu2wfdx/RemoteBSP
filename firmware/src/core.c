@@ -2855,7 +2855,8 @@ static bool process_request(rbsp_core_t* core,
                     owned_by_peer = lease->active &&
                                     lease->owner_session_id !=
                                         request->session_id;
-                    if (owned_by_peer) {
+                    if (!lease->active || owned_by_peer ||
+                        lease->owner_session_id != request->session_id) {
                         status = RBSP_STATUS_ACCESS_DENIED;
                     } else if (!core->hal.bus_reset(bus_resource)) {
                         core->bus_status[bus_resource_index].backend_failed =

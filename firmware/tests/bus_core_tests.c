@@ -383,6 +383,11 @@ int main(void) {
     assert(output[24U] == 0U && last_reset_resource_id == I2C_DEVICE_ID);
     assert(!core.bus_status[1U].backend_failed &&
            !core.bus_leases[1U].active && core.bus_leases[2U].active);
+    /* 成功恢复已释放租约；同一会话也必须重新获取后才能再次复位。 */
+    size = make_request(request, 0x0033U, 11U, 490U,
+                        status_query, sizeof(status_query));
+    assert(exchange(&core, request, size, 490U, output) == 25U);
+    assert(output[24U] == 4U);
     size = make_request(request, 0x0021U, 11U, 491U, NULL, 0U);
     assert(exchange(&core, request, size, 491U, output) == 193U);
     assert(output[24U] == 0U && output[28U] == 0U);

@@ -3237,6 +3237,19 @@ private:
                 bus_reservation;
             std::optional<std::uint64_t> bus_node_generation;
             std::optional<std::uint32_t> bus_device_resource_id;
+            std::optional<std::uint32_t> bus_reset_resource_id;
+            if (command == remotebsp::protocol::Command::ResourceReset &&
+                request.payload.size() == 4U) {
+                const auto resource_id =
+                    remotebsp::protocol::decode_resource_id(request.payload);
+                const auto type = static_cast<std::uint8_t>(resource_id >> 24U);
+                if (type == static_cast<std::uint8_t>(
+                                remotebsp::protocol::ResourceType::I2cDevice) ||
+                    type == static_cast<std::uint8_t>(
+                                remotebsp::protocol::ResourceType::SpiDevice)) {
+                    bus_reset_resource_id = resource_id;
+                }
+            }
             if (command == remotebsp::protocol::Command::I2cContract ||
                 command == remotebsp::protocol::Command::SpiContract) {
                 if (request.header.object_id != 0U) {
@@ -3352,6 +3365,11 @@ private:
             remotebsp::toolbusd::Submission submission;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
+                if (bus_reset_resource_id.has_value() &&
+                    ipc_request.node_id <= kMaximumNodeId) {
+                    bus_node_generation =
+                        bus_node_generations_[ipc_request.node_id];
+                }
                 const auto* node =
                     nodes_.find_by_node_id(ipc_request.node_id);
                 if (ipc_request.node_id > kMaximumNodeId ||
@@ -3476,6 +3494,17 @@ private:
                     } catch (const std::exception&) {
                         // 保持透明转发：旧主机仍可接收未知固件响应，但健康统计不归类。
                     }
+                }
+                if (bus_reset_resource_id.has_value() &&
+                    bus_node_generation.has_value() &&
+                    bus_node_generations_[ipc_request.node_id] ==
+                        *bus_node_generation &&
+                    (response->second.header.flags &
+                     remotebsp::protocol::kErrorResponseFlag) == 0U &&
+                    response->second.payload.size() == 1U &&
+                    response->second.payload.front() == 0U) {
+                    bus_runtime_.observe_confirmed_reset(
+                        ipc_request.node_id, *bus_reset_resource_id);
                 }
                 const auto encoded =
                     remotebsp::protocol::encode(response->second);

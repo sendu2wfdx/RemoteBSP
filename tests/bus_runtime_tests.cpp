@@ -357,6 +357,14 @@ void check_remote_result_classification_and_isolation() {
            protocol::BusTransactionStatus::Ok);
     assert(recovered.resources[0U].consecutive_remote_failures == 0U);
     assert(recovered.resources[0U].peak_consecutive_remote_failures == 3U);
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Fault));
+    assert(runtime.observe_confirmed_reset(1U, first.resource_id));
+    const auto reset = runtime.telemetry_snapshot();
+    assert(!reset.resources[0U].last_remote_status_valid);
+    assert(reset.resources[0U].consecutive_remote_failures == 0U);
+    assert(reset.resources[0U].peak_consecutive_remote_failures == 3U);
+    assert(!runtime.observe_confirmed_reset(2U, first.resource_id));
     runtime.invalidate_node(1U);
     assert(runtime.telemetry_snapshot().resources.empty());
 }

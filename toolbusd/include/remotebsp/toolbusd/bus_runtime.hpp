@@ -146,6 +146,8 @@ public:
     bool observe_remote_result(
         std::uint32_t node_id, std::uint32_t device_resource_id,
         protocol::BusTransactionStatus status) noexcept;
+    bool observe_confirmed_reset(
+        std::uint32_t node_id, std::uint32_t device_resource_id) noexcept;
 
     std::size_t contract_count() const noexcept;
     std::size_t active_bus_count() const noexcept;

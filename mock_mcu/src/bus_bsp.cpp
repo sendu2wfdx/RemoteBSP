@@ -28,7 +28,7 @@ void MockBusBsp::add_device(
     const auto inserted = devices_.emplace(
         contract.resource_id,
         DeviceState{contract, std::move(initial_data), {},
-                    protocol::BusTransactionStatus::Ok});
+                    protocol::BusTransactionStatus::Ok, false, false});
     if (!inserted.second) {
         throw MockBusException(MockBusError::DuplicateDevice,
                                "Mock 总线设备 ID 重复");
@@ -56,6 +56,22 @@ void MockBusBsp::set_spi_response(std::uint32_t resource_id,
     device.spi_response = std::move(data);
 }
 
+void MockBusBsp::set_failed(std::uint32_t resource_id, bool failed) {
+    auto found = devices_.find(resource_id);
+    if (found == devices_.end())
+        throw MockBusException(MockBusError::DeviceNotFound,
+                               "Mock 总线设备不存在");
+    found->second.failed = failed;
+}
+
+void MockBusBsp::set_reset_failure(std::uint32_t resource_id, bool fail) {
+    auto found = devices_.find(resource_id);
+    if (found == devices_.end())
+        throw MockBusException(MockBusError::DeviceNotFound,
+                               "Mock 总线设备不存在");
+    found->second.reset_failure = fail;
+}
+
 MockBusBsp::DeviceState& MockBusBsp::require_device(
     std::uint32_t resource_id, protocol::BusResourceKind kind) {
     auto found = devices_.find(resource_id);
@@ -74,6 +90,7 @@ protocol::BusTransferResult MockBusBsp::take_injected_result(
     DeviceState& device) {
     const auto status = device.next_status;
     device.next_status = protocol::BusTransactionStatus::Ok;
+    if (status == protocol::BusTransactionStatus::Fault) device.failed = true;
     return {status, 0, 0, {}};
 }
 
@@ -151,11 +168,28 @@ const protocol::BusResourceContract* MockBusBsp::contract(
     return found == devices_.end() ? nullptr : &found->second.contract;
 }
 
+bool MockBusBsp::reset(std::uint32_t resource_id) {
+    auto found = devices_.find(resource_id);
+    if (found == devices_.end())
+        throw MockBusException(MockBusError::DeviceNotFound,
+                               "Mock 总线设备不存在");
+    if (found->second.reset_failure) return false;
+    found->second.failed = false;
+    found->second.next_status = protocol::BusTransactionStatus::Ok;
+    return true;
+}
+
+bool MockBusBsp::failed(std::uint32_t resource_id) const noexcept {
+    const auto found = devices_.find(resource_id);
+    return found != devices_.end() && found->second.failed;
+}
+
 std::vector<MockBusDeviceSnapshot> MockBusBsp::snapshot() const {
     std::vector<MockBusDeviceSnapshot> result;
     result.reserve(devices_.size());
     for (const auto& entry : devices_) {
         result.push_back({entry.first, entry.second.next_status,
+                          entry.second.failed,
                           entry.second.data, entry.second.spi_response});
     }
     std::sort(result.begin(), result.end(),

@@ -66,10 +66,22 @@ int main() {
         {spi_device_id, protocol::ResourceType::SpiDevice, 1,
          protocol::kResourceFlagExpanded, 16, 16},
     };
+    const auto access = static_cast<std::uint16_t>(
+        protocol::kResourceAccessReadable |
+        protocol::kResourceAccessWritable |
+        protocol::kResourceAccessExclusiveWrite |
+        protocol::kResourceAccessLeaseSupported);
+    const std::vector<protocol::ResourceContract> resource_contracts{
+        {i2c_device_id, protocol::kResourceContractVersion, access,
+         1000U, 100U, 10000U, 16U, 0U, 0U},
+        {spi_device_id, protocol::kResourceContractVersion, access,
+         1000U, 100U, 10000U, 16U, 0U, 0U},
+    };
     mock_mcu::RemoteCore core(
         {}, mock_mcu::capability_mask(mock_mcu::Capability::I2c) |
                 mock_mcu::capability_mask(mock_mcu::Capability::Spi),
-        nullptr, nullptr, resources, {}, nullptr, nullptr, nullptr, bus);
+        nullptr, nullptr, resources, resource_contracts,
+        nullptr, nullptr, nullptr, bus);
 
     const auto remote_i2c_contract =
         protocol::decode_bus_resource_contract(body(core.handle(request(
@@ -117,4 +129,45 @@ int main() {
                                 {spi_device_id, 1000, 0, 17, 0xFF,
                                  std::vector<std::uint8_t>(8, 0)})))));
     assert(limited.status == protocol::BusTransactionStatus::LimitExceeded);
+
+    // 总线恢复必须持有目标设备独占租约；单设备 poison 不污染同节点其他资源。
+    auto reset = core.handle(request(
+        protocol::Command::ResourceReset,
+        protocol::encode_resource_id(i2c_device_id)));
+    assert(reset.payload.front() == static_cast<std::uint8_t>(
+        mock_mcu::StatusCode::AccessDenied));
+    body(core.handle(request(
+        protocol::Command::ResourceAcquire,
+        protocol::encode_resource_lease_request(
+            {i2c_device_id, 1000U,
+             protocol::ResourceLeaseMode::Exclusive}))));
+    bus->set_next_status(i2c_device_id,
+                         protocol::BusTransactionStatus::Fault);
+    const auto fault = protocol::decode_bus_transfer_result(body(core.handle(
+        request(protocol::Command::I2cTransfer,
+                protocol::encode_i2c_transfer_request(
+                    {i2c_device_id, 1000, 0, 1, {0}})))));
+    assert(fault.status == protocol::BusTransactionStatus::Fault);
+    const auto poisoned = protocol::decode_resource_status(body(core.handle(
+        request(protocol::Command::ResourceStatus,
+                protocol::encode_resource_id(i2c_device_id)))));
+    assert(poisoned.health == protocol::ResourceHealth::Failed);
+    const auto peer = protocol::decode_resource_status(body(core.handle(
+        request(protocol::Command::ResourceStatus,
+                protocol::encode_resource_id(spi_device_id)))));
+    assert(peer.health == protocol::ResourceHealth::Normal);
+    bus->set_reset_failure(i2c_device_id, true);
+    reset = core.handle(request(protocol::Command::ResourceReset,
+                                protocol::encode_resource_id(i2c_device_id)));
+    assert(reset.payload.front() == static_cast<std::uint8_t>(
+        mock_mcu::StatusCode::ResourceFailed));
+    assert(bus->failed(i2c_device_id));
+    bus->set_reset_failure(i2c_device_id, false);
+    body(core.handle(request(protocol::Command::ResourceReset,
+                             protocol::encode_resource_id(i2c_device_id))));
+    assert(!bus->failed(i2c_device_id));
+    reset = core.handle(request(protocol::Command::ResourceReset,
+                                protocol::encode_resource_id(i2c_device_id)));
+    assert(reset.payload.front() == static_cast<std::uint8_t>(
+        mock_mcu::StatusCode::AccessDenied));
 }

@@ -36,6 +36,7 @@ from firmware_deployment import (
     validate_usb_katapult_deployment_plan,
 )
 from deployment_record import create_deployment_record, validate_deployment_record
+from deployment_attempt import create_absent_attempt, validate_deployment_attempt
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -83,6 +84,7 @@ MAX_COMPARISON_INPUT_BYTES = 128 * 1024
 MAX_CLI_PATH_CHARS = 512
 MAX_ADC_CALIBRATION_BYTES = 16 * 1024
 MAX_DEPLOYMENT_PLAN_BYTES = 64 * 1024
+MAX_DEPLOYMENT_ATTEMPT_BYTES = 64 * 1024
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -318,10 +320,7 @@ def _run_deployment_preflight_stlink(args) -> dict:
             "hardware_access": False, "flash_performed": False}
 
 
-def _run_deployment_plan_validate(args) -> dict:
-    artifact = _read_json(
-        args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES)
-    output_root = _bounded_path(args.output_root, "构建产物目录")
+def _validated_deployment_plan(artifact: object, output_root: Path) -> dict:
     if isinstance(artifact, dict) and artifact.get("format") == \
             "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1":
         validated = validate_stlink_deployment_plan(
@@ -336,12 +335,46 @@ def _run_deployment_plan_validate(args) -> dict:
             artifact, output_root=output_root)
     else:
         raise FirmwareDeploymentError("部署计划类型不受支持")
+    return validated
+
+
+def _run_deployment_plan_validate(args) -> dict:
+    artifact = _read_json(args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES)
+    validated = _validated_deployment_plan(
+        artifact, _bounded_path(args.output_root, "构建产物目录"))
     return {"ok": True,
             "format": "STUDIO_CLI_DEPLOYMENT_PLAN_VALIDATE_V1",
             "build_id": validated["build_id"],
             "backend": validated["backend"],
             "plan_sha256": validated["sha256"],
             "hardware_access": False, "flash_performed": False}
+
+
+def _run_deployment_attempt_create(args) -> dict:
+    plan = _validated_deployment_plan(
+        _read_json(args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES),
+        _bounded_path(args.output_root, "构建产物目录"))
+    attempt = create_absent_attempt(plan)
+    content = (json.dumps(attempt, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    written = _atomic_output(args.attempt_output, content, force=args.force)
+    return {"ok": True, "format": "STUDIO_CLI_DEPLOYMENT_ATTEMPT_CREATE_V1",
+            "attempt": attempt, "attempt_output": str(written),
+            "outcome": "absent", "hardware_success_claimed": False}
+
+
+def _run_deployment_attempt_validate(args) -> dict:
+    plan = _validated_deployment_plan(
+        _read_json(args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES),
+        _bounded_path(args.output_root, "构建产物目录"))
+    attempt = validate_deployment_attempt(
+        _read_json(args.attempt, "部署尝试", MAX_DEPLOYMENT_ATTEMPT_BYTES),
+        plan)
+    return {"ok": True,
+            "format": "STUDIO_CLI_DEPLOYMENT_ATTEMPT_VALIDATE_V1",
+            "attempt_id": attempt["attempt_id"],
+            "outcome": attempt["outcome"],
+            "hardware_success_claimed": attempt["hardware_success_claimed"]}
 
 
 def _run_deployment_preflight_usb_katapult(args) -> dict:
@@ -862,6 +895,23 @@ def _parser() -> StrictParser:
     deployment_validate.add_argument("--plan", required=True)
     deployment_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     deployment_validate.set_defaults(handler=_run_deployment_plan_validate)
+
+    attempt_create = sub.add_parser(
+        "deployment-attempt-create",
+        help="从已验证计划创建未执行部署尝试记录，不访问硬件")
+    attempt_create.add_argument("--plan", required=True)
+    attempt_create.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    attempt_create.add_argument("--attempt-output", required=True)
+    attempt_create.add_argument("--force", action="store_true")
+    attempt_create.set_defaults(handler=_run_deployment_attempt_create)
+
+    attempt_validate = sub.add_parser(
+        "deployment-attempt-validate",
+        help="严格验证部署尝试状态及其计划绑定")
+    attempt_validate.add_argument("--plan", required=True)
+    attempt_validate.add_argument("--attempt", required=True)
+    attempt_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    attempt_validate.set_defaults(handler=_run_deployment_attempt_validate)
 
     deploy = sub.add_parser(
         "deploy-stlink", help="显式通过ST-Link烧录并核对运行中身份")

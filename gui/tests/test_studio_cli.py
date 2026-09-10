@@ -244,6 +244,35 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(checked["backend"], "can-katapult")
         validate.assert_called_once()
 
+    def test_deployment_attempt_cli_only_creates_absent_record(self):
+        plan_path = self.directory / "plan.json"
+        attempt_path = self.directory / "attempt.json"
+        plan_path.write_text("{}", encoding="utf-8")
+        plan = {
+            "format": "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1",
+            "sha256": "a" * 64, "build_id": "board-build-01234567",
+            "backend": "stlink-openocd", "hardware_access": False,
+            "flash_performed": False,
+            "expected_identity": {
+                "board_id": "weact-g431-core-v10",
+                "project_sha256": "b" * 64, "config_sha256": "c" * 64,
+                "firmware_identity_sha256": "d" * 64}}
+        with patch("studio_cli._validated_deployment_plan", return_value=plan), \
+                patch("studio_cli.deploy_stlink") as deploy:
+            code, created, _, _ = self._call([
+                "deployment-attempt-create", "--plan", str(plan_path),
+                "--output-root", str(self.directory), "--attempt-output",
+                str(attempt_path)])
+            code2, checked, _, _ = self._call([
+                "deployment-attempt-validate", "--plan", str(plan_path),
+                "--attempt", str(attempt_path), "--output-root",
+                str(self.directory)])
+        self.assertEqual((code, code2), (EXIT_OK, EXIT_OK))
+        self.assertEqual(created["outcome"], "absent")
+        self.assertFalse(created["hardware_success_claimed"])
+        self.assertEqual(checked["outcome"], "absent")
+        deploy.assert_not_called()
+
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
         identity_file.write_text("{}", encoding="utf-8")

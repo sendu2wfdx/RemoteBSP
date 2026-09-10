@@ -18,6 +18,8 @@ public:
         const protocol::SpiTransferRequest& request) = 0;
     virtual const protocol::BusResourceContract* contract(
         std::uint32_t resource_id) const noexcept = 0;
+    virtual bool reset(std::uint32_t resource_id) = 0;
+    virtual bool failed(std::uint32_t resource_id) const noexcept = 0;
 };
 
 enum class MockBusError {
@@ -40,6 +42,7 @@ struct MockBusDeviceSnapshot {
     std::uint32_t resource_id{};
     protocol::BusTransactionStatus next_status{
         protocol::BusTransactionStatus::Ok};
+    bool failed{};
     std::vector<std::uint8_t> data;
     std::vector<std::uint8_t> spi_response;
 };
@@ -53,6 +56,8 @@ public:
                          protocol::BusTransactionStatus status);
     void set_spi_response(std::uint32_t resource_id,
                           std::vector<std::uint8_t> data);
+    void set_failed(std::uint32_t resource_id, bool failed);
+    void set_reset_failure(std::uint32_t resource_id, bool fail);
 
     protocol::BusTransferResult i2c_transfer(
         const protocol::I2cTransferRequest& request) override;
@@ -60,6 +65,8 @@ public:
         const protocol::SpiTransferRequest& request) override;
     const protocol::BusResourceContract* contract(
         std::uint32_t resource_id) const noexcept override;
+    bool reset(std::uint32_t resource_id) override;
+    bool failed(std::uint32_t resource_id) const noexcept override;
     std::vector<MockBusDeviceSnapshot> snapshot() const;
 
 private:
@@ -69,6 +76,8 @@ private:
         std::vector<std::uint8_t> spi_response;
         protocol::BusTransactionStatus next_status{
             protocol::BusTransactionStatus::Ok};
+        bool failed{};
+        bool reset_failure{};
     };
 
     DeviceState& require_device(std::uint32_t resource_id,

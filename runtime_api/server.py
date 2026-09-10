@@ -8,6 +8,7 @@ import ipaddress
 import json
 import re
 import secrets
+import signal
 import socket
 import sys
 import threading
@@ -306,7 +307,83 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             raise ValueError("HTTP请求I/O超时必须位于0.1～30秒")
         self._worker_slots = threading.BoundedSemaphore(maximum_workers)
         self.request_io_timeout_seconds = float(request_io_timeout_seconds)
+        self._tls_lock = threading.Lock()
+        self._tls_context = None
+        self._tls_config: Path | None = None
+        self._tls_expected_bind: str | None = None
+        self._tls_generation = 0
+        self._tls_last_result = "disabled"
+        self._tls_last_error: str | None = None
         super().__init__(server_address, request_handler_class)
+
+    def enable_tls(self, config: Path, expected_bind: str) -> None:
+        """完整预检后启用TLS；监听socket自身保持明文以支持上下文轮换。"""
+        context = prepare_server_context(config, expected_bind)
+        with self._tls_lock:
+            self._tls_context = context
+            self._tls_config = Path(config)
+            self._tls_expected_bind = expected_bind
+            self._tls_generation = 1
+            self._tls_last_result = "loaded"
+            self._tls_last_error = None
+
+    def reload_tls(self) -> bool:
+        """预检并加载候选上下文，成功后才原子切换新连接。"""
+        with self._tls_lock:
+            config = self._tls_config
+            expected_bind = self._tls_expected_bind
+            generation = self._tls_generation
+        if config is None or expected_bind is None:
+            return False
+        try:
+            candidate = prepare_server_context(config, expected_bind)
+        except (TlsDeploymentError, OSError) as error:
+            with self._tls_lock:
+                self._tls_last_result = "reload_failed_old_context_retained"
+                self._tls_last_error = str(error)
+            sys.stderr.write(json.dumps({
+                "event": "runtime_tls_reload",
+                "result": "failed",
+                "generation": generation,
+                "old_context_retained": True,
+                "error": str(error),
+            }, ensure_ascii=False) + "\n")
+            return False
+        with self._tls_lock:
+            self._tls_context = candidate
+            self._tls_generation += 1
+            generation = self._tls_generation
+            self._tls_last_result = "reloaded"
+            self._tls_last_error = None
+        sys.stderr.write(json.dumps({
+            "event": "runtime_tls_reload",
+            "result": "success",
+            "generation": generation,
+            "new_connections_only": True,
+        }, ensure_ascii=False) + "\n")
+        return True
+
+    def tls_status(self) -> dict:
+        with self._tls_lock:
+            return {
+                "enabled": self._tls_context is not None,
+                "generation": self._tls_generation,
+                "last_result": self._tls_last_result,
+                "last_error": self._tls_last_error,
+                "new_connections_only": True,
+            }
+
+    def get_request(self):
+        request, address = super().get_request()
+        with self._tls_lock:
+            context = self._tls_context
+        if context is None:
+            return request, address
+        try:
+            return context.wrap_socket(request, server_side=True), address
+        except BaseException:
+            request.close()
+            raise
 
     def process_request(self, request, client_address) -> None:
         # 在占用工作线程前设置有界等待，避免无期限的残缺头部或请求体占槽。
@@ -2633,6 +2710,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "loopback_only": True,
                     },
                     "authentication": self.authenticator is not None,
+                    "tls": self.server.tls_status(),  # type: ignore[attr-defined]
                     "authentication_mode": (
                         "api_key" if self.authenticator is not None
                         else "disabled_loopback"),
@@ -3055,8 +3133,7 @@ def make_server(host: str, port: int,
                          request_io_timeout_seconds=
                          request_io_timeout_seconds)
     if tls_baseline_config is not None:
-        context = prepare_server_context(tls_baseline_config, host)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.enable_tls(tls_baseline_config, host)
     server.tls_enabled = tls_baseline_config is not None  # type: ignore[attr-defined]
     server.provider = provider  # type: ignore[attr-defined]
     server.authenticator = authenticator  # type: ignore[attr-defined]
@@ -3315,11 +3392,36 @@ def main() -> int:
     scheme = "https" if args.tls_baseline_config is not None else "http"
     print(f"RemoteBSP Runtime API已启动：{scheme}://{display_host}:"
           f"{server.server_port}/api/{API_VERSION}（{auth_mode}）")
+    reload_requested = threading.Event()
+    reload_stopped = threading.Event()
+    reload_thread = None
+    previous_sighup_handler = None
+    if args.tls_baseline_config is not None and hasattr(signal, "SIGHUP"):
+        def reload_worker() -> None:
+            while not reload_stopped.is_set():
+                reload_requested.wait(0.5)
+                if not reload_requested.is_set():
+                    continue
+                reload_requested.clear()
+                if not reload_stopped.is_set():
+                    server.reload_tls()  # type: ignore[attr-defined]
+
+        previous_sighup_handler = signal.getsignal(signal.SIGHUP)
+        signal.signal(signal.SIGHUP, lambda *_: reload_requested.set())
+        reload_thread = threading.Thread(
+            target=reload_worker, name="runtime-tls-reload", daemon=True)
+        reload_thread.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        reload_stopped.set()
+        reload_requested.set()
+        if reload_thread is not None:
+            reload_thread.join(timeout=2.0)
+        if previous_sighup_handler is not None:
+            signal.signal(signal.SIGHUP, previous_sighup_handler)
         server.server_close()
     return 0
 

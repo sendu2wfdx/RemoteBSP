@@ -302,6 +302,21 @@ bool BusRuntime::observe_remote_result(
     return true;
 }
 
+bool BusRuntime::observe_confirmed_reset(
+    std::uint32_t node_id, std::uint32_t device_resource_id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const DeviceKey key{node_id, device_resource_id};
+    if (contracts_.find(key) == contracts_.end()) return false;
+    auto found = telemetry_.find(key);
+    if (found == telemetry_.end()) return true;
+    // 只有明确成功响应才清当前 poison；累计历史和峰值保留用于诊断。
+    found->second.last_remote_status_valid = false;
+    found->second.last_remote_status = protocol::BusTransactionStatus::Ok;
+    found->second.consecutive_remote_failures = 0U;
+    found->second.last_remote_result_time_us = clock_();
+    return true;
+}
+
 BusRuntime::Admission BusRuntime::admit(
     std::uint32_t node_id, std::uint32_t resource_id,
     protocol::BusResourceKind expected_kind, std::uint32_t timeout_us,
