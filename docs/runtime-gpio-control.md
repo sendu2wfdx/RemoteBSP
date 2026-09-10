@@ -35,9 +35,11 @@ GPIO 租约仍由 `POST /api/v1/control-leases` 申请，但 `command_group` 必
 
 稳定错误类别为：请求字段错误 `400/request_body_invalid`，权限或所有权错误
 `403/permission_denied`、`403/control_lease_not_owner`，租约不存在或在 daemon 换代后
-失效为 `404/control_lease_not_found`，范围冲突为 `409/control_lease_conflict`，控制后端
-或最终准入失败为 `503/gpio_control_unavailable` 或
-`503/control_lease_unavailable`。所有 HTTP 结果复用现有有界脱敏审计，仅记录认证键 ID、
+失效为 `404/control_lease_not_found`，范围冲突为 `409/control_lease_conflict`。下游结构化
+错误按稳定机器字段映射为 `409/control_target_rejected`、
+`502/control_protocol_incompatible`、`503/control_backend_unavailable` 或
+`504/control_deadline_exceeded`；错误详情只公开 `category`、`retryable` 和
+`possibly_committed`，不公开 daemon 消息。所有 HTTP 结果复用现有有界脱敏审计，仅记录认证键 ID、
 方法类别、`gpio_control`/`control_leases` 路径类别和结果码，不记录请求体、幂等键或电平。
 
 ## 调用顺序
@@ -51,6 +53,12 @@ GPIO 租约仍由 `POST /api/v1/control-leases` 申请，但 `command_group` 必
    隐式创建。请求还携带有界幂等键和目标电平。
 3. `runtime-control-release` 只允许登记时的所有者释放。v2 IPC 没有“代替他人撤销”
    字段，调用方不能通过自声明管理员标志越权。
+
+一次 HTTP 请求在读取头部前建立不可续期的单调绝对期限。请求体、daemon 身份单飞、目标
+快照、资源状态 fanout、`remote-cli` 子进程、登记、写入和释放都消费同一份剩余预算；任何
+层都不能重新获得完整超时。下游调用前耗尽期限表示确定未提交，可以回滚本次新租约；下游
+开始后才超时则返回 `retryable=false, possibly_committed=true`，不能据此直接重发。daemon
+已经返回的精确错误优先于事后期限，不能被笼统 504 覆盖。
 
 每次登记和写入前，`toolbusd` 都在当前节点 registry 中原子核对数字 node ID 与预期
 UUID，再从目标节点读取静态 `ResourceDescriptor` 与
@@ -100,7 +108,7 @@ v2 IPC 尚未提供持久化、抗篡改的 daemon 审计日志；HTTP 层虽然
 - 真实 CAN/CAN-FD、USB 或板卡验证；
 - 运动、PWM、SPI、I2C 和其他写资源；
 - 不可信本地多租户隔离，以及下游响应丢失后的跨进程 exactly-once 保证；
-- 可区分业务拒绝、目标错误和传输不确定性的结构化 IPC 错误。
+- 跨 daemon 重启可查询的持久化操作结果与 exactly-once 恢复。
 
 Runtime 根能力只在“回环监听、启用认证、使用 daemon 世代绑定租约管理器、Provider
 确认结构化 acquire/write/release 三个 IPC 均存在”时报告
@@ -116,8 +124,8 @@ daemon 身份变化、不可读或格式无效才全局失效。若 daemon 已�
 发现本地租约过期或世代变化，会用登记时的真实所有者做一次 best-effort 幂等释放，再以
 泛化 503 失败，响应不会回显 remote-cli stderr、套接字路径或底层异常文本。
 
-下一轮安全阻断项是补齐结构化 IPC 错误，并把 HTTP 解析、身份读取、
-目标解析、IPC 登记和写/关闭响应收敛为一个统一的
-端到端总 deadline，并定义“本地租约在远端命令执行期间跨过期”的 exactly-once 状态机；
-当前只保证已完成命令的 30 秒 daemon 幂等重放，不宣称跨过期或进程崩溃 exactly-once。
+结构化 IPC 错误和统一端到端 deadline 已完成；下一轮安全阻断项是实现
+[不确定提交恢复与操作结果账本](runtime-operation-ledger.md)，并定义“本地租约在远端命令
+执行期间跨过期”的 exactly-once 状态机。当前只保证已完成命令的 30 秒 daemon 内存幂等
+重放，不宣称跨过期或进程崩溃 exactly-once。
 daemon 审计的持久化、完整性保护和失败事件增强也仍是部署前置项。
