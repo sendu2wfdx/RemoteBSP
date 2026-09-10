@@ -1,9 +1,10 @@
 # Runtime PWM 控制边界
 
-> 当前实现状态（2026-09-11）：仅完成独立 PWM 持久操作账本的数据模型、
-> v1 读取兼容/v2 写入和单元测试。toolbusd 执行门、IPC、libremotebsp client、
-> remote-cli、Mock 进程级闭环与 HTTP 尚未接入；现阶段不存在可供调用方使用的
-> Runtime PWM 控制接口，不得把底层账本能力解释为端到端功能已完成。
+> 当前实现状态（2026-09-11）：独立 PWM 持久操作账本及 v1 读取兼容/v2 写入已经完成，
+> `toolbusd` Gate、daemon、IPC、`libremotebsp` client 与 `remote-cli` 已贯通 configure/stop。
+> 租约释放、过期和 daemon 关停按对象类型执行 `PWM_STOP`，不复用 GPIO close 语义。
+> Runtime HTTP、Studio 操作入口和从认证 HTTP 到 Mock 的三进程闭环尚未接入；本轮也没有
+> 新增实体 PWM 输出验收，因此仍不能宣称 Runtime/Studio PWM 端到端功能完成。
 
 ## 目标
 

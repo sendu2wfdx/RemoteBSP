@@ -29,6 +29,7 @@ enum class OperationKind : std::uint8_t {
     RuntimeGpioWrite = 1U,
     RuntimeControlRelease = 2U,
     RuntimePwmConfigure = 3U,
+    RuntimePwmStop = 4U,
 };
 
 enum class OperationState : std::uint8_t {
@@ -132,6 +133,17 @@ struct RuntimePwmConfigureOperation {
     bool active_low{};
 };
 
+struct RuntimePwmStopOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    OperationIdentity expected_node_uuid{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+};
+
 struct OperationTerminalResult {
     OperationTerminalResult() = default;
     OperationTerminalResult(std::optional<std::uint32_t> object,
@@ -223,6 +235,8 @@ public:
         const RuntimeControlReleaseOperation& operation);
     static OperationDigest derive_operation_id(
         const RuntimePwmConfigureOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimePwmStopOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_request_digest(
@@ -230,6 +244,8 @@ public:
         const ServerResolvedLease& lease);
     static OperationDigest derive_request_digest(
         const RuntimePwmConfigureOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimePwmStopOperation& operation);
 
     OperationBeginResult begin_gpio_write(
         const RuntimeGpioWriteOperation& operation);
@@ -238,6 +254,8 @@ public:
         const ServerResolvedLease& server_resolved_lease);
     OperationBeginResult begin_pwm_configure(
         const RuntimePwmConfigureOperation& operation);
+    OperationBeginResult begin_pwm_stop(
+        const RuntimePwmStopOperation& operation);
 
     OperationRecord finish(const OperationDigest& operation_id,
                            const OperationDigest& request_digest,

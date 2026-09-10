@@ -65,10 +65,20 @@ struct RuntimeGpioWriteResult {
     bool replayed{};
 };
 
+struct RuntimePwmResult {
+    std::uint32_t object_id{};
+    std::uint32_t frequency_hz{};
+    std::uint16_t duty{};
+    bool active_low{};
+    bool replayed{};
+};
+
 enum class RuntimeOperationKind : std::uint8_t {
     Unknown = 0U,
     GpioWrite = 1U,
     ControlRelease = 2U,
+    PwmConfigure = 3U,
+    PwmStop = 4U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -108,6 +118,9 @@ struct RuntimeOperationOutcome {
     bool replayed{};
     std::optional<std::uint32_t> object_id;
     std::optional<bool> value;
+    std::optional<std::uint32_t> frequency_hz;
+    std::optional<std::uint16_t> duty;
+    std::optional<bool> active_low;
     std::optional<RuntimeOperationError> error;
 };
 
@@ -327,7 +340,7 @@ public:
         const std::array<std::uint8_t, 16>& lease_id,
         const std::array<std::uint8_t, 16>& expected_node_uuid,
         const std::string& owner_key_id, std::uint32_t resource_id,
-        std::uint32_t ttl_ms) const;
+        std::uint32_t ttl_ms, std::uint16_t permissions = 0x0001U) const;
     RuntimeGpioWriteResult runtime_gpio_write(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
@@ -348,6 +361,19 @@ public:
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
         const std::string& owner_key_id) const;
+    RuntimeOperationOutcome runtime_pwm_configure_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key, std::uint32_t frequency_hz,
+        std::uint16_t duty, bool active_low) const;
+    RuntimeOperationOutcome runtime_pwm_stop_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        const std::string& owner_key_id, std::uint32_t resource_id,
+        const std::string& idempotency_key) const;
     RuntimeOperationOutcome runtime_operation_status(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::string& owner_key_id,

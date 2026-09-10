@@ -1586,6 +1586,179 @@ void check_release_readonly_resolution_tracks_lease_lifecycle() {
     });
 }
 
+void check_pwm_configure_stop_and_typed_cleanup() {
+    std::uint64_t now = 1000000000ULL;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 0x81U; lease[0] = 0x82U;
+    toolbusd::RuntimePwmConfigureRequest command;
+    command.daemon_instance_id = daemon;
+    command.lease_id = lease;
+    command.expected_node_uuid[0] = 0x83U;
+    command.owner_key_id = "pwm-operator";
+    command.node_id = 4U;
+    command.resource_id = 0x06000001U;
+    command.idempotency_key = "pwm-configure-1";
+    command.frequency_hz = 20000U;
+    command.duty = 2500U;
+    toolbusd::RuntimeControlAcquireRequest acquire;
+    acquire.daemon_instance_id = daemon;
+    acquire.lease_id = lease;
+    acquire.expected_node_uuid = command.expected_node_uuid;
+    acquire.owner_key_id = command.owner_key_id;
+    acquire.permissions = toolbusd::kRuntimePermissionPwmWrite;
+    acquire.node_id = command.node_id;
+    acquire.resource_id = command.resource_id;
+    acquire.ttl_ms = 1000U;
+    auto pwm_descriptor = protocol::ResourceDescriptor{
+        command.resource_id, protocol::ResourceType::Pwm, 1U,
+        protocol::kResourceFlagNative, 0U, 0U};
+    auto pwm_contract = contract(command.resource_id);
+    gate.acquire(acquire, daemon, 7U, pwm_descriptor, pwm_contract);
+    std::uint32_t creates = 0U, stops = 0U;
+    toolbusd::RuntimeControlGate::PwmIo io{
+        [&](std::uint32_t frequency, std::uint16_t duty, bool active_low) {
+            ++creates; assert(frequency == 20000U); assert(duty == 2500U);
+            assert(!active_low); return 91U;
+        },
+        [&](std::uint32_t node, std::uint64_t generation,
+            const std::array<std::uint8_t, 16>& uuid,
+            std::uint32_t object) {
+            ++stops; assert(node == 4U); assert(generation == 7U);
+            assert(uuid == command.expected_node_uuid); assert(object == 91U);
+        }};
+    const auto configured = gate.pwm_configure(
+        command, daemon, 7U, pwm_descriptor, pwm_contract, io);
+    assert(configured.object_id == 91U && creates == 1U);
+    assert(gate.pwm_configure(command, daemon, 7U, pwm_descriptor,
+                              pwm_contract, io).replayed);
+    assert(creates == 1U);
+    auto wrong_permission = command;
+    wrong_permission.permissions = toolbusd::kRuntimePermissionGpioWrite;
+    expect_error(toolbusd::RuntimeControlError::PermissionDenied, [&] {
+        static_cast<void>(gate.pwm_configure(
+            wrong_permission, daemon, 7U, pwm_descriptor, pwm_contract, io));
+    });
+    toolbusd::RuntimePwmStopRequest stop;
+    static_cast<toolbusd::RuntimePwmConfigureRequest&>(stop) = command;
+    stop.idempotency_key = "pwm-stop-1";
+    const auto stopped = gate.pwm_stop(
+        stop, daemon, 7U, pwm_descriptor, pwm_contract, io);
+    assert(stopped.object_id == 91U && stopped.frequency_hz == 20000U);
+    assert(stops == 1U);
+    assert(gate.pwm_stop(stop, daemon, 7U, pwm_descriptor,
+                         pwm_contract, io).replayed);
+    assert(stops == 1U);
+
+    command.idempotency_key = "pwm-configure-2";
+    gate.pwm_configure(command, daemon, 7U, pwm_descriptor, pwm_contract, io);
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon; release.lease_id = lease;
+    release.owner_key_id = command.owner_key_id;
+    gate.release(release, daemon);
+    assert(stops == 2U);
+    assert(gate.shutdown() == 0U);
+}
+
+void check_pwm_failed_stop_retains_retryable_object() {
+    toolbusd::RuntimeControlGate gate(4U, [] { return 1000000000ULL; }, false);
+    std::array<std::uint8_t, 16> daemon{}, lease{};
+    daemon[0] = 0x91U; lease[0] = 0x92U;
+    toolbusd::RuntimePwmConfigureRequest command;
+    command.daemon_instance_id = daemon; command.lease_id = lease;
+    command.expected_node_uuid[0] = 0x93U; command.owner_key_id = "pwm-retry";
+    command.node_id = 5U; command.resource_id = 0x06000002U;
+    command.idempotency_key = "configure-terminal-fail";
+    command.frequency_hz = 1000U; command.duty = 5000U;
+    toolbusd::RuntimeControlAcquireRequest acquire;
+    acquire.daemon_instance_id = daemon; acquire.lease_id = lease;
+    acquire.expected_node_uuid = command.expected_node_uuid;
+    acquire.owner_key_id = command.owner_key_id;
+    acquire.permissions = toolbusd::kRuntimePermissionPwmWrite;
+    acquire.node_id = command.node_id; acquire.resource_id = command.resource_id;
+    acquire.ttl_ms = 1000U;
+    const protocol::ResourceDescriptor pwm_descriptor{
+        command.resource_id, protocol::ResourceType::Pwm, 2U,
+        protocol::kResourceFlagNative, 0U, 0U};
+    const auto pwm_contract = contract(command.resource_id);
+    gate.acquire(acquire, daemon, 9U, pwm_descriptor, pwm_contract);
+    std::uint32_t stop_calls = 0U;
+    toolbusd::RuntimeControlGate::PwmIo io{
+        [](std::uint32_t, std::uint16_t, bool) { return 101U; },
+        [&](std::uint32_t, std::uint64_t,
+            const std::array<std::uint8_t, 16>&, std::uint32_t object_id) {
+            assert(object_id == 101U);
+            if (++stop_calls == 1U)
+                throw std::runtime_error("模拟 PWM_STOP 未确认");
+        }};
+    expect_error(toolbusd::RuntimeControlError::SafeStopFailed, [&] {
+        gate.pwm_configure(
+            command, daemon, 9U, pwm_descriptor, pwm_contract, io,
+            {[] {}, [](const toolbusd::RuntimePwmResult&) {
+                 throw toolbusd::RuntimeControlException(
+                     toolbusd::RuntimeControlError::SafeStopFailed,
+                     "模拟 terminal 持久化失败");
+             }, [](toolbusd::RuntimeControlGate::DurableRecovery recovery,
+                   toolbusd::RuntimeControlError) {
+                 assert(recovery == toolbusd::RuntimeControlGate::DurableRecovery::ScopeBlocked);
+             }});
+    });
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon; release.lease_id = lease;
+    release.owner_key_id = command.owner_key_id;
+    gate.release(release, daemon);
+    assert(stop_calls == 2U);
+    assert(gate.shutdown() == 0U);
+}
+
+void check_pwm_old_stop_then_precreate_expiry_is_safe_closed() {
+    std::uint64_t now = 1000000000ULL;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{}, lease{};
+    daemon[0] = 0xa1U; lease[0] = 0xa2U;
+    toolbusd::RuntimePwmConfigureRequest command;
+    command.daemon_instance_id = daemon; command.lease_id = lease;
+    command.expected_node_uuid[0] = 0xa3U; command.owner_key_id = "pwm-expiry";
+    command.node_id = 6U; command.resource_id = 0x06000003U;
+    command.idempotency_key = "first"; command.frequency_hz = 2000U;
+    command.duty = 4000U;
+    toolbusd::RuntimeControlAcquireRequest acquire;
+    acquire.daemon_instance_id = daemon; acquire.lease_id = lease;
+    acquire.expected_node_uuid = command.expected_node_uuid;
+    acquire.owner_key_id = command.owner_key_id;
+    acquire.permissions = toolbusd::kRuntimePermissionPwmWrite;
+    acquire.node_id = command.node_id; acquire.resource_id = command.resource_id;
+    acquire.ttl_ms = 10U;
+    const protocol::ResourceDescriptor pwm_descriptor{
+        command.resource_id, protocol::ResourceType::Pwm, 3U,
+        protocol::kResourceFlagNative, 0U, 0U};
+    const auto pwm_contract = contract(command.resource_id);
+    gate.acquire(acquire, daemon, 11U, pwm_descriptor, pwm_contract);
+    bool expire_during_stop = false;
+    std::uint32_t create_calls = 0U;
+    toolbusd::RuntimeControlGate::PwmIo io{
+        [&](std::uint32_t, std::uint16_t, bool) { ++create_calls; return 111U; },
+        [&](std::uint32_t, std::uint64_t,
+            const std::array<std::uint8_t, 16>&, std::uint32_t) {
+            if (expire_during_stop) now += 20000000ULL;
+        }};
+    gate.pwm_configure(command, daemon, 11U, pwm_descriptor, pwm_contract, io);
+    expire_during_stop = true;
+    command.idempotency_key = "replacement";
+    expect_error(toolbusd::RuntimeControlError::LeaseExpired, [&] {
+        static_cast<void>(gate.pwm_configure(
+            command, daemon, 11U, pwm_descriptor, pwm_contract, io));
+    });
+    assert(create_calls == 1U);
+    assert(gate.reap_expired() == 0U);
+    auto replacement = acquire;
+    replacement.lease_id[0] = 0xa4U;
+    replacement.ttl_ms = 1000U;
+    gate.acquire(replacement, daemon, 11U, pwm_descriptor, pwm_contract);
+    assert(gate.shutdown() == 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -1615,4 +1788,7 @@ int main() {
     check_gpio_terminal_sync_failure_forces_safe_cleanup();
     check_release_durability_uses_server_scope_and_reserves_it();
     check_release_readonly_resolution_tracks_lease_lifecycle();
+    check_pwm_configure_stop_and_typed_cleanup();
+    check_pwm_failed_stop_retains_retryable_object();
+    check_pwm_old_stop_then_precreate_expiry_is_safe_closed();
 }

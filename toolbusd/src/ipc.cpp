@@ -28,12 +28,15 @@ constexpr std::size_t kDaemonIdentitySize = 20U;
 constexpr std::size_t kHealthSnapshotHeaderSize = 24U;
 constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
 constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
+constexpr std::size_t kRuntimePwmRequestHeaderSize = 70U;
+constexpr std::size_t kRuntimePwmStopRequestHeaderSize = 64U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
 constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
 constexpr std::size_t kIpcErrorEnvelopeHeaderSize = 12U;
 constexpr std::size_t kRuntimeOperationQueryHeaderSize = 56U;
 constexpr std::size_t kRuntimeOperationLookupHeaderSize = 44U;
 constexpr std::size_t kRuntimeOperationOutcomeSize = 88U;
+constexpr std::size_t kRuntimePwmOperationOutcomeSize = 96U;
 constexpr std::size_t kMaximumLogicalRecordingNameBytes = 128U;
 
 void append_u16(std::vector<std::uint8_t>& output, std::uint16_t value) {
@@ -231,7 +234,9 @@ bool valid_operation_text(const std::string& value, std::size_t maximum,
 
 bool valid_operation_kind(RuntimeOperationKind kind) noexcept {
     return kind == RuntimeOperationKind::GpioWrite ||
-           kind == RuntimeOperationKind::ControlRelease;
+           kind == RuntimeOperationKind::ControlRelease ||
+           kind == RuntimeOperationKind::PwmConfigure ||
+           kind == RuntimeOperationKind::PwmStop;
 }
 
 bool valid_operation_error(RuntimeOperationError error) noexcept {
@@ -269,9 +274,14 @@ bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
             return outcome.recovery == RuntimeOperationRecovery::None &&
                    has_scope && !has_result && !has_error && !outcome.value;
         case RuntimeOperationState::Committed:
-            if (outcome.kind == RuntimeOperationKind::GpioWrite) {
+            if (outcome.kind == RuntimeOperationKind::GpioWrite ||
+                outcome.kind == RuntimeOperationKind::PwmConfigure) {
                 return outcome.recovery == RuntimeOperationRecovery::None &&
                        has_scope && has_result && !has_error;
+            }
+            if (outcome.kind == RuntimeOperationKind::PwmStop) {
+                return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
+                       has_scope && has_result && !has_error && !outcome.value;
             }
             return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
                    has_scope && !has_result && !has_error && !outcome.value;
@@ -602,6 +612,28 @@ IpcRequest read_ipc_request(int socket) {
         }
         return request;
     }
+    if (kind == IpcRequestKind::RuntimePwmConfigureOperation) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_pwm_configure = decode_ipc_runtime_pwm_request(
+                {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimePwmStopOperation) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_pwm_stop = decode_ipc_runtime_pwm_stop_request(
+                {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
     if (kind == IpcRequestKind::RuntimeOperationQuery) {
         IpcRequest request;
         request.kind = kind;
@@ -718,6 +750,22 @@ void write_ipc_runtime_control_release_operation_request(
         body.begin(),
         static_cast<std::uint8_t>(
             IpcRequestKind::RuntimeControlReleaseOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_pwm_configure_operation_request(
+    int socket, const RuntimePwmConfigureRequest& request) {
+    auto body = encode_ipc_runtime_pwm_request(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimePwmConfigureOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_pwm_stop_operation_request(
+    int socket, const RuntimePwmStopRequest& request) {
+    auto body = encode_ipc_runtime_pwm_stop_request(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimePwmStopOperation));
     send_body(socket, body);
 }
 
@@ -1699,6 +1747,119 @@ RuntimeGpioWriteRequest decode_ipc_runtime_gpio_write(
     return request;
 }
 
+std::vector<std::uint8_t> encode_ipc_runtime_pwm_request(
+    const RuntimePwmConfigureRequest& request) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes ||
+        request.idempotency_key.empty() ||
+        request.idempotency_key.size() > kMaximumRuntimeControlIdempotencyBytes ||
+        request.frequency_hz == 0U || request.duty > 10000U) {
+        throw IpcException("Runtime PWM IPC 字段无效或超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimePwmRequestHeaderSize + request.owner_key_id.size() +
+                 request.idempotency_key.size());
+    append_u16(body, request.version);
+    append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(), request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.expected_node_uuid.begin(), request.expected_node_uuid.end());
+    append_u32(body, request.node_id);
+    append_u32(body, request.resource_id);
+    append_u32(body, request.frequency_hz);
+    append_u16(body, request.duty);
+    body.push_back(request.active_low ? 1U : 0U);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(request.idempotency_key.size()));
+    body.push_back(0U);
+    body.insert(body.end(), request.owner_key_id.begin(), request.owner_key_id.end());
+    body.insert(body.end(), request.idempotency_key.begin(), request.idempotency_key.end());
+    return body;
+}
+
+RuntimePwmConfigureRequest decode_ipc_runtime_pwm_request(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimePwmRequestHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion ||
+        get_u32(body.data() + 60U) == 0U || get_u16(body.data() + 64U) > 10000U ||
+        body[66U] > 1U || body[69U] != 0U) {
+        throw IpcException("Runtime PWM IPC 版本、长度或数值无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[67U]);
+    const auto idempotency_length = static_cast<std::size_t>(body[68U]);
+    if (owner_length == 0U || owner_length > kMaximumRuntimeControlIdentityBytes ||
+        idempotency_length == 0U || idempotency_length > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != kRuntimePwmRequestHeaderSize + owner_length + idempotency_length) {
+        throw IpcException("Runtime PWM IPC 字符串长度无效");
+    }
+    RuntimePwmConfigureRequest request;
+    request.version = get_u16(body.data());
+    request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin() + 4U, 16U, request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, 16U, request.lease_id.begin());
+    std::copy_n(body.begin() + 36U, 16U, request.expected_node_uuid.begin());
+    request.node_id = get_u32(body.data() + 52U);
+    request.resource_id = get_u32(body.data() + 56U);
+    request.frequency_hz = get_u32(body.data() + 60U);
+    request.duty = get_u16(body.data() + 64U);
+    request.active_low = body[66U] != 0U;
+    request.owner_key_id.assign(body.begin() + 70U, body.begin() + 70U + owner_length);
+    request.idempotency_key.assign(body.begin() + 70U + owner_length, body.end());
+    return request;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_pwm_stop_request(
+    const RuntimePwmStopRequest& request) {
+    if (request.version != kRuntimeControlIpcVersion || request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes ||
+        request.idempotency_key.empty() ||
+        request.idempotency_key.size() > kMaximumRuntimeControlIdempotencyBytes) {
+        throw IpcException("Runtime PWM_STOP IPC 字段无效或超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kRuntimePwmStopRequestHeaderSize + request.owner_key_id.size() + request.idempotency_key.size());
+    append_u16(body, request.version);
+    append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(), request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.expected_node_uuid.begin(), request.expected_node_uuid.end());
+    append_u32(body, request.node_id);
+    append_u32(body, request.resource_id);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(request.idempotency_key.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), request.owner_key_id.begin(), request.owner_key_id.end());
+    body.insert(body.end(), request.idempotency_key.begin(), request.idempotency_key.end());
+    return body;
+}
+
+RuntimePwmStopRequest decode_ipc_runtime_pwm_stop_request(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kRuntimePwmStopRequestHeaderSize ||
+        get_u16(body.data()) != kRuntimeControlIpcVersion || get_u16(body.data() + 62U) != 0U) {
+        throw IpcException("Runtime PWM_STOP IPC 版本、长度或保留位无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[60U]);
+    const auto idempotency_length = static_cast<std::size_t>(body[61U]);
+    if (owner_length == 0U || owner_length > kMaximumRuntimeControlIdentityBytes ||
+        idempotency_length == 0U || idempotency_length > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != kRuntimePwmStopRequestHeaderSize + owner_length + idempotency_length) {
+        throw IpcException("Runtime PWM_STOP IPC 字符串长度无效");
+    }
+    RuntimePwmStopRequest request;
+    request.version = get_u16(body.data());
+    request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin() + 4U, 16U, request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, 16U, request.lease_id.begin());
+    std::copy_n(body.begin() + 36U, 16U, request.expected_node_uuid.begin());
+    request.node_id = get_u32(body.data() + 52U);
+    request.resource_id = get_u32(body.data() + 56U);
+    request.owner_key_id.assign(body.begin() + 64U, body.begin() + 64U + owner_length);
+    request.idempotency_key.assign(body.begin() + 64U + owner_length, body.end());
+    return request;
+}
+
 std::vector<std::uint8_t> encode_ipc_runtime_control_release(
     const RuntimeControlReleaseRequest& request) {
     if (request.version != kRuntimeControlIpcVersion ||
@@ -1913,10 +2074,14 @@ std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
     const bool has_result = outcome.object_id != 0U;
     const bool has_error = outcome.error != RuntimeOperationError::None;
     std::vector<std::uint8_t> body;
-    body.reserve(kRuntimeOperationOutcomeSize);
+    const bool pwm = outcome.kind == RuntimeOperationKind::PwmConfigure ||
+                     outcome.kind == RuntimeOperationKind::PwmStop;
+    const auto encoded_size = pwm ? kRuntimePwmOperationOutcomeSize
+                                  : kRuntimeOperationOutcomeSize;
+    body.reserve(encoded_size);
     append_u16(body, outcome.version);
     append_u16(body, static_cast<std::uint16_t>(
-                         kRuntimeOperationOutcomeSize));
+                         encoded_size));
     body.push_back(static_cast<std::uint8_t>(outcome.kind));
     body.push_back(static_cast<std::uint8_t>(outcome.state));
     body.push_back(static_cast<std::uint8_t>(outcome.recovery));
@@ -1932,18 +2097,25 @@ std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
     append_u32(body, outcome.object_id);
     append_u16(body, static_cast<std::uint16_t>(outcome.error));
     body.push_back(outcome.value ? 1U : 0U);
-    body.insert(body.end(), 5U, 0U);
+    if (pwm) {
+        append_u32(body, outcome.frequency_hz);
+        append_u16(body, outcome.duty);
+        body.push_back(outcome.active_low ? 1U : 0U);
+        body.push_back(0U);
+        body.insert(body.end(), 5U, 0U);
+    } else {
+        body.insert(body.end(), 5U, 0U);
+    }
     return body;
 }
 
 RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
     const std::vector<std::uint8_t>& body) {
-    if (body.size() != kRuntimeOperationOutcomeSize ||
+    if ((body.size() != kRuntimeOperationOutcomeSize &&
+         body.size() != kRuntimePwmOperationOutcomeSize) ||
         get_u16(body.data()) != kRuntimeOperationIpcVersion ||
-        get_u16(body.data() + 2U) != kRuntimeOperationOutcomeSize ||
-        (body[7U] & ~0x07U) != 0U || body[82U] > 1U ||
-        std::any_of(body.begin() + 83U, body.end(),
-                    [](std::uint8_t byte) { return byte != 0U; })) {
+        get_u16(body.data() + 2U) != body.size() ||
+        (body[7U] & ~0x07U) != 0U || body[82U] > 1U) {
         throw IpcException("Runtime 操作结果版本、长度或保留位无效");
     }
     RuntimeOperationOutcome outcome;
@@ -1962,6 +2134,16 @@ RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
     outcome.error = static_cast<RuntimeOperationError>(
         get_u16(body.data() + 80U));
     outcome.value = body[82U] != 0U;
+    if (body.size() == kRuntimePwmOperationOutcomeSize) {
+        if (body[89U] > 1U || body[90U] != 0U ||
+            std::any_of(body.begin() + 91U, body.end(), [](std::uint8_t byte) { return byte != 0U; }))
+            throw IpcException("Runtime PWM 操作结果保留位无效");
+        outcome.frequency_hz = get_u32(body.data() + 83U);
+        outcome.duty = get_u16(body.data() + 87U);
+        outcome.active_low = body[89U] != 0U;
+    } else if (std::any_of(body.begin() + 83U, body.end(), [](std::uint8_t byte) { return byte != 0U; })) {
+        throw IpcException("Runtime 操作结果保留位无效");
+    }
     const bool encoded_result = (body[7U] & 0x02U) != 0U;
     const bool encoded_error = (body[7U] & 0x04U) != 0U;
     if (encoded_result != (outcome.object_id != 0U) ||
@@ -1977,6 +2159,8 @@ const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept {
         case RuntimeOperationKind::Unknown: return "unknown";
         case RuntimeOperationKind::GpioWrite: return "gpio_write";
         case RuntimeOperationKind::ControlRelease: return "control_release";
+        case RuntimeOperationKind::PwmConfigure: return "pwm_configure";
+        case RuntimeOperationKind::PwmStop: return "pwm_stop";
     }
     return "unknown";
 }

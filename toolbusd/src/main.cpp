@@ -1,5 +1,6 @@
 #include "remotebsp/protocol/fragmentation.hpp"
 #include "remotebsp/protocol/gpio.hpp"
+#include "remotebsp/protocol/waveform.hpp"
 #include "remotebsp/toolbusd/bus_runtime.hpp"
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/health_producer.hpp"
@@ -48,6 +49,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -161,6 +163,8 @@ bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
            kind == Kind::RuntimeControlRelease ||
            kind == Kind::RuntimeGpioWriteOperation ||
            kind == Kind::RuntimeControlReleaseOperation ||
+           kind == Kind::RuntimePwmConfigureOperation ||
+           kind == Kind::RuntimePwmStopOperation ||
            kind == Kind::RuntimeOperationQuery ||
            kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
@@ -279,9 +283,12 @@ remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
     using IpcState = remotebsp::toolbusd::RuntimeOperationState;
 
     remotebsp::toolbusd::RuntimeOperationOutcome outcome;
-    outcome.kind = record.kind == LedgerKind::RuntimeGpioWrite
-                       ? IpcKind::GpioWrite
-                       : IpcKind::ControlRelease;
+    switch (record.kind) {
+        case LedgerKind::RuntimeGpioWrite: outcome.kind = IpcKind::GpioWrite; break;
+        case LedgerKind::RuntimeControlRelease: outcome.kind = IpcKind::ControlRelease; break;
+        case LedgerKind::RuntimePwmConfigure: outcome.kind = IpcKind::PwmConfigure; break;
+        case LedgerKind::RuntimePwmStop: outcome.kind = IpcKind::PwmStop; break;
+    }
     switch (record.state) {
         case LedgerState::Pending: outcome.state = IpcState::Pending; break;
         case LedgerState::Committed:
@@ -311,6 +318,12 @@ remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
     if (record.state == LedgerState::Committed &&
         record.kind == LedgerKind::RuntimeGpioWrite) {
         outcome.value = record.result.value.value_or(false);
+    }
+    if (record.state == LedgerState::Committed &&
+        record.kind == LedgerKind::RuntimePwmConfigure) {
+        outcome.frequency_hz = record.result.frequency_hz.value_or(0U);
+        outcome.duty = record.result.duty.value_or(0U);
+        outcome.active_low = record.result.active_low.value_or(false);
     }
     switch (record.result.stable_error_code) {
         case 0U: outcome.error = IpcError::None; break;
@@ -1531,6 +1544,205 @@ private:
         }
     }
 
+    template <typename Request>
+    std::tuple<std::uint64_t, remotebsp::protocol::ResourceDescriptor,
+               remotebsp::protocol::ResourceContract>
+    resolve_runtime_pwm(const Request& request,
+                        std::chrono::steady_clock::time_point deadline) {
+        std::uint64_t generation{};
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr || !node->online || !node->assigned ||
+                request.node_id > kMaximumNodeId ||
+                node->identity.uuid != request.expected_node_uuid) {
+                throw std::runtime_error("Runtime PWM 目标节点尚未发现或已经离线");
+            }
+            generation = bus_node_generations_[request.node_id];
+        }
+        const auto descriptor = remotebsp::protocol::decode_resource_descriptor(
+            request_snapshot_resource(request.node_id,
+                remotebsp::protocol::Command::ResourceDescribe,
+                remotebsp::protocol::encode_resource_id(request.resource_id), deadline));
+        const auto contract = remotebsp::protocol::decode_resource_contract(
+            request_snapshot_resource(request.node_id,
+                remotebsp::protocol::Command::ResourceContract,
+                remotebsp::protocol::encode_resource_id(request.resource_id), deadline));
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr || node->identity.uuid != request.expected_node_uuid ||
+                bus_node_generations_[request.node_id] != generation) {
+                throw std::runtime_error("Runtime PWM 合同查询期间节点代次变化");
+            }
+        }
+        return {generation, descriptor, contract};
+    }
+
+    remotebsp::toolbusd::RuntimeControlGate::PwmIo pwm_io(
+        const remotebsp::toolbusd::RuntimePwmConfigureRequest& request,
+        std::uint64_t generation,
+        const remotebsp::protocol::ResourceDescriptor& descriptor,
+        std::chrono::steady_clock::time_point deadline) {
+        return {
+            [&, this](std::uint32_t frequency_hz, std::uint16_t duty, bool active_low) {
+                const auto response = request_runtime_control_packet(
+                    request.node_id, generation, request.expected_node_uuid,
+                    remotebsp::protocol::Command::PwmCreate,
+                    remotebsp::protocol::encode_pwm_create(
+                        {static_cast<std::uint8_t>(descriptor.instance),
+                         frequency_hz, duty, active_low}),
+                    0U, deadline);
+                if (response.header.object_id == 0U) {
+                    throw RuntimeTargetException(
+                        remotebsp::toolbusd::IpcErrorCode::BackendUnavailable,
+                        true, "Runtime PWM_CREATE 已响应但对象 ID 无效，提交状态未知");
+                }
+                return response.header.object_id;
+            },
+            [this](std::uint32_t node_id, std::uint64_t node_generation,
+                   const std::array<std::uint8_t, 16>& uuid, std::uint32_t object_id) {
+                const auto stop_deadline = std::chrono::steady_clock::now() +
+                                           std::chrono::milliseconds(1800);
+                static_cast<void>(request_runtime_control_packet(
+                    node_id, node_generation, uuid,
+                    remotebsp::protocol::Command::PwmStop, {}, object_id,
+                    stop_deadline));
+            }};
+    }
+
+    remotebsp::toolbusd::RuntimePwmResult runtime_pwm_configure(
+        const remotebsp::toolbusd::RuntimePwmConfigureRequest& request,
+        const remotebsp::toolbusd::RuntimeControlGate::PwmDurability& durability) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+        auto [generation, descriptor, contract] = resolve_runtime_pwm(request, deadline);
+        return runtime_control_.pwm_configure(request, daemon_instance_id_, generation,
+            descriptor, contract, pwm_io(request, generation, descriptor, deadline), durability);
+    }
+
+    remotebsp::toolbusd::RuntimePwmResult runtime_pwm_stop(
+        const remotebsp::toolbusd::RuntimePwmStopRequest& request,
+        const remotebsp::toolbusd::RuntimeControlGate::PwmDurability& durability) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+        auto [generation, descriptor, contract] = resolve_runtime_pwm(request, deadline);
+        remotebsp::toolbusd::RuntimePwmConfigureRequest io_request;
+        io_request.node_id = request.node_id;
+        io_request.expected_node_uuid = request.expected_node_uuid;
+        return runtime_control_.pwm_stop(request, daemon_instance_id_, generation,
+            descriptor, contract, pwm_io(io_request, generation, descriptor, deadline), durability);
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_pwm_configure_operation(
+        const remotebsp::toolbusd::RuntimePwmConfigureRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimePwmConfigureOperation operation{
+            request.daemon_instance_id, request.lease_id, request.expected_node_uuid,
+            request.owner_key_id, request.idempotency_key, request.permissions,
+            request.node_id, request.resource_id, request.frequency_hz,
+            request.duty, request.active_low};
+        const auto operation_id = OperationLedger::derive_operation_id(operation);
+        const auto digest = OperationLedger::derive_request_digest(operation);
+        const auto old = operation_ledger_.lookup(operation_id, request.owner_key_id);
+        if (old.disposition == OperationLookupDisposition::Found) {
+            if (old.record->request_digest != digest) throw OperationLedgerException(
+                OperationLedgerError::IdempotencyConflict, "相同 PWM configure selector 绑定了不同配置");
+            return operation_outcome(*old.record, true);
+        }
+        std::optional<OperationBeginResult> begun;
+        std::optional<OperationRecord> terminal;
+        const auto finish = [&](OperationState state, OperationRecovery recovery,
+                                const OperationTerminalResult& result) {
+            try {
+                std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                return operation_ledger_.finish(begun->record.operation_id,
+                    begun->record.request_digest, state, recovery, result);
+            } catch (const OperationLedgerException& error) {
+                throw OperationLedgerAfterPendingException(error.what());
+            }
+        };
+        try {
+            static_cast<void>(runtime_pwm_configure(request, {
+                [&] { std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                    begun = operation_ledger_.begin_pwm_configure(operation);
+                    if (begun->disposition != OperationBeginDisposition::StartedDurablePending)
+                        throw OperationReplayException{}; },
+                [&](const RuntimePwmResult& result) {
+                    OperationTerminalResult durable;
+                    durable.object_id = result.object_id;
+                    durable.frequency_hz = result.frequency_hz;
+                    durable.duty = result.duty;
+                    durable.active_low = result.active_low;
+                    terminal = finish(OperationState::Committed, OperationRecovery::None, durable); },
+                [&](RuntimeControlGate::DurableRecovery recovery, RuntimeControlError) {
+                    terminal = finish(recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                        ? OperationState::Rejected : OperationState::Unknown,
+                        recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                        ? OperationRecovery::SafeClosed : OperationRecovery::ScopeBlocked,
+                        {std::nullopt, std::nullopt, static_cast<std::uint16_t>(RuntimeOperationError::Backend)}); }}));
+            if (!terminal) throw std::logic_error("PWM configure 未形成持久终态");
+            return operation_outcome(*terminal, false);
+        } catch (const OperationReplayException&) {
+            return operation_outcome(begun->record, true);
+        } catch (const OperationLedgerAfterPendingException&) { throw; }
+        catch (...) {
+            if (!begun) throw;
+            if (!terminal) terminal = finish(OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt, static_cast<std::uint16_t>(RuntimeOperationError::Backend)});
+            return operation_outcome(*terminal, false);
+        }
+    }
+
+    remotebsp::toolbusd::RuntimeOperationOutcome runtime_pwm_stop_operation(
+        const remotebsp::toolbusd::RuntimePwmStopRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimePwmStopOperation operation{request.daemon_instance_id, request.lease_id,
+            request.expected_node_uuid, request.owner_key_id, request.idempotency_key,
+            request.permissions, request.node_id, request.resource_id};
+        const auto operation_id = OperationLedger::derive_operation_id(operation);
+        const auto digest = OperationLedger::derive_request_digest(operation);
+        const auto old = operation_ledger_.lookup(operation_id, request.owner_key_id);
+        if (old.disposition == OperationLookupDisposition::Found) {
+            if (old.record->request_digest != digest) throw OperationLedgerException(
+                OperationLedgerError::IdempotencyConflict, "相同 PWM stop selector 绑定了不同请求");
+            return operation_outcome(*old.record, true);
+        }
+        std::optional<OperationBeginResult> begun;
+        std::optional<OperationRecord> terminal;
+        const auto finish = [&](OperationState state, OperationRecovery recovery,
+                                const OperationTerminalResult& result) {
+            try { std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                return operation_ledger_.finish(begun->record.operation_id,
+                    begun->record.request_digest, state, recovery, result);
+            } catch (const OperationLedgerException& error) {
+                throw OperationLedgerAfterPendingException(error.what()); }
+        };
+        try {
+            static_cast<void>(runtime_pwm_stop(request, {
+                [&] { std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+                    begun = operation_ledger_.begin_pwm_stop(operation);
+                    if (begun->disposition != OperationBeginDisposition::StartedDurablePending)
+                        throw OperationReplayException{}; },
+                [&](const RuntimePwmResult& result) { OperationTerminalResult durable;
+                    durable.object_id = result.object_id;
+                    terminal = finish(OperationState::Committed, OperationRecovery::SafeClosed, durable); },
+                [&](RuntimeControlGate::DurableRecovery recovery, RuntimeControlError) {
+                    terminal = finish(recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                        ? OperationState::Rejected : OperationState::Unknown,
+                        recovery == RuntimeControlGate::DurableRecovery::SafeClosed
+                        ? OperationRecovery::SafeClosed : OperationRecovery::ScopeBlocked,
+                        {std::nullopt, std::nullopt, static_cast<std::uint16_t>(RuntimeOperationError::Backend)}); }}));
+            if (!terminal) throw std::logic_error("PWM stop 未形成持久终态");
+            return operation_outcome(*terminal, false);
+        } catch (const OperationReplayException&) { return operation_outcome(begun->record, true); }
+        catch (const OperationLedgerAfterPendingException&) { throw; }
+        catch (...) {
+            if (!begun) throw;
+            if (!terminal) terminal = finish(OperationState::Unknown, OperationRecovery::ScopeBlocked,
+                {std::nullopt, std::nullopt, static_cast<std::uint16_t>(RuntimeOperationError::Backend)});
+            return operation_outcome(*terminal, false);
+        }
+    }
+
     remotebsp::toolbusd::RuntimeOperationOutcome
     runtime_control_release_operation(
         const remotebsp::toolbusd::RuntimeControlReleaseRequest& request) {
@@ -1699,11 +1911,25 @@ private:
             operation.owner_key_id = request.owner_key_id;
             operation.idempotency_key = request.idempotency_key;
             operation_id = OperationLedger::derive_operation_id(operation);
-        } else {
+        } else if (request.kind == RuntimeOperationKind::ControlRelease) {
             RuntimeControlReleaseOperation operation;
             operation.daemon_origin = request.daemon_instance_id;
             operation.lease_id = request.lease_id;
             operation.owner_key_id = request.owner_key_id;
+            operation_id = OperationLedger::derive_operation_id(operation);
+        } else if (request.kind == RuntimeOperationKind::PwmConfigure) {
+            RuntimePwmConfigureOperation operation;
+            operation.daemon_origin = request.daemon_instance_id;
+            operation.lease_id = request.lease_id;
+            operation.owner_key_id = request.owner_key_id;
+            operation.idempotency_key = request.idempotency_key;
+            operation_id = OperationLedger::derive_operation_id(operation);
+        } else {
+            RuntimePwmStopOperation operation;
+            operation.daemon_origin = request.daemon_instance_id;
+            operation.lease_id = request.lease_id;
+            operation.owner_key_id = request.owner_key_id;
+            operation.idempotency_key = request.idempotency_key;
             operation_id = OperationLedger::derive_operation_id(operation);
         }
         const auto found = operation_ledger_.lookup(
@@ -2276,6 +2502,24 @@ private:
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::
                         encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimePwmConfigureOperation) {
+                const auto outcome = runtime_pwm_configure_operation(
+                    ipc_request.runtime_pwm_configure);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::
+                                        RuntimePwmStopOperation) {
+                const auto outcome = runtime_pwm_stop_operation(
+                    ipc_request.runtime_pwm_stop);
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
                 return;
             }
             if (ipc_request.kind ==

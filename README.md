@@ -18,9 +18,9 @@ STM32F103 实板链路。STM32F103 的 CAN/USB 双模式 Katapult Bootloader 已
 重启恢复，并在真机发现并修复资源枚举缺口后贯通 5 项静态资源到 RuntimeSnapshot。
 STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
 
-当前迭代明确排除需要多块实体板共同验证的跨板卡场景；已有跨板设计与纯软件证据
-继续保留，但不会由单板或 Mock 结果外推关闭。其余单板固件、Studio、运行时、总线、
-设备参数和可靠性能力继续推进。
+当前迭代冻结跨板同步和多块实体板联调，等待用户提供对应硬件环境；已有跨板设计与
+纯软件证据继续保留，但不会由单板或 Mock 结果外推关闭。其余单板固件、Studio、
+运行时、总线、设备参数和可靠性能力继续推进。
 
 ## 架构
 
@@ -69,10 +69,10 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 `ResourceReset` 已恢复兼容语义：UART 清缓冲/故障并释放对象、PWM 安全停止、TimedBitstream 中止，后端失败则保留对象和故障状态以便重试 |
 | 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 F072/F103/G431 板级 HAL 已实现并交叉编译；三板复用明确的 STM32 公共事务模块，各自保留静态端点，生产代码由主机 HAL 桩覆盖 I2C flags、统一超时预算、可选恢复、SPI 片选和失败恢复。总线测试固件仍未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；Manifest v4 可声明静态合同。单节点 Mock USB 已补主机定向消费 API/IPC/CLI 和真实三进程 E2E，Stream 在 toolbusd 启动链路上显式绑定 USB 并拒绝向 CAN 自动降级。单合同双向、STM32 N2H BSP和实体高速数据面仍待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
-| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot。`toolbusd` 已提供默认关闭、固定目录、禁止覆盖的启动时逻辑录制入口及离线校验/回放，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层；运行期动态控制和信号退出进程测试仍待补齐 |
+| Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot。`toolbusd` 已提供默认关闭、固定目录、禁止覆盖的启动时及运行期 IPC/CLI 逻辑录制，并覆盖离线校验/回放和 SIGINT/SIGTERM 收口进程测试；文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与静态表生成、32线程构建和产物归档已实现。非交互 CLI 的 `deploy-stlink` 可执行受保护产物的写入/校验/复位，完整核验后生成自哈希部署记录，并可严格关联生产记录与批次。独立版本化 `FirmwareIdentity` 命令已贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与 Studio；Studio 构建向固件注入工程、配置和固件输入三项 SHA-256，非 Studio 固件逐字段报告 unavailable；Mock USB 已覆盖真实进程重启与缓存失效。只读 `inspect-runtime-identity` 仍不能单独记作实体烧录闭环 |
-| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警、增量事件和普通用户只读健康仪表盘已实现；仪表盘提供认证 SSE 主动推送并在断线后退回轮询，连接、速率、单事件与每连接队列均有界。页面提供节点/资源下钻、显式可用性、趋势、峰值和阈值告警，认证密钥只驻留页面内存。认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；`ControlAuditJournal` 已用同步 intent/terminal/unknown、HMAC-SHA256 链、分段容量和失败关闭覆盖租约与 GPIO 控制。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、跨重启事件历史和实体失效安全时延验证仍待实现 |
-| 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告。toolbusd 软件生产者、公共 MCU/Mock Remote Core 应答、`libremotebsp`、CLI 与 Runtime 可信投影器已贯通；F072/F103/G431 共用掉电安全双页 Flash 启动代际，公共 MCU Core 可报告 uptime、运动队列、租约和资源故障。CPU/ISR/栈尚无确定测量方法，继续明确为 unavailable，不伪报零值 |
+| Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警、增量事件和普通用户只读健康仪表盘已实现；仪表盘提供认证 SSE 主动推送并在断线后退回轮询，连接、速率、单事件与每连接队列均有界。页面提供节点/资源下钻、显式可用性、趋势、峰值和阈值告警，认证密钥只驻留页面内存。认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。PWM 控制已贯通 `toolbusd` Gate、daemon、IPC、`libremotebsp` client、CLI 与独立持久账本，配置、停止及租约释放/过期/关停均使用类型安全的 `PWM_STOP`；HTTP 和 Studio 操作入口尚未接入，本轮也没有新增实体 PWM 验收。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；`ControlAuditJournal` 已用同步 intent/terminal/unknown、HMAC-SHA256 链、分段容量和失败关闭覆盖租约与 GPIO 控制。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、跨重启事件历史和实体失效安全时延验证仍待实现 |
+| 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告。toolbusd 软件生产者、公共 MCU/Mock Remote Core 应答、`libremotebsp`、CLI 与 Runtime 可信投影器已贯通；F072/F103/G431 已在 APP 末端、设备参数区之前接入独立掉电安全双页 Flash 健康代际日志，公共 MCU Core 可报告 uptime、运动队列、租约和资源故障。该健康代际区不等于尚未接入的跨板运动 `boot_epoch`；实体 Flash 掉电/升级保留及 CPU/ISR/栈采样仍待验收，未提供值继续明确为 unavailable |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
@@ -92,7 +92,7 @@ H2N/N2H Mock 会话状态机；N2H 使用 peek/commit 两阶段
 交付，编码、分片、后端或租约失败时不提前消费数据。双向、USB Bulk 和 Ethernet
 真实数据面仍未实现。
 ADC、通用 Timer 和 Storage 仍按当前优先级后置。
-通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、GUI 草案和
+通用 PWM 与定时位流已经完成协议、Linux API/CLI、Mock、数字孪生、Studio 配置 GUI 草案和
 F072/F103/G431 固件后端第一阶段。PWM 直接描述频率、万分比占空比和极性；
 定时位流只描述 0/1 高低时间与复位时间，WS2812 的 RGB/GRB 排列、亮度和动画
 仍由 Linux 处理。三块板均已交叉编译，但新 DMA 波形后端尚未使用示波器和实体

@@ -313,6 +313,7 @@ void check_live_routing(const std::string& toolbusd,
     CHECK(active_after_conflict.state ==
           remotebsp::RuntimeOperationState::Committed);
     CHECK(!active_after_conflict.replayed);
+
     std::cerr << "阶段: live-routing 结束\n";
 }
 

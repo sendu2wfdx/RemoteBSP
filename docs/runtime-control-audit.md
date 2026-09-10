@@ -221,7 +221,8 @@ durable intent 视为 unknown，不能当作从未发生。
 - API 密钥热撤销、完整轮换、用户目录、动态角色或多租户隔离；
 - CAN/CAN-FD/USB 总线消息认证、加密、防伪造或跨重启防重放；
 - operation ledger 保留期之外的 exactly-once，或对 `expired_unknown` 的自动重放；
-- WebSocket/SSE 主动推送和跨重启 Runtime 事件历史；
+- 跨重启 Runtime 事件历史与可恢复增量遥测；认证 SSE 完整状态推送、慢客户端隔离和
+  轮询降级已实现，但不提供跨重启续传保证；
 - 集中日志、异地备份、数字签名、可信时间、WORM、外部链头锚定和不可否认性；
 - 实体掉电、物理 GPIO 电平、MCU 固件可信、总线洪泛、卡死资源或最坏安全停机时延。
 

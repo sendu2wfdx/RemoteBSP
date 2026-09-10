@@ -145,14 +145,22 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
                 continue;
             }
             const auto object = gpio_objects_.find(scope);
-            if (object == gpio_objects_.end()) {
+            const auto pwm_object = pwm_objects_.find(scope);
+            if (object == gpio_objects_.end() &&
+                pwm_object == pwm_objects_.end()) {
                 leases_by_scope_.erase(scope);
                 iterator = leases_.erase(iterator);
                 continue;
             }
             // 先完成所有可能抛异常的复制/扩容，再发布 in-flight 占位。
             // 若后续任一作用域准备失败，catch 会回滚本批次全部占位。
-            tasks.push_back({scope, iterator->first, object->second});
+            if (pwm_object != pwm_objects_.end()) {
+                tasks.push_back({scope, iterator->first, {},
+                                 pwm_object->second});
+            } else {
+                tasks.push_back({scope, iterator->first, object->second,
+                                 std::nullopt});
+            }
             if (!in_flight_scopes_.insert(scope).second) {
                 tasks.pop_back();
             }
@@ -172,6 +180,11 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
         } else {
             iterator = completed_.erase(iterator);
         }
+    }
+    for (auto iterator = pwm_completed_.begin();
+         iterator != pwm_completed_.end();) {
+        if (iterator->second.retain_until_ns > now_ns) ++iterator;
+        else iterator = pwm_completed_.erase(iterator);
     }
     return tasks;
 }
@@ -236,6 +249,30 @@ std::size_t RuntimeControlGate::finish_cleanup(
     std::vector<CleanupTask> tasks, bool retain_failed) {
     std::size_t failures = 0U;
     for (auto& task : tasks) {
+        if (task.pwm_object.has_value()) {
+            bool stopped = false;
+            try {
+                const auto& object = *task.pwm_object;
+                object.stopper(static_cast<std::uint32_t>(task.scope >> 32U),
+                               object.node_generation,
+                               object.expected_node_uuid, object.object_id);
+                stopped = true;
+            } catch (...) {
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            in_flight_scopes_.erase(task.scope);
+            if (stopped) {
+                pwm_objects_.erase(task.scope);
+                erase_lease_locked(task.lease_key);
+            } else if (retain_failed) {
+                const auto lease = leases_.find(task.lease_key);
+                if (lease != leases_.end()) lease->second.cleanup_failed = true;
+            }
+            scope_available_.notify_all();
+            expiry_changed_.notify_all();
+            if (!stopped) ++failures;
+            continue;
+        }
         if (stop_in_flight_scope(
                 task.scope, task.lease_key,
                 task.object.node_generation,
@@ -268,12 +305,16 @@ void RuntimeControlGate::acquire(
         reject(RuntimeControlError::DaemonIdentityMismatch,
                "Runtime 控制租约绑定了其他 toolbusd 实例");
     }
-    if (request.permissions != kRuntimePermissionGpioWrite) {
+    if (request.permissions != kRuntimePermissionGpioWrite &&
+        request.permissions != kRuntimePermissionPwmWrite) {
         reject(RuntimeControlError::PermissionDenied,
-               "Runtime 控制租约没有唯一的 GPIO 写权限");
+               "Runtime 控制租约没有唯一的受支持写权限");
     }
+    const auto expected_type = request.permissions == kRuntimePermissionPwmWrite
+                                   ? protocol::ResourceType::Pwm
+                                   : protocol::ResourceType::Gpio;
     if (descriptor.resource_id != request.resource_id ||
-        descriptor.type != protocol::ResourceType::Gpio ||
+        descriptor.type != expected_type ||
         contract.resource_id != request.resource_id ||
         (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
         (contract.access_flags &
@@ -283,7 +324,7 @@ void RuntimeControlGate::acquire(
         (contract.access_flags & protocol::kResourceAccessLeaseRequired) !=
             0U) {
         reject(RuntimeControlError::ContractRejected,
-               "目标资源不是允许独占写入的静态 GPIO 合同");
+               "目标资源不是允许独占写入的静态合同");
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -316,6 +357,7 @@ void RuntimeControlGate::acquire(
             // 节点换代意味着未知/未清理的旧 MCU 对象已经随会话重建消失，
             // 这是 daemon 重启之外唯一允许解除 poison 的路径。
             gpio_objects_.erase(scope);
+            pwm_objects_.erase(scope);
             erase_lease_locked(old->first);
         }
     }
@@ -818,6 +860,321 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
     return result;
 }
 
+RuntimePwmResult RuntimeControlGate::pwm_configure(
+    const RuntimePwmConfigureRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+    std::uint64_t node_generation,
+    const protocol::ResourceDescriptor& descriptor,
+    const protocol::ResourceContract& contract, const PwmIo& io,
+    const PwmDurability& durability) {
+    const bool durable = static_cast<bool>(durability.pending) ||
+                         static_cast<bool>(durability.committed) ||
+                         static_cast<bool>(durability.failed);
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !nonzero(request.expected_node_uuid) ||
+        !valid_identity(request.owner_key_id) ||
+        !valid_idempotency(request.idempotency_key) || request.node_id == 0U ||
+        request.node_id > 127U || request.resource_id == 0U ||
+        request.frequency_hz == 0U || request.duty > 10000U || !io.create ||
+        !io.stop || (durable && (!durability.pending ||
+                                 !durability.committed || !durability.failed))) {
+        reject(RuntimeControlError::InvalidRequest,
+               "Runtime PWM 配置请求字段无效");
+    }
+    if (request.daemon_instance_id != current_daemon_instance_id)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime PWM 请求绑定了其他 toolbusd 实例");
+    if (request.permissions != kRuntimePermissionPwmWrite)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime PWM 写权限不完整或包含未知位");
+    if (descriptor.resource_id != request.resource_id ||
+        descriptor.type != protocol::ResourceType::Pwm ||
+        contract.resource_id != request.resource_id ||
+        (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseRequired) != 0U)
+        reject(RuntimeControlError::ContractRejected,
+               "目标资源不是允许独占写入的静态 PWM 合同");
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (stopping_) reject(RuntimeControlError::SafeStopFailed,
+                          "Runtime 控制门正在关闭");
+    const auto scope = scope_key(request.node_id, request.resource_id);
+    if (!scope_available_.wait_for(lock, kSameScopeWait, [&] {
+            return in_flight_scopes_.find(scope) == in_flight_scopes_.end();
+        })) reject(RuntimeControlError::LeaseConflict, "PWM 前序命令尚未结束");
+    const auto lease_key = binary_id(request.lease_id);
+    const auto lease = leases_.find(lease_key);
+    const auto now = monotonic_ns_();
+    if (lease == leases_.end() || lease->second.deadline_ns <= now)
+        reject(RuntimeControlError::LeaseNotFound, "PWM 租约不存在或已过期");
+    if (lease->second.cleanup_failed)
+        reject(RuntimeControlError::SafeStopFailed, "PWM 作用域已阻断");
+    if (lease->second.owner_key_id != request.owner_key_id ||
+        lease->second.expected_node_uuid != request.expected_node_uuid ||
+        lease->second.permissions != request.permissions ||
+        lease->second.node_id != request.node_id ||
+        lease->second.resource_id != request.resource_id)
+        reject(RuntimeControlError::LeaseConflict, "PWM 租约身份或范围不匹配");
+    if (lease->second.node_generation != node_generation)
+        reject(RuntimeControlError::LeaseExpired, "PWM 节点代次已变化");
+    std::string key = "pwm\0", key_tail = request.owner_key_id;
+    key.append(key_tail); key.push_back('\0'); key += request.idempotency_key;
+    const auto prior = pwm_completed_.find(key);
+    if (prior != pwm_completed_.end()) {
+        const auto& old = prior->second;
+        if (old.stop || old.lease_id != request.lease_id ||
+            old.node_id != request.node_id || old.resource_id != request.resource_id ||
+            old.frequency_hz != request.frequency_hz || old.duty != request.duty ||
+            old.active_low != request.active_low)
+            reject(RuntimeControlError::IdempotencyConflict,
+                   "PWM 幂等键已用于不同命令");
+        auto replay = old.result; replay.replayed = true; return replay;
+    }
+    if (pwm_completed_.size() >= history_capacity_)
+        reject(RuntimeControlError::CapacityExceeded, "PWM 幂等历史已满");
+    const auto pending = pwm_completed_.emplace(
+        key, CompletedPwmCommand{request.lease_id, request.owner_key_id,
+            request.node_id, request.resource_id, false, request.frequency_hz,
+            request.duty, request.active_low, {},
+            std::numeric_limits<std::uint64_t>::max()});
+    if (!pending.second) reject(RuntimeControlError::IdempotencyConflict,
+                                "PWM 幂等 pending 冲突");
+    in_flight_scopes_.insert(scope);
+    auto old = pwm_objects_.find(scope);
+    std::optional<PwmObject> old_object = old == pwm_objects_.end()
+                                      ? std::nullopt
+                                      : std::optional<PwmObject>(old->second);
+    lock.unlock();
+    std::uint32_t created_object_id = 0U;
+    bool pending_persisted = false;
+    bool old_stop_completed = false;
+    bool create_started = false;
+    try {
+        if (durable) {
+            durability.pending();
+            pending_persisted = true;
+        }
+        if (old_object) {
+            old_object->stopper(request.node_id, old_object->node_generation,
+                                old_object->expected_node_uuid,
+                                old_object->object_id);
+            lock.lock(); pwm_objects_.erase(scope); lock.unlock();
+            old_stop_completed = true;
+        }
+        lock.lock();
+        const auto active = leases_.find(lease_key);
+        const bool expired = stopping_ || active == leases_.end() ||
+                             active->second.deadline_ns <= monotonic_ns_() ||
+                             active->second.node_generation != node_generation;
+        lock.unlock();
+        if (expired) reject(RuntimeControlError::LeaseExpired,
+                            "PWM 创建前租约已失效");
+        // 在远端 CREATE 前预留完整清理记录所需的容器与 stopper；CREATE
+        // 返回后只原地写入 object_id，不再分配，也不会遗失可重试清理信息。
+        lock.lock();
+        const auto staged = pwm_objects_.emplace(
+            scope, PwmObject{0U, node_generation,
+                             request.expected_node_uuid,
+                             request.frequency_hz, request.duty,
+                             request.active_low, io.stop});
+        lock.unlock();
+        if (!staged.second)
+            reject(RuntimeControlError::LeaseConflict,
+                   "PWM 对象清理槽预留冲突");
+        create_started = true;
+        const auto object_id = io.create(request.frequency_hz, request.duty,
+                                         request.active_low);
+        created_object_id = object_id;
+        if (object_id == 0U)
+            reject(RuntimeControlError::SafeStopFailed,
+                   "PWM_CREATE 未返回对象 ID");
+        lock.lock();
+        const auto tracked = pwm_objects_.find(scope);
+        if (tracked == pwm_objects_.end()) {
+            lock.unlock();
+            reject(RuntimeControlError::SafeStopFailed,
+                   "PWM_CREATE 返回后的清理记录不变量失效");
+        }
+        tracked->second.object_id = object_id;
+        lock.unlock();
+        RuntimePwmResult result{kRuntimeControlIpcVersion, object_id,
+                                request.frequency_hz, request.duty,
+                                request.active_low, false};
+        lock.lock();
+        const auto finished = monotonic_ns_();
+        const auto active2 = leases_.find(lease_key);
+        const bool expired2 = stopping_ || active2 == leases_.end() ||
+                              active2->second.deadline_ns <= finished;
+        lock.unlock();
+        if (expired2) {
+            io.stop(request.node_id, node_generation,
+                    request.expected_node_uuid, object_id);
+            reject(RuntimeControlError::LeaseExpired,
+                   "PWM 创建完成时租约已失效");
+        }
+        if (durable) durability.committed(result);
+        lock.lock();
+        auto saved = pwm_completed_.find(key);
+        saved->second.result = result;
+        saved->second.retain_until_ns = finished + kIdempotencyRetentionNs;
+        in_flight_scopes_.erase(scope);
+        lock.unlock(); scope_available_.notify_all(); expiry_changed_.notify_all();
+        return result;
+    } catch (const RuntimeControlException& error) {
+        bool safe_closed = !create_started &&
+                           (!old_object.has_value() || old_stop_completed);
+        if (created_object_id != 0U) {
+            try {
+                io.stop(request.node_id, node_generation,
+                        request.expected_node_uuid, created_object_id);
+                safe_closed = true;
+            } catch (...) {
+                safe_closed = false;
+            }
+        }
+        lock.lock();
+        if (safe_closed || created_object_id == 0U)
+            pwm_objects_.erase(scope);
+        pwm_completed_.erase(key); in_flight_scopes_.erase(scope);
+        const auto active = leases_.find(lease_key);
+        const bool unchanged_old_object = old_object.has_value() &&
+                                          !old_stop_completed &&
+                                          !create_started;
+        if (active != leases_.end() && !safe_closed &&
+            !unchanged_old_object)
+            active->second.cleanup_failed = true;
+        lock.unlock(); scope_available_.notify_all(); expiry_changed_.notify_all();
+        if (durable && pending_persisted) durability.failed(
+            safe_closed
+                ? DurableRecovery::SafeClosed : DurableRecovery::ScopeBlocked,
+            error.code());
+        throw;
+    } catch (...) {
+        bool safe_closed = false;
+        if (created_object_id != 0U) {
+            try {
+                io.stop(request.node_id, node_generation,
+                        request.expected_node_uuid, created_object_id);
+                safe_closed = true;
+            } catch (...) {
+            }
+        }
+        lock.lock();
+        if (safe_closed || created_object_id == 0U)
+            pwm_objects_.erase(scope);
+        pwm_completed_.erase(key); in_flight_scopes_.erase(scope);
+        const auto active = leases_.find(lease_key);
+        const bool unchanged_old_object = old_object.has_value() &&
+                                          !old_stop_completed &&
+                                          !create_started;
+        if (active != leases_.end() && !safe_closed &&
+            !unchanged_old_object)
+            active->second.cleanup_failed = true;
+        lock.unlock(); scope_available_.notify_all(); expiry_changed_.notify_all();
+        if (durable && pending_persisted) durability.failed(safe_closed ? DurableRecovery::SafeClosed
+                                                  : DurableRecovery::ScopeBlocked,
+                                      RuntimeControlError::SafeStopFailed);
+        throw;
+    }
+}
+
+RuntimePwmResult RuntimeControlGate::pwm_stop(
+    const RuntimePwmStopRequest& request,
+    const std::array<std::uint8_t, 16>& daemon, std::uint64_t generation,
+    const protocol::ResourceDescriptor& descriptor,
+    const protocol::ResourceContract& contract, const PwmIo& io,
+    const PwmDurability& durability) {
+    // 复用 configure 的全部静态请求校验，但 stop 必须针对现存对象，且不创建替代对象。
+    const bool durable = static_cast<bool>(durability.pending) ||
+                         static_cast<bool>(durability.committed) ||
+                         static_cast<bool>(durability.failed);
+    if (request.version != kRuntimeControlIpcVersion || !io.stop ||
+        !nonzero(request.lease_id) || !nonzero(request.expected_node_uuid) ||
+        !valid_identity(request.owner_key_id) || request.node_id == 0U ||
+        request.node_id > 127U || request.resource_id == 0U ||
+        !valid_idempotency(request.idempotency_key) || request.permissions != kRuntimePermissionPwmWrite ||
+        descriptor.type != protocol::ResourceType::Pwm ||
+        descriptor.resource_id != request.resource_id ||
+        contract.resource_id != request.resource_id ||
+        (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U ||
+        (contract.access_flags & protocol::kResourceAccessLeaseRequired) != 0U ||
+        (durable && (!durability.pending || !durability.committed ||
+                     !durability.failed)))
+        reject(RuntimeControlError::InvalidRequest, "Runtime PWM stop 请求无效");
+    if (request.daemon_instance_id != daemon)
+        reject(RuntimeControlError::DaemonIdentityMismatch, "PWM stop daemon 身份不匹配");
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto scope = scope_key(request.node_id, request.resource_id);
+    if (!scope_available_.wait_for(lock, kSameScopeWait, [&] { return !in_flight_scopes_.count(scope); }))
+        reject(RuntimeControlError::LeaseConflict, "PWM 前序命令尚未结束");
+    const auto lease_key = binary_id(request.lease_id);
+    const auto lease = leases_.find(lease_key);
+    if (lease == leases_.end() || lease->second.deadline_ns <= monotonic_ns_())
+        reject(RuntimeControlError::LeaseNotFound, "PWM stop 租约不存在或已过期");
+    if (stopping_) reject(RuntimeControlError::SafeStopFailed,
+                          "Runtime 控制门正在关闭");
+    if (lease->second.cleanup_failed)
+        reject(RuntimeControlError::SafeStopFailed, "PWM 作用域已阻断");
+    if (lease->second.owner_key_id != request.owner_key_id ||
+        lease->second.expected_node_uuid != request.expected_node_uuid ||
+        lease->second.permissions != request.permissions || lease->second.node_id != request.node_id ||
+        lease->second.resource_id != request.resource_id)
+        reject(RuntimeControlError::LeaseConflict, "PWM stop 租约不匹配");
+    if (lease->second.node_generation != generation)
+        reject(RuntimeControlError::LeaseExpired, "PWM stop 节点代次变化");
+    std::string key = "pwm\0", key_tail = request.owner_key_id;
+    key.append(key_tail); key.push_back('\0'); key += request.idempotency_key;
+    const auto prior = pwm_completed_.find(key);
+    if (prior != pwm_completed_.end()) {
+        const auto& old = prior->second;
+        if (!old.stop || old.lease_id != request.lease_id ||
+            old.node_id != request.node_id || old.resource_id != request.resource_id)
+            reject(RuntimeControlError::IdempotencyConflict,
+                   "PWM stop 幂等键已用于不同命令");
+        auto replay = old.result; replay.replayed = true; return replay;
+    }
+    auto object = pwm_objects_.find(scope);
+    if (object == pwm_objects_.end()) reject(RuntimeControlError::ObjectRetired,
+                                              "PWM 对象已停止");
+    const auto saved_object = object->second;
+    pwm_completed_.emplace(key, CompletedPwmCommand{
+        request.lease_id, request.owner_key_id, request.node_id,
+        request.resource_id, true, saved_object.frequency_hz,
+        saved_object.duty, saved_object.active_low, {},
+        std::numeric_limits<std::uint64_t>::max()});
+    in_flight_scopes_.insert(scope); lock.unlock();
+    bool stop_completed = false;
+    try {
+        if (durable) durability.pending();
+        saved_object.stopper(request.node_id, generation,
+                             request.expected_node_uuid, saved_object.object_id);
+        stop_completed = true;
+        RuntimePwmResult result{kRuntimeControlIpcVersion, saved_object.object_id,
+            saved_object.frequency_hz, saved_object.duty, saved_object.active_low, false};
+        if (durable) durability.committed(result);
+        lock.lock(); pwm_objects_.erase(scope);
+        auto saved = pwm_completed_.find(key);
+        saved->second.result = result;
+        saved->second.retain_until_ns = monotonic_ns_() + kIdempotencyRetentionNs;
+        in_flight_scopes_.erase(scope); lock.unlock();
+        scope_available_.notify_all(); expiry_changed_.notify_all(); return result;
+    } catch (...) {
+        lock.lock(); pwm_completed_.erase(key); in_flight_scopes_.erase(scope);
+        const auto active = leases_.find(lease_key);
+        if (stop_completed) pwm_objects_.erase(scope);
+        else if (active != leases_.end()) active->second.cleanup_failed = true;
+        lock.unlock(); scope_available_.notify_all(); expiry_changed_.notify_all();
+        if (durable) durability.failed(stop_completed ? DurableRecovery::SafeClosed
+                                                      : DurableRecovery::ScopeBlocked,
+                                      RuntimeControlError::SafeStopFailed);
+        throw;
+    }
+}
+
 std::optional<RuntimeControlGate::ResolvedReleaseLease>
 RuntimeControlGate::resolve_release_lease(
     const RuntimeControlReleaseRequest& request,
@@ -896,6 +1253,33 @@ void RuntimeControlGate::release(
         found->second.resource_id,
         found->second.permissions,
         found->second.admission_id};
+    const auto pwm_object = pwm_objects_.find(scope);
+    if (pwm_object != pwm_objects_.end()) {
+        CleanupTask task{scope, lease_key, {}, pwm_object->second};
+        if (!in_flight_scopes_.insert(scope).second)
+            reject(RuntimeControlError::LeaseConflict,
+                   "Runtime PWM 清理占位冲突");
+        lock.unlock();
+        if (durability_enabled) {
+            try {
+                durability.pending(resolved);
+            } catch (...) {
+                lock.lock(); in_flight_scopes_.erase(scope); lock.unlock();
+                scope_available_.notify_all(); expiry_changed_.notify_all();
+                throw;
+            }
+        }
+        const auto failures = finish_cleanup({std::move(task)}, true);
+        if (failures != 0U) {
+            if (durability_enabled)
+                durability.failed(DurableRecovery::ScopeBlocked,
+                                  RuntimeControlError::SafeStopFailed);
+            reject(RuntimeControlError::SafeStopFailed,
+                   "PWM_STOP 未获得确定成功，租约保持故障占位");
+        }
+        if (durability_enabled) durability.committed();
+        return;
+    }
     const auto object = gpio_objects_.find(scope);
     if (object == gpio_objects_.end()) {
         if (found->second.cleanup_failed) {
@@ -933,7 +1317,7 @@ void RuntimeControlGate::release(
     }
     // CleanupTask/std::function 的复制与分配先完成，再发布 in-flight。
     // 任一异常都保持 lease/object 原样，可由调用者重试。
-    CleanupTask task{scope, lease_key, object->second};
+    CleanupTask task{scope, lease_key, object->second, std::nullopt};
     if (!in_flight_scopes_.insert(scope).second) {
         reject(RuntimeControlError::LeaseConflict,
                "Runtime GPIO 清理占位冲突");
@@ -1021,7 +1405,7 @@ std::size_t RuntimeControlGate::shutdown() {
         // 以对象表为权威兜底，而不是只遍历 leases；即使内部不变量曾被
         // 破坏形成孤儿对象，shutdown 仍会尝试写低。
         try {
-            tasks.reserve(gpio_objects_.size());
+            tasks.reserve(gpio_objects_.size() + pwm_objects_.size());
             for (const auto& object : gpio_objects_) {
                 std::string lease_key;
                 const auto owner = leases_by_scope_.find(object.first);
@@ -1030,10 +1414,19 @@ std::size_t RuntimeControlGate::shutdown() {
                 }
                 // 先完成任务复制，再发布占位；异常时统一回滚本批次。
                 tasks.push_back({object.first, std::move(lease_key),
-                                 object.second});
+                                 object.second, std::nullopt});
                 if (!in_flight_scopes_.insert(object.first).second) {
                     tasks.pop_back();
                 }
+            }
+            for (const auto& object : pwm_objects_) {
+                std::string lease_key;
+                const auto owner = leases_by_scope_.find(object.first);
+                if (owner != leases_by_scope_.end()) lease_key = owner->second;
+                tasks.push_back({object.first, std::move(lease_key), {},
+                                 object.second});
+                if (!in_flight_scopes_.insert(object.first).second)
+                    tasks.pop_back();
             }
         } catch (...) {
             for (const auto& task : tasks) {
@@ -1066,6 +1459,7 @@ std::size_t RuntimeControlGate::shutdown() {
             leases_.clear();
             leases_by_scope_.clear();
             gpio_objects_.clear();
+            pwm_objects_.clear();
         }
         shutdown_failures_ = failures;
         shutdown_in_progress_ = false;
@@ -1099,6 +1493,10 @@ void RuntimeControlGate::expiry_loop() {
                 }
             }
             for (const auto& command : completed_) {
+                earliest = std::min(earliest,
+                                    command.second.retain_until_ns);
+            }
+            for (const auto& command : pwm_completed_) {
                 earliest = std::min(earliest,
                                     command.second.retain_until_ns);
             }

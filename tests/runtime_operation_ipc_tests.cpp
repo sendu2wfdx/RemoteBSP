@@ -674,6 +674,117 @@ void test_client_api_and_query_replay_contract() {
         });
     CHECK(released.kind == remotebsp::RuntimeOperationKind::ControlRelease);
     CHECK(released.state == remotebsp::RuntimeOperationState::Committed);
+
+    toolbusd::RuntimeOperationOutcome pwm_response;
+    pwm_response.kind = toolbusd::RuntimeOperationKind::PwmConfigure;
+    pwm_response.state = toolbusd::RuntimeOperationState::Committed;
+    pwm_response.operation_id = filled<32>(0x31U);
+    pwm_response.lease_id = lease;
+    pwm_response.expected_node_uuid = node;
+    pwm_response.resource_id = 0x06000000U;
+    pwm_response.object_id = 23U;
+    pwm_response.frequency_hz = 20000U;
+    pwm_response.duty = 4200U;
+    pwm_response.active_low = true;
+    const auto pwm = invoke_client_once(
+        toolbusd::IpcRequestKind::RuntimePwmConfigureOperation, pwm_response,
+        [&](const remotebsp::Client& client) {
+            return client.runtime_pwm_configure_operation(
+                daemon, lease, node, "owner", 0x06000000U,
+                "pwm:configure:1", 20000U, 4200U, true);
+        });
+    CHECK(pwm.kind == remotebsp::RuntimeOperationKind::PwmConfigure);
+    CHECK(pwm.frequency_hz == 20000U);
+    CHECK(pwm.duty == 4200U);
+    CHECK(pwm.active_low == true);
+
+    pwm_response.kind = toolbusd::RuntimeOperationKind::PwmStop;
+    pwm_response.recovery = toolbusd::RuntimeOperationRecovery::SafeClosed;
+    pwm_response.frequency_hz = 0U;
+    pwm_response.duty = 0U;
+    pwm_response.active_low = false;
+    const auto stopped = invoke_client_once(
+        toolbusd::IpcRequestKind::RuntimePwmStopOperation, pwm_response,
+        [&](const remotebsp::Client& client) {
+            return client.runtime_pwm_stop_operation(
+                daemon, lease, node, "owner", 0x06000000U, "pwm:stop:1");
+        });
+    CHECK(stopped.kind == remotebsp::RuntimeOperationKind::PwmStop);
+    CHECK(stopped.recovery == remotebsp::RuntimeOperationRecovery::SafeClosed);
+}
+
+void test_pwm_request_roundtrip_and_strict_decode() {
+    toolbusd::RuntimePwmConfigureRequest configure;
+    configure.daemon_instance_id = filled<16>(0x11U);
+    configure.lease_id = filled<16>(0x22U);
+    configure.expected_node_uuid = filled<16>(0x33U);
+    configure.owner_key_id = "owner";
+    configure.node_id = 7U;
+    configure.resource_id = 0x06000000U;
+    configure.idempotency_key = "pwm:configure:1";
+    configure.frequency_hz = 25000U;
+    configure.duty = 3750U;
+    configure.active_low = true;
+    const auto encoded = toolbusd::encode_ipc_runtime_pwm_request(configure);
+    const auto decoded = toolbusd::decode_ipc_runtime_pwm_request(encoded);
+    CHECK(decoded.daemon_instance_id == configure.daemon_instance_id);
+    CHECK(decoded.lease_id == configure.lease_id);
+    CHECK(decoded.expected_node_uuid == configure.expected_node_uuid);
+    CHECK(decoded.permissions == toolbusd::kRuntimePermissionPwmWrite);
+    CHECK(decoded.node_id == configure.node_id);
+    CHECK(decoded.resource_id == configure.resource_id);
+    CHECK(decoded.owner_key_id == configure.owner_key_id);
+    CHECK(decoded.idempotency_key == configure.idempotency_key);
+    CHECK(decoded.frequency_hz == 25000U);
+    CHECK(decoded.duty == 3750U);
+    CHECK(decoded.active_low);
+
+    auto malformed = encoded;
+    malformed.pop_back();
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+    malformed = encoded;
+    malformed.push_back(0U);
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+    malformed = encoded;
+    malformed[60U] = malformed[61U] = malformed[62U] = malformed[63U] = 0U;
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+    malformed = encoded;
+    malformed[64U] = 0x11U; malformed[65U] = 0x27U;
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+    malformed = encoded;
+    malformed[66U] = 2U;
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+    malformed = encoded;
+    malformed[69U] = 1U;
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_request(malformed)); });
+
+    toolbusd::RuntimePwmStopRequest stop;
+    stop.daemon_instance_id = configure.daemon_instance_id;
+    stop.lease_id = configure.lease_id;
+    stop.expected_node_uuid = configure.expected_node_uuid;
+    stop.owner_key_id = configure.owner_key_id;
+    stop.node_id = configure.node_id;
+    stop.resource_id = configure.resource_id;
+    stop.idempotency_key = "pwm:stop:1";
+    const auto stop_encoded = toolbusd::encode_ipc_runtime_pwm_stop_request(stop);
+    const auto stop_decoded = toolbusd::decode_ipc_runtime_pwm_stop_request(stop_encoded);
+    CHECK(stop_decoded.owner_key_id == stop.owner_key_id);
+    CHECK(stop_decoded.idempotency_key == stop.idempotency_key);
+    CHECK(stop_decoded.resource_id == stop.resource_id);
+    malformed = stop_encoded;
+    malformed[62U] = 1U;
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_stop_request(malformed)); });
+    malformed = stop_encoded;
+    malformed.pop_back();
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_stop_request(malformed)); });
+    malformed = stop_encoded;
+    malformed.push_back(0U);
+    expect_failure([&] { static_cast<void>(toolbusd::decode_ipc_runtime_pwm_stop_request(malformed)); });
+
+    configure.owner_key_id.assign(toolbusd::kMaximumRuntimeControlIdentityBytes + 1U, 'a');
+    expect_failure([&] { static_cast<void>(toolbusd::encode_ipc_runtime_pwm_request(configure)); });
+    stop.idempotency_key.assign(toolbusd::kMaximumRuntimeControlIdempotencyBytes + 1U, 'b');
+    expect_failure([&] { static_cast<void>(toolbusd::encode_ipc_runtime_pwm_stop_request(stop)); });
 }
 
 }  // namespace
@@ -685,6 +796,7 @@ int main() {
     test_request_kinds_and_fragmented_response();
     test_json_is_exact();
     test_client_api_and_query_replay_contract();
+    test_pwm_request_roundtrip_and_strict_decode();
     if (failures != 0) {
         std::cerr << failures << " 项 Runtime operation IPC 测试失败\n";
         return 1;

@@ -103,6 +103,8 @@ inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
         case RuntimeOperationKind::Unknown: return "unknown";
         case RuntimeOperationKind::GpioWrite: return "gpio_write";
         case RuntimeOperationKind::ControlRelease: return "control_release";
+        case RuntimeOperationKind::PwmConfigure: return "pwm_configure";
+        case RuntimeOperationKind::PwmStop: return "pwm_stop";
     }
     return "unknown";
 }
@@ -217,6 +219,18 @@ inline void write_runtime_operation_outcome(
         output << (*outcome.value ? "true" : "false");
     } else {
         output << "null";
+    }
+    if (outcome.kind == RuntimeOperationKind::PwmConfigure ||
+        outcome.kind == RuntimeOperationKind::PwmStop) {
+        output << ",\"frequency_hz\":";
+        if (outcome.frequency_hz.has_value()) output << *outcome.frequency_hz;
+        else output << "null";
+        output << ",\"duty\":";
+        if (outcome.duty.has_value()) output << *outcome.duty;
+        else output << "null";
+        output << ",\"active_low\":";
+        if (outcome.active_low.has_value()) output << (*outcome.active_low ? "true" : "false");
+        else output << "null";
     }
     output << ",\"error_code\":";
     if (outcome.error.has_value()) {

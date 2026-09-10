@@ -1,4 +1,5 @@
 #include "remotebsp/toolbusd/operation_ledger.hpp"
+#include "remotebsp/protocol/crc32.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -90,6 +91,13 @@ RuntimePwmConfigureOperation pwm_operation(std::uint32_t frequency = 20000U,
             "pwm-idem", 2U, 7U, 0x06000000U, frequency, duty, active_low};
 }
 
+RuntimePwmStopOperation pwm_stop_operation(
+    std::uint8_t lease = 0x55U,
+    std::string idempotency = "pwm-stop-idem") {
+    return {identity(0x11U), identity(lease), identity(0x33U), "owner",
+            std::move(idempotency), 2U, 7U, 0x06000000U};
+}
+
 std::string hex(const OperationDigest& digest) {
     constexpr char digits[] = "0123456789abcdef";
     std::string result;
@@ -120,6 +128,115 @@ OperationLedgerOptions options(const TestDirectory& directory,
         result.wall_clock_ms = [now] { return *now; };
     }
     return result;
+}
+
+std::vector<std::uint8_t> decode_hex(const std::string& text) {
+    CHECK((text.size() % 2U) == 0U);
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(text.size() / 2U);
+    const auto nibble = [](char value) -> std::uint8_t {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10U;
+        throw std::runtime_error("黄金样例包含非法十六进制字符");
+    };
+    for (std::size_t i = 0; i < text.size(); i += 2U) {
+        bytes.push_back(static_cast<std::uint8_t>(
+            (nibble(text[i]) << 4U) | nibble(text[i + 1U])));
+    }
+    return bytes;
+}
+
+void write_bytes(const std::filesystem::path& path,
+                 const std::vector<std::uint8_t>& bytes) {
+    std::ofstream output(path, std::ios::binary);
+    CHECK(output.good());
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    CHECK(output.good());
+    output.close();
+    CHECK(::chmod(path.c_str(), 0600) == 0);
+}
+
+void put_u32_at(std::vector<std::uint8_t>& bytes, std::size_t offset,
+                std::uint32_t value) {
+    for (std::size_t i = 0; i < 4U; ++i) {
+        bytes[offset + i] = static_cast<std::uint8_t>(value >> (i * 8U));
+    }
+}
+
+// 已发布 v1 布局的真实磁盘字节：recorded_at_ms=123 的 GPIO pending。
+// 固定黄金样例不借用当前 v2 编码器，避免编码器与解码器同步出错时漏检。
+const std::vector<std::uint8_t>& v1_pending_record_golden() {
+    static const auto bytes = decode_hex(
+        "52424f504c4731000100010100008800ef0001000000000000007b00000000000000"
+        "42cb33195d34911bf44f318d0862c8b2a91d0093a5503190e330fddbe3b2df8d"
+        "3e66708e0d23db0a03a03f6ca1fd028c51f33fb6a3635485bc2cee79b912749c"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "5b000000000001010100070000000100000111111111111111111111111111111111"
+        "2222222222222222222222222222222233333333333333333333333333333333"
+        "01000000000000000000000000000000000005006f776e657204006964656d"
+        "fa5f0c0152424f4c434f4d31");
+    return bytes;
+}
+
+const std::vector<std::uint8_t>& v1_pending_manifest_golden() {
+    static const auto bytes = decode_hex(
+        "52424f4c4d463100010098000200000000000000010000000000000001000000"
+        "00000000ef0000000000000001000000000000000100000000000000ef000000"
+        "0000000001000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000008c65061a1b44e09c62f5bdec73859bb19fae09cf"
+        "8f8d330aa073f2b199d1f5090ee4e14c52424f4c434f4d31");
+    return bytes;
+}
+
+void install_v1_pending_golden(const TestDirectory& directory) {
+    write_bytes(directory.path() / "segment-0000000000000001.rbol",
+                v1_pending_record_golden());
+    write_bytes(directory.path() / "manifest.v1", v1_pending_manifest_golden());
+}
+
+void check_v1_golden_restarts_and_upgrades_with_v2_recovery() {
+    TestDirectory directory;
+    install_v1_pending_golden(directory);
+    const auto operation_id = OperationLedger::derive_operation_id(gpio_operation());
+    {
+        OperationLedger ledger(options(directory));
+        if (!ledger.mutation_available()) {
+            throw std::runtime_error("v1黄金样例加载失败: " +
+                                     ledger.failure_reason());
+        }
+        const auto recovered = ledger.lookup(operation_id, "owner");
+        CHECK(recovered.disposition == OperationLookupDisposition::Found);
+        CHECK(recovered.record->state == OperationState::Unknown);
+        CHECK(recovered.record->recovery == OperationRecovery::ScopeBlocked);
+        CHECK(recovered.record->requested_value == true);
+        CHECK(ledger.blocked_scopes().size() == 1U);
+    }
+    const auto segment = directory.path() / "segment-0000000000000001.rbol";
+    const auto size_after_recovery = std::filesystem::file_size(segment);
+    OperationLedger reopened(options(directory));
+    CHECK(reopened.mutation_available());
+    CHECK(reopened.operation_count() == 1U);
+    CHECK(std::filesystem::file_size(segment) == size_after_recovery);
+    CHECK(reopened.lookup(operation_id, "owner").record->state ==
+          OperationState::Unknown);
+}
+
+void check_unknown_disk_versions_fail_closed() {
+    TestDirectory directory;
+    install_v1_pending_golden(directory);
+    auto manifest = v1_pending_manifest_golden();
+    manifest[8U] = 3U;
+    manifest[9U] = 0U;
+    put_u32_at(manifest, manifest.size() - 12U,
+               remotebsp::protocol::crc32(manifest.data(), manifest.size() - 12U));
+    write_bytes(directory.path() / "manifest.v1", manifest);
+    OperationLedger failed(options(directory));
+    CHECK(!failed.mutation_available());
+    check_error(OperationLedgerError::MutationUnavailable, [&] {
+        (void)failed.lookup(OperationLedger::derive_operation_id(gpio_operation()),
+                            "owner");
+    });
 }
 
 void check_pwm_record_is_lossless_and_durable() {
@@ -167,6 +284,64 @@ void check_pwm_record_is_lossless_and_durable() {
     CHECK(pending.record->state == OperationState::Unknown);
     CHECK(pending.record->requested_active_low == true);
     CHECK(!pending.record->result.active_low.has_value());
+}
+
+void check_pwm_stop_ids_terminal_and_restart_recovery() {
+    static_assert(static_cast<std::uint8_t>(OperationKind::RuntimePwmStop) == 4U,
+                  "PWM停止磁盘编号不得漂移");
+    const auto operation = pwm_stop_operation();
+    CHECK(hex(OperationLedger::derive_operation_id(operation)) ==
+          "34ca3f5d0430c70af9c60d759f37cd88b26d20b1c2650d45ccd137a42cd3cafa");
+    CHECK(hex(OperationLedger::derive_request_digest(operation)) ==
+          "14399ef77506b923686100ff048e5caee411684d577b8e408d7827e2b4577903");
+
+    TestDirectory terminal_directory;
+    OperationDigest terminal_id{};
+    {
+        OperationLedger ledger(options(terminal_directory));
+        const auto begun = ledger.begin_pwm_stop(operation);
+        CHECK(begun.record.kind == OperationKind::RuntimePwmStop);
+        terminal_id = begun.record.operation_id;
+        CHECK(ledger.begin_pwm_stop(operation).disposition ==
+              OperationBeginDisposition::ExistingPending);
+        auto conflicting = operation;
+        conflicting.resource_id += 1U;
+        check_error(OperationLedgerError::IdempotencyConflict, [&] {
+            (void)ledger.begin_pwm_stop(conflicting);
+        });
+        OperationTerminalResult result;
+        result.object_id = 23U;
+        check_error(OperationLedgerError::InvalidTransition, [&] {
+            (void)ledger.finish(begun.record.operation_id,
+                                begun.record.request_digest,
+                                OperationState::Committed,
+                                OperationRecovery::None, result);
+        });
+        (void)ledger.finish(begun.record.operation_id,
+                            begun.record.request_digest,
+                            OperationState::Committed,
+                            OperationRecovery::SafeClosed, result);
+    }
+    OperationLedger terminal_reopened(options(terminal_directory));
+    const auto terminal = terminal_reopened.lookup(terminal_id, "owner");
+    CHECK(terminal.record->state == OperationState::Committed);
+    CHECK(terminal.record->recovery == OperationRecovery::SafeClosed);
+    CHECK(terminal.record->kind == OperationKind::RuntimePwmStop);
+    CHECK(terminal.record->result.object_id == 23U);
+    CHECK(!terminal.record->result.frequency_hz.has_value());
+
+    TestDirectory pending_directory;
+    OperationDigest pending_id{};
+    {
+        OperationLedger ledger(options(pending_directory));
+        pending_id = ledger.begin_pwm_stop(pwm_stop_operation(0x66U)).record.operation_id;
+    }
+    OperationLedger recovered(options(pending_directory));
+    const auto pending = recovered.lookup(pending_id, "owner");
+    CHECK(pending.record->state == OperationState::Unknown);
+    CHECK(pending.record->recovery == OperationRecovery::ScopeBlocked);
+    CHECK(pending.record->kind == OperationKind::RuntimePwmStop);
+    CHECK(recovered.blocked_scopes().size() == 1U);
 }
 
 void check_stable_ids_and_business_conflict() {
@@ -840,7 +1015,10 @@ void check_mid_log_corruption_fails_closed() {
 }  // namespace
 
 int main() {
+    check_v1_golden_restarts_and_upgrades_with_v2_recovery();
+    check_unknown_disk_versions_fail_closed();
     check_pwm_record_is_lossless_and_durable();
+    check_pwm_stop_ids_terminal_and_restart_recovery();
     check_stable_ids_and_business_conflict();
     check_process_lock_and_durable_terminal();
     check_restart_pending_becomes_unknown();

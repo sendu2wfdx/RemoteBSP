@@ -177,6 +177,11 @@ RuntimeOperationOutcome public_operation_outcome(
     if (source.object_id != 0U) {
         result.object_id = source.object_id;
         result.value = source.value;
+        if (source.kind == toolbusd::RuntimeOperationKind::PwmConfigure) {
+            result.frequency_hz = source.frequency_hz;
+            result.duty = source.duty;
+            result.active_low = source.active_low;
+        }
     }
     if (source.error != toolbusd::RuntimeOperationError::None) {
         result.error = static_cast<RuntimeOperationError>(source.error);
@@ -396,12 +401,13 @@ void Client::runtime_control_acquire(
     const std::array<std::uint8_t, 16>& lease_id,
     const std::array<std::uint8_t, 16>& expected_node_uuid,
     const std::string& owner_key_id, std::uint32_t resource_id,
-    std::uint32_t ttl_ms) const {
+    std::uint32_t ttl_ms, std::uint16_t permissions) const {
     toolbusd::RuntimeControlAcquireRequest request;
     request.daemon_instance_id = daemon_instance_id;
     request.lease_id = lease_id;
     request.expected_node_uuid = expected_node_uuid;
     request.owner_key_id = owner_key_id;
+    request.permissions = permissions;
     request.node_id = node_id_;
     request.resource_id = resource_id;
     request.ttl_ms = ttl_ms;
@@ -501,6 +507,58 @@ RuntimeOperationOutcome Client::runtime_control_release_operation(
     const auto response = toolbusd::read_ipc_response(socket.get());
     if (response.status != toolbusd::IpcStatus::Ok) {
         throw_structured_ipc_error(response, "Runtime Release 操作提交失败");
+    }
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_pwm_configure_operation(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key, std::uint32_t frequency_hz,
+    std::uint16_t duty, bool active_low) const {
+    toolbusd::RuntimePwmConfigureRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.expected_node_uuid = expected_node_uuid;
+    request.owner_key_id = owner_key_id;
+    request.node_id = node_id_;
+    request.resource_id = resource_id;
+    request.idempotency_key = idempotency_key;
+    request.frequency_hz = frequency_hz;
+    request.duty = duty;
+    request.active_low = active_low;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_pwm_configure_operation_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime PWM 配置操作失败");
+    }
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
+RuntimeOperationOutcome Client::runtime_pwm_stop_operation(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
+    const std::string& owner_key_id, std::uint32_t resource_id,
+    const std::string& idempotency_key) const {
+    toolbusd::RuntimePwmStopRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.expected_node_uuid = expected_node_uuid;
+    request.owner_key_id = owner_key_id;
+    request.node_id = node_id_;
+    request.resource_id = resource_id;
+    request.idempotency_key = idempotency_key;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_pwm_stop_operation_request(socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime PWM 停止操作失败");
     }
     return public_operation_outcome(
         toolbusd::decode_ipc_runtime_operation_outcome(response.body));

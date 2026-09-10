@@ -45,6 +45,8 @@ enum class IpcRequestKind : std::uint8_t {
     LogicalRecordingStart = 19,
     LogicalRecordingStop = 20,
     LogicalRecordingStatus = 21,
+    RuntimePwmConfigureOperation = 22,
+    RuntimePwmStopOperation = 23,
 };
 constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
@@ -103,6 +105,8 @@ enum class RuntimeOperationKind : std::uint8_t {
     Unknown = 0U,
     GpioWrite = 1U,
     ControlRelease = 2U,
+    PwmConfigure = 3U,
+    PwmStop = 4U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -163,6 +167,9 @@ struct RuntimeOperationOutcome {
     std::uint32_t object_id{};
     RuntimeOperationError error{RuntimeOperationError::None};
     bool value{};
+    std::uint32_t frequency_hz{};
+    std::uint16_t duty{};
+    bool active_low{};
 };
 
 struct IpcResponse {
@@ -197,6 +204,8 @@ struct IpcRequest {
     RuntimeControlAcquireRequest runtime_control_acquire;
     RuntimeGpioWriteRequest runtime_gpio_write;
     RuntimeControlReleaseRequest runtime_control_release;
+    RuntimePwmConfigureRequest runtime_pwm_configure;
+    RuntimePwmStopRequest runtime_pwm_stop;
     RuntimeOperationQuery runtime_operation_query;
     RuntimeOperationLookup runtime_operation_lookup;
     std::string logical_recording_name;
@@ -320,6 +329,10 @@ void write_ipc_runtime_gpio_write_operation_request(
     int socket, const RuntimeGpioWriteRequest& request);
 void write_ipc_runtime_control_release_operation_request(
     int socket, const RuntimeControlReleaseRequest& request);
+void write_ipc_runtime_pwm_configure_operation_request(
+    int socket, const RuntimePwmConfigureRequest& request);
+void write_ipc_runtime_pwm_stop_operation_request(
+    int socket, const RuntimePwmStopRequest& request);
 void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request);
 void write_ipc_runtime_operation_lookup_request(
@@ -377,6 +390,14 @@ RuntimeControlReleaseRequest decode_ipc_runtime_control_release(
 std::vector<std::uint8_t> encode_ipc_runtime_gpio_write_result(
     const RuntimeGpioWriteResult& result);
 RuntimeGpioWriteResult decode_ipc_runtime_gpio_write_result(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_pwm_request(
+    const RuntimePwmConfigureRequest& request);
+RuntimePwmConfigureRequest decode_ipc_runtime_pwm_request(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_pwm_stop_request(
+    const RuntimePwmStopRequest& request);
+RuntimePwmStopRequest decode_ipc_runtime_pwm_stop_request(
     const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
     const RuntimeOperationQuery& query);

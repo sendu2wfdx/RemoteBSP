@@ -20,6 +20,7 @@ namespace remotebsp::toolbusd {
 
 constexpr std::uint16_t kRuntimeControlIpcVersion = 2U;
 constexpr std::uint16_t kRuntimePermissionGpioWrite = 0x0001U;
+constexpr std::uint16_t kRuntimePermissionPwmWrite = 0x0002U;
 constexpr std::size_t kMaximumRuntimeControlIdentityBytes = 64U;
 constexpr std::size_t kMaximumRuntimeControlIdempotencyBytes = 64U;
 constexpr std::uint32_t kMaximumRuntimeControlTtlMs = 30000U;
@@ -49,6 +50,23 @@ struct RuntimeGpioWriteRequest {
     bool value{};
 };
 
+struct RuntimePwmConfigureRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionPwmWrite};
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::string idempotency_key;
+    std::uint32_t frequency_hz{};
+    std::uint16_t duty{};
+    bool active_low{};
+};
+
+struct RuntimePwmStopRequest : RuntimePwmConfigureRequest {};
+
 struct RuntimeControlReleaseRequest {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
@@ -60,6 +78,15 @@ struct RuntimeGpioWriteResult {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::uint32_t object_id{};
     bool value{};
+    bool replayed{};
+};
+
+struct RuntimePwmResult {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::uint32_t object_id{};
+    std::uint32_t frequency_hz{};
+    std::uint16_t duty{};
+    bool active_low{};
     bool replayed{};
 };
 
@@ -126,6 +153,21 @@ public:
         std::function<void(const RuntimeGpioWriteResult&)> committed;
         DurableFailure failed;
     };
+    using PwmCreator = std::function<std::uint32_t(
+        std::uint32_t frequency_hz, std::uint16_t duty, bool active_low)>;
+    using PwmStopper = std::function<void(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        std::uint32_t object_id)>;
+    struct PwmIo {
+        PwmCreator create;
+        PwmStopper stop;
+    };
+    struct PwmDurability {
+        std::function<void()> pending;
+        std::function<void(const RuntimePwmResult&)> committed;
+        DurableFailure failed;
+    };
 
     struct ResolvedReleaseLease {
         std::array<std::uint8_t, 16> expected_node_uuid{};
@@ -162,6 +204,21 @@ public:
         const protocol::ResourceContract& contract,
         const GpioIo& io,
         const GpioDurability& durability = {});
+
+    RuntimePwmResult pwm_configure(
+        const RuntimePwmConfigureRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        std::uint64_t node_generation,
+        const protocol::ResourceDescriptor& descriptor,
+        const protocol::ResourceContract& contract, const PwmIo& io,
+        const PwmDurability& durability = {});
+    RuntimePwmResult pwm_stop(
+        const RuntimePwmStopRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id,
+        std::uint64_t node_generation,
+        const protocol::ResourceDescriptor& descriptor,
+        const protocol::ResourceContract& contract, const PwmIo& io,
+        const PwmDurability& durability = {});
 
     // 只读解析当前活动租约，供持久账本在历史回放前核对服务端范围。
     // 返回空值只表示当前 Gate 中没有该租约；身份不匹配仍严格拒绝。
@@ -218,10 +275,34 @@ private:
         GpioCloser closer;
     };
 
+    struct PwmObject {
+        std::uint32_t object_id{};
+        std::uint64_t node_generation{};
+        std::array<std::uint8_t, 16> expected_node_uuid{};
+        std::uint32_t frequency_hz{};
+        std::uint16_t duty{};
+        bool active_low{};
+        PwmStopper stopper;
+    };
+
+    struct CompletedPwmCommand {
+        std::array<std::uint8_t, 16> lease_id{};
+        std::string owner_key_id;
+        std::uint32_t node_id{};
+        std::uint32_t resource_id{};
+        bool stop{};
+        std::uint32_t frequency_hz{};
+        std::uint16_t duty{};
+        bool active_low{};
+        RuntimePwmResult result;
+        std::uint64_t retain_until_ns{};
+    };
+
     struct CleanupTask {
         std::uint64_t scope{};
         std::string lease_key;
         GpioObject object;
+        std::optional<PwmObject> pwm_object;
     };
 
     enum class CleanupResult {
@@ -256,7 +337,9 @@ private:
     std::unordered_map<std::string, LeaseState> leases_;
     std::unordered_map<std::uint64_t, std::string> leases_by_scope_;
     std::unordered_map<std::string, CompletedCommand> completed_;
+    std::unordered_map<std::string, CompletedPwmCommand> pwm_completed_;
     std::unordered_map<std::uint64_t, GpioObject> gpio_objects_;
+    std::unordered_map<std::uint64_t, PwmObject> pwm_objects_;
     std::unordered_set<std::uint64_t> in_flight_scopes_;
     std::uint64_t next_admission_id_{1U};
     std::condition_variable expiry_changed_;

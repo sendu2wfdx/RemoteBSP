@@ -179,8 +179,10 @@ remotebsp::RuntimeOperationKind parse_runtime_operation_kind(
     if (text == "control_release") {
         return remotebsp::RuntimeOperationKind::ControlRelease;
     }
+    if (text == "pwm_configure") return remotebsp::RuntimeOperationKind::PwmConfigure;
+    if (text == "pwm_stop") return remotebsp::RuntimeOperationKind::PwmStop;
     throw std::invalid_argument(
-        "Runtime 操作类型必须是 gpio_write 或 control_release");
+        "Runtime 操作类型必须是 gpio_write、control_release、pwm_configure 或 pwm_stop");
 }
 
 std::uint16_t parse_device_parameter_id(const std::string& text) {
@@ -419,6 +421,8 @@ void print_usage() {
         << "  node-health-snapshot\n"
         << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <租约ms>\n"
+        << "  runtime-pwm-acquire <daemon实例ID> <控制租约ID> "
+           "<预期节点UUID> <调用者ID> <PWM资源ID> <租约ms>\n"
         << "  runtime-gpio-write <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <幂等键> <0|1>\n"
         << "  runtime-control-release <daemon实例ID> <控制租约ID> "
@@ -427,6 +431,10 @@ void print_usage() {
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <幂等键> <0|1>\n"
         << "  runtime-control-release-operation <daemon实例ID> "
            "<控制租约ID> <调用者ID>\n"
+        << "  runtime-pwm-configure-operation <daemon实例ID> <控制租约ID> "
+           "<预期节点UUID> <调用者ID> <PWM资源ID> <幂等键> <频率Hz> <duty0..10000> <active-low:0|1>\n"
+        << "  runtime-pwm-stop-operation <daemon实例ID> <控制租约ID> "
+           "<预期节点UUID> <调用者ID> <PWM资源ID> <幂等键>\n"
         << "  runtime-operation-status <daemon实例ID> <调用者ID> "
            "<operation ID>\n"
         << "  runtime-operation-lookup <daemon实例ID> <调用者ID> "
@@ -609,6 +617,16 @@ int run(const std::vector<std::string>& arguments,
         }
         return 0;
     }
+    if (name == "runtime-pwm-acquire" && arguments.size() == 7) {
+        client.runtime_control_acquire(
+            parse_hex_id(arguments[1], "daemon实例ID"),
+            parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4],
+            parse_u32(arguments[5], "PWM资源ID"),
+            parse_u32(arguments[6], "租约毫秒"), 0x0002U);
+        std::cout << (json_output ? "{\"schema_version\":1,\"command\":\"runtime-pwm-acquire\",\"data\":{}}\n" : "ok\n");
+        return 0;
+    }
 
     if (name == "runtime-gpio-write" && arguments.size() == 8) {
         const auto value = parse_u32(arguments[7], "GPIO 电平");
@@ -684,6 +702,26 @@ int run(const std::vector<std::string>& arguments,
             parse_hex_id(arguments[2], "控制租约ID"), arguments[3]);
         remotebsp::cli_json::write_runtime_operation_outcome(
             std::cout, name, outcome);
+        return 0;
+    }
+    if (name == "runtime-pwm-configure-operation" && arguments.size() == 10) {
+        if (!json_output) throw std::invalid_argument("runtime-pwm-configure-operation 必须与 --json 一起使用");
+        const auto active_low = parse_u32(arguments[9], "active-low");
+        const auto duty = parse_u32(arguments[8], "PWM duty");
+        if (active_low > 1U || duty > 10000U) throw std::invalid_argument("PWM active-low 或 duty 无效");
+        const auto outcome = client.runtime_pwm_configure_operation(
+            parse_hex_id(arguments[1], "daemon实例ID"), parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4], parse_u32(arguments[5], "PWM资源ID"),
+            arguments[6], parse_u32(arguments[7], "PWM频率"), static_cast<std::uint16_t>(duty), active_low != 0U);
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout, name, outcome);
+        return 0;
+    }
+    if (name == "runtime-pwm-stop-operation" && arguments.size() == 7) {
+        if (!json_output) throw std::invalid_argument("runtime-pwm-stop-operation 必须与 --json 一起使用");
+        const auto outcome = client.runtime_pwm_stop_operation(
+            parse_hex_id(arguments[1], "daemon实例ID"), parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4], parse_u32(arguments[5], "PWM资源ID"), arguments[6]);
+        remotebsp::cli_json::write_runtime_operation_outcome(std::cout, name, outcome);
         return 0;
     }
 
@@ -1647,6 +1685,9 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-control-release" &&
              arguments[0] != "runtime-gpio-write-operation" &&
              arguments[0] != "runtime-control-release-operation" &&
+             arguments[0] != "runtime-pwm-acquire" &&
+             arguments[0] != "runtime-pwm-configure-operation" &&
+             arguments[0] != "runtime-pwm-stop-operation" &&
              arguments[0] != "runtime-operation-status" &&
              arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&
