@@ -1,17 +1,18 @@
 # Runtime 不确定提交恢复与操作结果账本
 
-> 状态：**设计已定、尚未实现**。
+> 状态：**软件实现已接入并通过单元、Mock 与本地进程测试**。
 >
-> 本文定义 Runtime 写控制在响应丢失、`toolbusd` 崩溃和本地持久化故障下的
-> 最小结果合同。本文不是当前实现能力说明，也不构成 CAN、USB 或实体板卡证据。
+> 本文同时记录当前实现合同与仍需实体环境验证的边界。现有证据不构成真实 CAN、USB、
+> GPIO 电平、生产文件系统掉电或实体板卡安全时延证据。
 
 ## 1. 目标与边界
 
-当前 GPIO 控制链已经具备短租约、进程内幂等历史、节点 UUID/代次核对、首次低电平
-创建、安全写低和 `GPIO_CLOSE`。仍缺少的关键保证是：当远端命令可能已经执行、但成功
-响应没有到达调用者时，系统无法跨 `toolbusd` 重启回答“是否已经提交”。
+当前 GPIO 控制链已经具备短租约、节点 UUID/代次核对、首次低电平创建、安全写低和
+`GPIO_CLOSE`。`toolbusd` 操作账本现把 GPIO 写入和释放的 pending/终态持久化；当远端
+命令可能已经执行但响应未到达时，系统会返回可查询的 operation 状态，或保守恢复为
+`unknown`/`expired_unknown`，不会把未知结果伪装成未执行。
 
-v1 账本解决以下问题：
+v1 账本的软件实现覆盖以下问题：
 
 - 在任何可能改变 MCU 状态的请求发送前，持久化其操作身份和完整参数摘要；
 - 只在成功结果已经持久化后向 Runtime 返回成功；
@@ -36,8 +37,8 @@ MCU 本地看门狗、资源租约或实体安全电路。
 - 只有 `toolbusd` 知道 mutating Remote Packet 是否进入了发送路径；
 - Runtime 观察到的 CLI/IPC 超时既可能发生在发送前，也可能发生在远端已执行之后；
 - `RequestManager` 的 `(session_id, request_id)` 只在当前 daemon 会话及短重复窗口内有效；
-- Runtime 的 `ControlLeaseManager` 和 `RuntimeControlGate::completed_` 当前都只保留进程内
-  短期状态，进程退出后不能作为证据。
+- Runtime 的 `ControlLeaseManager` 和 `RuntimeControlGate` 内存镜像仍只负责当前进程的
+  授权、并发和快速重放；跨进程证据来自 `toolbusd` 的持久账本。
 
 `RequestManager` 仍负责同一次逻辑操作内的传输重试。重试必须保留相同的 session、请求
 ID、命令和对象 ID，由 Remote Core 的请求去重阻止重复副作用。账本负责阻止应用重试或
@@ -75,6 +76,7 @@ SHA-256(
 - 首次受理该操作的 daemon instance ID；
 - lease ID、真实 owner key ID 和权限位；
 - 预期节点 UUID、节点 ID、资源 ID；
+- Release 使用的服务端单调租约 admission 序号，用于区分同一 lease ID 的不同登记生命周期；
 - GPIO 目标值；
 - Release 所针对的原租约身份。
 
@@ -89,7 +91,9 @@ SHA-256(
 - 完整记录或墓碑仍在时，摘要不符明确返回 Conflict；
 - 记录已经超过保留期时，查询返回 `expired_unknown`，绝不返回“未执行”或“可以重发”；
 - 完整记录保留期远长于最大 30 秒 lease。记录可删除时，原 lease 必然已经不能授权执行；
-- 新 lease 会产生不同 `operation_id`，因此旧 ID 不会被重新解释为一项新操作。
+- 正常新 lease 使用新的随机 lease ID，因此产生不同 `operation_id`；若同一 lease ID 被异常
+  重复登记，Release 的 `operation_id` 仍相同，但服务端单调 `admission_id` 会使
+  `request_digest` 不同并触发 `IdempotencyConflict`，旧 Release 终态不能冒充新生命周期。
 
 ## 4. 状态机
 
@@ -101,6 +105,7 @@ SHA-256(
 | `committed` | 已收到严格匹配的成功响应，且 committed 终态已同步到稳定存储 | 返回相同结果并标记 replay，不访问 MCU |
 | `rejected` | 可证明目标效果未提交，或已确定完成安全写低及 Close | 返回相同拒绝和恢复状态，不访问 MCU |
 | `unknown` | 请求可能已发送但没有可信结果、终态写盘失败，或重启时恢复到 durable pending | 只允许查询或受控安全协调，禁止重发原目标操作 |
+| `expired_unknown` | 查询记录不存在、已过保留期或属于其他 owner；这是查询合成状态，不写入日志 | 返回同形未知结果，不泄漏记录是否存在，也不允许重发旧操作 |
 
 `committed` 只证明历史命令在当时获得成功响应，不证明当前 GPIO 仍处于该值，也不证明
 daemon 重启后资源已经可以由新会话接管。
@@ -135,11 +140,11 @@ stateDiagram-v2
 
 ## 5. RuntimeControlGate 接入点
 
-当前 `RuntimeControlGate::gpio_write()` 在远端 I/O 前向 `completed_` 插入 RAM pending，
-成功后再原地发布结果。实现账本时应以持久索引替换这项短期历史，但保留现有的预分配、
-同作用域串行和异常回滚原则。
+当前 `ToolbusDaemon` 以 durability 回调把 `OperationLedger` 接入
+`RuntimeControlGate::gpio_write()` 和 `release()`：Gate 内存占位负责同作用域串行与异常
+回滚，持久索引负责跨进程查询和恢复，两者用途不混淆。
 
-建议执行顺序如下：
+当前执行顺序如下：
 
 1. 在 Gate 锁内验证 daemon、lease、owner、节点、合同和请求摘要；
 2. 查询持久索引。terminal 直接返回，`unknown` 直接拒绝执行，Absent 才继续；
@@ -151,14 +156,25 @@ stateDiagram-v2
 8. committed 持久化失败时不得返回成功：RAM 状态改为 unknown，并执行现有安全协调；
 9. 所有发送前失败都撤销 RAM 占位；pending 已同步后的失败不得删除操作记录。
 
-为了让响应丢失后的重放不再先执行两次远端合同读取，`ToolbusDaemon::runtime_gpio_write()`
-应在 `request_snapshot_resource()` 前调用 Gate 的只读 `lookup_operation()`。Absent 才读取
-合同，进入执行阶段后再次核对索引，以封闭两个并发调用同时看到 Absent 的竞态。
+`ToolbusDaemon::runtime_gpio_write_operation()` 先按 operation ID 查询持久索引；已有记录
+直接返回，Absent 才进入 Gate。Gate 的 pending durability 回调在目标 I/O 前同步记录，
+terminal 回调在发布成功前同步终态，以封闭两个并发调用同时执行副作用的竞态。
 
 Release 采用相同的 pending/terminal 边界。Close 不确定时，可以由显式安全协调入口只重试
 幂等 Close；该动作不是重发原 GPIO 目标写，并且只能更新 recovery 证据。
 
 ## 6. 持久化格式与崩溃恢复
+
+`toolbusd` 启动时必须显式指定账本目录：
+
+```sh
+./build-wsl/toolbusd/toolbusd can0 classical /tmp/toolbusd.sock \
+  --runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger
+```
+
+目录不存在时以 `0700` 创建；已存在目录必须是当前有效用户拥有、组和其他用户无权限的
+真实目录，并以进程锁拒绝两个 daemon 同时使用。正式部署不得使用会随重启清空的目录，
+也不得删除记录来绕过 unknown scope 阻断。
 
 ### 6.1 文件与记录
 
@@ -177,6 +193,10 @@ v1 使用版本化、追加式分段日志。每条记录包含：
 
 - pending 完整追加后调用 `fdatasync(fd)`；只有成功后才能开始 mutating I/O；
 - terminal 完整追加后调用 `fdatasync(fd)`；只有成功后才能回复 committed/rejected；
+- terminal 持久化失败发生在目标 I/O 之后，IPC 固定返回
+  `BackendUnavailable`、`retryable=false`、`possibly_committed=true`；内存镜像转为
+  `unknown/scope_blocked` 并尝试安全协调，账本不可继续读取时保持写能力失败关闭，重启后
+  再把磁盘上的 durable pending 恢复为 unknown；
 - 新段、封段、manifest 原子替换和旧段删除都必须配套 `fsync(dirfd)`；
 - 临时文件必须位于同一目录，以 `O_EXCL | O_NOFOLLOW | O_CLOEXEC` 和 `0600` 创建；
 - 新 manifest 完整写入并同步、原子 rename、目录同步成功后，旧段才允许删除。
@@ -224,37 +244,49 @@ daemon 启动时按 journal sequence 重放每个作用域的生命周期：
 Runtime 控制 IPC 升级版本，写入和释放结果均返回：
 
 - `operation_id`；
+- `lease_id`、`expected_node_uuid` 与 `resource_id`；
+- `kind`；
 - `state`；
 - `replayed`；
 - `recovery`；
 - committed 时的对象 ID/目标值；
 - rejected/unknown 时的稳定结构化错误码。
 
-新增 `RuntimeOperationQuery`。请求至少包含 IPC 版本、当前 daemon instance ID、owner key
-ID 和 operation ID；为了找回首次响应丢失的 ID，也支持严格的 lease ID + idempotency
-查询。查询不要求旧 lease 仍有效，但必须校验 owner，不能泄漏其他身份的操作记录。
+已增加 `RuntimeOperationQuery` 与 `RuntimeOperationLookup`。前者包含 IPC 版本、当前 daemon
+instance ID、owner key ID 和 operation ID；后者用 kind、lease ID 和幂等键找回首次响应
+丢失的 ID。查询不要求旧 lease 仍有效，但必须校验 owner；不存在、过期和其他 owner 的
+按 ID 查询统一返回 `expired_unknown`，且 kind/scope 为 null，不能形成记录存在性侧信道。
 
 ### 8.2 CLI
 
-增加只读命令：
+已提供四个结构化命令：
 
 ```text
+remote-cli --json runtime-gpio-write-operation \
+  <daemon实例ID> <lease ID> <节点UUID> <owner-key-id> \
+  <resource-id> <idempotency-key> <0|1>
+remote-cli --json runtime-control-release-operation \
+  <daemon实例ID> <lease ID> <owner-key-id>
 remote-cli --json runtime-operation-status \
-  <当前daemon实例ID> <owner-key-id> <operation-id>
+  <daemon实例ID> <owner-key-id> <operation-id>
+remote-cli --json runtime-operation-lookup \
+  <daemon实例ID> <owner-key-id> <gpio_write|control_release> \
+  <lease ID> <idempotency-key>
 ```
 
 JSON 必须使用精确字段、规范十六进制 ID、有界整数和稳定枚举；重复键、额外键、未知版本
-及不合法状态组合全部拒绝。
+及不合法状态组合全部拒绝。Release lookup 的幂等键固定为 `release:v1`。
 
 ### 8.3 Runtime HTTP
 
-增加认证后的操作查询资源，例如：
+Runtime 已增加认证后的操作查询与定位资源：
 
 ```text
 GET /api/v1/control/operations/{operation_id}
+POST /api/v1/control/operation-lookups
 ```
 
-建议映射：
+当前映射：
 
 | operation 状态 | HTTP 行为 |
 |---|---|
@@ -268,6 +300,11 @@ Runtime 本地租约过期、进程重启或 daemon identity 变化，只能撤�
 operation 的查询能力。写请求发生 Provider 超时后，不得直接回滚并允许同作用域新操作；
 必须先查 operation：committed 重放，rejected 且 `safe_closed` 才结束本地占位，pending
 返回 202，unknown 则冻结作用域。
+
+HTTP 查询要求 `runtime.control.operation.read`。写入或释放返回可能已提交错误时，Runtime
+会在原请求剩余的同一绝对期限内自动执行一次 selector lookup；无可信结果时返回 409 和
+明确 locator。查询由固定有界线程池 singleflight 合并，短等待者超时不会取消共享任务。
+daemon identity 在查询中变化时最多对新实例重查一次，再次变化或不可验证即返回 503。
 
 ## 9. 容量、保留与轮转
 
@@ -312,6 +349,10 @@ v1 默认硬边界：
 
 ## 11. 自动测试矩阵
 
+以下是完整验收矩阵，不表示每一项都已自动化。当前已有账本单元故障注入、IPC/CLI、Mock
+进程贯通、并发重放和 terminal 持久化失败测试；逐边界强杀 daemon 并以同一账本重启的
+进程级故障注入仍待补齐。
+
 ### 11.1 schema 与身份
 
 - IPC 版本、精确长度、零/超长 ID、非法枚举、保留字段和整数边界；
@@ -355,12 +396,12 @@ v1 默认硬边界：
 - 节点重新发现或 daemon 本地 generation 重置不能解除 scope；可靠 MCU boot generation
   变化才能解除。
 
-### 11.6 进程级闭环
+### 11.6 待补的逐边界进程级闭环
 
-使用独立存活的 Mock MCU 和可注入崩溃点的 `toolbusd` 进程，在 pending、send、远端应用、
-terminal 和 IPC 响应各边界执行强制终止并以同一账本重启。通过 remote-cli 和 Runtime
-查询 operation，并核对 Mock 的 GPIO 创建、目标写、安全写低和 Close 计数。该测试是逻辑
-链路证据，不得标记为 CAN、USB 或实体硬件证据。
+后续应使用独立存活的 Mock MCU 和可注入崩溃点的 `toolbusd` 进程，在 pending、send、远端
+应用、terminal 和 IPC 响应各边界执行强制终止并以同一账本重启。通过 remote-cli 和
+Runtime 查询 operation，并核对 Mock 的 GPIO 创建、目标写、安全写低和 Close 计数。即使
+该测试完成，也只属于逻辑链路证据，不得标记为 CAN、USB 或实体硬件证据。
 
 ## 12. 验收不变量
 

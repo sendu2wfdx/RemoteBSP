@@ -3,10 +3,11 @@
 ## 目标与边界
 
 Runtime API 是位于 `toolbusd` 和浏览器/上层应用之间的长期运行服务边界，作用类似
-Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现可替换 Provider 之上的只读
-状态面，以及绑定 toolbusd 实例的进程内短时控制租约。GPIO 输出已经形成受信本机的
-最小写控制闭环；Runtime 不访问 SocketCAN、USB 或实体板，成功响应只证明对应远端
-命令收到成功应答，不等于更高层业务事务完成。
+Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现包含可替换 Provider 之上的只读
+状态面、绑定 toolbusd 实例的进程内短时控制租约，以及 GPIO 写入/释放持久操作账本。
+GPIO 输出已经形成受信本机的软件控制闭环；Runtime 不访问 SocketCAN、USB 或实体板，
+committed 只证明对应远端命令收到严格成功应答且终态已持久化，不等于当前实体电平或
+更高层业务事务完成。
 
 认证读取 `/api/v1/health` 还会返回 `toolbusd_health`：它通过版本化只读 IPC 取得与
 daemon instance ID 原子绑定的 `HealthSnapshot v1`，再按来源、节点、生产者代际、序号、
@@ -40,17 +41,18 @@ Runtime HTTP 层
         │ 只依赖 RuntimeProvider
         ▼
 文件 Provider / Mock Provider / Toolbusd Provider
-        │ Toolbusd Provider 只调用既有只读客户端
+        │ Toolbusd Provider 调用版本化结构化客户端
         ▼
 remote-cli / libremotebsp / toolbusd 本地套接字
-        │ RuntimeSnapshot v2 聚合 IPC；旧命令继续兼容
+        │ RuntimeSnapshot v2 + 受控 GPIO/操作账本 IPC
         ▼
 toolbusd 管理的传输层
 ```
 
 HTTP 层不能导入 SocketCAN、USB 或板卡实现。当前 Toolbusd Provider 通过现有
-`remote-cli → libremotebsp → toolbusd Unix Domain Socket` 边界读取信息，把节点枚举、
-资源目录和状态转换成同一快照；请求处理器本身不会发送 CAN/USB 帧。
+`remote-cli → libremotebsp → toolbusd Unix Domain Socket` 边界读取信息并执行受控 GPIO
+操作，把节点枚举、资源目录和状态转换成同一快照；请求处理器本身不会直接发送 CAN/USB
+帧，也不能绕过 daemon 的租约、静态合同或持久账本准入。
 
 Provider 默认使用一次 `runtime-snapshot --json`，只接受版本化结构化输出。`remote-cli` 未带
 `--json` 时继续输出原有的人类可读文本，不改变已有终端用法。
@@ -83,6 +85,12 @@ python3 -m runtime_api.server \
   --clock-error-warning-ns 250000 \
   --clock-sample-age-warning-ms 1000
 ```
+
+与该 Runtime 配套的 `toolbusd` 现在必须显式指定持久账本目录，例如
+`--runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger`。目录不能在 daemon
+重启时清空；正式部署应由 `toolbusd` 专用服务用户独占。旧文本 CLI 或缺少本地 operation
+方法时 `configured=false`；连接旧 daemon 时，即使本地适配器已配置，账本预检也会拒绝
+首个 acquire，确保 `operational=false` 并回滚本次本地租约。
 
 默认地址为 `http://127.0.0.1:8780/api/v1`。文件 Provider 每次请求重新读取文件，
 输入上限为 1 MiB；数据损坏、文件缺失或 schema 错误返回 HTTP 503，不回退到陈旧
@@ -180,9 +188,11 @@ X-API-Key: <api-key>
 - `runtime.control.lease.acquire`：申请本人名下的短时控制租约；
 - `runtime.control.lease.release`：释放本人名下的租约；
 - `runtime.control.lease.revoke`：监督者撤销任意身份的租约。
+- `runtime.gpio.write`：在已登记的本人 GPIO 租约范围内写输出；
+- `runtime.control.operation.read`：按 operation ID 或严格 selector 查询本人操作结果。
 
 空数组表示身份可以通过认证但不能执行上述操作，未知权限会使启动失败。权限模型不提供
-通配符或隐式默认值。部署配置可把前三项赋给“操作者”，只把读取和撤销赋给“监督者”；
+通配符或隐式默认值。部署配置可按职责组合普通操作权限，只把读取和撤销赋给“监督者”；
 这是显式权限组合，不是尚未实现的用户目录或动态角色继承。读取权限不能申请租约，申请
 权限也不能读取设备状态；未经授权的路径返回 HTTP 403、`permission_denied`。
 
@@ -413,7 +423,7 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 
 | 方法与路径 | 内容 |
 |---|---|
-| `GET /api/v1` | schema 版本、端点和未实现能力声明 |
+| `GET /api/v1` | schema 版本、端点与精确 configured/operational 能力声明 |
 | `GET /api/v1/health` | 未认证时仅存活探针；认证后含 Provider 可用性和当前 `snapshot_id` |
 | `GET /api/v1/snapshot` | 完整、同一时刻的节点/资源/告警快照 |
 | `GET /api/v1/nodes` | 节点摘要、资源数和活动告警数 |
@@ -423,11 +433,16 @@ Provider 不猜测跨进程时钟域，年龄与缓存周期均为 `null`。相�
 | `GET /api/v1/resources` | 全部资源，并补充所属 `node_id` |
 | `GET /api/v1/alerts` | 全部告警 |
 | `GET /api/v1/events` | 版本化增量事件游标分页；只做立即返回短轮询 |
+| `POST /api/v1/control-leases` | 申请有界短时租约 |
+| `POST /api/v1/control/gpio/write` | 在本人活动租约范围内提交 GPIO operation |
+| `DELETE /api/v1/control-leases/{lease_id}` | 本人释放或经服务端授权的监督撤销 |
+| `GET /api/v1/control/operations/{operation_id}` | 查询本人持久 operation 结果 |
+| `POST /api/v1/control/operation-lookups` | 用严格 kind/lease/idempotency selector 定位结果 |
 
-`HEAD` 与对应 `GET` 返回相同状态和头部但没有响应体。认证通过后的任何写方法返回
-HTTP 405；`OPTIONS` 返回 HTTP 204 和 `Allow: GET, HEAD, OPTIONS`；未知版本或路径
-返回 404。除 `/events` 的封闭 `cursor`、`limit` 外不接受查询参数，认证信息在所有路径
-都不得放入查询字符串。
+`HEAD` 与对应 `GET` 返回相同状态和头部但没有响应体。表中未声明写能力的路径继续返回
+HTTP 405；`OPTIONS` 按具体控制端点返回允许的方法，其他读取端点返回
+`GET, HEAD, OPTIONS`。未知版本或路径返回 404。除 `/events` 的封闭 `cursor`、`limit`
+外不接受查询参数，认证信息在所有路径都不得放入查询字符串。
 
 ## 快照 JSON v1
 
@@ -515,7 +530,9 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 
 ## 短时控制租约
 
-`POST /api/v1/control-leases` 是当前唯一写入口，要求 Runtime 自身绑定数字回环地址、
+`POST /api/v1/control-leases` 是控制流程的租约入口；GPIO 写入使用
+`POST /api/v1/control/gpio/write`，释放使用 `DELETE /api/v1/control-leases/{lease_id}`。
+这些入口都要求 Runtime 自身绑定数字回环地址、
 启用 API 密钥认证并拥有 `runtime.control.lease.acquire`。非回环监听即使配置密钥也以
 `control_transport_insecure` 失败关闭；远程客户端必须先由同机 TLS 反向代理终止 HTTPS，
 再转发到 `127.0.0.1` 或 `::1` 上的 Runtime。请求体必须是最多 4096 字节、字段封闭且无
@@ -525,7 +542,7 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 {
   "node_id": "mock-node-1",
   "resource_id": "gpio-0",
-  "command_group": "write",
+  "command_group": "gpio.write",
   "ttl_ms": 5000,
   "idempotency_key": "studio-request-0001"
 }
@@ -583,7 +600,9 @@ GPIO 写竖切已经把实例标识、稳定节点 UUID、节点代次和租约�
 `write_commands=true`、`control_leases.downstream_commands=true`；独立的
 `gpio_write.configured/operational` 字段区分已配置与曾完成最终准入；operational 状态
 还绑定 daemon 身份和单调 revision，旧并发结果不能复活已经撤销的能力证明，并始终保持
-`control_leases.loopback_only=true`。后续写命令入口
+`control_leases.loopback_only=true`。`operation_ledger` 同样公开
+`configured/operational/schema_version=1`，但不把仅存在本地适配代码误报为已通过 daemon
+准入。后续写命令入口
 必须在同一原子决策中校验身份、租约所有权和命令范围，并由 toolbusd 重新执行最终准入；
 不能仅凭客户端持有一个字符串 `lease_id` 就认为已获准执行。
 
@@ -598,6 +617,68 @@ HTTP 错误。下游开始前的期限耗尽可声明未提交并回滚本次租
 时必须返回 `retryable=false, possibly_committed=true`。daemon 已返回的精确错误不能被事后
 期限覆盖。公开无凭证 `/health` 仍只返回进程存活，不读取 Provider；认证健康读取也受同一
 请求期限约束。
+
+若目标 I/O 后的账本终态持久化失败，toolbusd 固定返回
+`BackendUnavailable`、`retryable=false`、`possibly_committed=true`，而不是允许调用方直接
+重放；Runtime 只可在剩余请求预算内查询原 operation，查询不可用时返回冻结 locator。
+
+## GPIO 操作结果查询与恢复
+
+GPIO 写入和释放使用 `toolbusd` 的版本化持久操作账本。daemon 在可能改变目标状态前先
+同步 pending 记录，取得严格成功响应后再同步终态；所有账本操作响应都携带稳定的 64 个
+小写十六进制 `operation_id`。HTTP 操作对象还包含 `lease_id`、稳定
+`scope.expected_node_uuid/resource_id`、`operation_kind`、`state`、`recovery`、
+`replayed`、结果与稳定错误。`committed` 只证明历史操作曾取得并持久化成功结果，不证明
+当前实体电平。
+
+拥有 `runtime.control.operation.read` 的同一认证身份可按 ID 查询：
+
+```text
+GET /api/v1/control/operations/{operation_id}
+```
+
+如果首次响应连 operation ID 都没有到达，可用严格 selector 定位：
+
+```http
+POST /api/v1/control/operation-lookups
+Content-Type: application/json
+
+{
+  "operation_kind": "gpio_write",
+  "lease_id": "0123456789abcdef0123456789abcdef",
+  "idempotency_key": "gpio-write-0001"
+}
+```
+
+释放定位的 `operation_kind` 为 `control_release`，幂等键固定为 `release:v1`。查询不要求
+Runtime 本地租约仍活动，因此 TTL 后仍可查询；但必须匹配 owner，未知记录与其他 owner
+记录返回同形 `expired_unknown`，按 ID 查询时 `operation_kind` 和 scope 为 `null`，避免
+泄漏。selector 已知操作类型，因此必须回显该类型。
+
+状态映射为：`pending` 返回 202 和 `Location`/`Retry-After`；`committed` 返回 200 并重放
+持久结果；`rejected` 按稳定原因返回 409、503 或 504；`unknown` 与
+`expired_unknown` 返回 409、`safe_to_retry=false`。`unknown.scope_blocked` 与
+`awaiting_reboot` 冻结单个稳定 UUID/资源作用域；`safe_closed` 或
+`node_reboot_confirmed` 才能解除快速缓存，权威阻断始终由 daemon 持久账本执行。账本
+不可读、损坏或版本不兼容返回 503，并关闭写能力证明。
+
+写入/释放出现 `possibly_committed=true` 时，只要本次请求尚有预算，Runtime 会使用同一
+绝对 deadline 自动执行一次只读 lookup；得到 pending 或终态就按上述状态返回。查询采用
+固定有界线程池和 singleflight，同一查询只产生一个 CLI 调用；短等待者超时不会取消共享
+任务或让长等待者继承其 deadline。daemon identity 在查询期间变化时最多对新实例重查
+一次，再次变化或不可验证即返回 503。预算耗尽或 lookup 无法取得可信结果时返回 409 与
+明确 locator，绝不盲重放原写请求。
+
+管理员代原所有者释放时，账本仍使用租约登记的真实 owner 鉴权。Runtime 在下游调用前用
+有界 256 项、24 小时过期的进程内索引保存“发起管理员 + locator → 原 owner”关联；locator 请求体
+不接受也不返回 owner。即时恢复失败后，同一管理员可用原 locator 延后查询，其他身份不能
+借此选择或探测 owner；对外查询仍要求显式 `runtime.control.operation.read` 权限，不因撤销
+权限而自动扩大读取面。并发请求各自持有服务端随机 reservation token；确定失败只撤销本次
+token，不会删除其他未决请求或已绑定 operation 的映射，uncertain 返回前会把临时 token
+收敛为单个 retained locator，避免同一 selector 重试造成无界增长。索引满载时在下游调用前
+以 503 失败关闭；Runtime 重启或索引过期后
+该关联即丢失，当前 HTTP 接口不能继续跨 owner 定位，也不会接受客户端补交 owner；需由
+受控运维流程处理，不能将这项进程内便利机制描述为跨 Runtime 重启保证。
 
 只有在“回环监听且认证已启用”使控制租约可用时，能力字段才报告 `read_only=false`；
 默认无认证回环开发模式和非回环监听仍报告 `read_only=true`。即使为 `false` 也只表示
@@ -630,10 +711,11 @@ API 已有本地租约状态写入口，不能据此推断设备可写；是否�
 用缓存、批量 Remote Packet 命令或原生语言绑定优化，但 Runtime 不能为此直接访问
 SocketCAN、USB 或传输层。
 
-当前认证授权和短租约竖切解决的是“哪个密钥身份可以读、申请、本人释放或监督撤销”、
-单进程内并发写意图互斥、GPIO 最终准入和失效安全停机，以及 toolbusd 进程重启后的旧
-租约失效。结构化 IPC 错误和统一控制期限已经闭合，但还没有跨进程可查询的提交结果；
-`possibly_committed` 只能禁止直接重试，不能替代恢复账本。TLS、反向代理信任边界、用户
+当前认证授权、短租约与持久操作账本解决的是“哪个密钥身份可以读、申请、本人释放、
+监督撤销或查询本人操作”、单进程并发写意图互斥、GPIO 最终准入和失效安全停机，以及
+toolbusd 重启后的旧租约失效、未知操作恢复和资源阻断。Ubuntu WSL 的 Runtime GPIO
+专项 27 项、全量 141 项软件测试已通过；这些数字只对应当前测试清单，不包含实体板证据。
+TLS、反向代理信任边界、用户
 目录和动态角色、密钥热加载/撤销、速率限制、其他资源的原子准入，以及审计异步持久化
 与完整性保护仍是后续
 部署门槛，不能把本轮的软件测试当作公网暴露、真实设备控制或硬件环境的安全实测证据。

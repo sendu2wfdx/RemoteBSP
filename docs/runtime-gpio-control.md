@@ -26,8 +26,8 @@ GPIO 租约仍由 `POST /api/v1/control-leases` 申请，但 `command_group` 必
 
 请求体字段封闭、拒绝重复字段，`value` 必须是 JSON 布尔值。Runtime 从认证结果取得
 `owner_key_id` 和权限，客户端不能在请求体中自报身份或管理员标志。写前会重新核对活动
-租约所有者、`node_id`、`resource_id` 和固定命令组；成功结果包含 `lease_id`、
-`object_id`、实际电平和 `replayed`。
+租约所有者、`node_id`、`resource_id` 和固定命令组；成功结果以 operation 对象返回，包含
+`operation_id`、`lease_id`、稳定 scope、`object_id`、实际电平、状态和 `replayed`。
 
 释放仍使用 `DELETE /api/v1/control-leases/{lease_id}`。监督者的
 `runtime.control.lease.revoke` 来自服务端认证配置；Runtime 查出登记时的真实所有者后
@@ -49,9 +49,9 @@ GPIO 租约仍由 `POST /api/v1/control-leases` 申请，但 `command_group` 必
 1. `runtime-control-acquire` 携带当前 daemon 的 128 位实例 ID、128 位租约 ID、
    预期节点 UUID、调用者键 ID、唯一的 GPIO 写权限位、节点/资源和剩余 TTL。Runtime
    先扣除本地校验与目标解析耗时，再把不超过本地截止时间的整毫秒余量交给 daemon。
-2. `runtime-gpio-write` 必须引用已经登记且未过期的同一租约；未知租约绝不会在写入时
-   隐式创建。请求还携带有界幂等键和目标电平。
-3. `runtime-control-release` 只允许登记时的所有者释放。v2 IPC 没有“代替他人撤销”
+2. `runtime-gpio-write-operation` 必须引用已经登记且未过期的同一租约；未知租约绝不会
+   在写入时隐式创建。请求还携带有界幂等键和目标电平，并返回持久 operation 状态。
+3. `runtime-control-release-operation` 只允许登记时的所有者释放。v2 IPC 没有“代替他人撤销”
    字段，调用方不能通过自声明管理员标志越权。
 
 一次 HTTP 请求在读取头部前建立不可续期的单调绝对期限。请求体、daemon 身份单飞、目标
@@ -74,8 +74,9 @@ daemon 内的最终控制门以 `(node_id, resource_id)` 为互斥域；调用�
 执行。同一资源的命令有界串行等待，不同节点或资源可并发，因此单节点超时不会占住整个
 Runtime 控制面。命令执行期间不能释放该资源租约或登记替代租约。
 
-幂等域为“调用者键 ID + 幂等键”。完成结果保留 30 秒；同参数重试返回原对象 ID 并标记
-`replayed`，不同参数复用键会被拒绝。活动租约、对象表与幂等历史均有上限，满载时失败
+幂等域为“调用者键 ID + 幂等键”。Gate 内存镜像保持有界，权威 operation 结果写入
+`toolbusd` 持久账本；同参数重试返回原 operation/对象 ID 并标记 `replayed`，不同参数复用
+键会被拒绝。活动租约、对象表、内存镜像和持久账本均有硬上限，满载时在目标 I/O 前失败
 关闭，不会无界增长。GPIO 首次写始终先用 `GPIO_CREATE(false)` 创建安全低电平对象，
 Gate 在本地登记对象与安全停机回调后才允许 `GPIO_WRITE` 切换到目标电平；后续写直接使用
 已登记对象。目标写入前再次检查关停状态、租约、单调截止时间和节点代次，已过期或正在
@@ -98,20 +99,21 @@ Unix Domain Socket 在监听前固定为 `0660`，因此当前可信调用者边
 恶意进程冒充另一个 Runtime 身份。部署时不得把 toolbusd socket 授权给普通网页进程或
 不受信任用户。
 
-v2 IPC 尚未提供持久化、抗篡改的 daemon 审计日志；HTTP 层虽然已有有界脱敏审计，仍是
-进程内存记录。因此这一竖切仍是受信本机边界内的最小控制闭环，不是可直接公网部署的
-完整权限系统。
+操作结果账本已经持久化，但它不是操作者审计日志，也不提供密码学防篡改；HTTP 脱敏审计
+仍是进程内存记录。因此这一竖切仍是受信本机边界内的最小控制闭环，不是可直接公网部署
+的完整权限系统。
 
 ## 当前未覆盖
 
 - 续租和租约列表；
 - 真实 CAN/CAN-FD、USB 或板卡验证；
 - 运动、PWM、SPI、I2C 和其他写资源；
-- 不可信本地多租户隔离，以及下游响应丢失后的跨进程 exactly-once 保证；
-- 跨 daemon 重启可查询的持久化操作结果与 exactly-once 恢复。
+- 不可信本地多租户隔离；
+- 可靠 MCU boot generation 驱动的自动解冻，以及实体掉电/链路断开下的安全时延证明；
+- 无限期结果保留或对 `expired_unknown` 的可重放承诺（明确不提供）。
 
 Runtime 根能力只在“回环监听、启用认证、使用 daemon 世代绑定租约管理器、Provider
-确认结构化 acquire/write/release 三个 IPC 均存在”时报告
+确认结构化 acquire、operation write/release、status/lookup IPC 均存在”时报告
 `gpio_write.configured=true`。初始 `operational=false`；只有完整的“登记 → 下游幂等
 登记 → 最终 authorize”成功后才置为 true，幂等重放也必须重新访问下游。该证明绑定
 daemon 身份和单调 revision；迟到的旧 acquire/write 结果不能覆盖较新的失效状态，旧
@@ -124,8 +126,10 @@ daemon 身份变化、不可读或格式无效才全局失效。若 daemon 已�
 发现本地租约过期或世代变化，会用登记时的真实所有者做一次 best-effort 幂等释放，再以
 泛化 503 失败，响应不会回显 remote-cli stderr、套接字路径或底层异常文本。
 
-结构化 IPC 错误和统一端到端 deadline 已完成；下一轮安全阻断项是实现
-[不确定提交恢复与操作结果账本](runtime-operation-ledger.md)，并定义“本地租约在远端命令
-执行期间跨过期”的 exactly-once 状态机。当前只保证已完成命令的 30 秒 daemon 内存幂等
-重放，不宣称跨过期或进程崩溃 exactly-once。
-daemon 审计的持久化、完整性保护和失败事件增强也仍是部署前置项。
+结构化 IPC 错误、统一端到端 deadline 和
+[不确定提交恢复与操作结果账本](runtime-operation-ledger.md)已完成软件闭环。写入和释放在
+目标 I/O 前持久化 pending、成功返回前持久化终态；Runtime 可按 operation ID 或严格
+selector 跨本地租约 TTL 查询，并把 pending 映射为 202、unknown/expired_unknown 映射为
+不可直接重试的 409。daemon 重启会恢复 durable pending 为 unknown 并重建资源阻断。
+这些保证来自单元、Mock 与本地进程测试，不是实体 GPIO 电平或掉电文件系统验证；daemon
+操作者审计的持久化、完整性保护和失败事件增强也仍是部署前置项。

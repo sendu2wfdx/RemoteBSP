@@ -143,8 +143,11 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
   后同一节点代次可以安全重建；固件对象绑定传输会话并隔离跨会话访问；能力证明绑定 daemon
   身份与单调 revision，普通目标错误仅回滚本租约，错误不向 HTTP 暴露内部路径；版本化
   IPC 错误信封和请求级单调绝对期限已贯通请求体、身份单飞、目标快照、CLI、登记、写入与释放，
-  并严格区分确定未提交和可能已提交；下一步实现已经审计定稿的可查询操作结果账本、
-  跨租约过期的 exactly-once 查询、TLS 部署基线、密钥
+  并严格区分确定未提交和可能已提交；版本化持久操作账本已覆盖 GPIO 写入与释放，具备
+  写前 pending、同步终态、跨租约 TTL 的 operation ID/selector 查询、重启 unknown 恢复和
+  资源冻结，Runtime HTTP 已接入 pending 202、终态重放、查询/定位和不确定结果自动恢复；
+  下一步补齐生产文件系统掉电/损坏演练、可靠 MCU boot generation 驱动的自动解冻、
+  TLS 部署基线、密钥
   热撤销、持久审计完整性、跨重启事件存储和主动推送；
 - Runtime API 只通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
 - 在现有版本化 REST 和短轮询之上评估 WebSocket/SSE 事件订阅与遥测流；

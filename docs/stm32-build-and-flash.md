@@ -394,8 +394,14 @@ sudo ip link set can0 up
 
 ```sh
 ./build-wsl/toolbusd/toolbusd can0 fd /tmp/toolbusd.sock \
-  --arbitration-bitrate 500000 --data-bitrate 1000000
+  --arbitration-bitrate 500000 --data-bitrate 1000000 \
+  --runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger
 ```
+
+`--runtime-operation-ledger-dir` 为当前 `toolbusd` 强制参数。正式目录应由运行 daemon 的
+专用用户独占且跨重启保留；目录属主、类型或权限不安全会拒绝 daemon 启动，安全目录内的
+账本内容损坏则保持只读诊断并让 Runtime 写入口失败关闭。该主机侧要求不改变任何 STM32
+烧录布局。
 
 单节点进入 USB Katapult 后，总线没有其他节点确认周期发现帧时，`gs_usb`
 适配器可能因持续 ACK 错误进入 ERROR-PASSIVE。USB 升级结束后重新启动接口即可：
@@ -431,7 +437,8 @@ F103 固件也按完整的 2048 字节协议上限构建；当前 Bluepill 配�
 启动守护进程并验证实体节点：
 
 ```sh
-./build-wsl/toolbusd/toolbusd can0 classical /tmp/toolbusd.sock
+./build-wsl/toolbusd/toolbusd can0 classical /tmp/toolbusd.sock \
+  --runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger
 
 ./build-wsl/remote-cli node-list
 ./build-wsl/remote-cli --node 1 ping hello

@@ -74,11 +74,14 @@ VID:PID@SERIAL
 
 ```sh
 ./build-wsl/toolbusd/toolbusd \
-    0x1209:0x0001@BOARD-01 usb /tmp/toolbusd.sock
+    0x1209:0x0001@BOARD-01 usb /tmp/toolbusd.sock \
+    --runtime-operation-ledger-dir /var/lib/remotebsp/operation-ledger
 ```
 
 VID/PID 必须由最终产品合法分配。Kconfig 中的开发默认值不能直接用于发布产品。
 当同一 VID/PID 下存在多块板卡时必须指定 USB 序列号，否则 toolbusd 拒绝任意选取。
+`--runtime-operation-ledger-dir` 是当前 `toolbusd` 的强制启动参数；正式目录必须由 daemon
+专用用户独占并跨重启保留。
 
 ## 无硬件端到端验证
 
@@ -86,7 +89,8 @@ VID/PID 必须由最终产品合法分配。Kconfig 中的开发默认值不能�
 
 ```sh
 ./build-wsl/toolbusd/toolbusd \
-    /tmp/remotebsp-usb-link.sock usb-mock /tmp/toolbusd.sock
+    /tmp/remotebsp-usb-link.sock usb-mock /tmp/toolbusd.sock \
+    --runtime-operation-ledger-dir /tmp/remotebsp-usb-mock-ledger
 ```
 
 终端二：
@@ -95,6 +99,9 @@ VID/PID 必须由最终产品合法分配。Kconfig 中的开发默认值不能�
 ./build-wsl/mock_mcu/mock_mcu \
     /tmp/remotebsp-usb-link.sock usb-mock --uart-stream
 ```
+
+这里的 `/tmp/remotebsp-usb-mock-ledger` 仅用于无硬件 Mock 测试；正式部署不得使用会被
+系统清理的临时目录。
 
 终端三继续使用现有 CLI：
 
