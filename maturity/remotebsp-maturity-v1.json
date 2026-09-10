@@ -57,7 +57,7 @@
           {"id": "resource_bus_runtime_source", "kind": "source", "path": "toolbusd/src/bus_runtime.cpp", "note": "有界设备合同缓存、首访单飞、父总线非阻塞仲裁和节点失效处理。"},
           {"id": "resource_static_table_source", "kind": "source", "path": "firmware/src/static_resources.c", "note": "Studio 生成 GPIO/UART/PWM/定时位流表的启动完整性和运行白名单公共消费者。"},
           {"id": "resource_embedded_enum_source", "kind": "source", "path": "firmware/src/core.c", "note": "STM32 Remote Core 已把静态表接入 ResourceEnum/Describe/Status/Contract；ResourceReset 对 UART/PWM/TimedBitstream 执行兼容恢复，后端失败时保留对象和故障状态。"},
-          {"id": "resource_g431_bus_hal_source", "kind": "source", "path": "firmware/boards/stm32g431cbu6/board_bus.c", "note": "G431 I2C1/SPI1/SPI2 板级 HAL 与静态端点；已有交叉编译及主机 HAL 桩证据，未烧录或电气验收。"}
+          {"id": "resource_stm32_bus_hal_source", "kind": "source", "path": "firmware/boards/common/stm32_bus_hal.c", "note": "F072/F103/G431 共用 I2C/SPI 事务与恢复实现，各板静态端点单独配置；已有交叉编译及主机 HAL 桩证据，未烧录或电气验收。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },

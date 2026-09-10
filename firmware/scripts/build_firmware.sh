@@ -102,6 +102,14 @@ case "${target}" in
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core-bus-hal
         ;;
+    stm32f072-bus-hal)
+        build_one f072-bus-hal tests/configs/stm32f072_bus_hal_defconfig \
+            remotebsp-stm32f072rbt6
+        ;;
+    stm32f103-bus-hal)
+        build_one f103-bus-hal tests/configs/stm32f103_bus_hal_defconfig \
+            remotebsp-stm32f103cbt6
+        ;;
     weact-stm32g431cbu6-core-studio-identity)
         build_studio_identity
         ;;
@@ -154,11 +162,13 @@ case "${target}" in
         # 保证本地与 GitHub 干净检出行为一致。
         bash "$0" all
         bash "$0" weact-stm32g431cbu6-core-bus-hal
+        bash "$0" stm32f072-bus-hal
+        bash "$0" stm32f103-bus-hal
         bash "$0" weact-stm32g431cbu6-core-studio-identity
         python3 "${root_dir}/scripts/verify_ci_firmware_matrix.py"
         ;;
     *)
-        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-bus-hal|weact-stm32g431cbu6-core-studio-identity|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all|ci]\n' \
+        printf '用法：%s [f072|f103|g431|stm32f072-bus-hal|stm32f103-bus-hal|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-bus-hal|weact-stm32g431cbu6-core-studio-identity|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all|ci]\n' \
             "$0" >&2
         exit 2
         ;;

@@ -182,6 +182,13 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
         message(FATAL_ERROR
             "缺少 STM32F0 官方依赖，请先运行 scripts/fetch_stm32_deps.sh")
     endif()
+    if(RBSP_BUS_LINES)
+        set(RBSP_F072_BUS_SOURCES
+            "${HAL_DIR}/Src/stm32f0xx_hal_i2c.c"
+            "${HAL_DIR}/Src/stm32f0xx_hal_i2c_ex.c"
+            "${HAL_DIR}/Src/stm32f0xx_hal_spi.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/stm32_bus_hal.c")
+    endif()
     add_executable(remotebsp-stm32f072rbt6
         "${BOARD_DIR}/main.c"
         ${RBSP_OPTIONAL_BOARD_SOURCES}
@@ -200,9 +207,14 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
         "${HAL_DIR}/Src/stm32f0xx_hal_uart.c"
         src/startup_gpio.c
         src/static_resources.c
+        ${RBSP_F072_BUS_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32f072rbt6 PRIVATE
         USE_HAL_DRIVER STM32F072xB)
+    if(RBSP_BUS_LINES)
+        target_compile_definitions(remotebsp-stm32f072rbt6 PRIVATE
+            RBSP_F072_BUS_ENABLED=1)
+    endif()
     target_compile_options(remotebsp_embedded_core PRIVATE
         -mcpu=cortex-m0 -mthumb)
     target_include_directories(remotebsp-stm32f072rbt6 PRIVATE
@@ -214,6 +226,12 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32f103cbt6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-f1")
     set(HAL_DIR "${VENDOR_DIR}/stm32f1xx-hal-driver")
+    if(RBSP_BUS_LINES)
+        set(RBSP_F103_BUS_SOURCES
+            "${HAL_DIR}/Src/stm32f1xx_hal_i2c.c"
+            "${HAL_DIR}/Src/stm32f1xx_hal_spi.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/stm32_bus_hal.c")
+    endif()
     add_executable(remotebsp-stm32f103cbt6
         "${BOARD_DIR}/main.c"
         ${RBSP_OPTIONAL_BOARD_SOURCES}
@@ -232,9 +250,14 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
         "${HAL_DIR}/Src/stm32f1xx_hal_uart.c"
         src/startup_gpio.c
         src/static_resources.c
+        ${RBSP_F103_BUS_SOURCES}
     )
     target_compile_definitions(remotebsp-stm32f103cbt6 PRIVATE
         USE_HAL_DRIVER STM32F103xB)
+    if(RBSP_BUS_LINES)
+        target_compile_definitions(remotebsp-stm32f103cbt6 PRIVATE
+            RBSP_F103_BUS_ENABLED=1)
+    endif()
     target_compile_options(remotebsp_embedded_core PRIVATE
         -mcpu=cortex-m3 -mthumb)
     target_include_directories(remotebsp-stm32f103cbt6 PRIVATE
@@ -252,7 +275,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
             "${HAL_DIR}/Src/stm32g4xx_hal_i2c_ex.c"
             "${HAL_DIR}/Src/stm32g4xx_hal_spi.c"
             "${HAL_DIR}/Src/stm32g4xx_hal_spi_ex.c"
-            "${BOARD_DIR}/board_bus.c")
+            "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/stm32_bus_hal.c")
     endif()
     if(RBSP_USB_LINK_LINES)
         set(USB_DEVICE_DIR "${VENDOR_DIR}/stm32-mw-usb-device")

@@ -6,6 +6,9 @@
 #endif
 #include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
+#ifdef CONFIG_REMOTEBSP_BUS
+#include "board_bus.h"
+#endif
 #ifdef CONFIG_REMOTEBSP_DEVICE_PARAMS
 #include "remotebsp_embedded/device_parameter_flash.h"
 #endif
@@ -77,6 +80,7 @@ _Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
 
 static CAN_HandleTypeDef can_handle;
 static rbsp_core_t remote_core;
+
 
 #ifdef CONFIG_REMOTEBSP_MOTION
 #ifdef CONFIG_MOTION_SLOT0_ENABLED
@@ -550,6 +554,11 @@ static bool gpio_pin_allowed(uint16_t encoded_pin) {
     if (!gpio_pin_present(encoded_pin)) {
         return false;
     }
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (rbsp_f103_bus_pin_reserved(encoded_pin)) {
+        return false;
+    }
+#endif
 #ifdef CONFIG_REMOTEBSP_MOTION
     if (motion_pin_reserved(encoded_pin)) {
         return false;
@@ -1010,6 +1019,15 @@ static bool board_gpio_read(uint16_t encoded_pin, bool* value) {
                  port, (uint16_t)(1U << (encoded_pin % 16U))) ==
              GPIO_PIN_SET;
     return true;
+}
+
+static uint64_t board_monotonic_microseconds(void) {
+    static uint32_t previous_ms;
+    static uint64_t epoch_ms;
+    const uint32_t now_ms = HAL_GetTick();
+    if (now_ms < previous_ms) epoch_ms += UINT64_C(1) << 32U;
+    previous_ms = now_ms;
+    return (epoch_ms + now_ms) * UINT64_C(1000);
 }
 
 #ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
@@ -1778,6 +1796,11 @@ int main(void) {
     board_fixed_io_configure();
 #endif
     startup_gpio_configure();
+#ifdef CONFIG_REMOTEBSP_BUS
+    if (!rbsp_f103_bus_init()) {
+        fatal_error();
+    }
+#endif
 #if defined(CONFIG_REMOTEBSP_PWM) || defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
     if (!rbsp_board_waveform_init()) {
         fatal_error();
@@ -1826,10 +1849,18 @@ int main(void) {
     const rbsp_hal_t hal = {
         .can_send = board_can_send,
         .milliseconds = HAL_GetTick,
+        .microseconds = board_monotonic_microseconds,
         .gpio_configure = board_gpio_configure,
         .gpio_configure_pull = board_gpio_configure_pull,
         .gpio_write = board_gpio_write,
         .gpio_read = board_gpio_read,
+#ifdef CONFIG_REMOTEBSP_BUS
+        .bus_resources = rbsp_f103_bus_resources(),
+        .bus_resource_count = rbsp_f103_bus_resource_count(),
+        .i2c_transfer = rbsp_f103_i2c_transfer,
+        .spi_transfer = rbsp_f103_spi_transfer,
+        .resource_status = rbsp_f103_bus_resource_status,
+#endif
 #ifdef CONFIG_REMOTEBSP_STATIC_GPIO_MAP
         .gpio_resource_allowed = board_gpio_resource_allowed,
 #endif

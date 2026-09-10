@@ -32,7 +32,8 @@
 - 已把独立部署作业接入非交互 CLI 的显式 `deploy-stlink` 命令：校验受保护构建记录/
   固件后执行 ST-Link 写入、校验、复位和有界重试，并通过调用者指定的有界 JSON 文件
   核对板型/工程/配置/固件四类身份；核验成功后生成自哈希部署记录，并可严格关联生产
-  记录和批次；下一步接入网页及 CAN/USB Katapult 执行器、可信时间与签名；
+  记录和批次；Web 已提供默认关闭的两阶段受控 ST-Link 入口；下一步接入 CAN/USB
+  Katapult 执行器、可信时间与签名，并完成实体部署验收；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，
@@ -113,13 +114,13 @@
   修复并在实板验证 Busy -> Normal、对象 1 不复位重建为对象 2。公共 Core 现把
   I2C/SPI 设备持有独占租约映射为 Busy，释放、超时和会话清理后恢复 Normal；该项只有
   主机单元测试；G431 板级 I2C/SPI HAL 已交叉编译但未烧录/电气实测，
-  F072/F103 板级 HAL 仍未实现。下一步接入 STEPGEN、总线
+  F072/F103/G431 板级 HAL 均已实现并交叉编译，但尚无实体总线验证。下一步接入 STEPGEN、总线
   错误计数和完整 MCU 健康生产者；未覆盖字段仍不得把全零解释为实体健康；
 - 公共 Core `ResourceReset` 已恢复 UART 清缓冲/故障并释放、PWM stop、
   TimedBitstream abort 的兼容语义，且后端失败时保留对象/故障状态；下一步
   把恢复结果接入更完整的健康历史和运维界面；
-- G431 I2C1 PB6/PB7、SPI1 PA5/PA6/PA7+PA15 CS、SPI2 PB13/PB14/PB15+
-  PB12 CS 的板级 HAL 已编译；待接入合适从设备后完成烧录、应答/超时/
+- F072/F103 的 I2C1 PB6/PB7 与 SPI1 PA5/PA6/PA7+PA4 CS，以及 G431 I2C1、
+  SPI1/SPI2 的板级 HAL 已编译；待接入合适从设备后完成烧录、应答/超时/
   恢复、片选与时序采集。生产板级代码已有主机 HAL 桩覆盖 flags、统一超时预算、
   可选恢复和 SPI CS/失败恢复，但该证据不是实板。SPI1 使用 PA6，当前 DL16 D5/PA6 接线保持时不得
   烧录该总线测试配置；

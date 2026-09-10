@@ -19,6 +19,7 @@
 
 static rbsp_can_frame_t sent_frames[1024];
 static size_t sent_count;
+static bool can_send_must_fail;
 static uint32_t now_ms;
 static bool gpio_values[256];
 static rbsp_gpio_direction_t gpio_directions[256];
@@ -179,6 +180,7 @@ static uint16_t make_request(uint8_t* packet, uint16_t command,
 }
 
 static bool fake_can_send(const rbsp_can_frame_t* frame) {
+    if (can_send_must_fail) return false;
     assert(sent_count < sizeof(sent_frames) / sizeof(sent_frames[0]));
     sent_frames[sent_count++] = *frame;
     return true;
@@ -503,6 +505,77 @@ static uint8_t exchange_status(rbsp_core_t* core, uint16_t command,
     return response[24U];
 }
 
+static void test_gpio_input_events(const rbsp_hal_t* hal,
+                                   const rbsp_node_info_t* info) {
+    enum { OWNER_SESSION = 0x10203040U };
+    rbsp_core_t core;
+    uint8_t response[1024];
+    uint8_t create[4U] = {5U, 0U, RBSP_GPIO_INPUT, 0U};
+    assert(rbsp_core_init(&core, hal, RBSP_CAN_CLASSICAL, info));
+    core.node_id = 25U;
+    assert(exchange_status(&core, 0x0100U, OWNER_SESSION, 500U, 0U,
+                           create, sizeof(create), response) == 0U);
+    const uint32_t object_id = get_u32(response + 12U);
+    uint8_t subscribe[8U] = {1U, 3U, 2U, 0U, 0U, 0U, 0U, 0U};
+    put_u32(subscribe + 4U, 2000U);
+    assert(exchange_status(&core, 0x0104U, OWNER_SESSION, 501U, object_id,
+                           subscribe, sizeof(subscribe), response) == 0U);
+
+    /* 1 ms 往返抖动不形成稳定边沿。 */
+    can_send_must_fail = true;
+    gpio_values[5U] = true;
+    now_ms = 10U;
+    rbsp_core_poll(&core);
+    gpio_values[5U] = false;
+    now_ms = 11U;
+    rbsp_core_poll(&core);
+    assert(core.gpio_objects[0U].input_event_sequence == 0U);
+
+    /* 两项固定队列装满后，第三项丢弃且累计计数可观测。 */
+    gpio_values[5U] = true;
+    now_ms = 20U;
+    rbsp_core_poll(&core);
+    now_ms = 22U;
+    rbsp_core_poll(&core);
+    gpio_values[5U] = false;
+    now_ms = 30U;
+    rbsp_core_poll(&core);
+    now_ms = 32U;
+    rbsp_core_poll(&core);
+    gpio_values[5U] = true;
+    now_ms = 40U;
+    rbsp_core_poll(&core);
+    now_ms = 42U;
+    rbsp_core_poll(&core);
+    assert(core.gpio_objects[0U].input_event_count == 2U);
+    assert(core.gpio_objects[0U].input_event_sequence == 3U);
+    assert(core.gpio_objects[0U].input_dropped_events == 1U);
+
+    can_send_must_fail = false;
+    assert(exchange_status(&core, 0x0105U, OWNER_SESSION, 502U, object_id,
+                           NULL, 0U, response) == 0U);
+    assert(get_u16(response + 26U) == 2U);
+    assert(get_u16(response + 28U) == 2U);
+    assert(get_u32(response + 30U) == 1U);
+    assert(get_u32(response + 34U) == 3U);
+
+    clear_sent();
+    now_ms = 43U;
+    rbsp_core_poll(&core);
+    assert(reassemble_sent(response, 0x519U) == 43U);
+    assert(response[1U] == 3U && get_u16(response + 2U) == 0x0180U);
+    assert(get_u32(response + 12U) == object_id);
+    assert(response[24U] == 1U && get_u32(response + 25U) == 1U);
+    assert(get_u64(response + 29U) == 22000U);
+    assert(response[37U] == 1U && response[38U] == 1U);
+    assert(get_u32(response + 39U) == 1U);
+
+    assert(rbsp_core_release_session(&core, OWNER_SESSION) == 1U);
+    assert(!core.gpio_objects[0U].used);
+    gpio_values[5U] = false;
+    now_ms = 0U;
+}
+
 static void test_resource_reset(const rbsp_hal_t* hal,
                                 const rbsp_node_info_t* info) {
     enum {
@@ -759,6 +832,7 @@ int main(void) {
     now_ms = 0U;
     assert(rbsp_core_init(&core, &hal, RBSP_CAN_CLASSICAL, &info));
     test_resource_reset(&hal, &info);
+    test_gpio_input_events(&hal, &info);
     uint8_t request[1024];
     uint8_t response[1024];
 #if defined(CONFIG_REMOTEBSP_MOTION)

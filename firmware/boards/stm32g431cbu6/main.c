@@ -813,6 +813,15 @@ static bool board_gpio_read(uint16_t encoded_pin, bool* value) {
     return true;
 }
 
+static uint64_t board_monotonic_microseconds(void) {
+    static uint32_t previous_ms;
+    static uint64_t epoch_ms;
+    const uint32_t now_ms = HAL_GetTick();
+    if (now_ms < previous_ms) epoch_ms += UINT64_C(1) << 32U;
+    previous_ms = now_ms;
+    return (epoch_ms + now_ms) * UINT64_C(1000);
+}
+
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
 /* 每个已启用 TMC2209 槽位各占用一条单线半双工 UART。 */
 enum { RBSP_SOFT_UART_SLOT_CAPACITY = 5U };
@@ -1905,6 +1914,7 @@ int main(void) {
         .can_send = board_can_send,
 #endif
         .milliseconds = HAL_GetTick,
+        .microseconds = board_monotonic_microseconds,
         .gpio_configure = board_gpio_configure,
         .gpio_configure_pull = board_gpio_configure_pull,
         .gpio_write = board_gpio_write,

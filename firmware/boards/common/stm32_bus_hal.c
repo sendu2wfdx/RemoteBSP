@@ -1,7 +1,33 @@
-#include "board_bus.h"
+#include "remotebsp_embedded/core.h"
 
 #ifdef CONFIG_REMOTEBSP_BUS
+#if defined(RBSP_F072_BUS_ENABLED)
+#include "stm32f0xx_hal.h"
+#define rbsp_g431_bus_init rbsp_f072_bus_init
+#define rbsp_g431_bus_pin_reserved rbsp_f072_bus_pin_reserved
+#define rbsp_g431_bus_resources rbsp_f072_bus_resources
+#define rbsp_g431_bus_resource_count rbsp_f072_bus_resource_count
+#define rbsp_g431_bus_resource_status rbsp_f072_bus_resource_status
+#define rbsp_g431_i2c_transfer rbsp_f072_i2c_transfer
+#define rbsp_g431_spi_transfer rbsp_f072_spi_transfer
+#define CONFIG_G431_BUS_I2C1_PB6_PB7 CONFIG_F072_BUS_I2C1_PB6_PB7
+#define CONFIG_G431_BUS_I2C1_DEVICE_ADDRESS CONFIG_F072_BUS_I2C1_DEVICE_ADDRESS
+#define CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15 CONFIG_F072_BUS_SPI1_PA5_PA6_PA7_CS_PA4
+#elif defined(RBSP_F103_BUS_ENABLED)
+#include "stm32f1xx_hal.h"
+#define rbsp_g431_bus_init rbsp_f103_bus_init
+#define rbsp_g431_bus_pin_reserved rbsp_f103_bus_pin_reserved
+#define rbsp_g431_bus_resources rbsp_f103_bus_resources
+#define rbsp_g431_bus_resource_count rbsp_f103_bus_resource_count
+#define rbsp_g431_bus_resource_status rbsp_f103_bus_resource_status
+#define rbsp_g431_i2c_transfer rbsp_f103_i2c_transfer
+#define rbsp_g431_spi_transfer rbsp_f103_spi_transfer
+#define CONFIG_G431_BUS_I2C1_PB6_PB7 CONFIG_F103_BUS_I2C1_PB6_PB7
+#define CONFIG_G431_BUS_I2C1_DEVICE_ADDRESS CONFIG_F103_BUS_I2C1_DEVICE_ADDRESS
+#define CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15 CONFIG_F103_BUS_SPI1_PA5_PA6_PA7_CS_PA4
+#else
 #include "stm32g4xx_hal.h"
+#endif
 
 enum {
     I2C1_BUS_ID = 0x0B000001U,
@@ -14,10 +40,14 @@ enum {
 
 static I2C_HandleTypeDef i2c1;
 static SPI_HandleTypeDef spi1;
+#if !defined(RBSP_F072_BUS_ENABLED) && !defined(RBSP_F103_BUS_ENABLED)
 static SPI_HandleTypeDef spi2;
+#endif
 static bool i2c1_backend_failed;
 static bool spi1_backend_failed;
+#if !defined(RBSP_F072_BUS_ENABLED) && !defined(RBSP_F103_BUS_ENABLED)
 static bool spi2_backend_failed;
+#endif
 
 /*
  * 依据 RM0440 I2C_TIMINGR 与 AN4235 的 Fast-mode 约束计算：
@@ -27,6 +57,7 @@ static bool spi2_backend_failed;
  * 两级同步器后，最快周期仍不短于 2.5us。这里有意留出低电平裕量，
  * 最终频率会随器件滤波延迟和板级上升时间略低于 400kHz。
  */
+#if !defined(RBSP_F072_BUS_ENABLED) && !defined(RBSP_F103_BUS_ENABLED)
 enum {
     I2C1_TIMING_PRESC = 4U,
     I2C1_TIMING_SCLDEL = 15U,
@@ -49,16 +80,28 @@ _Static_assert((((I2C1_TIMING_SCLL + 1U) +
                     (I2C1_TIMING_PRESC + 1U) + 22U) * 400000ULL >=
                    170000000ULL,
                "I2C Fast-mode最快周期超过400kHz");
+#endif
 
 static const rbsp_bus_resource_config_t resources[] = {
 #ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
-    {I2C1_BUS_ID, 0U, 400000U, CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US,
+    {I2C1_BUS_ID, 0U,
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+     100000U,
+#else
+     400000U,
+#endif
+     CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US,
      CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US, 1000U,
      CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES, 1U, 0U, 1U,
      RBSP_BUS_I2C_BUS,
      RBSP_BUS_CONTRACT_I2C_REPEATED_START | RBSP_BUS_CONTRACT_I2C_RECOVERY,
      0U, 0U},
-    {I2C1_DEVICE_ID, I2C1_BUS_ID, 400000U,
+    {I2C1_DEVICE_ID, I2C1_BUS_ID,
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+     100000U,
+#else
+     400000U,
+#endif
      CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US, CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US,
      1000U, CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES, 1U,
      CONFIG_G431_BUS_I2C1_DEVICE_ADDRESS, 1U, RBSP_BUS_I2C_DEVICE,
@@ -66,16 +109,37 @@ static const rbsp_bus_resource_config_t resources[] = {
      0U, 0U},
 #endif
 #ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
-    {SPI1_BUS_ID, 0U, 21250000U, CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US,
+    {SPI1_BUS_ID, 0U,
+#if defined(RBSP_F072_BUS_ENABLED)
+     6000000U,
+#elif defined(RBSP_F103_BUS_ENABLED)
+     9000000U,
+#else
+     21250000U,
+#endif
+     CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US,
      CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US, 1000U,
      CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES, 1U, 0U, 1U,
      RBSP_BUS_SPI_BUS,
      RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX |
          RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT,
      0U, 8U},
-    {SPI1_DEVICE_ID, SPI1_BUS_ID, 21250000U,
+    {SPI1_DEVICE_ID, SPI1_BUS_ID,
+#if defined(RBSP_F072_BUS_ENABLED)
+     6000000U,
+#elif defined(RBSP_F103_BUS_ENABLED)
+     9000000U,
+#else
+     21250000U,
+#endif
      CONFIG_REMOTEBSP_BUS_MIN_TIMEOUT_US, CONFIG_REMOTEBSP_BUS_MAX_TIMEOUT_US,
-     1000U, CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES, 1U, 15U, 1U,
+     1000U, CONFIG_REMOTEBSP_BUS_MAX_TRANSFER_BYTES, 1U,
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+     4U,
+#else
+     15U,
+#endif
+     1U,
      RBSP_BUS_SPI_DEVICE,
      RBSP_BUS_CONTRACT_SPI_FULL_DUPLEX |
          RBSP_BUS_CONTRACT_SPI_KEEP_CHIP_SELECT,
@@ -121,17 +185,51 @@ static rbsp_bus_transaction_status_t hal_status(HAL_StatusTypeDef status,
 #ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
 static bool i2c1_configure(void) {
     i2c1.Instance = I2C1;
+#if defined(RBSP_F103_BUS_ENABLED)
+    i2c1.Init.ClockSpeed = 100000U;
+    i2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+#elif defined(RBSP_F072_BUS_ENABLED)
+    i2c1.Init.Timing = 0x2000090EU;
+#else
     i2c1.Init.Timing = I2C1_TIMING;
+#endif
     i2c1.Init.OwnAddress1 = 0U;
     i2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-    i2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    i2c1.Init.DualAddressMode =
+#if defined(RBSP_F072_BUS_ENABLED)
+        I2C_DUALADDRESS_DISABLED;
+#else
+        I2C_DUALADDRESS_DISABLE;
+#endif
     i2c1.Init.OwnAddress2 = 0U;
+#if !defined(RBSP_F103_BUS_ENABLED)
     i2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-    i2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-    i2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-    return HAL_I2C_Init(&i2c1) == HAL_OK &&
-           HAL_I2CEx_ConfigAnalogFilter(&i2c1, I2C_ANALOGFILTER_ENABLE) == HAL_OK &&
-           HAL_I2CEx_ConfigDigitalFilter(&i2c1, 0U) == HAL_OK;
+#endif
+    i2c1.Init.GeneralCallMode =
+#if defined(RBSP_F072_BUS_ENABLED)
+        I2C_GENERALCALL_DISABLED;
+#else
+        I2C_GENERALCALL_DISABLE;
+#endif
+    i2c1.Init.NoStretchMode =
+#if defined(RBSP_F072_BUS_ENABLED)
+        I2C_NOSTRETCH_DISABLED;
+#else
+        I2C_NOSTRETCH_DISABLE;
+#endif
+    return HAL_I2C_Init(&i2c1) == HAL_OK
+#if !defined(RBSP_F103_BUS_ENABLED)
+           &&
+           HAL_I2CEx_ConfigAnalogFilter(&i2c1,
+#if defined(RBSP_F072_BUS_ENABLED)
+                                        I2C_ANALOGFILTER_ENABLED
+#else
+                                        I2C_ANALOGFILTER_ENABLE
+#endif
+                                        ) == HAL_OK &&
+           HAL_I2CEx_ConfigDigitalFilter(&i2c1, 0U) == HAL_OK
+#endif
+           ;
 }
 
 static bool i2c1_recover(void) {
@@ -154,7 +252,11 @@ static bool i2c1_recover(void) {
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
     pin.Pin = GPIO_PIN_6 | GPIO_PIN_7;
     pin.Mode = GPIO_MODE_AF_OD;
+#if defined(RBSP_F072_BUS_ENABLED)
+    pin.Alternate = GPIO_AF1_I2C1;
+#elif !defined(RBSP_F103_BUS_ENABLED)
     pin.Alternate = GPIO_AF4_I2C1;
+#endif
     HAL_GPIO_Init(GPIOB, &pin);
     return i2c1_configure();
 }
@@ -183,8 +285,10 @@ static bool spi_configure(SPI_HandleTypeDef* handle, SPI_TypeDef* instance) {
     handle->Init.TIMode = SPI_TIMODE_DISABLE;
     handle->Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
     handle->Init.CRCPolynomial = 7U;
+#if !defined(RBSP_F072_BUS_ENABLED) && !defined(RBSP_F103_BUS_ENABLED)
     handle->Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
     handle->Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+#endif
     return HAL_SPI_Init(handle) == HAL_OK;
 }
 
@@ -198,29 +302,64 @@ bool rbsp_g431_bus_init(void) {
     pin.Mode = GPIO_MODE_AF_OD;
     pin.Pull = GPIO_PULLUP;
     pin.Speed = GPIO_SPEED_FREQ_HIGH;
+#if defined(RBSP_F072_BUS_ENABLED)
+    pin.Alternate = GPIO_AF1_I2C1;
+#elif !defined(RBSP_F103_BUS_ENABLED)
     pin.Alternate = GPIO_AF4_I2C1;
+#endif
     HAL_GPIO_Init(GPIOB, &pin);
     if (!i2c1_configure()) {
         i2c1_backend_failed = true;
         return false;
     }
     i2c1_backend_failed = false;
+#if defined(RBSP_F072_BUS_ENABLED)
+    HAL_NVIC_SetPriority(I2C1_IRQn, 2U, 0U);
+    HAL_NVIC_EnableIRQ(I2C1_IRQn);
+#else
     HAL_NVIC_SetPriority(I2C1_EV_IRQn, 6U, 0U);
     HAL_NVIC_SetPriority(I2C1_ER_IRQn, 6U, 0U);
     HAL_NVIC_EnableIRQ(I2C1_EV_IRQn);
     HAL_NVIC_EnableIRQ(I2C1_ER_IRQn);
 #endif
+#endif
 #ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
     __HAL_RCC_SPI1_CLK_ENABLE();
+#if defined(RBSP_F103_BUS_ENABLED)
+    pin.Pin = GPIO_PIN_5 | GPIO_PIN_7;
+    pin.Mode = GPIO_MODE_AF_PP;
+    pin.Pull = GPIO_NOPULL;
+    pin.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOA, &pin);
+    pin.Pin = GPIO_PIN_6;
+    pin.Mode = GPIO_MODE_INPUT;
+    HAL_GPIO_Init(GPIOA, &pin);
+#else
     pin.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
     pin.Mode = GPIO_MODE_AF_PP;
     pin.Pull = GPIO_NOPULL;
-    pin.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    pin.Speed = GPIO_SPEED_FREQ_HIGH;
+#if defined(RBSP_F072_BUS_ENABLED)
+    pin.Alternate = GPIO_AF0_SPI1;
+#elif !defined(RBSP_F103_BUS_ENABLED)
     pin.Alternate = GPIO_AF5_SPI1;
+#endif
     HAL_GPIO_Init(GPIOA, &pin);
-    pin.Pin = GPIO_PIN_15;
+#endif
+    pin.Pin =
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+        GPIO_PIN_4;
+#else
+        GPIO_PIN_15;
+#endif
     pin.Mode = GPIO_MODE_OUTPUT_PP;
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOA,
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+                      GPIO_PIN_4,
+#else
+                      GPIO_PIN_15,
+#endif
+                      GPIO_PIN_SET);
     HAL_GPIO_Init(GPIOA, &pin);
     if (!spi_configure(&spi1, SPI1)) {
         spi1_backend_failed = true;
@@ -254,7 +393,13 @@ bool rbsp_g431_bus_pin_reserved(uint16_t pin) {
     if (pin == 22U || pin == 23U) return true;
 #endif
 #ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
-    if (pin == 5U || pin == 6U || pin == 7U || pin == 15U) return true;
+    if (pin == 5U || pin == 6U || pin == 7U || pin ==
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+        4U
+#else
+        15U
+#endif
+    ) return true;
 #endif
 #ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
     if (pin >= 28U && pin <= 31U) return true;
@@ -381,7 +526,12 @@ rbsp_bus_transaction_status_t rbsp_g431_spi_transfer(
     uint16_t cs_pin = 0U;
 #ifdef CONFIG_G431_BUS_SPI1_PA5_PA6_PA7_CS_PA15
     if (device->controller == 1U && !spi1_backend_failed) {
-        handle = &spi1; cs_port = GPIOA; cs_pin = GPIO_PIN_15;
+        handle = &spi1; cs_port = GPIOA;
+#if defined(RBSP_F072_BUS_ENABLED) || defined(RBSP_F103_BUS_ENABLED)
+        cs_pin = GPIO_PIN_4;
+#else
+        cs_pin = GPIO_PIN_15;
+#endif
     }
 #endif
 #ifdef CONFIG_G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
@@ -431,6 +581,12 @@ rbsp_bus_transaction_status_t rbsp_g431_spi_transfer(
 }
 
 #ifdef CONFIG_G431_BUS_I2C1_PB6_PB7
+#if defined(RBSP_F072_BUS_ENABLED)
+void I2C1_IRQHandler(void) {
+    HAL_I2C_EV_IRQHandler(&i2c1);
+    HAL_I2C_ER_IRQHandler(&i2c1);
+}
+#else
 void I2C1_EV_IRQHandler(void) {
     HAL_I2C_EV_IRQHandler(&i2c1);
 }
@@ -438,5 +594,6 @@ void I2C1_EV_IRQHandler(void) {
 void I2C1_ER_IRQHandler(void) {
     HAL_I2C_ER_IRQHandler(&i2c1);
 }
+#endif
 #endif
 #endif

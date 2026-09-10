@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #include "remotebsp_config.h"
+#ifndef CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY
+#define CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY 2
+#endif
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
 #include "remotebsp/device_params/store.h"
 #endif
@@ -247,6 +250,8 @@ typedef struct {
     /* 兼容旧板级实现；link_send 为空时使用 can_send。 */
     bool (*can_send)(const rbsp_can_frame_t* frame);
     uint32_t (*milliseconds)(void);
+    /* 单调微秒时间戳；为空时 Core 使用 milliseconds()*1000。 */
+    uint64_t (*microseconds)(void);
     bool (*gpio_configure)(uint16_t pin, rbsp_gpio_direction_t direction,
                            bool initial_value);
     bool (*gpio_configure_pull)(uint16_t pin,
@@ -341,11 +346,32 @@ typedef struct {
 } rbsp_request_cache_entry_t;
 
 typedef struct {
+    uint64_t timestamp_us;
+    uint32_t sequence;
+    uint8_t edge;
+    bool value;
+} rbsp_gpio_input_event_t;
+
+typedef struct {
     bool used;
     uint32_t object_id;
     uint32_t owner_session_id;
     uint16_t pin;
     rbsp_gpio_direction_t direction;
+    bool input_events_enabled;
+    uint8_t input_edge_mask;
+    uint16_t input_queue_capacity;
+    uint32_t input_debounce_us;
+    bool stable_value;
+    bool candidate_value;
+    bool candidate_active;
+    uint64_t candidate_since_us;
+    uint32_t input_event_sequence;
+    uint32_t input_dropped_events;
+    uint16_t input_event_begin;
+    uint16_t input_event_count;
+    rbsp_gpio_input_event_t input_events[
+        CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY];
 } rbsp_gpio_object_t;
 
 
@@ -400,6 +426,8 @@ typedef struct {
     rbsp_bootloader_mode_t bootloader_request_mode;
     bool bootloader_request_pending;
     uint32_t health_started_ms;
+    uint32_t gpio_clock_last_ms;
+    uint64_t gpio_clock_epoch_ms;
     uint64_t health_producer_generation;
     uint64_t health_sample_sequence;
     rbsp_reassembly_slot_t reassembly[CONFIG_REMOTE_REASSEMBLY_SLOTS];

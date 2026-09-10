@@ -47,6 +47,9 @@ enum {
     RBSP_COMMAND_GPIO_READ = 0x0101,
     RBSP_COMMAND_GPIO_WRITE = 0x0102,
     RBSP_COMMAND_GPIO_CLOSE = 0x0103,
+    RBSP_COMMAND_GPIO_INPUT_SUBSCRIBE = 0x0104,
+    RBSP_COMMAND_GPIO_INPUT_EVENT_STATUS = 0x0105,
+    RBSP_COMMAND_GPIO_INPUT_EVENT = 0x0180,
     RBSP_COMMAND_UART_CREATE = 0x0200,
     RBSP_COMMAND_UART_READ = 0x0201,
     RBSP_COMMAND_UART_WRITE = 0x0202,
@@ -103,6 +106,9 @@ enum {
     RBSP_FRAGMENT_FLAG_MASK = 0x03,
     RBSP_FRAGMENT_LENGTH_SHIFT = 2,
     RBSP_BOOTLOADER_RESET_DELAY_MS = 100,
+    RBSP_GPIO_INPUT_EVENT_VERSION = 1,
+    RBSP_GPIO_EDGE_RISING = 1U << 0,
+    RBSP_GPIO_EDGE_FALLING = 1U << 1,
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
     RBSP_DEVICE_PARAM_PROTOCOL_VERSION = 1,
     RBSP_DEVICE_PARAM_STATUS_SIZE = 16,
@@ -233,6 +239,17 @@ static uint32_t get_u32(const uint8_t* input) {
            ((uint32_t)input[1] << 8U) |
            ((uint32_t)input[2] << 16U) |
            ((uint32_t)input[3] << 24U);
+}
+
+static uint64_t gpio_monotonic_us(rbsp_core_t* core, uint32_t now_ms) {
+    if (core->hal.microseconds != NULL) {
+        return core->hal.microseconds();
+    }
+    if (now_ms < core->gpio_clock_last_ms) {
+        core->gpio_clock_epoch_ms += UINT64_C(1) << 32U;
+    }
+    core->gpio_clock_last_ms = now_ms;
+    return (core->gpio_clock_epoch_ms + now_ms) * UINT64_C(1000);
 }
 
 static void put_health_metric(uint8_t* output, uint16_t id,
@@ -2981,6 +2998,94 @@ static bool process_request(rbsp_core_t* core,
             break;
         }
 
+        case RBSP_COMMAND_GPIO_INPUT_SUBSCRIBE: {
+            rbsp_gpio_object_t* object =
+                find_gpio_object(core, request->object_id);
+            const uint8_t edge_mask = request->payload_length == 8U
+                                          ? request->payload[1U]
+                                          : 0U;
+            const uint16_t queue_capacity = request->payload_length == 8U
+                                                ? get_u16(request->payload + 2U)
+                                                : 0U;
+            if (request->object_id == 0U ||
+                request->payload_length != 8U ||
+                request->payload[0U] != RBSP_GPIO_INPUT_EVENT_VERSION ||
+                edge_mask == 0U ||
+                (edge_mask & ~(RBSP_GPIO_EDGE_RISING |
+                               RBSP_GPIO_EDGE_FALLING)) != 0U ||
+                queue_capacity == 0U ||
+                queue_capacity > CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id ||
+                       object->direction != RBSP_GPIO_INPUT) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
+            } else {
+                bool value = false;
+                if (!core->hal.gpio_read(object->pin, &value)) {
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_RESOURCE_FAILED,
+                        request->object_id, NULL, 0U);
+                } else {
+                    object->input_events_enabled = true;
+                    object->input_edge_mask = edge_mask;
+                    object->input_queue_capacity = queue_capacity;
+                    object->input_debounce_us =
+                        get_u32(request->payload + 4U);
+                    object->stable_value = value;
+                    object->candidate_value = value;
+                    object->candidate_active = false;
+                    object->candidate_since_us = 0U;
+                    object->input_event_sequence = 0U;
+                    object->input_dropped_events = 0U;
+                    object->input_event_begin = 0U;
+                    object->input_event_count = 0U;
+                    response_size = make_status_response(
+                        core, request, RBSP_STATUS_OK,
+                        request->object_id, NULL, 0U);
+                }
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_GPIO_INPUT_EVENT_STATUS: {
+            rbsp_gpio_object_t* object =
+                find_gpio_object(core, request->object_id);
+            if (request->object_id == 0U ||
+                request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id ||
+                       !object->input_events_enabled) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
+            } else {
+                uint8_t data[13U] = {0U};
+                data[0U] = RBSP_GPIO_INPUT_EVENT_VERSION;
+                put_u16(data + 1U, object->input_event_count);
+                put_u16(data + 3U, object->input_queue_capacity);
+                put_u32(data + 5U, object->input_dropped_events);
+                put_u32(data + 9U, object->input_event_sequence);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, data, sizeof(data));
+            }
+            break;
+        }
+
 #if CONFIG_UART_RESOURCE_COUNT > 0
         case RBSP_COMMAND_UART_CREATE: {
             if (core->hal.uart_configure == NULL ||
@@ -4095,6 +4200,8 @@ bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
 #endif
     core->next_transfer_id = 1U;
     core->last_heartbeat_ms = hal->milliseconds();
+    core->gpio_clock_last_ms = core->last_heartbeat_ms;
+    core->gpio_clock_epoch_ms = 0U;
     core->health_started_ms = core->last_heartbeat_ms;
     return true;
 }
@@ -4121,6 +4228,80 @@ bool rbsp_core_device_params_init(
     return true;
 }
 #endif
+
+static void service_gpio_input_events(rbsp_core_t* core, uint32_t now_ms) {
+#if CONFIG_GPIO_RESOURCE_COUNT > 0
+    if (core->node_id == 0U || core->hal.gpio_read == NULL) return;
+    const uint64_t now_us = gpio_monotonic_us(core, now_ms);
+    for (size_t index = 0U; index < CONFIG_GPIO_RESOURCE_COUNT; ++index) {
+        rbsp_gpio_object_t* object = &core->gpio_objects[index];
+        if (!object->used || !object->input_events_enabled) continue;
+        bool raw_value = object->stable_value;
+        if (core->hal.gpio_read(object->pin, &raw_value)) {
+            if (raw_value == object->stable_value) {
+                object->candidate_active = false;
+            } else if (!object->candidate_active ||
+                       raw_value != object->candidate_value) {
+                object->candidate_active = true;
+                object->candidate_value = raw_value;
+                object->candidate_since_us = now_us;
+            } else if (now_us - object->candidate_since_us >=
+                       object->input_debounce_us) {
+                const uint8_t edge = raw_value ? RBSP_GPIO_EDGE_RISING
+                                               : RBSP_GPIO_EDGE_FALLING;
+                object->stable_value = raw_value;
+                object->candidate_active = false;
+                ++object->input_event_sequence;
+                if ((object->input_edge_mask & edge) != 0U) {
+                    if (object->input_event_count >=
+                        object->input_queue_capacity) {
+                        if (object->input_dropped_events != UINT32_MAX)
+                            ++object->input_dropped_events;
+                    } else {
+                        const uint16_t position = (uint16_t)(
+                            (object->input_event_begin +
+                             object->input_event_count) %
+                            CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY);
+                        rbsp_gpio_input_event_t* event =
+                            &object->input_events[position];
+                        event->sequence = object->input_event_sequence;
+                        event->timestamp_us = now_us;
+                        event->value = raw_value;
+                        event->edge = edge;
+                        ++object->input_event_count;
+                    }
+                }
+            }
+        }
+        if (object->input_event_count != 0U) {
+            const rbsp_gpio_input_event_t* event =
+                &object->input_events[object->input_event_begin];
+            uint8_t data[19U] = {0U};
+            data[0U] = RBSP_GPIO_INPUT_EVENT_VERSION;
+            put_u32(data + 1U, event->sequence);
+            put_u64(data + 5U, event->timestamp_us);
+            data[13U] = event->value ? 1U : 0U;
+            data[14U] = event->edge;
+            put_u32(data + 15U, object->input_dropped_events);
+            const uint16_t size = encode_packet(
+                core->tx_packet, RBSP_MESSAGE_EVENT,
+                RBSP_COMMAND_GPIO_INPUT_EVENT, 0U, event->sequence,
+                object->object_id, 0U, data, sizeof(data));
+            if (send_packet(core, core->tx_packet, size,
+                            allocate_transfer_id(core),
+                            RBSP_ROUTE_EVENT_BASE + core->node_id)) {
+                object->input_event_begin = (uint16_t)(
+                    (object->input_event_begin + 1U) %
+                    CONFIG_GPIO_INPUT_EVENT_QUEUE_CAPACITY);
+                --object->input_event_count;
+            }
+        }
+    }
+#else
+    (void)core;
+    (void)now_ms;
+#endif
+}
 
 
 void rbsp_core_poll(rbsp_core_t* core) {
@@ -4150,6 +4331,8 @@ void rbsp_core_poll(rbsp_core_t* core) {
             slot->active = false;
         }
     }
+
+    service_gpio_input_events(core, now);
 
 #if CONFIG_UART_RESOURCE_COUNT > 0
     if (core->node_id != 0U && core->hal.uart_read != NULL) {

@@ -9,6 +9,10 @@
 #define HAL_TIM_MODULE_ENABLED
 #define HAL_DMA_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
+#ifdef RBSP_F103_BUS_ENABLED
+#define HAL_I2C_MODULE_ENABLED
+#define HAL_SPI_MODULE_ENABLED
+#endif
 
 #define HSE_VALUE 8000000U
 #define HSE_STARTUP_TIMEOUT 100U
@@ -29,5 +33,9 @@
 #include "stm32f1xx_hal_dma.h"
 #include "stm32f1xx_hal_tim.h"
 #include "stm32f1xx_hal_uart.h"
+#ifdef RBSP_F103_BUS_ENABLED
+#include "stm32f1xx_hal_i2c.h"
+#include "stm32f1xx_hal_spi.h"
+#endif
 
 #define assert_param(expression) ((void)0U)

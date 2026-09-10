@@ -636,7 +636,7 @@ add_test(NAME embedded_bus_core_tests COMMAND embedded_bus_core_tests)
 # 直接编译 G431 生产板级 BUS HAL，并以主机桩验证错误恢复与片选时序。
 add_executable(g431_board_bus_hal_tests
     ../firmware/tests/g431_board_bus_tests.c
-    ../firmware/boards/stm32g431cbu6/board_bus.c
+    ../firmware/boards/common/stm32_bus_hal.c
 )
 target_include_directories(g431_board_bus_hal_tests PRIVATE
     ../firmware/tests/g431_hal_stub

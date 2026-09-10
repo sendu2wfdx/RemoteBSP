@@ -67,7 +67,7 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦。Studio Web 已提供只读快照和带 SHA-256 完整性校验的 v2 备份，恢复兼容 v1；显式 CLI 写入与恢复通过 UUID、generation CAS 和固定确认短语防止写错节点或覆盖并发变化；尚未完成实体参数区掉电验收 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 `ResourceReset` 已恢复兼容语义：UART 清缓冲/故障并释放对象、PWM 安全停止、TimedBitstream 中止，后端失败则保留对象和故障状态以便重试 |
-| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 G431 I2C1/SPI1/SPI2 实体 HAL 已实现并交叉编译；生产板级代码另由主机 HAL 桩覆盖 I2C flags、统一超时预算、可选恢复、SPI 片选和失败恢复。总线测试固件仍未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；双向 Stream 与真实高速数据面待实现 |
+| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 F072/F103/G431 板级 HAL 已实现并交叉编译；三板复用明确的 STM32 公共事务模块，各自保留静态端点，生产代码由主机 HAL 桩覆盖 I2C flags、统一超时预算、可选恢复、SPI 片选和失败恢复。总线测试固件仍未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
 | RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与静态表生成、32线程构建和产物归档已实现。非交互 CLI 的 `deploy-stlink` 可执行受保护产物的写入/校验/复位，完整核验后生成自哈希部署记录，并可严格关联生产记录与批次。独立版本化 `FirmwareIdentity` 命令已贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与 Studio；Studio 构建向固件注入工程、配置和固件输入三项 SHA-256，非 Studio 固件逐字段报告 unavailable；Mock USB 已覆盖真实进程重启与缓存失效。只读 `inspect-runtime-identity` 仍不能单独记作实体烧录闭环 |
@@ -87,7 +87,7 @@ Remote Core/HAL 骨架。嵌入式切片把端点、长度、超时、flags、�
 清理后恢复 Normal；这只证明设备级租约状态映射。G431 已增加默认关闭的 I2C1/
 SPI1/SPI2 板级 HAL 和专用交叉编译配置；同一份生产代码已在主机 HAL 桩中覆盖 flags、
 统一超时预算、恢复分支和 SPI 片选，但仍未烧录、未接从设备、未完成电气与时序实测；
-F072/F103 仍无板级总线 HAL。高速 Stream 已完成
+F072/F103/G431 板级总线 HAL 均已交叉编译但尚未实板验证。高速 Stream 已完成
 H2N/N2H Mock 会话状态机；N2H 使用 peek/commit 两阶段
 交付，编码、分片、后端或租约失败时不提前消费数据。双向、USB Bulk 和 Ethernet
 真实数据面仍未实现。
@@ -136,7 +136,8 @@ Flash 仿 EEPROM 保存身份、制造和校准数据。Katapult 已限制 APP �
 在线升级不会覆盖参数区。Studio Web 已接入只读参数快照和备份；写入及恢复只通过显式
 CLI 执行，并在每次修改前核对节点 UUID、参数 generation 和固定维护确认短语。Studio
 构建归档、部署作业软件模块、显式 ST-Link CLI 与运行时固件身份读取适配器已实现；
-网页部署/参数写入界面、实体烧录后自动核验和参数区掉电实测仍未完成。
+Web 已提供默认关闭、显式启用的两阶段 ST-Link 部署入口，复用相同身份核验和部署记录
+后端；实体烧录验收、参数写入界面和参数区掉电实测仍未完成。
 
 ## 目录
 
