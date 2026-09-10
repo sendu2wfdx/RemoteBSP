@@ -225,7 +225,7 @@ SHA-256、比较结果 SHA-256 和确定性差异资料包 SHA-256。导入资�
 ## 非交互生产资料 CLI
 
 `gui/studio_cli.py` 为 CI、批产准备和离线归档提供单行 JSON 输入/输出约定。它直接
-调用 Studio 已有工程校验、固件构建、ST-Link 部署、批次生成/校验和本地历史后端，
+调用 Studio 已有工程校验、固件构建、ST-Link/CAN Katapult 部署、批次生成/校验和本地历史后端，
 不维护第二套板卡、资源、哈希或历史规则。任何硬件动作都必须通过显式部署子命令发起：
 
 ```sh
@@ -241,6 +241,12 @@ python3 gui/studio_cli.py build --project project.json --jobs 32
 # 显式烧录已有受保护构建；身份文件模式仍可用于离线/外部适配器核对。
 python3 gui/studio_cli.py deploy-stlink --build-id <构建ID> \
   --identity-file /run/remotebsp/device-identity.json
+
+# CAN Katapult 必须定向指定接口和已登记 UUID，不提供广播写入模式。
+python3 gui/studio_cli.py deploy-can-katapult --build-id <构建ID> \
+  --identity-file /run/remotebsp/device-identity.json \
+  --can-interface can0 --katapult-uuid <Katapult-UUID> \
+  --flashtool firmware/vendor/katapult/scripts/flashtool.py
 
 # 只读运行中固件身份；完整和缺项都会准确输出，但不会宣称本次部署已核验。
 python3 gui/studio_cli.py inspect-runtime-identity \
@@ -279,12 +285,16 @@ python3 gui/studio_cli.py history-search --history-root ./local-history \
 - `3`：输入文件、schema、资源、哈希、容量或安全边界不合法；
 - `4`：显式构建、部署、身份核对、原子输出或本地文件操作失败。
 
-`deploy-stlink` 复核构建记录和固件哈希后执行 OpenOCD 写入、校验和复位。独立版本化
+`deploy-stlink` 复核构建记录和固件哈希后执行 OpenOCD 写入、校验和复位。
+`deploy-can-katapult` 复核同一受保护构建记录中的 `firmware.bin`，拒绝缺少 UUID 的
+广播写入，并在升级后沿用相同的板卡、工程、配置和固件四重身份核验及部署记录。
+当前 CAN Katapult 路径已完成假执行器单元测试，尚未完成实体升级验收；USB Katapult
+仍未接入 Studio 部署命令。独立版本化
 `FirmwareIdentity` 命令已经贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与
 Studio；Studio 构建把工程、配置、固件输入三个 SHA-256 注入固件，普通非 Studio
 构建则逐字段报告 unavailable。`inspect-runtime-identity` 会交叉核对 `node-list`
 与固件身份的 UUID/板型，并准确输出完整字段或缺项；它是只读检查，所以自身的
-`deployment_verified` 始终为 false。`deploy-stlink` 只有在写入、复位和四重身份核验
+`deployment_verified` 始终为 false。显式部署命令只有在写入、复位和四重身份核验
 全部成功后才生成自哈希部署记录；该记录可严格关联生产记录和批次。`--identity-file`
 仍保留严格有界 JSON 适配器。Web 已提供默认关闭的两阶段 ST-Link 入口，只有显式启用且
 配置 toolbusd 后才开放；当前仅完成假执行器测试，不能外推为 Studio 实体烧录回读闭环。

@@ -10,9 +10,9 @@ GUI_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(GUI_ROOT))
 
 from firmware_deployment import (  # noqa: E402
-    DeviceIdentity, FirmwareDeploymentError, deploy_stlink,
+    DeviceIdentity, FirmwareDeploymentError, deploy_can_katapult, deploy_stlink,
     IdentityCapabilityError, JsonIdentityFileReader, ToolbusdIdentityReader,
-    expected_identity, make_stlink_plan)
+    expected_identity, make_can_katapult_plan, make_stlink_plan)
 
 
 class Reader:
@@ -198,7 +198,8 @@ class FirmwareDeploymentTest(unittest.TestCase):
         build_id = "weact-test-01234567"
         directory = root / build_id
         directory.mkdir()
-        files = {"firmware.bin": b"binary", "firmware.elf": b"elf"}
+        files = {"firmware.bin": b"binary", "firmware.elf": b"elf",
+                 "firmware.config": b"CONFIG_APP_LAYOUT_KATAPULT_8K=y\n"}
         artifacts = []
         for name, content in files.items():
             (directory / name).write_bytes(content)
@@ -233,6 +234,77 @@ class FirmwareDeploymentTest(unittest.TestCase):
             with self.assertRaisesRegex(FirmwareDeploymentError, "序列号"):
                 make_stlink_plan(build_id, output_root=root,
                                  probe_serial="x; shutdown")
+
+    def test_can_katapult_plan_is_targeted_and_uses_verified_bin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# test", encoding="utf-8")
+            plan = make_can_katapult_plan(
+                build_id, output_root=root, can_interface="can0",
+                katapult_uuid="A1b2C3d4e5f6", flashtool=flashtool)
+            self.assertEqual(plan.backend, "can-katapult")
+            self.assertEqual(plan.command[-6:], (
+                "-i", "can0", "-u", "a1b2c3d4e5f6", "-f",
+                str(root / build_id / "firmware.bin")))
+
+    def test_can_katapult_rejects_broadcast_or_injection_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# test", encoding="utf-8")
+            for interface, uuid in (("can0;id", "abcdef"),
+                                    ("can0", ""), ("can0", "all")):
+                with self.subTest(interface=interface, uuid=uuid), \
+                        self.assertRaises(FirmwareDeploymentError):
+                    make_can_katapult_plan(
+                        build_id, output_root=root, can_interface=interface,
+                        katapult_uuid=uuid, flashtool=flashtool)
+
+    def test_can_katapult_rejects_non_bootloader_layout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            config = root / build_id / "firmware.config"
+            content = b"CONFIG_APP_LAYOUT_KATAPULT_8K=n\n"
+            config.write_bytes(content)
+            record_path = root / build_id / "build-record.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            item = next(item for item in record["artifacts"]
+                        if item["filename"] == "firmware.config")
+            item.update(size=len(content),
+                        sha256=hashlib.sha256(content).hexdigest())
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# test", encoding="utf-8")
+            with self.assertRaisesRegex(FirmwareDeploymentError, "8 KiB"):
+                make_can_katapult_plan(
+                    build_id, output_root=root, can_interface="can0",
+                    katapult_uuid="abcdef", flashtool=flashtool)
+
+    def test_can_katapult_deploy_reuses_four_way_identity_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# test", encoding="utf-8")
+            expected = expected_identity(build_id, output_root=root)
+            observed = DeviceIdentity(
+                expected.board_id, expected.project_sha256,
+                expected.config_sha256, expected.firmware_identity_sha256,
+                "ab" * 16)
+            calls = []
+            result = deploy_can_katapult(
+                build_id, Reader([observed]), output_root=root,
+                can_interface="can0", katapult_uuid="abcdef123456",
+                flashtool=flashtool,
+                runner=lambda command, timeout: calls.append(tuple(command)),
+                sleeper=lambda _: None)
+            self.assertTrue(result.verified)
+            self.assertEqual(result.backend, "can-katapult")
+            self.assertEqual(len(calls), 1)
 
     def test_tampered_firmware_is_rejected_before_flash(self):
         with tempfile.TemporaryDirectory() as temp:

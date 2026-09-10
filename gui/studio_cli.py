@@ -25,6 +25,7 @@ from firmware_deployment import (
     JsonIdentityFileReader,
     RUNTIME_IDENTITY_CAPABILITIES_MISSING,
     ToolbusdIdentityReader,
+    deploy_can_katapult,
     deploy_stlink,
 )
 from deployment_record import create_deployment_record
@@ -276,6 +277,38 @@ def _run_deploy_stlink(args) -> dict:
             "firmware_flash": "performed_and_verified",
             "hardware_access": True,
         },
+    }
+
+
+def _run_deploy_can_katapult(args) -> dict:
+    output_root = _bounded_path(args.output_root, "构建产物目录")
+    reader = JsonIdentityFileReader(
+        _bounded_path(args.identity_file, "设备身份文件"))
+    result = deploy_can_katapult(
+        args.build_id, reader, output_root=output_root,
+        can_interface=args.can_interface, katapult_uuid=args.katapult_uuid,
+        flashtool=_bounded_path(args.flashtool, "Katapult flashtool"),
+        flash_timeout=args.flash_timeout,
+        reconnect_timeout=args.reconnect_timeout,
+        poll_interval=args.poll_interval)
+    deployment_record = create_deployment_record(result, output_root=output_root)
+    record_output = None
+    if args.record_output is not None:
+        record_output = _atomic_output(
+            args.record_output, deployment_record.content, force=args.force)
+    return {
+        "ok": True, "format": "STUDIO_CLI_CAN_KATAPULT_DEPLOYMENT_V1",
+        "build_id": result.build_id, "backend": result.backend,
+        "board_id": result.expected.board_id,
+        "device_uuid": result.observed.device_uuid,
+        "attempts": result.attempts, "verified": result.verified,
+        "deployment_record": deployment_record.record,
+        "deployment_record_sha256": deployment_record.sha256,
+        "deployment_record_filename": deployment_record.filename,
+        "deployment_record_output": str(record_output) if record_output else None,
+        "execution_status": {"software_build": "not_performed",
+                             "firmware_flash": "performed_and_verified",
+                             "hardware_access": True},
     }
 
 
@@ -550,6 +583,21 @@ def _parser() -> StrictParser:
                         help="完整核验成功后原子写入版本化部署记录")
     deploy.add_argument("--force", action="store_true")
     deploy.set_defaults(handler=_run_deploy_stlink)
+
+    katapult = sub.add_parser(
+        "deploy-can-katapult", help="显式通过CAN Katapult定向升级并核对身份")
+    katapult.add_argument("--build-id", required=True)
+    katapult.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    katapult.add_argument("--identity-file", required=True)
+    katapult.add_argument("--can-interface", required=True)
+    katapult.add_argument("--katapult-uuid", required=True)
+    katapult.add_argument("--flashtool", required=True)
+    katapult.add_argument("--flash-timeout", type=int, default=120)
+    katapult.add_argument("--reconnect-timeout", type=float, default=10.0)
+    katapult.add_argument("--poll-interval", type=float, default=0.25)
+    katapult.add_argument("--record-output")
+    katapult.add_argument("--force", action="store_true")
+    katapult.set_defaults(handler=_run_deploy_can_katapult)
 
     inspect_identity = sub.add_parser(
         "inspect-runtime-identity",

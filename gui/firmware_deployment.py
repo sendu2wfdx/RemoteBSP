@@ -36,6 +36,8 @@ class IdentityCapabilityError(FirmwareDeploymentError):
 _HASH = re.compile(r"[0-9a-f]{64}")
 _BUILD_ID = re.compile(r"[a-z0-9-]{8,96}")
 _PROBE_SERIAL = re.compile(r"[A-Za-z0-9._:-]{1,96}")
+_CAN_INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,32}")
+_KATAPULT_UUID = re.compile(r"[0-9a-fA-F]{6,32}")
 _OPENOCD_TARGET = {
     "mellow-fly-d5-v1": "target/stm32f0x.cfg",
     "weact-bluepill-plus-v1": "target/stm32f1x.cfg",
@@ -402,7 +404,7 @@ def expected_identity(build_id: str, *, output_root: Path) -> FirmwareIdentity:
         raise FirmwareDeploymentError("构建记录与构建ID不一致")
     board_id = record.get("board_id")
     if board_id not in _OPENOCD_TARGET:
-        raise FirmwareDeploymentError("构建记录中的板卡不支持ST-Link")
+        raise FirmwareDeploymentError("构建记录中的板卡不受部署器支持")
     return FirmwareIdentity(
         board_id=board_id,
         project_sha256=_require_hash(record.get("project_sha256"),
@@ -436,6 +438,37 @@ def make_stlink_plan(build_id: str, *, output_root: Path,
         "-f", _OPENOCD_TARGET[identity.board_id],
         "-c", f"program {{{artifact_text}}} verify reset exit"))
     return FlashPlan("stlink-openocd", tuple(command), artifact)
+
+
+def make_can_katapult_plan(
+        build_id: str, *, output_root: Path, can_interface: str,
+        katapult_uuid: str, flashtool: Path) -> FlashPlan:
+    """生成定向 CAN Katapult APP 升级命令，不允许广播写入。"""
+    expected_identity(build_id, output_root=output_root)
+    if not isinstance(can_interface, str) or not _CAN_INTERFACE.fullmatch(
+            can_interface):
+        raise FirmwareDeploymentError("CAN接口名称格式无效")
+    if not isinstance(katapult_uuid, str) or not _KATAPULT_UUID.fullmatch(
+            katapult_uuid):
+        raise FirmwareDeploymentError("Katapult UUID必须是6至32位十六进制")
+    try:
+        if flashtool.is_symlink() or not flashtool.is_file():
+            raise FirmwareDeploymentError("Katapult flashtool必须是普通文件")
+        script = flashtool.resolve(strict=True)
+        artifact = resolve_artifact(build_id, "firmware.bin", output_root)
+        config = resolve_artifact(build_id, "firmware.config", output_root)
+        config_bytes = config.read_bytes()
+    except (FirmwareBuildError, OSError) as error:
+        raise FirmwareDeploymentError(
+            f"构建记录不可用于部署：{error}") from error
+    if b"CONFIG_APP_LAYOUT_KATAPULT_8K=y\n" not in \
+            config_bytes.replace(b"\r\n", b"\n").splitlines(keepends=True):
+        raise FirmwareDeploymentError(
+            "CAN Katapult只允许写入启用8 KiB Katapult布局的APP产物")
+    return FlashPlan(
+        "can-katapult",
+        ("python3", str(script), "-i", can_interface, "-u",
+         katapult_uuid.lower(), "-f", str(artifact)), artifact)
 
 
 def _run_flash(command: Sequence[str], timeout: int) -> None:
@@ -486,6 +519,45 @@ def deploy_stlink(
         capability_check()
     plan = make_stlink_plan(build_id, output_root=output_root,
                             probe_serial=probe_serial)
+    runner(plan.command, flash_timeout)
+    deadline = time.monotonic() + reconnect_timeout
+    attempts = 0
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            observed = reader.read_identity()
+            verify_identity(expected, observed)
+            return DeploymentResult(build_id, plan.backend, expected, observed,
+                                    attempts, True)
+        except (FirmwareDeploymentError, OSError, TimeoutError) as error:
+            last_error = error
+            sleeper(poll_interval)
+    raise FirmwareDeploymentError(
+        f"烧录后节点未在期限内通过身份核对：{last_error}")
+
+
+def deploy_can_katapult(
+        build_id: str, reader: IdentityReader, *, output_root: Path,
+        can_interface: str, katapult_uuid: str, flashtool: Path,
+        flash_timeout: int = 120, reconnect_timeout: float = 10.0,
+        poll_interval: float = 0.25,
+        runner: Callable[[Sequence[str], int], None] = _run_flash,
+        sleeper: Callable[[float], None] = time.sleep) -> DeploymentResult:
+    """通过定向 CAN Katapult 写入 APP，并执行与 ST-Link 相同的身份闭环。"""
+    if flash_timeout < 1 or flash_timeout > 600:
+        raise FirmwareDeploymentError("烧录超时必须位于1～600秒")
+    if not math.isfinite(reconnect_timeout) or not math.isfinite(poll_interval) or \
+            reconnect_timeout <= 0 or reconnect_timeout > 120 or \
+            poll_interval <= 0 or poll_interval > reconnect_timeout:
+        raise FirmwareDeploymentError("重连等待参数无效")
+    expected = expected_identity(build_id, output_root=output_root)
+    capability_check = getattr(reader, "require_complete_identity", None)
+    if capability_check is not None:
+        capability_check()
+    plan = make_can_katapult_plan(
+        build_id, output_root=output_root, can_interface=can_interface,
+        katapult_uuid=katapult_uuid, flashtool=flashtool)
     runner(plan.command, flash_timeout)
     deadline = time.monotonic() + reconnect_timeout
     attempts = 0

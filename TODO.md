@@ -32,8 +32,10 @@
 - 已把独立部署作业接入非交互 CLI 的显式 `deploy-stlink` 命令：校验受保护构建记录/
   固件后执行 ST-Link 写入、校验、复位和有界重试，并通过调用者指定的有界 JSON 文件
   核对板型/工程/配置/固件四类身份；核验成功后生成自哈希部署记录，并可严格关联生产
-  记录和批次；Web 已提供默认关闭的两阶段受控 ST-Link 入口；下一步接入 CAN/USB
-  Katapult 执行器、可信时间与签名，并完成实体部署验收；
+  记录和批次；Web 已提供默认关闭的两阶段受控 ST-Link 入口；CAN Katapult 已接入
+  非交互 CLI，强制指定接口和 Katapult UUID、复核受保护 APP 产物，并沿用四重身份
+  回读与部署记录；下一步接入 USB Katapult、Web 两阶段入口、可信时间与签名，并完成
+  实体部署验收；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，
