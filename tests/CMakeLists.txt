@@ -1,3 +1,11 @@
+# 测试以 assert 作为可执行断言。Release 默认定义 NDEBUG 会把断言和其参数一起
+# 裁掉，既可能造成 -Werror 未使用变量，也会让测试静默空跑；所有配置都必须保留断言。
+if(MSVC)
+    add_compile_options(/UNDEBUG)
+else()
+    add_compile_options(-UNDEBUG)
+endif()
+
 add_executable(protocol_tests protocol_tests.cpp)
 target_link_libraries(protocol_tests PRIVATE remotebsp_protocol)
 
