@@ -68,6 +68,25 @@ python3 gui/server.py
 python3 gui/server.py --state /tmp/remotebsp-mock-state.json
 ```
 
+## Runtime PWM 认证代理
+
+Studio 浏览器端不得保存或接收 Runtime API key。PWM 控制代理默认关闭；需要时把
+仅含一行 API key 的文件放在 Studio 服务端，并显式启动：
+
+```bash
+python3 gui/server.py \
+  --enable-runtime-pwm-proxy \
+  --runtime-api-url http://127.0.0.1:8080 \
+  --runtime-api-key-file /run/secrets/remotebsp-runtime-api-key
+```
+
+代理只接受数字回环 HTTP 地址和显式端口，只开放 PWM configure、stop 与只读
+snapshot 三个固定上游端点；它不接受任意 URL、路径或通用 Runtime 转发。写请求
+必须使用 JSON、字段集合必须精确匹配且不超过 4096 字节；上游响应限制为 1 MiB，
+默认超时 3 秒（可用 `--runtime-proxy-timeout-ms` 在 100～10000 毫秒内调整）。API
+key 只在服务端启动时从独立文件读取，不写入 Studio 工程、能力响应或浏览器脚本。
+启用代理时 Studio 自身也强制监听数字回环地址，不能通过 `0.0.0.0` 暴露控制入口。
+
 状态文件只由 Mock MCU 写入，Studio 只读。GUI 不直接访问 CAN。设备参数已通过
 独立 `toolbusd` 适配器提供 Web 只读快照/备份和显式 CLI 写入/恢复；实时控制和
 烧录仍通过相互隔离的后端推进。

@@ -5,9 +5,9 @@
 > 贯通 configure/stop。HTTP 使用 `POST /api/v1/control/pwm/configure|stop`，响应结果位于
 > `data.operation.result`，资源状态统一从 `GET /api/v1/snapshot` 读取。租约释放、过期和
 > daemon 关停按对象类型执行 `PWM_STOP`，不复用 GPIO close 语义。Studio 已有与工程配置面
-> 分离的运行时适配界面，但不保存 Bearer/API key；服务器尚未配置安全认证代理与 base
-> paths，入口保持默认禁用。从认证 HTTP 到 Mock 的三进程闭环和实体 PWM 输出本轮均未新增
-> 验收，因此仍不能宣称 Studio 或实体 PWM 端到端功能完成。
+> 分离的运行时适配界面，并增加默认关闭的同源认证代理；Bearer/API key 只从服务端文件
+> 读取，不进入浏览器或工程。认证 HTTP 到 Mock 的普通资源、远端租约和未知申请隔离三类
+> 进程闭环已纳入固定测试；实体 PWM 本轮没有新增验收，因此不能外推三板实体闭环。
 
 ## 目标
 

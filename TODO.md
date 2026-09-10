@@ -48,9 +48,10 @@
   本地历史，并复用 Studio 后端；下一步增加批量烧号编排、权限、签名和可信时间；
 - PWM 已贯通 `toolbusd` Gate、daemon、IPC、`libremotebsp` client、CLI、独立持久账本和
   认证 Runtime HTTP；配置/停止读取 `data.operation.result`，状态统一读取
-  `/api/v1/snapshot`。Studio 已有独立运行时适配界面，但不保存 Bearer/API key；下一步由
-  服务器安全配置发布认证代理和 base paths 后再解锁，禁止网页直连 CAN/toolbusd。WS2812
-  Runtime HTTP/Studio 操作页与 PWM 本轮实体输出验收仍待完成；
+  `/api/v1/snapshot`。Studio 已增加默认关闭的同源认证代理：API key 只由服务端密钥文件
+  读取，上游和 Studio 均限制在数字回环地址，并仅开放 PWM configure/stop/snapshot 三个
+  固定端点；浏览器和工程文件不持有密钥，也不直连 CAN/toolbusd。WS2812 Runtime HTTP/
+  Studio 操作页与 PWM 本轮新增实体输出验收仍待完成；
 
 验收条件：不进入 `menuconfig`，从一份 Studio 工程可重复得到相同固件，完成构建、
 烧录、重启和回读核对；冲突配置在构建前被定位并拒绝。
@@ -202,9 +203,9 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
   `ControlAuditJournal` 已通过显式目录与密钥文件提供同步 intent/terminal/unknown、
   HMAC-SHA256 链、分段容量、进程锁和失败关闭，覆盖租约申请/释放与 GPIO 写入；普通读取
   审计仍保持有界、非阻塞的进程内边界；
-  下一步补齐生产文件系统掉电/损坏演练、可靠 MCU boot generation 驱动的自动解冻、
-  TLS 部署基线、API 密钥热撤销、控制审计密钥轮换与外部链头锚定、跨重启事件存储、
-  认证 SSE 完整状态推送、慢客户端隔离及轮询降级已实现；系统级资源耗尽验证仍待完成；
+  认证 SSE 完整状态推送、慢客户端隔离及轮询降级已实现。下一步补齐生产文件系统
+  掉电/损坏演练、可靠 MCU boot generation 驱动的自动解冻、TLS 部署基线、API 密钥
+  热撤销、控制审计密钥轮换与外部链头锚定、跨重启事件存储，以及系统级资源耗尽验证；
 - Runtime API 只通过 `libremotebsp` 使用 `toolbusd`，不得直接访问 SocketCAN 或 USB；
 - 在现有版本化 REST、短轮询和完整状态 SSE 之上评估可恢复的增量遥测流；
 - 明确多客户端租约、身份、权限、审计和命令冲突处理；

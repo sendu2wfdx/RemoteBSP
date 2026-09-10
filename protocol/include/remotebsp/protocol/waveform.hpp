@@ -4,9 +4,15 @@
 #include <stdexcept>
 #include <vector>
 
+#include "remotebsp/protocol/packet.hpp"
+
 namespace remotebsp::protocol {
 
 constexpr std::uint16_t kPwmDutyScale = 10000;
+constexpr std::size_t kMaximumTimedBitstreamDataBytes =
+    kMaximumPayloadSize - sizeof(std::uint16_t);
+constexpr std::uint16_t kMaximumTimedBitstreamBits =
+    static_cast<std::uint16_t>(kMaximumTimedBitstreamDataBytes * 8U);
 
 struct PwmCreatePayload {
     std::uint8_t channel{};

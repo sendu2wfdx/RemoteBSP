@@ -137,7 +137,9 @@ TimedBitstreamCreatePayload decode_timed_bitstream_create(
 std::vector<std::uint8_t> encode_timed_bitstream_write(
     const TimedBitstreamWritePayload& payload) {
     const std::size_t expected = (payload.bit_count + 7U) / 8U;
-    if (payload.bit_count == 0 || payload.data.size() != expected) {
+    if (payload.bit_count == 0 ||
+        payload.bit_count > kMaximumTimedBitstreamBits ||
+        payload.data.size() != expected) {
         throw WaveformPayloadException(
             WaveformPayloadError::InvalidValue, "定时位流数据长度无效");
     }
@@ -156,7 +158,8 @@ TimedBitstreamWritePayload decode_timed_bitstream_write(
             "TIMED_BITSTREAM_WRITE 载荷过短");
     }
     const auto bit_count = read_u16(payload.data());
-    if (bit_count == 0 || payload.size() != 2U + (bit_count + 7U) / 8U) {
+    if (bit_count == 0 || bit_count > kMaximumTimedBitstreamBits ||
+        payload.size() != 2U + (bit_count + 7U) / 8U) {
         throw WaveformPayloadException(
             WaveformPayloadError::InvalidLength,
             "TIMED_BITSTREAM_WRITE 数据长度不匹配");

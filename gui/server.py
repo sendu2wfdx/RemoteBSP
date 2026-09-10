@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 import mimetypes
 from http import HTTPStatus
@@ -52,6 +53,7 @@ from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
 from web_deployment import WebDeploymentController
 from parameter_audit import ParameterAuditStore
 from web_device_parameters import WebDeviceParameterController
+from runtime_pwm_proxy import RuntimePwmProxy, RuntimePwmProxyError
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -131,6 +133,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def device_parameter_manager(self) -> DeviceParameterManager | None:
         return getattr(self.server, "device_parameter_manager", None)
 
+    @property
+    def runtime_pwm_proxy(self) -> RuntimePwmProxy | None:
+        return getattr(self.server, "runtime_pwm_proxy", None)
+
     def _send_json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -155,7 +161,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(chunk)
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/health":
             self._send_json({"ok": True})
             return
@@ -177,6 +184,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(state)
             return
         if path == "/api/project/target":
+            pwm_proxy = self.runtime_pwm_proxy
             self._send_json({
                 "api_version": 1,
                 "mode": "static-firmware",
@@ -197,9 +205,16 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
                 "runtime_pwm": {
-                    "available": False,
-                    "auth_proxy": False,
-                    "reason": "runtime_pwm_auth_proxy_unconfigured",
+                    "available": pwm_proxy is not None,
+                    "auth_proxy": pwm_proxy is not None,
+                    "reason": (None if pwm_proxy is not None else
+                               "runtime_pwm_auth_proxy_unconfigured"),
+                    "configure_path": ("/api/runtime/pwm/configure" if
+                                       pwm_proxy is not None else None),
+                    "stop_path": ("/api/runtime/pwm/stop" if
+                                  pwm_proxy is not None else None),
+                    "snapshot_path": ("/api/runtime/pwm/snapshot" if
+                                      pwm_proxy is not None else None),
                     "contract": {
                         "configure": "POST /api/v1/control/pwm/configure",
                         "stop": "POST /api/v1/control/pwm/stop",
@@ -208,6 +223,21 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                     },
                 },
             })
+            return
+        if path == "/api/runtime/pwm/snapshot":
+            proxy = self.runtime_pwm_proxy
+            if proxy is None:
+                self._send_json({"ok": False, "error": "Runtime PWM代理未启用"},
+                                HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                if parsed.query:
+                    raise RuntimePwmProxyError("PWM快照端点不接受查询参数", 400)
+                response = proxy.snapshot()
+                self._send_json(response.document, HTTPStatus(response.status))
+            except RuntimePwmProxyError as error:
+                self._send_json({"ok": False, "error": str(error)},
+                                HTTPStatus(error.status))
             return
         if path == "/api/production-history/status":
             self._send_json(self.production_history.status())
@@ -276,7 +306,30 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in {"/api/runtime/pwm/configure", "/api/runtime/pwm/stop"}:
+            proxy = self.runtime_pwm_proxy
+            if proxy is None:
+                self._send_json({"ok": False, "error": "Runtime PWM代理未启用"},
+                                HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                if parsed.query:
+                    raise RuntimePwmProxyError("PWM写入端点不接受查询参数", 400)
+                if self.headers.get_content_type() != "application/json":
+                    raise RuntimePwmProxyError("PWM请求必须使用application/json", 415)
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > proxy.MAXIMUM_BODY_BYTES:
+                    raise RuntimePwmProxyError("PWM请求长度无效或超过4096字节", 400)
+                body = self.rfile.read(length)
+                response = proxy.stop(body) if path.endswith("/stop") else \
+                    proxy.configure(body)
+                self._send_json(response.document, HTTPStatus(response.status))
+            except (ValueError, RuntimePwmProxyError) as error:
+                status = error.status if isinstance(error, RuntimePwmProxyError) else 400
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus(status))
+            return
         if path not in ("/api/project/inspect", "/api/project/validate",
                         "/api/project/generate",
                         "/api/project/generate-reports",
@@ -567,7 +620,14 @@ def make_server(host: str, port: int,
                 deployment_controller: WebDeploymentController | None = None,
                 parameter_write_controller:
                     WebDeviceParameterController | None = None,
+                runtime_pwm_proxy: RuntimePwmProxy | None = None,
                 ) -> ThreadingHTTPServer:
+    if runtime_pwm_proxy is not None:
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                raise ValueError("启用Runtime PWM代理时Studio必须监听数字回环地址")
+        except ValueError as error:
+            raise ValueError("启用Runtime PWM代理时Studio必须监听数字回环地址") from error
     server = ThreadingHTTPServer((host, port), GuiRequestHandler)
     server.state_path = state_path  # type: ignore[attr-defined]
     server.build_jobs = build_jobs  # type: ignore[attr-defined]
@@ -577,6 +637,7 @@ def make_server(host: str, port: int,
     server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
     server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
     server.parameter_write_controller = parameter_write_controller  # type: ignore[attr-defined]
+    server.runtime_pwm_proxy = runtime_pwm_proxy  # type: ignore[attr-defined]
     return server
 
 
@@ -607,6 +668,14 @@ def main() -> int:
                         help="设备参数写入审计目录")
     parser.add_argument("--parameter-audit-key-file", type=Path,
                         help="设备参数写入审计HMAC密钥文件")
+    parser.add_argument("--enable-runtime-pwm-proxy", action="store_true",
+                        help="显式启用Studio到Runtime的PWM认证代理")
+    parser.add_argument("--runtime-api-url", default="http://127.0.0.1:8080",
+                        help="Runtime本机HTTP地址（必须为数字回环地址）")
+    parser.add_argument("--runtime-api-key-file", type=Path,
+                        help="仅由Studio服务端读取的Runtime API key文件")
+    parser.add_argument("--runtime-proxy-timeout-ms", type=int, default=3000,
+                        help="Runtime PWM代理超时，默认3000毫秒")
     args = parser.parse_args()
     if args.build_jobs < 1 or args.build_jobs > 64:
         parser.error("--build-jobs必须位于1～64")
@@ -645,12 +714,23 @@ def main() -> int:
                                     args.parameter_audit_key_file))
         except DeviceParameterError as error:
             parser.error(str(error))
+    runtime_pwm_proxy = None
+    if args.enable_runtime_pwm_proxy:
+        if args.runtime_api_key_file is None:
+            parser.error("启用Runtime PWM代理必须配置--runtime-api-key-file")
+        try:
+            runtime_pwm_proxy = RuntimePwmProxy.from_key_file(
+                args.runtime_api_url, args.runtime_api_key_file,
+                timeout_seconds=args.runtime_proxy_timeout_ms / 1000.0)
+        except ValueError as error:
+            parser.error(str(error))
     server = make_server(
         args.host, args.port, args.state, build_jobs=args.build_jobs,
         history_root=args.history_root,
         device_parameter_manager=parameter_manager,
         deployment_controller=deployment_controller,
-        parameter_write_controller=parameter_write_controller)
+        parameter_write_controller=parameter_write_controller,
+        runtime_pwm_proxy=runtime_pwm_proxy)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")
     print("未连接 Mock 状态文件时会自动显示演示数据；按 Ctrl+C 退出。")
     print(f"固件构建使用{args.build_jobs}个并行任务。")

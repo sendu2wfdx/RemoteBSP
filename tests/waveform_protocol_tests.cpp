@@ -52,4 +52,22 @@ int main() {
         (void)decode_timed_bitstream_create(
             std::vector<std::uint8_t>(17, 0));
     });
+    const TimedBitstreamWritePayload maximum_bits{
+        kMaximumTimedBitstreamBits,
+        std::vector<std::uint8_t>(kMaximumTimedBitstreamDataBytes, 0xA5)};
+    assert(encode_timed_bitstream_write(maximum_bits).size() ==
+           kMaximumPayloadSize);
+    expect_invalid([] {
+        (void)encode_timed_bitstream_write(
+            {static_cast<std::uint16_t>(kMaximumTimedBitstreamBits + 1U),
+             std::vector<std::uint8_t>(
+                 kMaximumTimedBitstreamDataBytes + 1U, 0)});
+    });
+    expect_invalid([] {
+        std::vector<std::uint8_t> oversized(
+            kMaximumPayloadSize + 1U, 0);
+        oversized[0] = 0x31;
+        oversized[1] = 0x3F;
+        (void)decode_timed_bitstream_write(oversized);
+    });
 }
