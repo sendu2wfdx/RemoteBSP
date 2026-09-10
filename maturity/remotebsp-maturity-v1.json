@@ -48,7 +48,7 @@
     {
       "id": "resource_model",
       "title": "通用资源模型",
-      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；Studio/固件共用 GPIO/UART/PWM/位流静态表，G431 已接入 UART 水位/溢出和 PWM/TimedBitstream 基础状态及 PWM 停止释放对象，I2C/SPI 已有 toolbusd 父总线仲裁及公共 Core 独占租约 Busy 映射，H2N/N2H Stream 已到 Mock，ADC、Timer、Storage、双向流与实体数据面缺失。",
+      "summary": "GPIO、UART、PWM、位流、运动、I2C/SPI 和 Stream 已部分贯通；公共 Core ResourceReset 已恢复 UART 清缓冲/故障并释放、PWM stop、TimedBitstream abort 的兼容语义，失败时保留对象和故障状态。G431 I2C1/SPI1/SPI2 板级 HAL 已交叉编译，但未烧录或电气实测；H2N/N2H Stream 已到 Mock，ADC、Timer、Storage、双向流与实体高速数据面缺失。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -56,7 +56,8 @@
           {"id": "resource_protocol_source", "kind": "source", "path": "protocol/src/resource.cpp", "note": "资源描述、合同和状态协议实现。"},
           {"id": "resource_bus_runtime_source", "kind": "source", "path": "toolbusd/src/bus_runtime.cpp", "note": "有界设备合同缓存、首访单飞、父总线非阻塞仲裁和节点失效处理。"},
           {"id": "resource_static_table_source", "kind": "source", "path": "firmware/src/static_resources.c", "note": "Studio 生成 GPIO/UART/PWM/定时位流表的启动完整性和运行白名单公共消费者。"},
-          {"id": "resource_embedded_enum_source", "kind": "source", "path": "firmware/src/core.c", "note": "STM32 Remote Core 已把静态表接入 ResourceEnum/Describe/Status/Contract 四个只读命令，并汇总 UART/PWM/TimedBitstream 基础状态；PWM 停止成功释放对象槽，缺失能力和非法索引失败关闭。"}
+          {"id": "resource_embedded_enum_source", "kind": "source", "path": "firmware/src/core.c", "note": "STM32 Remote Core 已把静态表接入 ResourceEnum/Describe/Status/Contract；ResourceReset 对 UART/PWM/TimedBitstream 执行兼容恢复，后端失败时保留对象和故障状态。"},
+          {"id": "resource_g431_bus_hal_source", "kind": "source", "path": "firmware/boards/stm32g431cbu6/board_bus.c", "note": "G431 I2C1/SPI1/SPI2 板级 HAL 与静态端点；仅有交叉编译证据，未烧录或电气验收。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
@@ -70,14 +71,14 @@
           {"id": "resource_stream_n2h_test", "kind": "mock_test", "path": "tests/stream_n2h_session_tests.cpp", "note": "N2H 精确累计 ACK、两阶段交付、回绕、溢出、租约到期和跨资源/节点隔离；Mock不是实体实测，且未绑定真实高速链路。"},
           {"id": "resource_bus_runtime_test", "kind": "host_test", "path": "tests/bus_runtime_tests.cpp", "note": "覆盖合同边界、首访单飞、父总线争用、跨节点隔离和失效期间 ABA 防护；不代表实体总线时序。"},
           {"id": "resource_static_table_test", "kind": "host_test", "path": "firmware/tests/startup_gpio_tests.c", "note": "覆盖静态资源表边界、跨类型引脚冲突与 UART/波形白名单；不代表实体引脚时序。"},
-          {"id": "resource_embedded_enum_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "覆盖 STM32 ResourceEnum/Describe/Status/Contract 的多资源分页、严格索引、UART/PWM/TimedBitstream 状态、后端失败，以及PWM停止后对象重建。"}
+          {"id": "resource_embedded_enum_test", "kind": "host_test", "path": "firmware/tests/core_tests.c", "note": "覆盖 STM32 ResourceEnum/Describe/Status/Contract，以及 ResourceReset 的 UART/PWM/TimedBitstream 成功、所有权和后端失败保留语义。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
       },
       "cross_compiled": {
         "status": "partial",
         "evidence": [
-          {"id": "resource_cross_document", "kind": "documented_cross_compile_result", "path": "docs/bus-and-stream-resources.md", "note": "三平台默认关闭态已交叉编译并检查零总线符号；不代表 I2C/SPI 实体 BSP 已实现。"},
+          {"id": "resource_cross_document", "kind": "documented_cross_compile_result", "path": "docs/bus-and-stream-resources.md", "note": "三平台默认关闭态已检查零总线符号；G431 I2C1/SPI1/SPI2 专用配置已交叉编译，不代表已烧录或实板验收。"},
           {"id": "resource_enum_cross_document", "kind": "documented_cross_compile_result", "path": "docs/hardware-evidence-g431-2026-09-10.md", "note": "Resource 四命令修复后 F072、F103、两块正式板型和 G431 共六个目标交叉编译通过；这是构建证据，不替代实体资源事务。"}
         ],
         "blocker_ids": ["incomplete_resource_families"]
@@ -165,7 +166,7 @@
     {
       "id": "observability",
       "title": "可观测性",
-      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；toolbusd 软件生产者、只读 IPC、操作账本可变更状态/记录数量和 Runtime 可信投影已贯通。G431 已把 UART 环形缓冲水位/溢出及 PWM/TimedBitstream 基础状态接入 ResourceStatus，并实板验证 PWM Busy->Normal；公共 Core 还把 I2C/SPI 设备独占租约映射为 Busy，但三板无实体总线 HAL 和实测。这仍不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列、历史和硬件时间戳质量仍未实现。",
+      "summary": "流量、资源健康、Runtime 快照、主机时钟质量及 HealthSnapshot v1 指标契约已有稳定机器字段；toolbusd 软件生产者、只读 IPC、操作账本可变更状态/记录数量和 Runtime 可信投影已贯通。G431 已把 UART 环形缓冲水位/溢出及 PWM/TimedBitstream 基础状态接入 ResourceStatus，并实板验证 PWM Busy->Normal；公共 Core 还把 I2C/SPI 设备独占租约映射为 Busy。G431 虽已有板级总线 HAL，但只有编译证据；三板均无实体总线遥测或电气实测。这仍不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列、历史和硬件时间戳质量仍未实现。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -205,7 +206,7 @@
     {
       "id": "configuration_build",
       "title": "配置与构建",
-      "summary": "Studio 工程、Kconfig 与 GPIO/UART/PWM/定时位流静态表生成、冲突校验、带源码身份的构建归档、生产批次包及有界本地历史检索已部分实现；显式 deploy-stlink CLI 已覆盖受保护固件校验、ST-Link 写入/校验/复位、重试和身份文件核对，但网页入口及真实运行时回读适配器尚未接入。",
+      "summary": "Studio 工程、Kconfig 与静态表生成、冲突校验、带源码身份的构建归档、生产批次包及有界本地历史检索已部分实现；显式 deploy-stlink CLI 可执行受保护固件写入/校验/复位。inspect-runtime-identity 仅读取 UUID、板型、状态及版本子集，因运行时合同缺少 project/config/firmware identity 三个 SHA-256 而明确不构成部署核验；网页入口及完整实体回读仍未接入。",
       "implemented": {
         "status": "partial",
         "evidence": [
@@ -400,7 +401,7 @@
     {"id": "multi_node_hardware_sync", "dimension_id": "multi_node_synchronization", "summary": "通用启动代次日志已有软件证据，但尚未绑定板级独立 Flash 区，实体同步也未完成。", "requires_hardware": true, "closure_evidence": "先逐板证明 boot epoch 区域、升级保留和掉电行为，再由至少两块实体节点在 CAN/CAN-FD 压力下提供同步边沿、误差包络、租约失效和失联恢复记录。"},
     {"id": "partial_failure_recovery", "dimension_id": "fault_isolation", "summary": "响应丢失和 daemon 重启后的 GPIO 不确定提交已有持久软件账本与作用域阻断；网络分区、跨节点部分 COMMIT、总线饱和和实体资源卡死恢复矩阵仍未完成。", "requires_hardware": true, "closure_evidence": "固定故障脚本、期望状态机、原始链路记录和实体安全输出证据。"},
     {"id": "hardware_observability", "dimension_id": "observability", "summary": "缺少 MCU CPU/ISR/栈/队列遥测和硬件时间戳质量标记。", "requires_hardware": true, "closure_evidence": "版本化指标契约、实体采集记录、时间基说明和故障阈值测试。"},
-    {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "显式 deploy-stlink CLI 已接入 ST-Link 执行，但 Studio 网页尚未接入部署入口、重启后的真实运行时身份/配置哈希回读和批量生产闭环。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、真实运行时回读身份与配置哈希。"},
+    {"id": "studio_flash_readback", "dimension_id": "configuration_build", "summary": "显式 deploy-stlink CLI 已接入 ST-Link 执行；inspect-runtime-identity 只能读 UUID/板型/状态/版本，缺少工程、配置、固件输入三个 SHA-256，不能用于部署核验。Studio 网页入口和批量生产闭环仍缺失。", "requires_hardware": true, "closure_evidence": "三类板卡保存工程、构建记录、烧录日志、真实运行时回读的三个 SHA-256、身份与配置哈希。"},
     {"id": "upgrade_matrix", "dimension_id": "upgrade_recovery", "summary": "F072/G431 双模式切换、失败恢复和参数区掉电矩阵不完整。", "requires_hardware": true, "closure_evidence": "逐板记录 CAN/USB 进入、升级中断、恢复、参数保持和镜像哈希。"},
     {"id": "runtime_control_plane", "dimension_id": "runtime_api", "summary": "认证回环 HTTP 到 GPIO IPC v2、显式对象销毁、同代安全复用、固件会话所有权、结构化错误、统一控制期限、可查询的跨进程不确定提交账本及 HMAC 链持久控制审计已完成；仍缺主动推送、跨重启事件历史、TLS/密钥生命周期和系统级资源耗尽验证。", "requires_hardware": false, "closure_evidence": "实现 TLS/密钥生命周期、主动推送和跨重启事件历史，并完成进程/线程/磁盘/IPC 容量耗尽攻击测试。"},
     {"id": "auth_and_threat_model", "dimension_id": "security_boundaries", "summary": "威胁模型、API key 身份、只读权限、有界普通审计和 HMAC 链持久控制审计已建立，但 TLS/密钥生命周期、速率限制和总线消息认证未闭合。", "requires_hardware": false, "closure_evidence": "补齐密钥生命周期、攻击面测试、总线认证和部署加固验证。"},

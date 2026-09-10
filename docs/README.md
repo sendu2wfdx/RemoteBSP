@@ -73,8 +73,8 @@ flowchart LR
 | PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 主机、Mock、GUI和三款STM32后端已编译；G431 PWM 已实测 Busy -> Normal、停止后不复位重建对象和最高 100 kHz 两种占空比 0 毛刺；TimedBitstream 仅有忙/后端失败基础状态，实体WS2812波形待验收 |
 | 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入主机与STM32公共Core；可靠启动代次双页日志已通过故障注入，但尚未绑定实体Flash区，三板继续安全禁用跨板入口 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
-| Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、I2C/SPI图形编辑、Mock可视化、工程差异、确定性生产资料、`.config`与GPIO/UART/PWM/定时位流静态表生成；构建归档纳入源码/依赖/工具链身份并拒绝构建期漂移。部署作业模块可校验固件、生成安全 ST-Link 计划、重试并核对四类身份，但实际烧录器执行和实体回读适配器尚未接入 Studio |
-| I2C / SPI | 协议、Mock、Studio、主机运行时及嵌入式公共Core竖切已实现 | `toolbusd`已增加合同首访单飞、父总线仲裁和节点代次失效；默认关闭的STM32公共Core固定端点合同、设备级租约和原子事务边界；三板真实HAL与实板验收待完成 |
+| Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、构建归档及显式 ST-Link 部署编排已实现。`inspect-runtime-identity` 只读 UUID/板型/状态/版本子集；运行时合同缺少工程、配置、固件输入三个 SHA-256，因此不构成部署核验或实体回读闭环 |
+| I2C / SPI | 公共竖切已实现，G431 板级 HAL 已编译 | `toolbusd`合同缓存/父总线仲裁、公共 Core 静态合同/租约/原子事务已测；G431 I2C1 PB6/PB7、SPI1 PA5/PA6/PA7+PA15 CS、SPI2 PB13/PB14/PB15+PB12 CS 已交叉编译，未烧录、未电气实测；F072/F103 板级 HAL 待完成 |
 | 高速 Stream | H2N/N2H Mock会话已实现、已测试 | 连续序号、精确ACK信用、两阶段交付、背压、故障与旧缓冲隔离已覆盖；双向及USB/Ethernet真实数据面待实现 |
 | Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误与统一单调期限已贯通；持久控制审计以 HMAC 链和同步 intent/terminal/unknown 失败关闭 mutation，16 项日志内核及 6 项集成测试已覆盖。TLS、主动推送、跨重启事件历史及实体失效安全验收待实现 |
 | 遥测健康契约 | toolbusd 软件生产链已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd 已贯通生产者、只读 IPC、CLI 与 Runtime 可信投影。G431 UART 水位/溢出和 PWM/TimedBitstream 基础状态已接入，但不是完整 MCU 健康遥测，CPU/ISR/栈/运动队列和硬件时间戳仍待实现 |

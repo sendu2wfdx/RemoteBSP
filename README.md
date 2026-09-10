@@ -62,17 +62,17 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
-| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 I2C/SPI 设备在独占租约有效期内由 `ResourceStatus` 报告 Busy，但三款实体板尚无 I2C/SPI HAL，不能视作实体遥测 |
-| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理。实体 I2C/SPI BSP、双向 Stream 与真实高速数据面待实现 |
+| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 `ResourceReset` 已恢复兼容语义：UART 清缓冲/故障并释放对象、PWM 安全停止、TimedBitstream 中止，后端失败则保留对象和故障状态以便重试 |
+| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 G431 I2C1/SPI1/SPI2 实体 HAL 已实现并交叉编译；总线测试固件未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与 GPIO/UART/PWM/定时位流只读表生成、32线程构建和产物归档；构建 ID 纳入源码/依赖/工具链身份，构建期漂移拒绝归档，下载复核普通文件边界、大小和哈希；批次历史支持损坏隔离和四类追溯检索。非交互 CLI 新增必须显式调用的 `deploy-stlink`：复核受保护产物后执行 ST-Link 写入/校验/复位，并从调用者指定的有界 JSON 身份文件核对四字段。身份文件只是上位机适配边界，尚无真实运行时身份读取器，也未接入网页，不能记作 Studio 自动回读闭环 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与静态表生成、32线程构建和产物归档已实现。非交互 CLI 的 `deploy-stlink` 可执行受保护产物的写入/校验/复位；`inspect-runtime-identity` 只读取 `toolbusd node-list` 公开的 UUID、板型、在线状态、固件与协议版本子集。当前运行时合同缺少工程、配置和固件输入三个 SHA-256，因此命令明确返回 `deployment_verified=false`，不能记作 Studio 烧录回读闭环 |
 | Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；`ControlAuditJournal` 已用同步 intent/terminal/unknown、HMAC-SHA256 链、分段容量和失败关闭覆盖租约与 GPIO 控制，16 项日志内核及 6 项 HTTP 集成测试已通过。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、主动推送、跨重启事件历史和实体失效安全时延验证仍待实现 |
 | 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。toolbusd 软件生产者、版本化只读 IPC、CLI 与 Runtime 可信投影已接入；G431 `ResourceStatus` 已有 UART 水位/溢出和 PWM/TimedBitstream 基础状态，但它不是完整 MCU 健康生产者，CPU/ISR/栈/运动队列与硬件时间戳实体采样仍未实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证。2026-09-10 真机压力 200/200、4×50 并发全过，2023 字节分片 56 ms，daemon/MCU/CAN 接口恢复通过；修复后枚举 3 UART、PWM0、TimedBitstream0 并由 RuntimeSnapshot 返回。PA6/D5 已采集 1 kHz/50%、1 kHz/12.34%、100 kHz/50% 和 100 kHz/25%，各 0 毛刺；修复 `pwm-stop` 对象释放后，实体状态由 Busy 回到 Normal、对象 1 无复位重建为对象 2，并再次通过 100 kHz/25%。PA0/PA4 仍需复测，不能外推 STEP、TimedBitstream 或跨板时序 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证。2026-09-10 真机压力 200/200、4×50 并发全过，2023 字节分片 56 ms，daemon/MCU/CAN 接口恢复通过；修复后枚举 3 UART、PWM0、TimedBitstream0 并由 RuntimeSnapshot 返回。PA6/D5 已采集 1 kHz/50%、1 kHz/12.34%、100 kHz/50% 和 100 kHz/25%，各 0 毛刺；修复 `pwm-stop` 对象释放后，实体状态由 Busy 回到 Normal、对象 1 无复位重建为对象 2，并再次通过 100 kHz/25%。I2C1 PB6/PB7、SPI1 PA5/PA6/PA7+PA15 CS、SPI2 PB13/PB14/PB15+PB12 CS 实体 HAL 已交叉编译，但未烧录或电气实测；SPI1 占用当前 DL16 D5 所接 PA6，保持该接线时不得烧录总线测试固件。PA0/PA4 仍需复测，不能外推 STEP、TimedBitstream 或跨板时序 |
 
 I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码、Mock BSP、
 设备级故障隔离、Studio 静态端点/合同图形编辑、`toolbusd` 合同懒加载与父总线
@@ -80,8 +80,9 @@ I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码
 Remote Core/HAL 骨架。嵌入式切片把端点、长度、超时、flags、独占租约与同步原子
 事务边界固定下来；合同首访单飞、节点代次失效和跨节点/跨总线隔离已有软件测试。
 设备持有独占租约期间，公共 Core 的 `ResourceStatus` 会报告 Busy，释放、超时或会话
-清理后恢复 Normal；这只证明设备级租约状态映射。三块板仍没有真实 HAL 映射，含总线
-资源的实体构建继续被 Studio 拒绝，尚无 I2C/SPI 电气与时序实测。高速 Stream 已完成
+清理后恢复 Normal；这只证明设备级租约状态映射。G431 已增加默认关闭的 I2C1/
+SPI1/SPI2 板级 HAL 和专用交叉编译配置，但未烧录、未接从设备、未完成电气与时序实测；
+F072/F103 仍无板级总线 HAL。高速 Stream 已完成
 H2N/N2H Mock 会话状态机；N2H 使用 peek/commit 两阶段
 交付，编码、分片、后端或租约失败时不提前消费数据。双向、USB Bulk 和 Ethernet
 真实数据面仍未实现。

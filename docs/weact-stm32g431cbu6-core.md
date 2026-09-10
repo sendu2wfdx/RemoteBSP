@@ -128,6 +128,22 @@ GND 仍待确认/复测。单路 PA6 PWM 不能据此关闭 STEP、TimedBitstrea
 时序 blocker。通道映射、失败现象和完整证据分层见
 [本轮实体验收记录](hardware-evidence-g431-2026-09-10.md)。
 
+## I2C/SPI 板级 HAL 开发状态
+
+G431 已增加一份非正式预设的单板总线交叉编译配置，用来验证公共 Core 与
+STM32 HAL 的编译集成：
+
+| 端点 | 引脚 | 静态合同 |
+|---|---|---|
+| I2C1 | PB6=SCL、PB7=SDA | 7-bit 设备地址 0x48，上限 400 kHz，重复起始与总线恢复 |
+| SPI1 | PA5=SCK、PA6=MISO、PA7=MOSI、PA15=CS | Mode 0、8 bit、MSB first，上限 21.25 MHz |
+| SPI2 | PB13=SCK、PB14=MISO、PB15=MOSI、PB12=CS | Mode 0、8 bit、MSB first，上限 21.25 MHz |
+
+该固件已交叉编译，但尚未烧录，也没有连接 I2C/SPI 从设备或使用逻辑分析仪
+验证 ACK/NACK、频率、占空、片选、Mode 与超时恢复。当前 DL16 D5 连接 PA6，
+与 SPI1 MISO 复用相冲；在用户拆除或明确重新安排该接线前，不得烧录此总线测试
+配置。
+
 ## 构建
 
 在名为 `Ubuntu` 的 WSL 中执行：
