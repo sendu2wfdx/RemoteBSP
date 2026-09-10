@@ -79,6 +79,8 @@ from production_signing import (
 )
 from project_compare import MAX_PROJECT_BYTES
 from project_config import ProjectConfigError, validate_project
+from production_provisioning import (
+    ProvisioningBatchController, create_policy, validate_policy)
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -620,6 +622,32 @@ def _run_parameter_write(args) -> dict:
     }
 
 
+def _run_provisioning_policy_create(args) -> dict:
+    source = _read_json(args.source, "生产授权策略源", 64 * 1024)
+    if not isinstance(source, dict) or set(source) != {"operators", "parameter_rules"}:
+        raise ProjectConfigError("生产授权策略源字段无效")
+    policy = create_policy(**source)
+    output = _atomic_output(args.output, (json.dumps(policy, ensure_ascii=False,
+        sort_keys=True, indent=2) + "\n").encode(), force=args.force)
+    return {"ok": True, "policy": policy, "output": str(output),
+            "hardware_access": False}
+
+
+def _run_provisioning_policy_validate(args) -> dict:
+    policy = validate_policy(_read_json(args.policy, "生产授权策略", 64 * 1024))
+    return {"ok": True, "format": policy["format"],
+            "policy_sha256": policy["sha256"], "hardware_access": False}
+
+
+def _run_provisioning_batch_execute(args) -> dict:
+    controller = ProvisioningBatchController(
+        policy=validate_policy(_read_json(args.policy, "生产授权策略", 64 * 1024)),
+        journal_root=_bounded_path(args.journal_root, "批量烧号日志目录"),
+        manager_factory=lambda _: _parameter_manager(args),
+        audit_factory=lambda _: _parameter_audit(args))
+    return controller.execute(_read_json(args.batch, "批量烧号请求", 256 * 1024))
+
+
 def _run_parameter_restore(args) -> dict:
     backup = _read_json(args.backup, "设备参数备份", MAX_BACKUP_BYTES)
     if not isinstance(backup, dict) or not isinstance(
@@ -1080,6 +1108,29 @@ def _parser() -> StrictParser:
     add_parameter_target(parameter_restore)
     parameter_restore.add_argument("--backup", required=True)
     parameter_restore.set_defaults(handler=_run_parameter_restore)
+
+    policy_create = sub.add_parser(
+        "provisioning-policy-create", help="生成版本化生产角色与一次性字段策略")
+    policy_create.add_argument("--source", required=True)
+    policy_create.add_argument("--output", required=True)
+    policy_create.add_argument("--force", action="store_true")
+    policy_create.set_defaults(handler=_run_provisioning_policy_create)
+    policy_validate = sub.add_parser(
+        "provisioning-policy-validate", help="离线严格验证生产授权策略")
+    policy_validate.add_argument("--policy", required=True)
+    policy_validate.set_defaults(handler=_run_provisioning_policy_validate)
+    provisioning = sub.add_parser(
+        "provisioning-batch-execute", help="按角色策略执行有审计的批量烧号")
+    provisioning.add_argument("--policy", required=True)
+    provisioning.add_argument("--batch", required=True)
+    provisioning.add_argument("--journal-root", required=True)
+    provisioning.add_argument("--toolbusd-socket", required=True)
+    provisioning.add_argument("--node-id", type=int, default=1)
+    provisioning.add_argument("--remote-cli", default="remote-cli")
+    provisioning.add_argument("--parameter-timeout", type=float, default=3.0)
+    provisioning.add_argument("--audit-dir", required=True)
+    provisioning.add_argument("--audit-key-file", required=True)
+    provisioning.set_defaults(handler=_run_provisioning_batch_execute)
 
     calibration_create = sub.add_parser(
         "adc-calibration-create", help="从生产规格生成ADC校准数据工件（不采样）")

@@ -592,10 +592,21 @@ class ControlAuditJournal:
         next_size = self._active_size
         if next_size and next_size + len(frame) > self._options.maximum_segment_bytes:
             next_segment += 1
-            self._create_segment(next_segment)
+            try:
+                self._create_segment(next_segment)
+            except ControlAuditError:
+                # 容量检查完成后，任何真实文件系统失败都意味着无法再证明
+                # 后续控制动作已被审计。即使失败发生在新分段尚未写入时，
+                # 也必须关闭本进程的控制写面，交由重启扫描决定可恢复边界。
+                self._operational = False
+                raise
             next_size = 0
         name = self._segment_name(next_segment)
-        fd = self._open_existing_segment(name, os.O_WRONLY | os.O_APPEND)
+        try:
+            fd = self._open_existing_segment(name, os.O_WRONLY | os.O_APPEND)
+        except ControlAuditError:
+            self._operational = False
+            raise
         try:
             self._hook("record_write")
             self._write_all(fd, frame)

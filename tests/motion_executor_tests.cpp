@@ -466,6 +466,44 @@ void test_axis_count_is_board_capability_not_three() {
     assert(status.metrics.emitted_steps == 78);
 }
 
+void test_segmented_deceleration_and_late_refill_fail_closed() {
+    // “平滑停车”由主机预先规划成逐段降速并以final段收尾；MCU只执行
+    // 确定性分段，不在实时路径临时生成运动学轨迹。
+    MotionExecutor planned(two_axes(), 4, 1000000ULL);
+    planned.enqueue(segment(1, 1000000ULL, 1000000ULL, false, 8, 0), 0);
+    planned.enqueue(segment(2, 2000000ULL, 1000000ULL, false, 4, 0), 0);
+    planned.enqueue(segment(3, 3000000ULL, 1000000ULL, true, 1, 0), 0);
+    assert(planned.status().queue_depth == 3U);
+    assert(!planned.status().queue_low);
+    planned.advance_to(4000000ULL);
+    const auto stopped = planned.status();
+    assert(stopped.state == MotionState::Idle);
+    assert(stopped.fault == MotionFault::None);
+    assert(stopped.axes[0].position_steps == 13);
+    assert(!stopped.axes[0].enabled);
+
+    MotionExecutor starved(two_axes(), 4, 1000000ULL);
+    starved.enqueue(segment(1, 1000000ULL, 1000000ULL, false, 8, 0), 0);
+    starved.advance_to(1500000ULL);
+    assert(starved.status().queue_low);
+    expect_motion_error(MotionError::SegmentLate, [&] {
+        starved.enqueue(
+            segment(2, 2000000ULL, 1000000ULL, true, 1, 0), 1500000ULL);
+    });
+    // 迟到段拒绝不能污染已接受序号、队列或轴位置；既有段边界到达后
+    // 在同一advance调用内进入安全态，停车时间有界于已接受段终点。
+    assert(starved.status().last_accepted_sequence == 1U);
+    assert(starved.status().queue_depth == 1U);
+    const auto safe_edges = starved.advance_to(2000000ULL);
+    assert(count_edges(safe_edges, kAxisX, MotionSignal::Enable, false) == 1U);
+    const auto failed = starved.status();
+    assert(failed.fault == MotionFault::QueueUnderrun);
+    assert(failed.metrics.rejected_segments == 1U);
+    assert(failed.metrics.queue_underruns == 1U);
+    assert(failed.metrics.safety_stops == 1U);
+    assert(starved.advance_to(3000000ULL).empty());
+}
+
 }
 
 int main() {
@@ -480,4 +518,5 @@ int main() {
     test_limit_while_armed_prevents_motion();
     test_digital_twin_motion_and_fault_injection();
     test_axis_count_is_board_capability_not_three();
+    test_segmented_deceleration_and_late_refill_fail_closed();
 }

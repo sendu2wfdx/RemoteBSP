@@ -231,6 +231,12 @@ durable intent 视为 unknown，不能当作从未发生。
 - 记录字段封闭、长度上限及 API 密钥、认证头、幂等键、请求体不落盘；
 - 真实 Runtime、`remote-cli`、`toolbusd` 与 USB Mock/vcan 的进程级控制闭环。
 
+其中真实文件系统边界由
+`python3 -m unittest runtime_api.tests.test_control_audit_filesystem_drill`
+自动演练。它覆盖未承诺尾部裁剪、已承诺截断、链中段损坏、分段轮转、独立进程锁、
+轮转创建失败后的 writer 毒化，以及锁释放后的重启恢复；详细判定见
+[Runtime 持久化恢复软件演练](runtime-persistence-recovery-drill.md)。
+
 这些证据必须按层级表述：
 
 - Python/C++ 单元测试和故障注入属于主机软件证据；

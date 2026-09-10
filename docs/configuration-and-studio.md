@@ -282,6 +282,33 @@ attempt 文件名，不接受任意路径。
 上传限制为 32 MiB，结果明确显示原 attempt 状态和 `hardware_access=false`。校验失败只返回
 具体的软件证据错误，不访问设备，也不产生部署令牌。
 
+## 生产角色、一次性字段与批量烧号
+
+生产授权使用 `REMOTEBSP_PROVISIONING_POLICY_V1`，策略自带 SHA-256，明确列出操作员角色
+（`provisioner`/`supervisor`）和每个参数的 `replaceable`/`write_once` 策略。普通烧号必须由
+已授权 provisioner 发起；批次含一次性字段时，还必须提供策略中独立的 supervisor。
+一次性字段仅允许当前快照 `byte_count=0` 时写入，已有值一律失败关闭，软件不提供覆盖入口。
+
+`REMOTEBSP_PROVISIONING_BATCH_V1` 绑定批次 ID、操作员、审批者、目标 UUID、预期代数、参数值
+及请求 SHA-256。整批在首项写入前完成重复 UUID/参数、授权、Base64、长度、UUID、代数和一次性
+字段检查；每项仍使用现有 CAS 和 HMAC intent/terminal 审计。相同批次 ID 与相同摘要幂等返回，
+不同摘要明确冲突；运行期失败保存失败终态。结果中的 `hardware_acceptance=false` 表示这里只能
+证明软件调用与审计闭环，不能替代实体读取和生产验收。
+
+同一日志目录中的同一批次 ID 使用原子 `O_EXCL` 进程锁；多进程或多个 Studio 实例竞争时，
+只有一个实例可以进入终态检查/执行，其余立即失败关闭。锁带随机所有权令牌，释放前再次核对，
+不能误删被替换的锁。持久终态不包含 `replayed_existing`：该字段只存在于本次调用的响应信封，
+终态使用封闭字段集合和自哈希，因而不能通过修改历史文件伪造运行时重放状态。主管 ID 必须与
+provisioner ID 不同，即使策略配置异常也不能由同一身份自批自写。
+
+```text
+studio_cli.py provisioning-policy-create --source policy-source.json --output policy.json
+studio_cli.py provisioning-policy-validate --policy policy.json
+studio_cli.py provisioning-batch-execute --policy policy.json --batch batch.json \
+  --journal-root journals --toolbusd-socket /run/toolbusd.sock \
+  --audit-dir audits --audit-key-file audit.key
+```
+
 CI/发布候选不能以复用旧 `build/` 的结果作为证据。顶层 CMake 在进入任何测试子目录前
 显式解析 Python 解释器，并注册 `clean_build_registration_tests`：它在临时空目录重新配置
 工程，通过 CTest JSON 清单确认 GUI、Runtime、固件配置、OperationLedger、BusReset 真实

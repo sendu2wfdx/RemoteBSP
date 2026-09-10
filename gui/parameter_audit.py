@@ -140,19 +140,33 @@ class ParameterAuditStore:
         return record
 
     def begin(self, *, operation: str, node_id: int, node_uuid: str,
-              expected_generation: int, parameters: list[dict]) -> str:
+              expected_generation: int, parameters: list[dict],
+              operator: dict | None = None) -> str:
         if len(self._record_paths()) >= MAX_AUDIT_RECORDS:
             raise DeviceParameterError("参数审计容量已满，拒绝执行未记录的写入")
         if operation not in ("write", "restore") or not parameters or \
                 len(parameters) > 64:
             raise DeviceParameterError("参数审计意图无效")
         operation_id = uuid.uuid4().hex
+        if operator is not None and (not isinstance(operator, dict) or
+                set(operator) != {"identity", "role", "policy_sha256"} or
+                operator.get("role") not in ("provisioner", "supervisor") or
+                not isinstance(operator.get("identity"), str) or
+                not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", operator["identity"]) or
+                not re.fullmatch(r"[0-9a-f]{64}", str(operator.get("policy_sha256", "")))):
+            raise DeviceParameterError("参数审计生产操作员证据无效")
         event = {
             "phase": "intent", "operation": operation,
             "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
             "time_source": "host_system_clock_untrusted",
-            "operator": {"source": "local_cli", "identity": None,
-                         "authenticated": False},
+            "operator": ({"source": "production_policy",
+                          "identity": operator["identity"],
+                          "role": operator["role"],
+                          "policy_sha256": operator["policy_sha256"],
+                          "authorized_by_policy": True,
+                          "authenticated": False} if operator is not None else
+                         {"source": "local_cli", "identity": None,
+                          "authenticated": False}),
             "target": {"node_id": node_id, "node_uuid": node_uuid,
                        "expected_generation": expected_generation},
             "parameters": parameters,
