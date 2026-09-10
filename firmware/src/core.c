@@ -16,6 +16,10 @@ enum {
     RBSP_COMMAND_BOOTLOADER_ENTER = 0x0013,
     RBSP_COMMAND_BOOTLOADER_ENTER_USB = 0x0014,
     RBSP_COMMAND_TIME_SYNC = 0x0020,
+    RBSP_COMMAND_RESOURCE_ENUM = 0x0030,
+    RBSP_COMMAND_RESOURCE_DESCRIBE = 0x0031,
+    RBSP_COMMAND_RESOURCE_STATUS = 0x0032,
+    RBSP_COMMAND_RESOURCE_RESET = 0x0033,
     RBSP_COMMAND_RESOURCE_CONTRACT = 0x0034,
     RBSP_COMMAND_RESOURCE_ACQUIRE = 0x0035,
     RBSP_COMMAND_RESOURCE_RENEW = 0x0036,
@@ -69,6 +73,18 @@ enum {
     RBSP_STATUS_RESOURCE_FAILED = 7,
     RBSP_STATUS_RESOURCE_BUSY = 8,
     RBSP_RESPONSE_ERROR_FLAG = 0x0001,
+    RBSP_RESOURCE_DESCRIPTOR_SIZE = 17,
+    RBSP_RESOURCE_STATUS_SIZE = 25,
+    RBSP_RESOURCE_CONTRACT_SIZE = 32,
+    RBSP_RESOURCE_FLAG_NATIVE = 1U << 0,
+    RBSP_RESOURCE_TYPE_UART = 2,
+    RBSP_RESOURCE_TYPE_PWM = 6,
+    RBSP_RESOURCE_TYPE_STEPGEN_AXIS = 9,
+    RBSP_RESOURCE_TYPE_TIMED_BITSTREAM = 10,
+    RBSP_RESOURCE_TYPE_I2C_BUS = 11,
+    RBSP_RESOURCE_TYPE_I2C_DEVICE = 12,
+    RBSP_RESOURCE_TYPE_SPI_BUS = 13,
+    RBSP_RESOURCE_TYPE_SPI_DEVICE = 14,
     RBSP_FRAGMENT_FIRST = 0x01,
     RBSP_FRAGMENT_LAST = 0x02,
     RBSP_FRAGMENT_FLAG_MASK = 0x03,
@@ -82,15 +98,15 @@ enum {
     RBSP_DEVICE_PARAM_STATUS_UNLOCKED = 1U << 0,
     RBSP_DEVICE_PARAM_STATUS_RESTART_REQUIRED = 1U << 1,
 #endif
-#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
-    RBSP_RESOURCE_LEASE_MINIMUM_MS = 100,
-    RBSP_RESOURCE_LEASE_MAXIMUM_MS = 60000,
-    RBSP_RESOURCE_LEASE_EXCLUSIVE = 2,
     RBSP_RESOURCE_ACCESS_READABLE = 1U << 0,
     RBSP_RESOURCE_ACCESS_WRITABLE = 1U << 1,
     RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE = 1U << 3,
     RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED = 1U << 4,
     RBSP_RESOURCE_ACCESS_LEASE_REQUIRED = 1U << 5,
+#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+    RBSP_RESOURCE_LEASE_MINIMUM_MS = 100,
+    RBSP_RESOURCE_LEASE_MAXIMUM_MS = 60000,
+    RBSP_RESOURCE_LEASE_EXCLUSIVE = 2,
 #endif
 };
 
@@ -1306,6 +1322,199 @@ static rbsp_uart_object_t* find_uart_object(rbsp_core_t* core,
     return NULL;
 }
 #endif
+
+typedef struct {
+    uint32_t resource_id;
+    uint8_t type;
+    uint16_t instance;
+    uint16_t flags;
+    uint32_t rx_capacity;
+    uint32_t tx_capacity;
+} rbsp_static_resource_descriptor_t;
+
+typedef struct {
+    uint8_t phase;
+    uint16_t index;
+} rbsp_static_resource_iterator_t;
+
+#if defined(CONFIG_REMOTEBSP_BUS)
+static uint8_t bus_resource_type(uint8_t kind) {
+    switch (kind) {
+        case RBSP_BUS_I2C_BUS:
+            return RBSP_RESOURCE_TYPE_I2C_BUS;
+        case RBSP_BUS_I2C_DEVICE:
+            return RBSP_RESOURCE_TYPE_I2C_DEVICE;
+        case RBSP_BUS_SPI_BUS:
+            return RBSP_RESOURCE_TYPE_SPI_BUS;
+        case RBSP_BUS_SPI_DEVICE:
+            return RBSP_RESOURCE_TYPE_SPI_DEVICE;
+        default:
+            return 0U;
+    }
+}
+#endif
+
+static bool next_static_resource(
+    const rbsp_core_t* core, rbsp_static_resource_iterator_t* iterator,
+    rbsp_static_resource_descriptor_t* descriptor) {
+    if (core == NULL || iterator == NULL || descriptor == NULL) {
+        return false;
+    }
+    for (;;) {
+        switch (iterator->phase) {
+            case 0U:
+#if CONFIG_UART_RESOURCE_COUNT > 0
+                if (iterator->index < CONFIG_UART_RESOURCE_COUNT) {
+                    const uint16_t instance = iterator->index++;
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        0x02000000UL + instance,
+                        RBSP_RESOURCE_TYPE_UART,
+                        instance,
+                        RBSP_RESOURCE_FLAG_NATIVE,
+                        CONFIG_UART_RX_BUFFER_SIZE,
+                        CONFIG_UART_TX_BUFFER_SIZE};
+                    return true;
+                }
+#endif
+                iterator->phase = 1U;
+                iterator->index = 0U;
+                break;
+            case 1U:
+#if defined(CONFIG_REMOTEBSP_PWM)
+                if (iterator->index < CONFIG_PWM_RESOURCE_COUNT) {
+                    const uint16_t instance = iterator->index++;
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        0x06000000UL + instance,
+                        RBSP_RESOURCE_TYPE_PWM,
+                        instance,
+                        RBSP_RESOURCE_FLAG_NATIVE,
+                        0U,
+                        0U};
+                    return true;
+                }
+#endif
+                iterator->phase = 2U;
+                iterator->index = 0U;
+                break;
+            case 2U:
+#if defined(CONFIG_REMOTEBSP_MOTION)
+                if (iterator->index < core->default_motion_axis_count) {
+                    const uint16_t instance = iterator->index++;
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        motion_resource_id(core, (uint8_t)instance),
+                        RBSP_RESOURCE_TYPE_STEPGEN_AXIS,
+                        instance,
+                        RBSP_RESOURCE_FLAG_NATIVE,
+                        0U,
+                        0U};
+                    return true;
+                }
+#endif
+                iterator->phase = 3U;
+                iterator->index = 0U;
+                break;
+            case 3U:
+#if defined(CONFIG_REMOTEBSP_TIMED_BITSTREAM)
+                if (iterator->index < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT) {
+                    const uint16_t instance = iterator->index++;
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        0x0A000000UL + instance,
+                        RBSP_RESOURCE_TYPE_TIMED_BITSTREAM,
+                        instance,
+                        RBSP_RESOURCE_FLAG_NATIVE,
+                        0U,
+                        (CONFIG_TIMED_BITSTREAM_MAX_BITS + 7U) / 8U};
+                    return true;
+                }
+#endif
+                iterator->phase = 4U;
+                iterator->index = 0U;
+                break;
+            case 4U:
+#if defined(CONFIG_REMOTEBSP_BUS)
+                if (iterator->index < core->hal.bus_resource_count) {
+                    const rbsp_bus_resource_config_t* item =
+                        &core->hal.bus_resources[iterator->index++];
+                    const uint8_t type = bus_resource_type(item->kind);
+                    const bool device =
+                        type == RBSP_RESOURCE_TYPE_I2C_DEVICE ||
+                        type == RBSP_RESOURCE_TYPE_SPI_DEVICE;
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        item->resource_id,
+                        type,
+                        (uint16_t)item->resource_id,
+                        RBSP_RESOURCE_FLAG_NATIVE,
+                        device ? item->maximum_transfer_bytes : 0U,
+                        device ? item->maximum_transfer_bytes : 0U};
+                    return true;
+                }
+#endif
+                iterator->phase = 5U;
+                iterator->index = 0U;
+                break;
+            default:
+                return false;
+        }
+    }
+}
+
+static void encode_resource_descriptor(
+    uint8_t output[RBSP_RESOURCE_DESCRIPTOR_SIZE],
+    const rbsp_static_resource_descriptor_t* descriptor) {
+    put_u32(output, descriptor->resource_id);
+    output[4U] = descriptor->type;
+    put_u16(output + 5U, descriptor->instance);
+    put_u16(output + 7U, descriptor->flags);
+    put_u32(output + 9U, descriptor->rx_capacity);
+    put_u32(output + 13U, descriptor->tx_capacity);
+}
+
+static bool find_static_resource(
+    const rbsp_core_t* core, uint32_t resource_id,
+    rbsp_static_resource_descriptor_t* descriptor) {
+    rbsp_static_resource_iterator_t iterator = {0U, 0U};
+    rbsp_static_resource_descriptor_t candidate;
+    while (next_static_resource(core, &iterator, &candidate)) {
+        if (candidate.resource_id == resource_id) {
+            *descriptor = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool basic_resource_contract(
+    rbsp_core_t* core, const rbsp_request_t* request,
+    uint16_t* response_size) {
+    if (request->object_id != 0U || request->payload_length != 4U) {
+        return false;
+    }
+    rbsp_static_resource_descriptor_t descriptor;
+    if (!find_static_resource(
+            core, get_u32(request->payload), &descriptor) ||
+        descriptor.type == RBSP_RESOURCE_TYPE_STEPGEN_AXIS ||
+        descriptor.type >= RBSP_RESOURCE_TYPE_I2C_BUS) {
+        return false;
+    }
+    uint16_t access = 0U;
+    if (descriptor.type == RBSP_RESOURCE_TYPE_UART) {
+        access = RBSP_RESOURCE_ACCESS_READABLE |
+                 RBSP_RESOURCE_ACCESS_WRITABLE;
+    } else {
+        access = RBSP_RESOURCE_ACCESS_WRITABLE |
+                 RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE;
+    }
+    uint8_t data[RBSP_RESOURCE_CONTRACT_SIZE] = {0U};
+    put_u32(data, descriptor.resource_id);
+    put_u16(data + 4U, 1U);
+    put_u16(data + 6U, access);
+    /* 当前实体后端没有独立操作队列合同；0 表示尚未声明。 */
+    put_u32(data + 20U, 0U);
+    *response_size = make_status_response(
+        core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+    return true;
+}
+
 static bool process_request(rbsp_core_t* core,
                             const rbsp_request_t* request) {
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -1716,6 +1925,99 @@ static bool process_request(rbsp_core_t* core,
         }
 #endif
 
+        case RBSP_COMMAND_RESOURCE_ENUM: {
+            if (request->object_id != 0U || request->payload_length != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+                break;
+            }
+            rbsp_static_resource_iterator_t iterator = {0U, 0U};
+            rbsp_static_resource_descriptor_t descriptor;
+            uint16_t count = 0U;
+            uint16_t data_length = 2U;
+            bool exhausted = false;
+            while (next_static_resource(core, &iterator, &descriptor)) {
+                if ((uint32_t)RBSP_HEADER_SIZE + 1U + data_length +
+                        RBSP_RESOURCE_DESCRIPTOR_SIZE >
+                    CONFIG_REMOTE_MAX_PACKET_SIZE) {
+                    exhausted = true;
+                    break;
+                }
+                encode_resource_descriptor(
+                    payload + 1U + data_length, &descriptor);
+                data_length += RBSP_RESOURCE_DESCRIPTOR_SIZE;
+                ++count;
+            }
+            if (exhausted) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_EXHAUSTED,
+                    0U, NULL, 0U);
+            } else {
+                put_u16(payload + 1U, count);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    payload + 1U, data_length);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_RESOURCE_DESCRIBE: {
+            rbsp_static_resource_descriptor_t descriptor;
+            if (request->object_id != 0U || request->payload_length != 4U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!find_static_resource(
+                           core, get_u32(request->payload), &descriptor)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[RBSP_RESOURCE_DESCRIPTOR_SIZE];
+                encode_resource_descriptor(data, &descriptor);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_RESOURCE_STATUS: {
+            rbsp_static_resource_descriptor_t descriptor;
+            if (request->object_id != 0U || request->payload_length != 4U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    0U, NULL, 0U);
+            } else if (!find_static_resource(
+                           core, get_u32(request->payload), &descriptor)) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            } else {
+                uint8_t data[RBSP_RESOURCE_STATUS_SIZE] = {0U};
+                put_u32(data, descriptor.resource_id);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U,
+                    data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_RESOURCE_RESET: {
+            rbsp_static_resource_descriptor_t descriptor;
+            uint8_t status = RBSP_STATUS_UNSUPPORTED_CAPABILITY;
+            if (request->object_id != 0U || request->payload_length != 4U) {
+                status = RBSP_STATUS_INVALID_PAYLOAD;
+            } else if (!find_static_resource(
+                           core, get_u32(request->payload), &descriptor)) {
+                status = RBSP_STATUS_OBJECT_NOT_FOUND;
+            }
+            response_size = make_status_response(
+                core, request, status, 0U, NULL, 0U);
+            break;
+        }
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
         case RBSP_COMMAND_RESOURCE_CONTRACT: {
 #if defined(CONFIG_REMOTEBSP_BUS)
@@ -1724,6 +2026,9 @@ static bool process_request(rbsp_core_t* core,
                 break;
             }
 #endif
+            if (basic_resource_contract(core, request, &response_size)) {
+                break;
+            }
             uint8_t axis = 0U;
             const uint32_t resource_id =
                 request->payload_length == 4U
@@ -1949,6 +2254,11 @@ static bool process_request(rbsp_core_t* core,
         case RBSP_COMMAND_RESOURCE_LEASE_STATUS:
             if (!handle_bus_resource_command(
                     core, request, &response_size)) {
+                if (request->command == RBSP_COMMAND_RESOURCE_CONTRACT &&
+                    basic_resource_contract(
+                        core, request, &response_size)) {
+                    break;
+                }
                 uint16_t expected_length = 4U;
                 if (request->command == RBSP_COMMAND_RESOURCE_ACQUIRE) {
                     expected_length = 9U;
@@ -1960,6 +2270,19 @@ static bool process_request(rbsp_core_t* core,
                     core, request,
                     request->object_id != 0U ||
                             request->payload_length != expected_length
+                        ? RBSP_STATUS_INVALID_PAYLOAD
+                        : RBSP_STATUS_OBJECT_NOT_FOUND,
+                    0U, NULL, 0U);
+            }
+            break;
+#endif
+
+#if !defined(CONFIG_REMOTEBSP_BUS) && !defined(CONFIG_REMOTEBSP_MOTION)
+        case RBSP_COMMAND_RESOURCE_CONTRACT:
+            if (!basic_resource_contract(core, request, &response_size)) {
+                response_size = make_status_response(
+                    core, request,
+                    request->object_id != 0U || request->payload_length != 4U
                         ? RBSP_STATUS_INVALID_PAYLOAD
                         : RBSP_STATUS_OBJECT_NOT_FOUND,
                     0U, NULL, 0U);

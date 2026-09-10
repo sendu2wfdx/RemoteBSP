@@ -85,6 +85,10 @@ static uint32_t get_u32(const uint8_t* input) {
            ((uint32_t)input[3] << 24U);
 }
 
+static uint16_t get_u16(const uint8_t* input) {
+    return (uint16_t)input[0] | ((uint16_t)input[1] << 8U);
+}
+
 static uint64_t get_u64(const uint8_t* input) {
     uint64_t value = 0U;
     for (unsigned index = 0U; index < 8U; ++index) {
@@ -587,6 +591,93 @@ int main(void) {
     assert(core.node_id == 25U);
     assert(reassemble_sent(response, 0x599U) == 25U);
     assert(response[24] == 0U);
+
+    /*
+     * 静态资源目录来自编译期能力，不得把 GPIO 对象池容量误当成固定端点。
+     * config_all 依次公开 2 UART、2 PWM、2 STEPGEN、1 定时位流和 2 BUS 项。
+     */
+    clear_sent();
+    request_size = make_request(request, 0x0030U, 201U, 0U, NULL, 0U);
+    feed_packet(&core, 0x619U, 201U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 180U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 9U);
+    const uint8_t* descriptor = response + 27U;
+    assert(get_u32(descriptor) == 0x02000000U && descriptor[4U] == 2U);
+    assert(get_u16(descriptor + 5U) == 0U &&
+           get_u32(descriptor + 9U) == CONFIG_UART_RX_BUFFER_SIZE &&
+           get_u32(descriptor + 13U) == CONFIG_UART_TX_BUFFER_SIZE);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x02000001U && descriptor[4U] == 2U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x06000000U && descriptor[4U] == 6U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x06000001U && descriptor[4U] == 6U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x09000000U && descriptor[4U] == 9U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x09000001U && descriptor[4U] == 9U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == 0x0A000000U && descriptor[4U] == 10U &&
+           get_u32(descriptor + 13U) == 96U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == TEST_I2C_BUS_ID && descriptor[4U] == 11U);
+    descriptor += 17U;
+    assert(get_u32(descriptor) == TEST_I2C_DEVICE_ID &&
+           descriptor[4U] == 12U && get_u32(descriptor + 9U) == 128U &&
+           get_u32(descriptor + 13U) == 128U);
+
+    uint8_t static_resource_id[4U];
+    put_u32(static_resource_id, 0x06000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0031U, 202U, 0U,
+                                static_resource_id,
+                                sizeof(static_resource_id));
+    feed_packet(&core, 0x619U, 202U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 42U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x06000000U &&
+           response[29U] == 6U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0032U, 203U, 0U,
+                                static_resource_id,
+                                sizeof(static_resource_id));
+    feed_packet(&core, 0x619U, 203U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 50U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x06000000U &&
+           response[29U] == 0U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0034U, 204U, 0U,
+                                static_resource_id,
+                                sizeof(static_resource_id));
+    feed_packet(&core, 0x619U, 204U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 57U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x06000000U &&
+           get_u16(response + 29U) == 1U &&
+           get_u16(response + 31U) == 0x000AU);
+
+    clear_sent();
+    request_size = make_request(request, 0x0033U, 205U, 0U,
+                                static_resource_id,
+                                sizeof(static_resource_id));
+    feed_packet(&core, 0x619U, 205U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 6U);
+
+    put_u32(static_resource_id, 0xDEADBEEFU);
+    clear_sent();
+    request_size = make_request(request, 0x0031U, 206U, 0U,
+                                static_resource_id,
+                                sizeof(static_resource_id));
+    feed_packet(&core, 0x619U, 206U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 3U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0030U, 207U, 1U, NULL, 0U);
+    feed_packet(&core, 0x619U, 207U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 2U);
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
     /* STEPGEN 资源公开租约合同，并且只接受有界的独占租约。 */
