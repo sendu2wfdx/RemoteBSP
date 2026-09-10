@@ -6,6 +6,10 @@ else()
     add_compile_options(-UNDEBUG)
 endif()
 
+# Python 进程测试散布在本文件各处；必须在首次注册前解析解释器，
+# 避免干净构建把空变量退化为直接执行不可执行的 .py 文件。
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 add_executable(protocol_tests protocol_tests.cpp)
 target_link_libraries(protocol_tests PRIVATE remotebsp_protocol)
 
@@ -873,7 +877,6 @@ target_compile_options(embedded_tmc2209_uart_backend_tests PRIVATE
 add_test(NAME embedded_tmc2209_uart_backend_tests
          COMMAND embedded_tmc2209_uart_backend_tests)
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_executable(link_recording_control_tests link_recording_control_tests.cpp)
 target_link_libraries(link_recording_control_tests PRIVATE
     remotebsp_link_recording_control)
