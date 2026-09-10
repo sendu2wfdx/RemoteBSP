@@ -1984,6 +1984,8 @@ std::string twin_state_digest(const DigitalTwin& twin,
         digest.add_u64(status.node_time_ns);
         digest.add_u64(status.queue_depth);
         digest.add_u64(status.queue_capacity);
+        digest.add_u64(status.queue_low_watermark);
+        digest.add_u64(status.queue_low ? 1U : 0U);
         digest.add_u64(status.last_accepted_sequence);
         digest.add_u64(status.last_completed_sequence);
         digest.add_u64(status.metrics.accepted_segments);

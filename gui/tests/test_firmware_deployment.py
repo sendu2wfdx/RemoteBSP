@@ -11,8 +11,10 @@ sys.path.insert(0, str(GUI_ROOT))
 
 from firmware_deployment import (  # noqa: E402
     DeviceIdentity, FirmwareDeploymentError, deploy_can_katapult, deploy_stlink,
+    deploy_usb_katapult,
     IdentityCapabilityError, JsonIdentityFileReader, ToolbusdIdentityReader,
-    expected_identity, make_can_katapult_plan, make_stlink_plan)
+    expected_identity, make_can_katapult_plan, make_stlink_plan,
+    make_usb_katapult_plan)
 
 
 class Reader:
@@ -305,6 +307,38 @@ class FirmwareDeploymentTest(unittest.TestCase):
             self.assertTrue(result.verified)
             self.assertEqual(result.backend, "can-katapult")
             self.assertEqual(len(calls), 1)
+
+    def test_usb_katapult_plan_deploy_and_input_rejection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); build_id = self._build(root)
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# test", encoding="utf-8")
+            device = "/dev/serial/by-id/usb-katapult_1d50_6177-ABC"
+            plan = make_usb_katapult_plan(
+                build_id, output_root=root, usb_device=device,
+                flashtool=flashtool)
+            self.assertEqual(plan.backend, "usb-katapult")
+            self.assertEqual(plan.command[-4:],
+                             ("-d", device, "-f", str(root / build_id / "firmware.bin")))
+            expected = expected_identity(build_id, output_root=root)
+            observed = DeviceIdentity(
+                expected.board_id, expected.project_sha256,
+                expected.config_sha256, expected.firmware_identity_sha256,
+                "ab" * 16)
+            calls = []
+            result = deploy_usb_katapult(
+                build_id, Reader([observed]), output_root=root,
+                usb_device=device, flashtool=flashtool,
+                runner=lambda command, timeout: calls.append(tuple(command)),
+                sleeper=lambda _: None)
+            self.assertTrue(result.verified)
+            self.assertEqual(result.backend, "usb-katapult")
+            for unsafe in ("/dev/ttyACM0", "../../tty",
+                           "/dev/serial/by-id/x;--query"):
+                with self.assertRaises(FirmwareDeploymentError):
+                    make_usb_katapult_plan(
+                        build_id, output_root=root, usb_device=unsafe,
+                        flashtool=flashtool)
 
     def test_tampered_firmware_is_rejected_before_flash(self):
         with tempfile.TemporaryDirectory() as temp:

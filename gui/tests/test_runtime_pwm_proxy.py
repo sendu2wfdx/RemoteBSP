@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 GUI_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(GUI_ROOT))
 
-from runtime_pwm_proxy import RuntimePwmProxy  # noqa: E402
+from runtime_pwm_proxy import RuntimePwmProxy, RuntimePwmProxyError  # noqa: E402
 from server import make_server  # noqa: E402
 
 
@@ -131,6 +131,21 @@ class RuntimePwmProxyTest(unittest.TestCase):
                 self.assertEqual(len(UpstreamHandler.requests), 2)
             finally:
                 server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_timed_bitstream_whitelist_and_ws2812_frame_limit(self) -> None:
+        common = {"lease_id": "a" * 32, "node_id": "node-" + "b" * 32,
+                  "resource_id": "resource-07000000", "idempotency_key": "frame-1"}
+        response = self.proxy.timed_bitstream("frame", json.dumps({
+            **common, "bit_count": 48, "data": "00ff7f112233"}).encode())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(UpstreamHandler.requests[-1][1],
+                         "/api/v1/control/timed-bitstream/frame")
+        for operation, body in (("frame", {**common, "bit_count": 8,
+                                            "data": "FF"}),
+                                ("erase", common),
+                                ("stop", {**common, "path": "/tmp/tool"})):
+            with self.assertRaises(RuntimePwmProxyError):
+                self.proxy.timed_bitstream(operation, json.dumps(body).encode())
 
 
 if __name__ == "__main__":

@@ -37,6 +37,10 @@ static void test_auto_append_and_completion(void) {
                &queue, &first, 0U, &accepted_first) ==
            RBSP_MOTION_ENQUEUE_OK);
     assert(accepted_first.start_time_ns == 1000000ULL);
+    rbsp_motion_status_snapshot_t warning;
+    assert(rbsp_motion_snapshot(&queue, &warning));
+    assert(warning.queue_low_watermark == 1U);
+    assert(warning.queue_low);
 
     rbsp_motion_segment_t accepted_second;
     const rbsp_motion_segment_t second =
@@ -46,6 +50,8 @@ static void test_auto_append_and_completion(void) {
            RBSP_MOTION_ENQUEUE_OK);
     assert(accepted_second.start_time_ns == 3000000ULL);
     assert(queue.size == 2U);
+    assert(rbsp_motion_snapshot(&queue, &warning));
+    assert(!warning.queue_low);
     assert(rbsp_motion_front(&queue)->sequence == 1U);
 
     assert(rbsp_motion_complete_front(&queue));
@@ -77,6 +83,9 @@ static void test_validation_and_underrun(void) {
     assert(rbsp_motion_complete_front(&queue));
     assert(queue.state == RBSP_MOTION_FAULTED);
     assert(queue.fault == RBSP_MOTION_FAULT_UNDERRUN);
+    rbsp_motion_status_snapshot_t warning;
+    assert(rbsp_motion_snapshot(&queue, &warning));
+    assert(!warning.queue_low);
     assert(rbsp_motion_clear_fault(&queue, 2000000ULL));
     assert(queue.state == RBSP_MOTION_IDLE);
 }

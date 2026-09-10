@@ -36,6 +36,11 @@ class RuntimePwmProxy:
     _STOP_FIELDS = frozenset({
         "lease_id", "node_id", "resource_id", "idempotency_key",
     })
+    _BITSTREAM_COMMON = frozenset({
+        "lease_id", "node_id", "resource_id", "idempotency_key"})
+    _BITSTREAM_CONFIGURE = _BITSTREAM_COMMON | frozenset({
+        "bit_period_ns", "zero_high_ns", "one_high_ns", "reset_time_us"})
+    _BITSTREAM_FRAME = _BITSTREAM_COMMON | frozenset({"bit_count", "data"})
 
     def __init__(self, upstream: str, api_key: str, *, timeout_seconds: float = 3.0):
         parsed = urlsplit(upstream)
@@ -126,3 +131,24 @@ class RuntimePwmProxy:
 
     def snapshot(self) -> RuntimePwmProxyResponse:
         return self._request("/api/v1/snapshot")
+
+    def timed_bitstream(self, operation: str, body: bytes) -> RuntimePwmProxyResponse:
+        expected = {"configure": self._BITSTREAM_CONFIGURE,
+                    "frame": self._BITSTREAM_FRAME,
+                    "stop": self._BITSTREAM_COMMON}.get(operation)
+        if expected is None or not body or len(body) > self.MAXIMUM_BODY_BYTES:
+            raise RuntimePwmProxyError("定时位流请求无效或超过4096字节", 400)
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimePwmProxyError("定时位流请求不是合法JSON", 400) from error
+        if not isinstance(value, dict) or set(value) != expected:
+            raise RuntimePwmProxyError("定时位流请求字段不完整或包含未知字段", 400)
+        if operation == "frame":
+            bits, data = value["bit_count"], value["data"]
+            if type(bits) is not int or not 1 <= bits <= 6144 or \
+                    not isinstance(data, str) or len(data) != ((bits + 7) // 8) * 2 or \
+                    any(char not in "0123456789abcdef" for char in data):
+                raise RuntimePwmProxyError("WS2812帧必须是最多256像素的小写完整字节流", 400)
+        return self._request(f"/api/v1/control/timed-bitstream/{operation}",
+                             body=value)

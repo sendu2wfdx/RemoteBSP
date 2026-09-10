@@ -26,6 +26,7 @@ from firmware_deployment import (
     RUNTIME_IDENTITY_CAPABILITIES_MISSING,
     ToolbusdIdentityReader,
     deploy_can_katapult,
+    deploy_usb_katapult,
     deploy_stlink,
 )
 from deployment_record import create_deployment_record, validate_deployment_record
@@ -308,6 +309,39 @@ def _run_deploy_can_katapult(args) -> dict:
         "board_id": result.expected.board_id,
         "device_uuid": result.observed.device_uuid,
         "attempts": result.attempts, "verified": result.verified,
+        "deployment_record": deployment_record.record,
+        "deployment_record_sha256": deployment_record.sha256,
+        "deployment_record_filename": deployment_record.filename,
+        "deployment_record_output": str(record_output) if record_output else None,
+        "execution_status": {"software_build": "not_performed",
+                             "firmware_flash": "performed_and_verified",
+                             "hardware_access": True},
+    }
+
+
+def _run_deploy_usb_katapult(args) -> dict:
+    output_root = _bounded_path(args.output_root, "固件输出目录")
+    reader = JsonIdentityFileReader(_bounded_path(
+        args.identity_file, "设备身份文件"))
+    result = deploy_usb_katapult(
+        args.build_id, reader, output_root=output_root,
+        usb_device=args.usb_device,
+        flashtool=_bounded_path(args.flashtool, "Katapult flashtool"),
+        flash_timeout=args.flash_timeout,
+        reconnect_timeout=args.reconnect_timeout,
+        poll_interval=args.poll_interval)
+    deployment_record = create_deployment_record(result, output_root=output_root)
+    record_output = None
+    if args.record_output:
+        record_output = _atomic_output(_prepare_output(
+            args.record_output, force=args.force), deployment_record.content,
+            force=args.force)
+    return {
+        "ok": True, "format": "STUDIO_CLI_USB_KATAPULT_DEPLOYMENT_V1",
+        "status": "performed_and_verified", "backend": result.backend,
+        "build_id": result.build_id, "board_id": result.expected.board_id,
+        "device_uuid": result.observed.device_uuid, "attempts": result.attempts,
+        "verified": result.verified,
         "deployment_record": deployment_record.record,
         "deployment_record_sha256": deployment_record.sha256,
         "deployment_record_filename": deployment_record.filename,
@@ -650,6 +684,22 @@ def _parser() -> StrictParser:
     katapult.add_argument("--record-output")
     katapult.add_argument("--force", action="store_true")
     katapult.set_defaults(handler=_run_deploy_can_katapult)
+
+    usb_katapult = sub.add_parser(
+        "deploy-usb-katapult",
+        help="显式通过独立USB Katapult恢复阶段定向升级并核对身份")
+    usb_katapult.add_argument("--build-id", required=True)
+    usb_katapult.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    usb_katapult.add_argument("--identity-file", required=True)
+    usb_katapult.add_argument("--usb-device", required=True,
+                              help="固定/dev/serial/by-id设备")
+    usb_katapult.add_argument("--flashtool", required=True)
+    usb_katapult.add_argument("--flash-timeout", type=int, default=120)
+    usb_katapult.add_argument("--reconnect-timeout", type=float, default=10.0)
+    usb_katapult.add_argument("--poll-interval", type=float, default=0.25)
+    usb_katapult.add_argument("--record-output")
+    usb_katapult.add_argument("--force", action="store_true")
+    usb_katapult.set_defaults(handler=_run_deploy_usb_katapult)
 
     inspect_identity = sub.add_parser(
         "inspect-runtime-identity",

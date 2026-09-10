@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define RBSP_MOTION_QUEUE_LOW_WATERMARK 1U
+
 #include "remotebsp_config.h"
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
@@ -101,6 +103,8 @@ typedef struct {
 typedef struct {
     uint8_t axis_count;
     uint16_t queue_depth;
+    uint16_t queue_low_watermark;
+    bool queue_low;
     rbsp_motion_state_t state;
     rbsp_motion_fault_t fault;
     uint32_t last_accepted_sequence;

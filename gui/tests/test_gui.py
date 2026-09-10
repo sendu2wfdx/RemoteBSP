@@ -791,7 +791,8 @@ class GuiTest(unittest.TestCase):
                                b"deployConfirmation", b"deployPreflight",
                                b"deployExecute", b"deployResult",
                                b"deployBackend", b"deployCanInterface",
-                               b"deployKatapultUuid"):
+                               b"deployKatapultUuid", b"deployUsbDeviceField",
+                               b"deployUsbDevice"):
                     self.assertIn(marker, page)
                 for marker in (b"parameterUuid", b"parameterGeneration",
                                b"parameterId", b"parameterValue",
@@ -808,6 +809,11 @@ class GuiTest(unittest.TestCase):
                 target = json.loads(urlopen(
                     base + "/api/project/target").read())
                 self.assertFalse(target["runtime_pwm"]["available"])
+                self.assertFalse(target["runtime_timed_bitstream"]["available"])
+                self.assertEqual(target["runtime_timed_bitstream"]["maximum_pixels"], 256)
+                for name in ("configure_path", "frame_path", "stop_path",
+                             "snapshot_path"):
+                    self.assertIsNone(target["runtime_timed_bitstream"][name])
                 self.assertFalse(target["runtime_pwm"]["auth_proxy"])
                 self.assertEqual(
                     target["runtime_pwm"]["reason"],
@@ -824,6 +830,10 @@ class GuiTest(unittest.TestCase):
                     b"/api/deployment/can-katapult/preflight", script)
                 self.assertIn(
                     b"/api/deployment/can-katapult/execute", script)
+                self.assertIn(
+                    b"/api/deployment/usb-katapult/preflight", script)
+                self.assertIn(
+                    b"/api/deployment/usb-katapult/execute", script)
                 self.assertIn(b"/api/deployment/execute", script)
                 self.assertIn(
                     b"/api/device-parameters/write-preflight", script)
@@ -831,6 +841,16 @@ class GuiTest(unittest.TestCase):
                     b"/api/device-parameters/restore-preflight", script)
                 self.assertIn(b"snapshot_path", script)
                 self.assertIn(b"auth_proxy", script)
+                for marker in (b"runtimeBitsLease", b"runtimeBitsNode",
+                               b"runtimeBitsResource", b"runtimeBitsPixels",
+                               b"runtimeBitsConfigure", b"runtimeBitsFrame",
+                               b"runtimeBitsStop", b"runtimeBitsSnapshot"):
+                    self.assertIn(marker, page)
+                self.assertIn(b"encodeWs2812Pixels", script)
+                self.assertIn(b"runtimeBitsAdapter", script)
+                self.assertIn(b"configure_path", script)
+                self.assertIn(b"frame_path", script)
+                self.assertIn(b"stop_path", script)
                 self.assertIn(b"data.operation.result", script)
                 self.assertNotIn(b"status_path", script)
                 self.assertNotIn(b"deployConfig", page)

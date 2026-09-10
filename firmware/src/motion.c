@@ -311,6 +311,20 @@ bool rbsp_motion_snapshot(
     }
     snapshot->axis_count = queue->axis_count;
     snapshot->queue_depth = queue->size;
+    snapshot->queue_low_watermark =
+        RBSP_MOTION_QUEUE_LOW_WATERMARK;
+    snapshot->queue_low = false;
+    if (queue->fault == RBSP_MOTION_FAULT_NONE &&
+        queue->size > 0U &&
+        queue->size <= RBSP_MOTION_QUEUE_LOW_WATERMARK &&
+        (queue->state == RBSP_MOTION_ARMED ||
+         queue->state == RBSP_MOTION_RUNNING)) {
+        const uint16_t tail = (uint16_t)(
+            (queue->head + queue->size - 1U) %
+            CONFIG_MOTION_QUEUE_DEPTH);
+        snapshot->queue_low =
+            !queue->segments[tail].final_segment;
+    }
     snapshot->state = queue->state;
     snapshot->fault = queue->fault;
     snapshot->last_accepted_sequence =

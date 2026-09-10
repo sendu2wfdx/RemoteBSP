@@ -11,6 +11,7 @@ namespace remotebsp::protocol {
 // 节点组合，因此系统总轴数不受此单节点编解码预算限制。
 constexpr std::size_t kMaximumMotionAxes = 64;
 constexpr std::uint16_t kMotionContractVersion = 1;
+constexpr std::uint16_t kMotionQueueLowWatermark = 1;
 
 struct MotionAxisMovePayload {
     std::uint32_t resource_id{};
@@ -95,6 +96,8 @@ struct MotionStatusPayload {
     std::uint64_t node_time_ns{};
     std::uint16_t queue_depth{};
     std::uint16_t queue_capacity{};
+    std::uint16_t queue_low_watermark{};
+    bool queue_low{};
     std::uint32_t last_accepted_sequence{};
     std::uint32_t last_completed_sequence{};
     MotionMetricsPayload metrics;

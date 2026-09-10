@@ -102,6 +102,10 @@ void write_visual_state(const DigitalTwin& twin, std::uint64_t elapsed_ms,
            << "\", \"fault\": \"" << motion_fault_name(motion.fault)
            << "\", \"queue_depth\": " << motion.queue_depth
            << ", \"queue_capacity\": " << motion.queue_capacity
+           << ", \"queue_low_watermark\": "
+           << motion.queue_low_watermark
+           << ", \"queue_low\": "
+           << (motion.queue_low ? "true" : "false")
            << ", \"axes\": [";
     for (std::size_t index = 0; index < motion.axes.size(); ++index) {
         const auto& axis = motion.axes[index];

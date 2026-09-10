@@ -90,6 +90,8 @@ struct MotionStatus {
     std::uint64_t node_time_ns{};
     std::size_t queue_depth{};
     std::size_t queue_capacity{};
+    std::size_t queue_low_watermark{1U};
+    bool queue_low{};
     std::uint32_t last_accepted_sequence{};
     std::uint32_t last_completed_sequence{};
     std::vector<MotionAxisStatus> axes;

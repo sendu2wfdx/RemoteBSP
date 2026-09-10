@@ -355,6 +355,12 @@ MotionStatus MotionExecutor::status() const {
     result.node_time_ns = now_ns_;
     result.queue_depth = queue_.size();
     result.queue_capacity = queue_capacity_;
+    result.queue_low_watermark = 1U;
+    result.queue_low =
+        fault_ == MotionFault::None && !queue_.empty() &&
+        queue_.size() <= result.queue_low_watermark &&
+        !queue_.back().segment.final_segment &&
+        (state_ == MotionState::Armed || state_ == MotionState::Running);
     result.last_accepted_sequence = last_accepted_sequence_;
     result.last_completed_sequence = last_completed_sequence_;
     result.metrics = metrics_;

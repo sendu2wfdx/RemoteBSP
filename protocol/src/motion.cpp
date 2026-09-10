@@ -381,7 +381,15 @@ std::vector<std::uint8_t> encode_motion_status(
     const MotionStatusPayload& status) {
     validate_axis_count(status.axes.size());
     if (status.queue_depth > status.queue_capacity ||
-        status.metrics.maximum_queue_depth > status.queue_capacity) {
+        status.metrics.maximum_queue_depth > status.queue_capacity ||
+        status.queue_low_watermark > 0x00FFU ||
+        status.queue_low_watermark > status.queue_capacity ||
+        (status.queue_low &&
+         (status.queue_depth == 0U ||
+          status.queue_depth > status.queue_low_watermark ||
+          status.fault != MotionFaultPayload::None ||
+          (status.state != MotionStatePayload::Armed &&
+           status.state != MotionStatePayload::Running)))) {
         throw MotionPayloadException(MotionPayloadError::InvalidValue,
                                      "运动队列状态无效");
     }
@@ -406,7 +414,9 @@ std::vector<std::uint8_t> encode_motion_status(
     append_u64(output, status.metrics.limit_stops);
     append_u64(output, status.metrics.queue_underruns);
     append_u16(output, status.metrics.maximum_queue_depth);
-    append_u16(output, 0);
+    append_u16(output, static_cast<std::uint16_t>(
+                           status.queue_low_watermark |
+                           (status.queue_low ? 0x8000U : 0U)));
     for (const auto& axis : status.axes) {
         if (axis.resource_id == 0) {
             throw MotionPayloadException(MotionPayloadError::InvalidValue,
@@ -445,7 +455,7 @@ MotionStatusPayload decode_motion_status(
         payload.size() !=
             kStatusHeaderSize +
                 static_cast<std::size_t>(axis_count) * kAxisStatusSize ||
-        read_u16(payload.data() + 90) != 0) {
+        (read_u16(payload.data() + 90) & 0x7F00U) != 0U) {
         throw MotionPayloadException(MotionPayloadError::InvalidValue,
                                      "运动状态枚举、长度或保留字段无效");
     }
@@ -466,8 +476,18 @@ MotionStatusPayload decode_motion_status(
     status.metrics.limit_stops = read_u64(payload.data() + 72);
     status.metrics.queue_underruns = read_u64(payload.data() + 80);
     status.metrics.maximum_queue_depth = read_u16(payload.data() + 88);
+    const auto queue_warning = read_u16(payload.data() + 90);
+    status.queue_low_watermark = queue_warning & 0x00FFU;
+    status.queue_low = (queue_warning & 0x8000U) != 0U;
     if (status.queue_depth > status.queue_capacity ||
-        status.metrics.maximum_queue_depth > status.queue_capacity) {
+        status.metrics.maximum_queue_depth > status.queue_capacity ||
+        status.queue_low_watermark > status.queue_capacity ||
+        (status.queue_low &&
+         (status.queue_depth == 0U ||
+          status.queue_depth > status.queue_low_watermark ||
+          status.fault != MotionFaultPayload::None ||
+          (status.state != MotionStatePayload::Armed &&
+           status.state != MotionStatePayload::Running)))) {
         throw MotionPayloadException(MotionPayloadError::InvalidValue,
                                      "运动队列状态无效");
     }

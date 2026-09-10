@@ -61,6 +61,7 @@ void test_status_round_trip() {
     source.node_time_ns = 123456789;
     source.queue_depth = 2;
     source.queue_capacity = 32;
+    source.queue_low_watermark = 1;
     source.last_accepted_sequence = 4;
     source.last_completed_sequence = 2;
     source.metrics =
@@ -78,6 +79,8 @@ void test_status_round_trip() {
     assert(decoded.queue_depth == 2);
     assert(decoded.metrics.emitted_edges == 30);
     assert(decoded.metrics.maximum_queue_depth == 3);
+    assert(decoded.queue_low_watermark == 1U);
+    assert(!decoded.queue_low);
     assert(decoded.axes.size() == 2);
     assert(decoded.axes[0].position_steps == -123);
     assert(decoded.axes[0].step_level);
@@ -216,6 +219,26 @@ void test_rejection() {
     try {
         static_cast<void>(
             remotebsp::protocol::encode_motion_status(invalid));
+        assert(false);
+    } catch (const MotionPayloadException&) {
+    }
+
+    MotionStatusPayload warning;
+    warning.state = MotionStatePayload::Armed;
+    warning.queue_depth = 1U;
+    warning.queue_capacity = 4U;
+    warning.queue_low_watermark = 1U;
+    warning.queue_low = true;
+    warning.axes.push_back({1});
+    const auto decoded_warning =
+        remotebsp::protocol::decode_motion_status(
+            remotebsp::protocol::encode_motion_status(warning));
+    assert(decoded_warning.queue_low);
+
+    warning.queue_depth = 2U;
+    try {
+        static_cast<void>(
+            remotebsp::protocol::encode_motion_status(warning));
         assert(false);
     } catch (const MotionPayloadException&) {
     }

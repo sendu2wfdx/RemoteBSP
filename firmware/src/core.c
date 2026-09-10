@@ -3815,6 +3815,9 @@ static bool process_request(rbsp_core_t* core,
             put_u64(data + 80U, snapshot.queue_underruns);
             put_u16(data + 88U,
                     snapshot.maximum_queue_depth);
+            put_u16(data + 90U,
+                    (uint16_t)(snapshot.queue_low_watermark |
+                               (snapshot.queue_low ? 0x8000U : 0U)));
             for (uint8_t axis = 0U;
                  axis < snapshot.axis_count; ++axis) {
                 uint8_t* entry =

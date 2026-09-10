@@ -116,8 +116,11 @@ void test_auto_append_and_queue_underrun() {
     MotionExecutor completed(two_axes());
     const auto first = completed.enqueue(
         segment(1, 0, 1000000ULL, false, 1, 0), 0);
+    assert(completed.status().queue_low_watermark == 1U);
+    assert(completed.status().queue_low);
     const auto second = completed.enqueue(
         segment(2, 0, 1000000ULL, true, 0, 1), 0);
+    assert(!completed.status().queue_low);
     assert(first.start_time_ns == 1000000ULL);
     assert(second.start_time_ns == 2000000ULL);
     completed.advance_to(3000000ULL);
@@ -127,12 +130,14 @@ void test_auto_append_and_queue_underrun() {
     MotionExecutor starved(two_axes());
     const auto only = starved.enqueue(
         segment(1, 0, 1000000ULL, false, 1, 0), 0);
+    assert(starved.status().queue_low);
     starved.advance_to(only.start_time_ns + only.duration_ns);
     const auto status = starved.status();
     assert(status.state == MotionState::Faulted);
     assert(status.fault == MotionFault::QueueUnderrun);
     assert(status.metrics.queue_underruns == 1);
     assert(status.metrics.safety_stops == 1);
+    assert(!status.queue_low);
 }
 
 void test_validation_and_capacity() {

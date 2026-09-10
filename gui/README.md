@@ -87,6 +87,15 @@ snapshot 三个固定上游端点；它不接受任意 URL、路径或通用 Run
 key 只在服务端启动时从独立文件读取，不写入 Studio 工程、能力响应或浏览器脚本。
 启用代理时 Studio 自身也强制监听数字回环地址，不能通过 `0.0.0.0` 暴露控制入口。
 
+同一个认证代理还提供通用定时位流的 configure、frame、stop 和只读 snapshot 固定
+白名单。Studio 的 WS2812 页面在浏览器本地把 `#RRGGBB` 像素按 RGB/GRB/BRG
+色序和 0～100% 整数亮度确定性缩放，编码为小写十六进制字节流；Runtime 与 MCU
+只看到 `bit_count` 和通用 timed-bitstream 数据，不包含 WS2812 业务语义。页面固定
+使用 800 kbit/s 的 1250/350/700 ns 时序，复位时间为 50～1000 µs。代理限制最多
+256 个像素、4096 字节 JSON 请求、1 MiB 上游响应和有界超时，并拒绝额外字段、
+非完整字节流以及白名单外操作。本轮只验证软件编码、认证转发和状态读取，不构成实体
+灯带颜色、时序裕量或示波器波形证据。
+
 状态文件只由 Mock MCU 写入，Studio 只读。GUI 不直接访问 CAN。设备参数已通过
 独立 `toolbusd` 适配器提供 Web 只读快照/备份和显式 CLI 写入/恢复；实时控制和
 烧录仍通过相互隔离的后端推进。
@@ -347,8 +356,22 @@ APP 布局，并读取当前运行节点身份，但不会烧录。执行端点
 不接受命令、脚本或文件路径。成功写入后必须等待同一 RemoteBSP UUID 节点重连，
 完成板型、工程、配置、固件四重身份核验，才会原子写入自哈希部署记录；CAN 后端记录
 绑定实际烧录的 `firmware.bin`。实体 CAN 烧录与重连证据仍需在目标板上补充。
-当前 CAN Katapult 路径已完成假执行器单元测试，尚未完成实体升级验收；USB Katapult
-仍未接入 Studio 部署命令。独立版本化
+当前 CAN Katapult 路径已完成假执行器单元测试，尚未完成实体升级验收。USB Katapult
+也已提供显式 `deploy-usb-katapult` CLI 与默认关闭的 Web 两阶段入口：CLI 仅接受规范
+`/dev/serial/by-id/...` 设备，Web 的唯一设备和 flashtool 均由服务器启动配置固定，浏览器
+不能提交命令或路径。该路径只写受保护的 Katapult 8 KiB APP 布局 `firmware.bin`，完成后
+等待同一 RemoteBSP UUID 的运行 APP 重连并执行四重身份核验；Katapult USB 的独立 PID
+只用于恢复升级阶段，不与 RemoteBSP USB Vendor Bulk APP 合并。启用 Web 入口需显式配置：
+
+```bash
+python3 gui/server.py --toolbusd-socket /run/remotebsp/toolbusd.sock \
+  --enable-usb-katapult-deployment \
+  --usb-katapult-device /dev/serial/by-id/usb-katapult-fixed-device \
+  --katapult-flashtool firmware/vendor/katapult/scripts/flashtool.py
+```
+
+当前只有固定命令计划、两阶段令牌、假执行器、身份回读和部署记录的软件证据，实体 USB
+切换、枚举、写入、重连仍未验收。独立版本化
 `FirmwareIdentity` 命令已经贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与
 Studio；Studio 构建把工程、配置、固件输入三个 SHA-256 注入固件，普通非 Studio
 构建则逐字段报告 unavailable。`inspect-runtime-identity` 会交叉核对 `node-list`

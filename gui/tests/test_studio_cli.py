@@ -228,6 +228,41 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual((self.directory / "katapult.json").read_bytes(),
                          b"{}\n")
 
+    def test_explicit_usb_katapult_deployment_uses_fixed_device_and_records(self):
+        identity_file = self.directory / "usb-identity.json"
+        identity_file.write_text("{}", encoding="utf-8")
+        flashtool = self.directory / "usb-flashtool.py"
+        flashtool.write_text("# test", encoding="utf-8")
+        expected = FirmwareIdentity(
+            "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64)
+        observed = DeviceIdentity(
+            "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64,
+            "ab" * 16)
+        result = DeploymentResult(
+            "weact-g431-core-v10-01234567", "usb-katapult", expected,
+            observed, 1, True)
+        record = type("DeploymentRecord", (), {
+            "record": {"status": "firmware_flash_verified"},
+            "sha256": "f" * 64, "filename": "deployment.json",
+            "content": b"{}\n"})()
+        device = "/dev/serial/by-id/usb-katapult_1d50_6177-ABC"
+        arguments = [
+            "deploy-usb-katapult", "--build-id", result.build_id,
+            "--output-root", str(self.directory / "out"),
+            "--identity-file", str(identity_file),
+            "--usb-device", device, "--flashtool", str(flashtool),
+            "--record-output", str(self.directory / "usb-katapult.json")]
+        with patch("studio_cli.deploy_usb_katapult",
+                   return_value=result) as deploy, \
+                patch("studio_cli.create_deployment_record",
+                      return_value=record):
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(response["backend"], "usb-katapult")
+        self.assertEqual(deploy.call_args.kwargs["usb_device"], device)
+        self.assertEqual((self.directory / "usb-katapult.json").read_bytes(),
+                         b"{}\n")
+
     def test_runtime_identity_inspection_is_complete_but_not_deployment(self):
         arguments = [
             "inspect-runtime-identity",

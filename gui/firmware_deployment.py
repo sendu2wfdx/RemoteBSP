@@ -38,6 +38,8 @@ _BUILD_ID = re.compile(r"[a-z0-9-]{8,96}")
 _PROBE_SERIAL = re.compile(r"[A-Za-z0-9._:-]{1,96}")
 _CAN_INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,32}")
 _KATAPULT_UUID = re.compile(r"[0-9a-fA-F]{6,32}")
+_USB_KATAPULT_DEVICE = re.compile(
+    r"/dev/serial/by-id/[A-Za-z0-9][A-Za-z0-9_.:+-]{0,191}")
 _OPENOCD_TARGET = {
     "mellow-fly-d5-v1": "target/stm32f0x.cfg",
     "weact-bluepill-plus-v1": "target/stm32f1x.cfg",
@@ -471,6 +473,34 @@ def make_can_katapult_plan(
          katapult_uuid.lower(), "-f", str(artifact)), artifact)
 
 
+def make_usb_katapult_plan(
+        build_id: str, *, output_root: Path, usb_device: str,
+        flashtool: Path) -> FlashPlan:
+    """生成固定 USB serial-by-id 的 Katapult APP 升级命令。"""
+    expected_identity(build_id, output_root=output_root)
+    if not isinstance(usb_device, str) or not _USB_KATAPULT_DEVICE.fullmatch(
+            usb_device):
+        raise FirmwareDeploymentError(
+            "USB Katapult设备必须是规范/dev/serial/by-id路径")
+    try:
+        if flashtool.is_symlink() or not flashtool.is_file():
+            raise FirmwareDeploymentError("Katapult flashtool必须是普通文件")
+        script = flashtool.resolve(strict=True)
+        artifact = resolve_artifact(build_id, "firmware.bin", output_root)
+        config = resolve_artifact(build_id, "firmware.config", output_root)
+        config_bytes = config.read_bytes()
+    except (FirmwareBuildError, OSError) as error:
+        raise FirmwareDeploymentError(
+            f"构建记录不可用于部署：{error}") from error
+    if b"CONFIG_APP_LAYOUT_KATAPULT_8K=y\n" not in \
+            config_bytes.replace(b"\r\n", b"\n").splitlines(keepends=True):
+        raise FirmwareDeploymentError(
+            "USB Katapult只允许写入启用8 KiB Katapult布局的APP产物")
+    return FlashPlan(
+        "usb-katapult",
+        ("python3", str(script), "-d", usb_device, "-f", str(artifact)), artifact)
+
+
 def _run_flash(command: Sequence[str], timeout: int) -> None:
     try:
         completed = subprocess.run(
@@ -574,3 +604,41 @@ def deploy_can_katapult(
             sleeper(poll_interval)
     raise FirmwareDeploymentError(
         f"烧录后节点未在期限内通过身份核对：{last_error}")
+
+
+def deploy_usb_katapult(
+        build_id: str, reader: IdentityReader, *, output_root: Path,
+        usb_device: str, flashtool: Path, flash_timeout: int = 120,
+        reconnect_timeout: float = 10.0, poll_interval: float = 0.25,
+        runner: Callable[[Sequence[str], int], None] = _run_flash,
+        sleeper: Callable[[float], None] = time.sleep) -> DeploymentResult:
+    """通过独立 USB Katapult 恢复阶段写入 APP，再核对运行 APP 身份。"""
+    if flash_timeout < 1 or flash_timeout > 600:
+        raise FirmwareDeploymentError("烧录超时必须位于1～600秒")
+    if not math.isfinite(reconnect_timeout) or not math.isfinite(poll_interval) or \
+            reconnect_timeout <= 0 or reconnect_timeout > 120 or \
+            poll_interval <= 0 or poll_interval > reconnect_timeout:
+        raise FirmwareDeploymentError("重连等待参数无效")
+    expected = expected_identity(build_id, output_root=output_root)
+    capability_check = getattr(reader, "require_complete_identity", None)
+    if capability_check is not None:
+        capability_check()
+    plan = make_usb_katapult_plan(
+        build_id, output_root=output_root, usb_device=usb_device,
+        flashtool=flashtool)
+    runner(plan.command, flash_timeout)
+    deadline = time.monotonic() + reconnect_timeout
+    attempts = 0
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        attempts += 1
+        try:
+            observed = reader.read_identity()
+            verify_identity(expected, observed)
+            return DeploymentResult(build_id, plan.backend, expected, observed,
+                                    attempts, True)
+        except (FirmwareDeploymentError, OSError, TimeoutError) as error:
+            last_error = error
+            sleeper(poll_interval)
+    raise FirmwareDeploymentError(
+        f"USB Katapult烧录后节点未在期限内通过身份核对：{last_error}")

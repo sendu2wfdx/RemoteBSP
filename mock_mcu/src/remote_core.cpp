@@ -2973,6 +2973,9 @@ protocol::Packet RemoteCore::handle_motion_status(
         static_cast<std::uint16_t>(source.queue_depth);
     status.queue_capacity =
         static_cast<std::uint16_t>(source.queue_capacity);
+    status.queue_low_watermark =
+        static_cast<std::uint16_t>(source.queue_low_watermark);
+    status.queue_low = source.queue_low;
     status.last_accepted_sequence = source.last_accepted_sequence;
     status.last_completed_sequence = source.last_completed_sequence;
     status.metrics = {

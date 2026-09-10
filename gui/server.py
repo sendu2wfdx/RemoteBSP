@@ -50,7 +50,9 @@ from production_history import (
 )
 from device_parameters import DeviceParameterError, DeviceParameterManager
 from firmware_deployment import FirmwareDeploymentError, ToolbusdIdentityReader
-from web_deployment import WebCanKatapultDeploymentController, WebDeploymentController
+from web_deployment import (
+    WebCanKatapultDeploymentController, WebDeploymentController,
+    WebUsbKatapultDeploymentController)
 from parameter_audit import ParameterAuditStore
 from web_device_parameters import WebDeviceParameterController
 from runtime_pwm_proxy import RuntimePwmProxy, RuntimePwmProxyError
@@ -129,6 +131,11 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def can_katapult_deployment_controller(self) -> \
             WebCanKatapultDeploymentController | None:
         return getattr(self.server, "can_katapult_deployment_controller", None)
+
+    @property
+    def usb_katapult_deployment_controller(self) -> \
+            WebUsbKatapultDeploymentController | None:
+        return getattr(self.server, "usb_katapult_deployment_controller", None)
 
     @property
     def parameter_write_controller(self) -> WebDeviceParameterController | None:
@@ -210,6 +217,14 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                                       if self.can_katapult_deployment_controller is not None
                                       else None),
                 },
+                "usb_katapult_deployment_enabled":
+                    self.usb_katapult_deployment_controller is not None,
+                "usb_katapult_deployment": {
+                    "available": self.usb_katapult_deployment_controller is not None,
+                    "usb_device": (self.usb_katapult_deployment_controller.usb_device
+                                   if self.usb_katapult_deployment_controller is not None
+                                   else None),
+                },
                 "device_parameter_write_enabled":
                     self.parameter_write_controller is not None,
                 "device_parameters_enabled":
@@ -235,9 +250,24 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "result": "data.operation.result",
                     },
                 },
+                "runtime_timed_bitstream": {
+                    "available": pwm_proxy is not None,
+                    "auth_proxy": pwm_proxy is not None,
+                    "maximum_pixels": 256,
+                    "can_encode_ws2812": True,
+                    "configure_path": ("/api/runtime/timed-bitstream/configure"
+                                       if pwm_proxy is not None else None),
+                    "frame_path": ("/api/runtime/timed-bitstream/frame"
+                                   if pwm_proxy is not None else None),
+                    "stop_path": ("/api/runtime/timed-bitstream/stop"
+                                  if pwm_proxy is not None else None),
+                    "snapshot_path": ("/api/runtime/timed-bitstream/snapshot"
+                                      if pwm_proxy is not None else None),
+                },
             })
             return
-        if path == "/api/runtime/pwm/snapshot":
+        if path in {"/api/runtime/pwm/snapshot",
+                    "/api/runtime/timed-bitstream/snapshot"}:
             proxy = self.runtime_pwm_proxy
             if proxy is None:
                 self._send_json({"ok": False, "error": "Runtime PWM代理未启用"},
@@ -321,6 +351,28 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        bitstream_prefix = "/api/runtime/timed-bitstream/"
+        operation = path[len(bitstream_prefix):] if path.startswith(bitstream_prefix) else None
+        if operation in {"configure", "frame", "stop"}:
+            proxy = self.runtime_pwm_proxy
+            if proxy is None:
+                self._send_json({"ok": False, "error": "Runtime定时位流代理未启用"},
+                                HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                if parsed.query:
+                    raise RuntimePwmProxyError("定时位流写入端点不接受查询参数", 400)
+                if self.headers.get_content_type() != "application/json":
+                    raise RuntimePwmProxyError("定时位流请求必须使用application/json", 415)
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > proxy.MAXIMUM_BODY_BYTES:
+                    raise RuntimePwmProxyError("定时位流请求长度无效或超过4096字节", 400)
+                response = proxy.timed_bitstream(operation, self.rfile.read(length))
+                self._send_json(response.document, HTTPStatus(response.status))
+            except (ValueError, RuntimePwmProxyError) as error:
+                status = error.status if isinstance(error, RuntimePwmProxyError) else 400
+                self._send_json({"ok": False, "error": str(error)}, HTTPStatus(status))
+            return
         if path in {"/api/runtime/pwm/configure", "/api/runtime/pwm/stop"}:
             proxy = self.runtime_pwm_proxy
             if proxy is None:
@@ -359,6 +411,8 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/deployment/execute",
                         "/api/deployment/can-katapult/preflight",
                         "/api/deployment/can-katapult/execute",
+                        "/api/deployment/usb-katapult/preflight",
+                        "/api/deployment/usb-katapult/execute",
                         "/api/device-parameters/write-preflight",
                         "/api/device-parameters/restore-preflight",
                         "/api/device-parameters/execute",
@@ -377,12 +431,15 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             project = request.get("project")
             if path.startswith("/api/deployment/"):
                 can_katapult = path.startswith("/api/deployment/can-katapult/")
+                usb_katapult = path.startswith("/api/deployment/usb-katapult/")
                 controller = (self.can_katapult_deployment_controller if
-                              can_katapult else self.deployment_controller)
+                              can_katapult else self.usb_katapult_deployment_controller
+                              if usb_katapult else self.deployment_controller)
                 if controller is None:
                     self._send_json(
                         {"ok": False, "error": ("Studio未配置受控CAN Katapult部署入口"
-                         if can_katapult else "Studio未配置受控ST-Link部署入口")},
+                         if can_katapult else "Studio未配置受控USB Katapult部署入口"
+                         if usb_katapult else "Studio未配置受控ST-Link部署入口")},
                         HTTPStatus.SERVICE_UNAVAILABLE)
                     return
                 if path.endswith("/preflight"):
@@ -639,6 +696,8 @@ def make_server(host: str, port: int,
                 deployment_controller: WebDeploymentController | None = None,
                 can_katapult_deployment_controller:
                     WebCanKatapultDeploymentController | None = None,
+                usb_katapult_deployment_controller:
+                    WebUsbKatapultDeploymentController | None = None,
                 parameter_write_controller:
                     WebDeviceParameterController | None = None,
                 runtime_pwm_proxy: RuntimePwmProxy | None = None,
@@ -658,6 +717,7 @@ def make_server(host: str, port: int,
     server.device_parameter_manager = device_parameter_manager  # type: ignore[attr-defined]
     server.deployment_controller = deployment_controller  # type: ignore[attr-defined]
     server.can_katapult_deployment_controller = can_katapult_deployment_controller  # type: ignore[attr-defined]
+    server.usb_katapult_deployment_controller = usb_katapult_deployment_controller  # type: ignore[attr-defined]
     server.parameter_write_controller = parameter_write_controller  # type: ignore[attr-defined]
     server.runtime_pwm_proxy = runtime_pwm_proxy  # type: ignore[attr-defined]
     return server
@@ -690,6 +750,10 @@ def main() -> int:
                         help="Web CAN Katapult唯一允许使用的CAN接口")
     parser.add_argument("--katapult-flashtool", type=Path,
                         help="服务端固定的Katapult flashtool.py路径")
+    parser.add_argument("--enable-usb-katapult-deployment", action="store_true",
+                        help="显式启用本地Web两阶段USB Katapult部署入口")
+    parser.add_argument("--usb-katapult-device",
+                        help="Web USB Katapult唯一允许的/dev/serial/by-id设备")
     parser.add_argument("--enable-device-parameter-write", action="store_true",
                         help="显式启用本地Web设备参数写入与恢复")
     parser.add_argument("--parameter-audit-dir", type=Path,
@@ -746,6 +810,22 @@ def main() -> int:
                     expected_uuid=expected_uuid, remote_cli=args.remote_cli))
         except FirmwareDeploymentError as error:
             parser.error(str(error))
+    usb_katapult_controller = None
+    if args.enable_usb_katapult_deployment:
+        if not args.toolbusd_socket or not args.usb_katapult_device or \
+                args.katapult_flashtool is None:
+            parser.error("启用Web USB Katapult部署必须配置toolbusd、USB设备和flashtool")
+        try:
+            usb_katapult_controller = WebUsbKatapultDeploymentController(
+                output_root=DEFAULT_OUTPUT_ROOT,
+                record_root=args.deployment_record_root,
+                usb_device=args.usb_katapult_device,
+                flashtool=args.katapult_flashtool,
+                reader_factory=lambda expected_uuid: ToolbusdIdentityReader(
+                    args.toolbusd_socket, args.node_id,
+                    expected_uuid=expected_uuid, remote_cli=args.remote_cli))
+        except FirmwareDeploymentError as error:
+            parser.error(str(error))
     parameter_write_controller = None
     if args.enable_device_parameter_write:
         if parameter_manager is None or args.parameter_audit_dir is None or \
@@ -774,6 +854,7 @@ def main() -> int:
         device_parameter_manager=parameter_manager,
         deployment_controller=deployment_controller,
         can_katapult_deployment_controller=can_katapult_controller,
+        usb_katapult_deployment_controller=usb_katapult_controller,
         parameter_write_controller=parameter_write_controller,
         runtime_pwm_proxy=runtime_pwm_proxy)
     print(f"RemoteBSP GUI 已启动：http://{args.host}:{args.port}")

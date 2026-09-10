@@ -1616,6 +1616,9 @@ int run(const std::vector<std::string>& arguments,
                   << " node_time_ns=" << status.node_time_ns
                   << " queue_depth=" << status.queue_depth
                   << " queue_capacity=" << status.queue_capacity
+                  << " queue_low_watermark="
+                  << status.queue_low_watermark
+                  << " queue_low=" << (status.queue_low ? 1 : 0)
                   << " last_accepted="
                   << status.last_accepted_sequence
                   << " last_completed="
