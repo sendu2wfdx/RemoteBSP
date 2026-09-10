@@ -109,11 +109,11 @@ jobs:
         working-directory: firmware
         run: bash scripts/fetch_stm32_deps.sh
 
-      - name: 编译 F072、F103 与 G431 正式配置
+      - name: 编译正式配置、G431 BUS 与 Studio 身份固件
         working-directory: firmware
         env:
           RBSP_BUILD_JOBS: 32
-        run: bash scripts/build_firmware.sh all
+        run: bash scripts/build_firmware.sh ci
 
       - name: 保存固件产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -124,5 +124,6 @@ jobs:
             firmware/out/*.bin
             firmware/out/*.hex
             firmware/out/*.map
+            firmware/out/*.identity.json
           if-no-files-found: error
           retention-days: 30

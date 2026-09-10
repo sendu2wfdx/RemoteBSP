@@ -283,11 +283,13 @@ python3 gui/studio_cli.py history-search --history-root ./local-history \
 `FirmwareIdentity` 命令已经贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与
 Studio；Studio 构建把工程、配置、固件输入三个 SHA-256 注入固件，普通非 Studio
 构建则逐字段报告 unavailable。`inspect-runtime-identity` 会交叉核对 `node-list`
-与固件身份的 UUID/板型，并准确输出完整字段或缺项；它是只读检查，不与某次烧录作业
-原子绑定，所以 `deployment_verified` 始终为 false。`--identity-file` 仍保留严格有界
-JSON 适配器。当前没有网页部署入口，不能外推为 Studio 实体烧录回读闭环。
+与固件身份的 UUID/板型，并准确输出完整字段或缺项；它是只读检查，所以自身的
+`deployment_verified` 始终为 false。`deploy-stlink` 只有在写入、复位和四重身份核验
+全部成功后才生成自哈希部署记录；该记录可严格关联生产记录和批次。`--identity-file`
+仍保留严格有界 JSON 适配器。当前没有网页部署入口，不能外推为 Studio 实体烧录回读闭环。
 
-设备参数 Web 入口只允许读取和备份；服务启动时必须显式配置 `--toolbusd-socket`。
+设备参数 Web 入口只允许读取和备份；备份 v2 带规范 JSON 的 SHA-256 完整性摘要，恢复
+仍兼容既有 v1。服务启动时必须显式配置 `--toolbusd-socket`。
 写入和恢复只能调用上述 CLI，后端在副作用前核对节点 UUID、参数 generation、当前
 维护状态和固定确认短语，并逐项使用 generation CAS。它还不是批量烧号、权限审计或
 实体 Flash 掉电验证结论。

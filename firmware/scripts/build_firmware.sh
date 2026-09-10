@@ -26,6 +26,27 @@ build_one() {
         "${root_dir}/out/${output_artifact}.map"
 }
 
+build_studio_identity() {
+    local input_dir="${root_dir}/build/ci-studio-input"
+    local input_sha="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    python3 "${root_dir}/scripts/generate_ci_studio_fixture.py" \
+        --output "${input_dir}" \
+        --firmware-input-sha256 "${input_sha}"
+    local build_dir="${root_dir}/build/g431-weact-core-studio-identity"
+    cmake -S "${root_dir}" -B "${build_dir}" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="${root_dir}/cmake/arm-none-eabi-toolchain.cmake" \
+        -DRBSP_CONFIG="${input_dir}/firmware.config" \
+        -DRBSP_STATIC_RESOURCE_TABLE="${input_dir}/remotebsp_static_resources.h" \
+        -DRBSP_FIRMWARE_INPUT_SHA256="${input_sha}"
+    cmake --build "${build_dir}" --parallel "${build_jobs}"
+    for suffix in elf hex bin map; do
+        cp "${build_dir}/remotebsp-stm32g431cbu6.${suffix}" \
+            "${root_dir}/out/remotebsp-stm32g431-weact-core-studio-identity.${suffix}"
+    done
+    cp "${input_dir}/identity.json" \
+        "${root_dir}/out/remotebsp-stm32g431-weact-core-studio-identity.identity.json"
+}
+
 case "${target}" in
     f072)
         build_one f072 configs/stm32f072rbt6_defconfig \
@@ -81,6 +102,9 @@ case "${target}" in
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core-bus-hal
         ;;
+    weact-stm32g431cbu6-core-studio-identity)
+        build_studio_identity
+        ;;
     weact-stm32g431cbu6-core-usb|g431-usb)
         build_one g431-weact-core-usb \
             configs/stm32g431_weact_core_usb_defconfig \
@@ -125,8 +149,14 @@ case "${target}" in
             remotebsp-stm32g431cbu6 \
             remotebsp-stm32g431-weact-core
         ;;
+    ci)
+        "$0" all
+        "$0" weact-stm32g431cbu6-core-bus-hal
+        "$0" weact-stm32g431cbu6-core-studio-identity
+        python3 "${root_dir}/scripts/verify_ci_firmware_matrix.py"
+        ;;
     *)
-        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all]\n' \
+        printf '用法：%s [f072|f103|g431|mellow-fly-d5|mellow-fly-d5-katapult|weact-bluepill-plus|weact-bluepill-plus-motion|weact-bluepill-plus-katapult|weact-stm32g431cbu6-core|weact-stm32g431cbu6-core-dual-pwm|weact-stm32g431cbu6-core-bus-hal|weact-stm32g431cbu6-core-studio-identity|weact-stm32g431cbu6-core-usb|weact-stm32g431cbu6-core-motion|weact-stm32g431cbu6-core-katapult|all|ci]\n' \
             "$0" >&2
         exit 2
         ;;
