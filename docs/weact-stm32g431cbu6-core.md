@@ -139,7 +139,9 @@ STM32 HAL 的编译集成：
 | SPI1 | PA5=SCK、PA6=MISO、PA7=MOSI、PA15=CS | Mode 0、8 bit、MSB first，上限 21.25 MHz |
 | SPI2 | PB13=SCK、PB14=MISO、PB15=MOSI、PB12=CS | Mode 0、8 bit、MSB first，上限 21.25 MHz |
 
-该固件已交叉编译，但尚未烧录，也没有连接 I2C/SPI 从设备或使用逻辑分析仪
+生产板级代码另由主机 HAL 桩测试直接覆盖 I2C flags、统一超时预算、可选恢复、
+SPI 片选及传输失败后的恢复/故障标记。该测试不经过实体引脚或外设。总线固件虽已
+交叉编译，但尚未烧录，也没有连接 I2C/SPI 从设备或使用逻辑分析仪
 验证 ACK/NACK、频率、占空、片选、Mode 与超时恢复。当前 DL16 D5 连接 PA6，
 与 SPI1 MISO 复用相冲；在用户拆除或明确重新安排该接线前，不得烧录此总线测试
 配置。

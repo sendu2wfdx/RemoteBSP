@@ -46,8 +46,9 @@ python3 gui/server.py
 python3 gui/server.py --state /tmp/remotebsp-mock-state.json
 ```
 
-状态文件只由 Mock MCU 写入，Studio 只读。GUI 不直接访问 CAN；未来实时控制、
-设备参数维护和烧录均通过独立后端及 `toolbusd` 完成。
+状态文件只由 Mock MCU 写入，Studio 只读。GUI 不直接访问 CAN。设备参数已通过
+独立 `toolbusd` 适配器提供 Web 只读快照/备份和显式 CLI 写入/恢复；实时控制和
+烧录仍通过相互隔离的后端推进。
 
 内置动画会明确显示“演示模式 / DEMO”，不代表实体节点在线。只有使用
 `--state`连接 Mock 状态文件时才显示“Mock MCU 实时数据”。当前实时控制页中的
@@ -237,9 +238,24 @@ python3 gui/studio_cli.py build --project project.json --dry-run
 # 只有显式 build 才调用现有固件构建后端；仍然不烧录、不访问板卡。
 python3 gui/studio_cli.py build --project project.json --jobs 32
 
-# 显式烧录已有受保护构建，并等待本机上位机原子更新身份文件后核对运行中身份。
+# 显式烧录已有受保护构建；身份文件模式仍可用于离线/外部适配器核对。
 python3 gui/studio_cli.py deploy-stlink --build-id <构建ID> \
   --identity-file /run/remotebsp/device-identity.json
+
+# 只读运行中固件身份；完整和缺项都会准确输出，但不会宣称本次部署已核验。
+python3 gui/studio_cli.py inspect-runtime-identity \
+  --toolbusd-socket /tmp/toolbusd.sock --node-id 1
+
+# 参数写入/恢复是显式维护操作，必须携带刚读取的 UUID、generation 和确认短语。
+python3 gui/studio_cli.py device-parameter-write \
+  --toolbusd-socket /tmp/toolbusd.sock --node-id 1 \
+  --expected-uuid <32位小写UUID> --expected-generation <代数> \
+  --parameter-id 0x0001 --value-base64 <Base64> \
+  --confirmation WRITE_DEVICE_PARAMETERS
+python3 gui/studio_cli.py device-parameter-restore \
+  --toolbusd-socket /tmp/toolbusd.sock --node-id 1 \
+  --expected-uuid <32位小写UUID> --expected-generation <代数> \
+  --backup parameter-backup.json --confirmation WRITE_DEVICE_PARAMETERS
 
 # 从已有生产记录生成确定性批次；不指定输出文件时只在 stdout 返回JSON结果。
 python3 gui/studio_cli.py batch-create --batch-id pilot-001 --name 首批归档 \
@@ -263,11 +279,18 @@ python3 gui/studio_cli.py history-search --history-root ./local-history \
 - `3`：输入文件、schema、资源、哈希、容量或安全边界不合法；
 - `4`：显式构建、部署、身份核对、原子输出或本地文件操作失败。
 
-`deploy-stlink` 是当前唯一会访问硬件的 CLI 命令；它复核构建记录和固件哈希后执行
-OpenOCD 写入、校验和复位。`--identity-file` 必须是普通、非符号链接、最大 16 KiB 的
-严格 JSON 文件，由外部上位机在节点重连后原子更新。该文件适配器不是从 `toolbusd`
-或 MCU 实时读取身份，当前也没有网页入口，因此成功只证明显式 CLI 部署及所提供身份
-快照的一致性，不能外推为 Studio 自动发现或真实运行时回读闭环。
+`deploy-stlink` 复核构建记录和固件哈希后执行 OpenOCD 写入、校验和复位。独立版本化
+`FirmwareIdentity` 命令已经贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与
+Studio；Studio 构建把工程、配置、固件输入三个 SHA-256 注入固件，普通非 Studio
+构建则逐字段报告 unavailable。`inspect-runtime-identity` 会交叉核对 `node-list`
+与固件身份的 UUID/板型，并准确输出完整字段或缺项；它是只读检查，不与某次烧录作业
+原子绑定，所以 `deployment_verified` 始终为 false。`--identity-file` 仍保留严格有界
+JSON 适配器。当前没有网页部署入口，不能外推为 Studio 实体烧录回读闭环。
+
+设备参数 Web 入口只允许读取和备份；服务启动时必须显式配置 `--toolbusd-socket`。
+写入和恢复只能调用上述 CLI，后端在副作用前核对节点 UUID、参数 generation、当前
+维护状态和固定确认短语，并逐项使用 generation CAS。它还不是批量烧号、权限审计或
+实体 Flash 掉电验证结论。
 
 CLI 单路径最长 512 个字符，工程和差异输入最多 128 KiB，生产记录最多 64 KiB，
 板卡目录最多 2 MiB；JSON 重复字段和非标准数值会被拒绝；批次仍限制 32 份生产记录
@@ -275,8 +298,8 @@ CLI 单路径最长 512 个字符，工程和差异输入最多 128 KiB，生产
 `--force` 才允许原子替换用户指定的文件。
 `history-search` 只打开已有带标记历史库，不会因查询创建目录。
 
-所有响应都带有“未烧录、未访问硬件”的执行状态。未来烧录器必须是独立、显式授权
-的命令和适配器，不能暗中附加到 `build`、`batch-create` 或 `history-save`。
+纯资料命令的响应都带有“未烧录、未访问硬件”的执行状态。烧录及设备参数修改必须
+继续保持独立、显式命令，不能暗中附加到 `build`、`batch-create` 或 `history-save`。
 
 命令行和CI可以调用同一后端：
 
@@ -296,8 +319,8 @@ python3 gui/project_config.py \
   --catalog gui/data/pin_catalog.json
 ```
 
-随后也可手工按普通固件流程构建。当前尚未实现烧录和回读确认，界面不会宣称
-已经把配置部署到节点。
+随后也可手工按普通固件流程构建。显式 CLI 已有烧录编排和独立运行时身份读取，
+但两者尚未形成实体作业级原子核验，界面不会宣称已经把配置部署到节点。
 
 工程后端会先执行 schema 迁移与规范化。没有版本字段的早期草案按 v0 依次迁移到
 当前 v2；未来版本会明确拒绝，避免错误降级。`/api/project/inspect` 可在不生成

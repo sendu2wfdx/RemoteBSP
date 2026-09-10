@@ -111,8 +111,11 @@ WS2812/定时位流端点，并检查单轴及整板步频预算。后续扩展�
 ./build-wsl/remote-cli --node 1 param-set adc0 hex:0000010000000000a05a3200
 ```
 
-写入流程在客户端内部完成临时解锁、代数检查、写入和重新锁定。后续生产工具还需
-增加权限分级、批量烧号、审计日志、schema 迁移及实板掉电测试。
+Studio Web 已通过 `toolbusd` 提供单节点参数的只读快照与备份，不直接访问 CAN。
+修改与恢复保持显式 CLI：每次执行都必须匹配运行节点 UUID、当前参数 generation，
+并提交固定维护确认短语；逐项写入使用 generation CAS，检测到并发变化即停止。
+当前尚未提供网页写入口。后续生产工具还需增加权限分级、批量烧号、审计日志、
+schema 迁移及实板掉电测试。
 
 ## Studio 当前完成度
 
@@ -143,10 +146,14 @@ WS2812/定时位流端点，并检查单轴及整板步频预算。后续扩展�
   校验和历史保存后端；`deploy-stlink` 是必须显式调用的硬件命令，复核受保护固件后
   执行 ST-Link 写入/校验/复位，再从调用者指定的严格有界 JSON 身份文件核对四字段；
   其他命令都不隐式烧录或访问板卡；
-- 提供只读 `inspect-runtime-identity`，通过 `remote-cli node-list` 复核指定节点的
-  UUID、板型、在线/ready、固件版本和协议版本。该输出始终明确列出缺少的
-  `project_sha256`、`config_sha256`和`firmware_identity_sha256`，并返回
-  `deployment_verified=false`，不把节点子集身份冒充烧录回读证据；
+- 新增独立版本化 `FirmwareIdentity` 命令并贯通 MCU、Mock、`libremotebsp`、
+  `toolbusd` CLI 与 Studio；Studio 构建注入工程、配置和固件输入三个 SHA-256，
+  非 Studio 构建按字段报告 unavailable；
+- 提供只读 `inspect-runtime-identity`，同时核对 `node-list` 与 `firmware-identity`
+  所指 UUID/板型，准确输出完整身份或缺项。该命令不执行烧录，也不把“读取完整”
+  等同于“本次部署已验证”，所以 `deployment_verified` 始终为 false；
+- Studio Web 提供设备参数只读快照与备份；显式 CLI 写入/恢复使用节点 UUID、
+  generation CAS 和固定确认短语，网页尚不提供写入口；
 - 生成确定、版本化的纯软件生产记录，关联工程/资源/资料包哈希及已有构建记录中
   的 Git、工具链、内存和产物证据；缺失、不匹配、未烧录和未实测均显式标记；
 - 提供独立部署作业软件模块：只接受经构建记录哈希保护的固件，生成不经 shell 拼接的
@@ -159,12 +166,12 @@ WS2812/定时位流端点，并检查单轴及整板步频预算。后续扩展�
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、
   USB Katapult 执行器；
-- 接入实体设备的完整运行时身份回读适配器；当前 `inspect-runtime-identity`
-  只读子集不含三个必需 SHA-256，`deploy-stlink` 仍依赖由外部上位机原子更新的
-  JSON 文件，测试仍使用注入式执行器/读取器，不能记作自动发现和实体回读闭环；
+- 将 `deploy-stlink` 的实体烧录作业与运行时 `FirmwareIdentity` 读取原子关联；当前
+  身份读取已经贯通，但独立 `inspect-runtime-identity` 固定不作部署归因，测试仍包含
+  注入式执行器/读取器，不能记作自动发现和实体回读闭环；
 - 完整 MCU 引脚复用、定时器和 DMA 数据库；
 - 将烧录回读结果、节点 UUID 和实体电气验收证据追加到生产记录；
-- 设备参数的 GUI 维护页。
+- 设备参数的受控 GUI 写入/恢复页及生产审计。
 
 ## 推荐生成物
 

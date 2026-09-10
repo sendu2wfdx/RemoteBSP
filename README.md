@@ -18,6 +18,10 @@ STM32F103 实板链路。STM32F103 的 CAN/USB 双模式 Katapult Bootloader 已
 重启恢复，并在真机发现并修复资源枚举缺口后贯通 5 项静态资源到 RuntimeSnapshot。
 STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
 
+当前迭代明确排除需要多块实体板共同验证的跨板卡场景；已有跨板设计与纯软件证据
+继续保留，但不会由单板或 Mock 结果外推关闭。其余单板固件、Studio、运行时、总线、
+设备参数和可靠性能力继续推进。
+
 ## 架构
 
 ```mermaid
@@ -61,12 +65,12 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 请求管理 | 超时、重试、响应匹配、重复请求缓存，避免副作用重复执行 |
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
-| 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
+| 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦。Studio Web 已提供只读快照/备份，显式 CLI 写入与恢复通过 UUID、generation CAS 和固定确认短语防止写错节点或覆盖并发变化；尚未完成实体参数区掉电验收 |
 | 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；G431 已接入 UART 真实环形缓冲水位/溢出以及 PWM/TimedBitstream 忙和后端失败基础状态；公共 Core 的 `ResourceReset` 已恢复兼容语义：UART 清缓冲/故障并释放对象、PWM 安全停止、TimedBitstream 中止，后端失败则保留对象和故障状态以便重试 |
-| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 G431 I2C1/SPI1/SPI2 实体 HAL 已实现并交叉编译；总线测试固件未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；双向 Stream 与真实高速数据面待实现 |
+| 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁、STM32 公共 Core，以及 G431 I2C1/SPI1/SPI2 实体 HAL 已实现并交叉编译；生产板级代码另由主机 HAL 桩覆盖 I2C flags、统一超时预算、可选恢复、SPI 片选和失败恢复。总线测试固件仍未烧录，亦未连接从设备或完成电气/时序实测。H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理；双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
-| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与静态表生成、32线程构建和产物归档已实现。非交互 CLI 的 `deploy-stlink` 可执行受保护产物的写入/校验/复位；`inspect-runtime-identity` 只读取 `toolbusd node-list` 公开的 UUID、板型、在线状态、固件与协议版本子集。当前运行时合同缺少工程、配置和固件输入三个 SHA-256，因此命令明确返回 `deployment_verified=false`，不能记作 Studio 烧录回读闭环 |
+| RemoteBSP Studio | 本地中文 GUI 首版：板卡资源工程、冲突过滤、I2C/SPI 图形编辑、Mock 数字孪生、工程差异、`.config` 与静态表生成、32线程构建和产物归档已实现。非交互 CLI 的 `deploy-stlink` 可执行受保护产物的写入/校验/复位。独立版本化 `FirmwareIdentity` 命令已贯通 MCU、Mock、`libremotebsp`、`toolbusd` CLI 与 Studio；Studio 构建向固件注入工程、配置和固件输入三项 SHA-256，非 Studio 固件逐字段报告 unavailable。只读 `inspect-runtime-identity` 会准确输出完整身份或缺项，但 `deployment_verified` 始终为 false，不能单独记作 Studio 烧录回读闭环 |
 | Runtime API | HTTP v1、RuntimeSnapshot IPC v2、短缓存、故障隔离、时钟质量告警和增量事件已实现；认证回环 HTTP 已把细粒度 `runtime.gpio.write` 权限、短时租约、稳定 UUID、节点代次和幂等键映射到 `toolbusd` GPIO IPC v2。首次创建保持低电平，释放、过期和关停执行安全写低及 `GPIO_CLOSE`，Close 不确定会冻结单资源直至幂等重试确认，成功后同代可安全复用；固件对象和会话清理也强制所有权隔离。GPIO 写入/释放操作现由 `toolbusd` 持久操作账本记录 pending 与终态，可按 operation ID 或严格 selector 跨租约 TTL 查询，重启恢复的 unknown 会冻结对应资源；Runtime HTTP 已贯通查询、定位和不确定结果自动恢复。控制/健康 IPC 错误信封 v1 与请求级单调绝对期限已贯通，并强制“可能已提交即不可直接重试”；`ControlAuditJournal` 已用同步 intent/terminal/unknown、HMAC-SHA256 链、分段容量和失败关闭覆盖租约与 GPIO 控制，16 项日志内核及 6 项 HTTP 集成测试已通过。USB Mock、vcan Classical CAN 与 CAN-FD 软件验证已覆盖。TLS、主动推送、跨重启事件历史和实体失效安全时延验证仍待实现 |
 | 遥测健康契约 | `HealthSnapshot v1` 已定义稳定来源、生产者代际、节点、时间基、状态、单位及有界指标；严格区分可用零值、未知、不可用和未报告，Release 测试有效。toolbusd 软件生产者、版本化只读 IPC、CLI 与 Runtime 可信投影已接入；G431 `ResourceStatus` 已有 UART 水位/溢出和 PWM/TimedBitstream 基础状态，但它不是完整 MCU 健康生产者，CPU/ISR/栈/运动队列与硬件时间戳实体采样仍未实现 |
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
@@ -81,7 +85,8 @@ Remote Core/HAL 骨架。嵌入式切片把端点、长度、超时、flags、�
 事务边界固定下来；合同首访单飞、节点代次失效和跨节点/跨总线隔离已有软件测试。
 设备持有独占租约期间，公共 Core 的 `ResourceStatus` 会报告 Busy，释放、超时或会话
 清理后恢复 Normal；这只证明设备级租约状态映射。G431 已增加默认关闭的 I2C1/
-SPI1/SPI2 板级 HAL 和专用交叉编译配置，但未烧录、未接从设备、未完成电气与时序实测；
+SPI1/SPI2 板级 HAL 和专用交叉编译配置；同一份生产代码已在主机 HAL 桩中覆盖 flags、
+统一超时预算、恢复分支和 SPI 片选，但仍未烧录、未接从设备、未完成电气与时序实测；
 F072/F103 仍无板级总线 HAL。高速 Stream 已完成
 H2N/N2H Mock 会话状态机；N2H 使用 peek/commit 两阶段
 交付，编码、分片、后端或租约失败时不提前消费数据。双向、USB Bulk 和 Ethernet
@@ -128,8 +133,10 @@ DDA 余数分配和迟到安全停机。G431 已用 Studio 专用固件完成 10
 
 设备参数是独立机制：F103 在末尾保留 2 KiB，F072/G431 保留 4 KiB，采用双页
 Flash 仿 EEPROM 保存身份、制造和校准数据。Katapult 已限制 APP 写入上界，因此
-在线升级不会覆盖参数区。Studio 构建归档、部署作业软件模块和显式 ST-Link CLI 已实现；
-网页部署入口、真实运行时设备身份回读适配器以及设备参数维护页面尚未接入。
+在线升级不会覆盖参数区。Studio Web 已接入只读参数快照和备份；写入及恢复只通过显式
+CLI 执行，并在每次修改前核对节点 UUID、参数 generation 和固定维护确认短语。Studio
+构建归档、部署作业软件模块、显式 ST-Link CLI 与运行时固件身份读取适配器已实现；
+网页部署/参数写入界面、实体烧录后自动核验和参数区掉电实测仍未完成。
 
 ## 目录
 
