@@ -7,6 +7,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -33,6 +34,7 @@ from device_parameters import (
     MAX_BACKUP_BYTES,
     WRITE_CONFIRMATION,
 )
+from parameter_audit import ParameterAuditStore, parameter_evidence
 from production_batch import (
     MAX_BATCH_COMPARISONS,
     MAX_BATCH_MANIFEST_BYTES,
@@ -327,21 +329,53 @@ def _parameter_manager(args) -> DeviceParameterManager:
         remote_cli=args.remote_cli, timeout=args.parameter_timeout)
 
 
+def _parameter_audit(args) -> ParameterAuditStore:
+    return ParameterAuditStore(
+        _bounded_path(args.audit_dir, "参数审计目录"),
+        _bounded_path(args.audit_key_file, "参数审计密钥"))
+
+
+def _finish_parameter_audit(audit: ParameterAuditStore, operation_id: str,
+                            error: Exception) -> None:
+    match = re.search(r"完成(\d+)项后中止", str(error))
+    applied = int(match.group(1)) if match else 0
+    audit.finish(
+        operation_id,
+        outcome="partial_failure" if applied else "failure",
+        generation_after=None, applied_count=applied,
+        error_type=type(error).__name__)
+
+
 def _run_parameter_write(args) -> dict:
     try:
         value = base64.b64decode(args.value_base64, validate=True)
     except (TypeError, ValueError) as error:
         raise ProjectConfigError("--value-base64不是合法Base64") from error
     # 规范化后再交给同一有界后端，避免宽松编码存在多种表示。
-    snapshot = _parameter_manager(args).write(
-        expected_uuid=args.expected_uuid,
+    audit = _parameter_audit(args)
+    operation_id = audit.begin(
+        operation="write", node_id=args.node_id,
+        node_uuid=args.expected_uuid,
         expected_generation=args.expected_generation,
-        parameter_id=args.parameter_id,
-        value_base64=base64.b64encode(value).decode("ascii"),
-        confirmation=args.confirmation)
+        parameters=[parameter_evidence(args.parameter_id, value)])
+    try:
+        snapshot = _parameter_manager(args).write(
+            expected_uuid=args.expected_uuid,
+            expected_generation=args.expected_generation,
+            parameter_id=args.parameter_id,
+            value_base64=base64.b64encode(value).decode("ascii"),
+            confirmation=args.confirmation)
+    except Exception as error:
+        _finish_parameter_audit(audit, operation_id, error)
+        raise
+    audit.finish(operation_id, outcome="success",
+                 generation_after=snapshot["status"]["generation"],
+                 applied_count=(1 if snapshot["status"]["generation"] !=
+                                args.expected_generation else 0))
     return {
         "ok": True, "format": "STUDIO_CLI_DEVICE_PARAMETER_WRITE_V1",
         "snapshot": snapshot,
+        "audit_operation_id": operation_id,
         "execution_status": {
             "software_build": "not_performed", "firmware_flash": "not_performed",
             "hardware_access": True, "device_parameters_written": True,
@@ -351,13 +385,40 @@ def _run_parameter_write(args) -> dict:
 
 def _run_parameter_restore(args) -> dict:
     backup = _read_json(args.backup, "设备参数备份", MAX_BACKUP_BYTES)
-    snapshot = _parameter_manager(args).restore(
-        backup, expected_uuid=args.expected_uuid,
+    if not isinstance(backup, dict) or not isinstance(
+            backup.get("parameters"), list):
+        raise ProjectConfigError("设备参数备份缺少参数数组")
+    evidence = []
+    for item in backup["parameters"]:
+        if not isinstance(item, dict) or type(item.get("id")) is not int:
+            raise ProjectConfigError("设备参数备份参数ID无效")
+        try:
+            raw = base64.b64decode(item.get("value_base64"), validate=True)
+        except (TypeError, ValueError) as error:
+            raise ProjectConfigError("设备参数备份值不是合法Base64") from error
+        evidence.append(parameter_evidence(item["id"], raw))
+    audit = _parameter_audit(args)
+    operation_id = audit.begin(
+        operation="restore", node_id=args.node_id,
+        node_uuid=args.expected_uuid,
         expected_generation=args.expected_generation,
-        confirmation=args.confirmation)
+        parameters=evidence)
+    try:
+        snapshot = _parameter_manager(args).restore(
+            backup, expected_uuid=args.expected_uuid,
+            expected_generation=args.expected_generation,
+            confirmation=args.confirmation)
+    except Exception as error:
+        _finish_parameter_audit(audit, operation_id, error)
+        raise
+    applied = snapshot["status"]["generation"] - args.expected_generation
+    audit.finish(operation_id, outcome="success",
+                 generation_after=snapshot["status"]["generation"],
+                 applied_count=applied)
     return {
         "ok": True, "format": "STUDIO_CLI_DEVICE_PARAMETER_RESTORE_V1",
         "snapshot": snapshot,
+        "audit_operation_id": operation_id,
         "execution_status": {
             "software_build": "not_performed", "firmware_flash": "not_performed",
             "hardware_access": True, "device_parameters_written": True,
@@ -510,6 +571,10 @@ def _parser() -> StrictParser:
                              help=f"必须精确填写{WRITE_CONFIRMATION}")
         command.add_argument("--remote-cli", default="remote-cli")
         command.add_argument("--parameter-timeout", type=float, default=3.0)
+        command.add_argument("--audit-dir", required=True,
+                             help="本地参数审计记录目录")
+        command.add_argument("--audit-key-file", required=True,
+                             help="至少32字节的本地参数审计HMAC密钥文件")
 
     parameter_write = sub.add_parser(
         "device-parameter-write", help="显式写入单项设备参数")

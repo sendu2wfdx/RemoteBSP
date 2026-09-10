@@ -24,6 +24,7 @@ from firmware_deployment import (  # noqa: E402
     FirmwareIdentity,
     IdentityCapabilityError,
 )
+from device_parameters import DeviceParameterError  # noqa: E402
 from production_batch import export_production_batch  # noqa: E402
 from production_record import generate_production_record  # noqa: E402
 from studio_cli import (  # noqa: E402
@@ -45,6 +46,8 @@ class StudioCliTest(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
         self.project = json.loads(PROJECT_PATH.read_text(encoding="utf-8"))
+        self.audit_key = self.directory / "audit.key"
+        self.audit_key.write_bytes(b"k" * 32)
         record = generate_production_record(self.project, self.catalog)
         self.record_path = self.directory / "production-record.json"
         self.record_path.write_bytes(record.content)
@@ -246,6 +249,8 @@ class StudioCliTest(unittest.TestCase):
             "--value-base64", "bmV3", "--confirmation",
             "WRITE_DEVICE_PARAMETERS", "--remote-cli", "/bin/remote-cli",
             "--parameter-timeout", "1.5",
+            "--audit-dir", str(self.directory / "write-audit"),
+            "--audit-key-file", str(self.audit_key),
         ]
         with patch("studio_cli.DeviceParameterManager") as manager_type:
             manager_type.return_value.write.return_value = snapshot
@@ -258,17 +263,38 @@ class StudioCliTest(unittest.TestCase):
             parameter_id=0x100, value_base64="bmV3",
             confirmation="WRITE_DEVICE_PARAMETERS")
         self.assertTrue(response["execution_status"]["hardware_access"])
+        self.assertRegex(response["audit_operation_id"], r"^[0-9a-f]{32}$")
+
+        failed_arguments = list(arguments)
+        failed_arguments[failed_arguments.index(str(
+            self.directory / "write-audit"))] = str(
+                self.directory / "failed-write-audit")
+        with patch("studio_cli.DeviceParameterManager") as manager_type:
+            manager_type.return_value.write.side_effect = DeviceParameterError(
+                "设备参数恢复在完成1项后中止；模拟错误")
+            code, error, _, _ = self._call(failed_arguments)
+        self.assertEqual(code, EXIT_OPERATION)
+        records = list((self.directory / "failed-write-audit").glob(
+            "audit-*.json"))
+        self.assertEqual(len(records), 1)
+        audit = json.loads(records[0].read_text(encoding="utf-8"))
+        self.assertEqual(audit["events"][1]["outcome"], "partial_failure")
+        self.assertEqual(audit["events"][1]["applied_count"], 1)
+        self.assertNotIn("bmV3", records[0].read_text(encoding="utf-8"))
 
     def test_device_parameter_restore_reads_bounded_backup(self):
         backup = self.directory / "parameters.json"
         backup.write_text(json.dumps({
             "schema_version": 1, "node_uuid": "ab" * 16,
-            "parameters": []}), encoding="utf-8")
+            "parameters": [{"id": 0x100, "value_base64": "b2xk"}]}),
+            encoding="utf-8")
         arguments = [
             "device-parameter-restore", "--toolbusd-socket", "/tmp/toolbusd.sock",
             "--expected-uuid", "ab" * 16, "--expected-generation", "7",
             "--confirmation", "WRITE_DEVICE_PARAMETERS",
             "--backup", str(backup),
+            "--audit-dir", str(self.directory / "restore-audit"),
+            "--audit-key-file", str(self.audit_key),
         ]
         with patch("studio_cli.DeviceParameterManager") as manager_type:
             manager_type.return_value.restore.return_value = {
