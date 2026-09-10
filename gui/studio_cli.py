@@ -40,7 +40,7 @@ from deployment_record import create_deployment_record, validate_deployment_reco
 from deployment_attempt import (
     EXECUTION_CONFIRMATION, create_absent_attempt, execute_deployment_plan,
     validate_deployment_attempt)
-from deployment_evidence_bundle import create_bundle, verify_bundle
+from deployment_evidence_bundle import create_bundle, import_bundle, verify_bundle
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -391,6 +391,11 @@ def _run_deployment_bundle_create(args) -> dict:
 
 def _run_deployment_bundle_verify(args) -> dict:
     return verify_bundle(_bounded_path(args.bundle, "部署证据包"))
+
+
+def _run_deployment_bundle_import(args) -> dict:
+    return import_bundle(_bounded_path(args.bundle, "部署证据包"),
+                         _bounded_path(args.import_root, "证据包导入目录"))
 
 
 def _run_deployment_execute(args) -> dict:
@@ -967,6 +972,13 @@ def _parser() -> StrictParser:
         help="完全离线验证部署证据ZIP和终态，不访问硬件")
     bundle_verify.add_argument("--bundle", required=True)
     bundle_verify.set_defaults(handler=_run_deployment_bundle_verify)
+
+    bundle_import = sub.add_parser(
+        "deployment-evidence-bundle-import",
+        help="严格离线复验并按整包摘要归档证据ZIP，不解压执行")
+    bundle_import.add_argument("--bundle", required=True)
+    bundle_import.add_argument("--import-root", required=True)
+    bundle_import.set_defaults(handler=_run_deployment_bundle_import)
 
     deployment_execute = sub.add_parser(
         "deployment-execute",

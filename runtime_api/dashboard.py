@@ -29,6 +29,10 @@ class RuntimeDashboard:
             "nodes": {}, "toolbusd_health": []}
         self._series: dict[str, list[dict]] = restored["nodes"]
         self._health_series: list[dict] = restored["toolbusd_health"]
+        self._ipc_instance_id: str | None = None
+        self._ipc_counters: dict[str, int] | None = None
+        self._ipc_sample_identity: tuple[str, int, int] | None = None
+        self._ipc_last_projection: dict | None = None
         self._lock = threading.Lock()
         self._alert_evaluator = AlertRuleEvaluator(
             alert_rules or AlertRuleManager())
@@ -104,8 +108,69 @@ class RuntimeDashboard:
         if overall not in {"healthy", "degraded", "fault", "unknown"}:
             overall = "unknown"
         threshold_alerts = self._alert_evaluator.evaluate(metrics, scope=scope)
+        ipc = snapshot.get("ipc")
+        if not isinstance(ipc, dict):
+            ipc = None
         return {"availability": "available", "overall": overall,
-                "metrics": metrics, "threshold_alerts": threshold_alerts}
+                "metrics": metrics, "threshold_alerts": threshold_alerts,
+                "ipc": copy.deepcopy(ipc)}
+
+    def _observe_ipc(self, raw_health: dict, projected: dict) -> None:
+        ipc = projected.get("ipc")
+        instance_id = raw_health.get("daemon_instance_id")
+        if not isinstance(ipc, dict) or not isinstance(instance_id, str):
+            projected["ipc"] = {"availability": "unknown", "alerts": []}
+            return
+        sample_identity = (instance_id,
+                           raw_health.get("producer_generation"),
+                           raw_health.get("sample_sequence"))
+        if sample_identity == self._ipc_sample_identity and \
+                self._ipc_last_projection is not None:
+            projected["ipc"] = copy.deepcopy(self._ipc_last_projection)
+            projected["threshold_alerts"].extend(
+                copy.deepcopy(self._ipc_last_projection["alerts"]))
+            return
+        counter_names = ("accepted_total", "capacity_rejected_total",
+                         "oversized_frame_total", "timeout_total",
+                         "thread_creation_failed_total")
+        counters = {name: ipc.get(name) for name in counter_names}
+        if any(type(value) is not int or value < 0
+               for value in counters.values()):
+            projected["ipc"] = {"availability": "unknown", "alerts": []}
+            return
+        same_instance = self._ipc_instance_id == instance_id and \
+            self._ipc_counters is not None
+        deltas = {name.removesuffix("_total"): (
+            max(0, counters[name] - self._ipc_counters[name])
+            if same_instance else None) for name in counter_names}
+        alerts = []
+        labels = {"capacity_rejected": "IPC容量拒绝",
+                  "oversized_frame": "IPC超限帧拒绝",
+                  "timeout": "IPC请求超时",
+                  "thread_creation_failed": "IPC线程创建失败"}
+        for name, label in labels.items():
+            delta = deltas[name]
+            alerts.append({"code": f"toolbusd_ipc_{name}",
+                           "severity": "critical" if name ==
+                           "thread_creation_failed" else "warning",
+                           "active": isinstance(delta, int) and delta > 0,
+                           "delta": delta,
+                           "message": label})
+        maximum = ipc.get("maximum_clients")
+        active = ipc.get("active_clients")
+        saturated = type(maximum) is int and maximum > 0 and \
+            type(active) is int and active >= maximum
+        alerts.append({"code": "toolbusd_ipc_saturated",
+                       "severity": "warning", "active": saturated,
+                       "delta": None, "message": "IPC连接容量已饱和"})
+        projected["ipc"] = {**ipc, "availability": "available",
+                            "same_daemon_baseline": same_instance,
+                            "deltas": deltas, "alerts": alerts}
+        projected["threshold_alerts"].extend(alerts)
+        self._ipc_instance_id = instance_id
+        self._ipc_counters = counters
+        self._ipc_sample_identity = sample_identity
+        self._ipc_last_projection = copy.deepcopy(projected["ipc"])
 
     def _node_health(self, value: object) -> dict:
         if not isinstance(value, dict):
@@ -166,6 +231,7 @@ class RuntimeDashboard:
                 toolbusd_health, dict) else None
             if projected_health["availability"] == "available" and isinstance(
                     raw_health, dict):
+                self._observe_ipc(raw_health, projected_health)
                 sample_key = (raw_health.get("producer_generation"),
                               raw_health.get("sample_sequence"))
                 if all(type(value) is int for value in sample_key) and \

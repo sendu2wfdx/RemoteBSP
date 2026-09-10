@@ -99,6 +99,14 @@ class StudioDeploymentWorkflowHttpTests(unittest.TestCase):
                         "attempt_filename": "build-0000-部署尝试-v1.json"})
                 self.assertEqual(packaged["package_sha256"], "1" * 64)
                 bundle.assert_called_once_with("build-0000-部署尝试-v1.json")
+                with patch.object(workflow, "import_evidence_bundle",
+                        return_value={"ok": True, "imported": True,
+                                      "hardware_access": False}) as importer:
+                    imported = post("/api/deployment/history/bundle/import", {
+                        "bundle_base64": "UEs="})
+                self.assertTrue(imported["imported"])
+                self.assertFalse(imported["hardware_access"])
+                importer.assert_called_once_with("UEs=")
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 

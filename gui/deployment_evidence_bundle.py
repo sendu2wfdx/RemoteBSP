@@ -142,6 +142,13 @@ def verify_bundle(path: Path) -> dict:
     expected_names = {item.get("path") for item in manifest.get("entries", [])} | {"manifest.json"}
     if expected_names != set(content):
         raise FirmwareDeploymentError("证据包条目集合与清单不一致")
+    artifact_entry = ("evidence/firmware.elf" if plan.get("backend") ==
+                      "stlink-openocd" else "evidence/firmware.bin")
+    allowed_names = {"manifest.json", "deployment-plan.json",
+        "deployment-attempt.json", "evidence/studio-project.json",
+        "evidence/firmware.config", "evidence/build-record.json", artifact_entry}
+    if set(content) != allowed_names:
+        raise FirmwareDeploymentError("证据包含有私钥、外部工具或其他非白名单条目")
     for item in manifest["entries"]:
         data = content[item["path"]]
         if item.get("byte_count") != len(data) or item.get("sha256") != hashlib.sha256(data).hexdigest():
@@ -150,8 +157,6 @@ def verify_bundle(path: Path) -> dict:
     if plan.get("sha256") != _digest(plan):
         raise FirmwareDeploymentError("证据包计划自哈希无效")
     evidence = plan.get("evidence", {})
-    artifact_entry = ("evidence/firmware.elf" if plan.get("backend") ==
-                      "stlink-openocd" else "evidence/firmware.bin")
     expected_hashes = {
         "evidence/studio-project.json": evidence.get("studio_project_sha256"),
         "evidence/firmware.config": evidence.get("firmware_config_sha256"),
@@ -168,3 +173,31 @@ def verify_bundle(path: Path) -> dict:
     return {"ok": True, "format": FORMAT, "package_sha256": package_sha,
             "manifest_sha256": manifest["sha256"], "outcome": attempt["outcome"],
             "hardware_success_claimed": attempt["hardware_success_claimed"]}
+
+
+def import_bundle(path: Path, import_root: Path) -> dict:
+    """严格复验后原子归档原ZIP；不解压、不执行、不信任原文件名。"""
+    verified = verify_bundle(path)
+    if import_root.exists() and (import_root.is_symlink() or
+                                 not import_root.is_dir()):
+        raise FirmwareDeploymentError("证据包导入目录无效")
+    import_root.mkdir(parents=False, exist_ok=True)
+    target = import_root / f"{verified['package_sha256']}.zip"
+    content = path.read_bytes()
+    if target.exists():
+        if target.is_symlink() or not target.is_file() or \
+                hashlib.sha256(target.read_bytes()).hexdigest() != verified["package_sha256"]:
+            raise FirmwareDeploymentError("同摘要导入包已存在但内容或类型异常")
+        return {**verified, "imported": True, "deduplicated": True,
+                "imported_filename": target.name, "hardware_access": False}
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.",
+                                         suffix=".tmp", dir=import_root)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content); stream.flush(); os.fsync(stream.fileno())
+        os.link(temporary, target); temporary.unlink()
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {**verified, "imported": True, "deduplicated": False,
+            "imported_filename": target.name, "hardware_access": False}

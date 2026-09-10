@@ -275,6 +275,21 @@ studio_cli.py deployment-evidence-bundle-verify --bundle deployment-evidence.zip
 Studio HTTP 使用 `/api/deployment/history/bundle`，只接受已经出现在严格历史索引中的
 attempt 文件名，不接受任意路径。
 
+移交端可用 `deployment-evidence-bundle-import --bundle ... --import-root ...` 完全离线复验
+并导入。导入不会解压到工作区，而是忽略外来文件名，以整包 SHA-256 命名并原子归档原 ZIP；
+重复包按摘要去重。清单之外的任何条目都会被拒绝，因此私钥、OpenOCD、flashtool 或其他
+工具本体不能随包导入。Studio 页面与 `/api/deployment/history/bundle/import` 提供相同流程，
+上传限制为 32 MiB，结果明确显示原 attempt 状态和 `hardware_access=false`。校验失败只返回
+具体的软件证据错误，不访问设备，也不产生部署令牌。
+
+CI/发布候选不能以复用旧 `build/` 的结果作为证据。顶层 CMake 在进入任何测试子目录前
+显式解析 Python 解释器，并注册 `clean_build_registration_tests`：它在临时空目录重新配置
+工程，通过 CTest JSON 清单确认 GUI、Runtime、固件配置、OperationLedger、BusReset 真实
+进程测试及离线证据核验均存在，且所有 Python 入口绑定本次发现的解释器。独立的
+`deployment_evidence_offline_tests` 只读取本地 ZIP 并复算摘要，不访问板卡或网络。发布门禁
+应至少先执行干净配置检查，再构建并运行这些已注册测试；增量目录测试只能作为开发反馈，
+不能替代干净环境结果。
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

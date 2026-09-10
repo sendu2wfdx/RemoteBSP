@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 干净构建必须在任何子目录注册 Python 测试前解析解释器；不能依赖旧缓存
+# 偶然留下 Python3_EXECUTABLE。
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+endif()
+
 add_subdirectory(device_params)
 add_subdirectory(protocol)
 add_subdirectory(transport)
@@ -18,10 +25,8 @@ target_compile_options(remote-cli PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 
-include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME gui_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest discover
                 -s ${CMAKE_SOURCE_DIR}/gui/tests -v)
@@ -44,4 +49,17 @@ if(BUILD_TESTING)
     add_test(NAME generated_pin_choices_are_current
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/firmware/scripts/generate_pin_choices.py --check)
+    add_test(NAME deployment_evidence_offline_tests
+        COMMAND ${Python3_EXECUTABLE} -m unittest
+                gui.tests.test_deployment_evidence_bundle -v)
+    set_tests_properties(deployment_evidence_offline_tests PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME clean_build_registration_tests
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/clean_build_registration_tests.py
+                ${CMAKE_COMMAND} ${CMAKE_CTEST_COMMAND}
+                ${CMAKE_SOURCE_DIR})
+    set_tests_properties(clean_build_registration_tests PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        TIMEOUT 60)
 endif()

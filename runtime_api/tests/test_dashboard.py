@@ -6,6 +6,58 @@ from runtime_api.provider import mock_snapshot
 
 
 class RuntimeDashboardTests(unittest.TestCase):
+    @staticmethod
+    def _ipc_health(instance: str, sequence: int, **changes):
+        ipc = {
+            "active_clients": 1, "maximum_clients": 4,
+            "peak_clients": 2, "accepted_total": 10,
+            "capacity_rejected_total": 0, "oversized_frame_total": 0,
+            "timeout_total": 0, "thread_creation_failed_total": 0,
+        }
+        ipc.update(changes)
+        return {"available": True, "snapshot": {
+            "daemon_instance_id": instance, "overall": "healthy",
+            "producer_generation": 1, "sample_sequence": sequence,
+            "sample_time_ms": sequence, "metrics": [], "ipc": ipc}}
+
+    def test_ipc_health_deltas_alert_recovery_and_restart_boundary(self):
+        dashboard = RuntimeDashboard()
+        first = dashboard.observe(
+            mock_snapshot(), self._ipc_health("a" * 32, 1))
+        self.assertFalse(first["toolbusd_health"]["ipc"][
+            "same_daemon_baseline"])
+        self.assertIsNone(first["toolbusd_health"]["ipc"]["deltas"][
+            "timeout"])
+
+        second = dashboard.observe(mock_snapshot(), self._ipc_health(
+            "a" * 32, 2, active_clients=4, peak_clients=4,
+            capacity_rejected_total=2, oversized_frame_total=1,
+            timeout_total=3, thread_creation_failed_total=1))
+        ipc = second["toolbusd_health"]["ipc"]
+        self.assertEqual(ipc["deltas"]["capacity_rejected"], 2)
+        self.assertEqual(ipc["deltas"]["timeout"], 3)
+        self.assertTrue(all(alert["active"] for alert in ipc["alerts"]))
+        repeated = dashboard.observe(mock_snapshot(), self._ipc_health(
+            "a" * 32, 2, active_clients=4, peak_clients=4,
+            capacity_rejected_total=2, oversized_frame_total=1,
+            timeout_total=3, thread_creation_failed_total=1))
+        self.assertEqual(repeated["toolbusd_health"]["ipc"]["deltas"],
+                         ipc["deltas"])
+
+        recovered = dashboard.observe(mock_snapshot(), self._ipc_health(
+            "a" * 32, 3, capacity_rejected_total=2,
+            oversized_frame_total=1, timeout_total=3,
+            thread_creation_failed_total=1))
+        self.assertFalse(any(alert["active"] for alert in
+                             recovered["toolbusd_health"]["ipc"]["alerts"]))
+
+        restarted = dashboard.observe(
+            mock_snapshot(), self._ipc_health("b" * 32, 1))
+        self.assertFalse(restarted["toolbusd_health"]["ipc"][
+            "same_daemon_baseline"])
+        self.assertTrue(all(value is None for value in restarted[
+            "toolbusd_health"]["ipc"]["deltas"].values()))
+
     def test_web_bus_reset_requires_capability_lease_and_locks_unknown(self):
         script = (Path(__file__).parents[1] / "static" / "dashboard.js").read_text()
         self.assertIn("busResetPermitted", script)

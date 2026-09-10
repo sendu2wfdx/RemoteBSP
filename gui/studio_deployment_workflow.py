@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import tempfile
+import base64
+import binascii
 import threading
 import time
 from datetime import datetime, timezone
@@ -189,6 +191,28 @@ class StudioDeploymentWorkflow:
         return create_bundle(plan=plan, attempt=attempt,
             output_root=self.output_root,
             output=bundle_root / attempt_filename.replace(".json", ".zip"))
+
+    def import_evidence_bundle(self, bundle_base64: object) -> dict:
+        if not isinstance(bundle_base64, str) or len(bundle_base64) > 45 * 1024 * 1024:
+            raise FirmwareDeploymentError("导入证据包Base64无效或过大")
+        try:
+            content = base64.b64decode(bundle_base64, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise FirmwareDeploymentError("导入证据包不是规范Base64") from error
+        if not content or len(content) > 32 * 1024 * 1024:
+            raise FirmwareDeploymentError("导入证据包为空或超过32 MiB")
+        incoming = self.attempt_root / "incoming"
+        incoming.mkdir(exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=".upload-", suffix=".zip",
+                                             dir=incoming)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content); stream.flush(); os.fsync(stream.fileno())
+            from deployment_evidence_bundle import import_bundle
+            return import_bundle(temporary, self.attempt_root / "imported")
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def execute(self, *, confirmation_token: object, execute: object,
                 confirmation: object, expected_uuid: object = None,

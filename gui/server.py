@@ -482,6 +482,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/deployment/usb-katapult/execute",
                         "/api/deployment/history/export",
                         "/api/deployment/history/bundle",
+                        "/api/deployment/history/bundle/import",
                         "/api/device-parameters/write-preflight",
                         "/api/device-parameters/restore-preflight",
                         "/api/device-parameters/execute",
@@ -490,8 +491,10 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 262144:
-                raise ProjectConfigError("请求长度无效或超过256 KiB")
+            maximum_request = (45 * 1024 * 1024 if path ==
+                               "/api/deployment/history/bundle/import" else 262144)
+            if length <= 0 or length > maximum_request:
+                raise ProjectConfigError("请求长度无效或超过端点上限")
             request = json.loads(self.rfile.read(length).decode("utf-8"))
             catalog = None if path.startswith((
                 "/api/production-batch/", "/api/production-history/",
@@ -499,6 +502,19 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
             if path.startswith("/api/deployment/"):
+                if path == "/api/deployment/history/bundle/import":
+                    workflow = self.studio_deployment_workflow
+                    if workflow is None:
+                        self._send_json({"ok": False,
+                            "error": "Studio部署历史未启用"},
+                            HTTPStatus.SERVICE_UNAVAILABLE)
+                        return
+                    if set(request) != {"bundle_base64"}:
+                        raise FirmwareDeploymentError("部署证据包导入字段无效")
+                    response = workflow.import_evidence_bundle(
+                        request["bundle_base64"])
+                    self._send_json(response)
+                    return
                 if path == "/api/deployment/history/bundle":
                     workflow = self.studio_deployment_workflow
                     if workflow is None:

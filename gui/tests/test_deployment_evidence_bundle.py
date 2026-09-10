@@ -10,7 +10,8 @@ GUI_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(GUI_ROOT))
 
 from deployment_attempt import create_absent_attempt  # noqa: E402
-from deployment_evidence_bundle import create_bundle, verify_bundle, _digest  # noqa: E402
+from deployment_evidence_bundle import (  # noqa: E402
+    create_bundle, import_bundle, verify_bundle, _digest)
 from firmware_deployment import FirmwareDeploymentError  # noqa: E402
 
 
@@ -55,6 +56,12 @@ class DeploymentEvidenceBundleTests(unittest.TestCase):
             verified = verify_bundle(one)
             self.assertEqual(verified["outcome"], "absent")
             self.assertFalse(verified["hardware_success_claimed"])
+            imported = import_bundle(one, root / "imported")
+            duplicate = import_bundle(two, root / "imported")
+            self.assertTrue(imported["imported"])
+            self.assertFalse(imported["deduplicated"])
+            self.assertTrue(duplicate["deduplicated"])
+            self.assertFalse(imported["hardware_access"])
             with zipfile.ZipFile(one) as archive:
                 self.assertEqual(archive.namelist(), sorted(archive.namelist()))
 

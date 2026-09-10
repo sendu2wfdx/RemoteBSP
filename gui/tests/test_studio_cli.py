@@ -312,6 +312,15 @@ class StudioCliTest(unittest.TestCase):
                 "deployment-evidence-bundle-verify", "--bundle", str(bundle)])
         self.assertEqual(code, 0); self.assertFalse(response["hardware_success_claimed"])
         verify.assert_called_once_with(bundle)
+        import_root = self.directory / "imported"
+        with patch("studio_cli.import_bundle", return_value={
+                "ok": True, "format": "REMOTEBSP_DEPLOYMENT_EVIDENCE_BUNDLE_V1",
+                "imported": True, "hardware_access": False}) as importer:
+            code, response, _, _ = self._call([
+                "deployment-evidence-bundle-import", "--bundle", str(bundle),
+                "--import-root", str(import_root)])
+        self.assertEqual(code, 0); self.assertFalse(response["hardware_access"])
+        importer.assert_called_once_with(bundle, import_root)
 
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
