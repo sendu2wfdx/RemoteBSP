@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 仅下载 ST 官方 MCU 支持组件，不包含中间件、USB 或板级示例。
+# 仅下载构建正式固件所需的 ST 官方 MCU 支持组件与 USB Device 中间件，
+# 不包含板级示例。CI 会编译 USB Vendor Bulk 正式配置，因此依赖清单必须与
+# build_firmware.sh ci 的目标矩阵保持一致。
 # 每个版本均与对应 STM32Cube 系列版本配套并固定到发布标签。
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 vendor_dir="${root_dir}/vendor"
@@ -38,4 +40,6 @@ clone_component cmsis-device-g4 v1.2.6 \
     https://github.com/STMicroelectronics/cmsis-device-g4.git
 clone_component stm32g4xx-hal-driver v1.2.6 \
     https://github.com/STMicroelectronics/stm32g4xx-hal-driver.git
+clone_component stm32-mw-usb-device v2.11.5 \
+    https://github.com/STMicroelectronics/stm32-mw-usb-device.git
 printf 'STM32 官方依赖准备完成：%s\n' "${vendor_dir}"
