@@ -14,8 +14,9 @@ RemoteBSP 不兼容 Klipper 协议，也不提供完整打印控制栈。它把�
 当前代码已经打通 Linux 主机、Mock MCU、Classical CAN、CAN-FD 和第一版 USB
 Vendor Bulk 主机/Mock/G431 Device 链路，并完成
 STM32F103 实板链路。STM32F103 的 CAN/USB 双模式 Katapult Bootloader 已完成
-实体板下载验证；STM32G431 已完成 CAN-FD 发现、心跳、PING、信息查询和 GPIO
-实板验证。STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
+实体板下载验证；STM32G431 已完成 CAN-FD 发现、心跳、PING、信息/能力查询、压力与
+重启恢复，并在真机发现并修复资源枚举缺口后贯通 5 项静态资源到 RuntimeSnapshot。
+STM32F072/FLY-D5 与 G431 双模式 Bootloader 的模式切换仍待实板验收。
 
 ## 架构
 
@@ -61,7 +62,7 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | CAN流量控制 | Classical CAN/CAN-FD线时间估算、六类业务预算、发送前准入和统计查询 |
 | 静态资源配置 | Studio 工程生成完整 Kconfig `.config` 和 GPIO/UART/PWM/定时位流只读静态表；三板在编译期校验 schema、板型、资源数量与端点符号，并用同一表完成启动校验和运行时白名单，不提供在线改线 |
 | 设备参数 | SN、UUID、硬件版本、制造批次/日期、设备名称与 ADC 校准值；双页 Flash 仿 EEPROM、CRC、代数和掉电安全提交，协议与介质解耦 |
-| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态、复位和会话级租约 |
+| 远程资源 | GPIO、UART、PWM、通用定时位流、STEPGEN 运动轴、I2C/SPI 总线与设备合同、资源枚举、健康状态接口、复位和会话级租约；实体静态资源的错误计数/缓冲水位仍待接入 |
 | 总线与高速流 | I2C/SPI 原子事务、主机/Mock、`toolbusd` 合同缓存与父总线仲裁，以及默认关闭的 STM32 公共 Core/HAL 骨架已实现；H2N/N2H Mock Stream 已覆盖租约、序号、精确 ACK 信用、两阶段交付、背压和会话清理。实体 I2C/SPI BSP、双向 Stream 与真实高速数据面待实现 |
 | 智能步进与跨板事务 | 板卡能力决定的多轴 STEP/DIR/EN 时间线、有界队列和安全停机；跨板事务已接入 `toolbusd`、IPC/API/CLI 和 STM32 公共 Remote Core，固件 STEPGEN 静态独占租约覆盖普通运动与组事务，并在释放、过期或会话结束时安全停机；三款实体板因尚无可靠 `boot_epoch` 来源而安全禁用跨板入口 |
 | Mock MCU | 版本化板卡描述、Classical CAN/CAN-FD、多节点、GPIO、UART、PWM、定时位流、I2C/SPI、H2N/N2H Stream 和运动执行；故障脚本及逻辑 LinkTransport 会话可有界录制并确定性回放双向帧、失败、空结果、delay/drop/duplicate/reboot，文件固定标注为逻辑证据，不冒充真实 CAN/USB 物理层 |
@@ -71,7 +72,7 @@ GPIO、UART、STEP/DIR/EN/DIAG、TMC、PWM 和 WS2812 映射均编译进板卡�
 | 成熟度证据 | `RemoteBSP Maturity v1` 机器可读基线与严格验证器已建立；另有 RemoteBSP/Klipper 公平对照计划与运行记录验证器，强制版本/配置锁定、至少30次样本、三次独立运行、原始文件哈希和安全失败否决。计划仍是 draft、整体结论仍 blocked，不把 Mock、交叉编译或局部实测外推成全面超过 Klipper |
 | STM32F103CBT6 / WeAct BluePill Plus | 外部8 MHz HSE、32.768 kHz LSE资源保留、Classical CAN、GPIO、USART1/2/3、双模式Katapult；三路115200全双工并发各方向1024字节已实板逐字节验证，0错字/0丢失；PA6 PWM、PA8 DMA定时位流及五轴/TMC后端已交叉编译 |
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN 1 Mbit/s、GPIO、五轴运动与五路 TMC2209 通讯已实板验证；PA6 TIM3_CH1 PWM 与 PA8 TIM1_CH1+DMA 定时位流已交叉编译；双模式 Katapult 切换待验收 |
-| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证，实体 WS2812 波形待验收 |
+| STM32G431CBU6 / WeAct STM32G431CBU6 Core | 外部 8 MHz HSE、32.768 kHz LSE 资源保留、CAN-FD 500 kbit/s + 1 Mbit/s BRS、USART1/2/3、PC6 TIM3_CH1 PWM、PA8 TIM1_CH1+DMA 定时位流、PC13 GPIO；CAN-FD、板载 PWM、单轴运动、三路115200全双工并发及 Studio 专用固件资源校验均已实板验证。2026-09-10 真机压力 200/200、4×50 并发全过，2023 字节分片 56 ms，daemon/MCU/CAN 接口恢复通过；修复后枚举 3 UART、PWM0、TimedBitstream0 并由 RuntimeSnapshot 返回。关闭 DL16 官方上位机后已采集 PA6 1 kHz/50% PWM：10 MHz、20 ms、40 边沿、最短脉宽 499.9 µs、0 毛刺；PA0/PA4 仍需复测，不能外推 STEP 或跨板时序 |
 
 I2C/SPI 已完成线协议、`libremotebsp` API、资源合同、严格编解码、Mock BSP、
 设备级故障隔离、Studio 静态端点/合同图形编辑、`toolbusd` 合同懒加载与父总线
@@ -218,6 +219,12 @@ device/inode 核对后清理。
 GitHub 的“软件基线验证”工作流会在主分支、`codex/**` 分支和合并请求上重复执行
 Ubuntu 主机/Mock/vcan 全量测试、成熟度门禁与三类 STM32 正式配置交叉编译，并保留
 JUnit 与固件产物 30 天。该结果属于自动测试和交叉编译证据，不能替代实体板验证。
+2026-09-10 的 G431 实体轮次另完成 CAN-FD 压力、恢复和资源枚举闭环；同轮 72/72
+主机测试及六目标交叉编译仍按软件证据记录。DL16 已在关闭官方上位机后通过
+`atk-logic` 取得 PA6 1 kHz/50% PWM 的 10 MHz、20 ms 原始采集；此前 `incomplete`
+仅发生在 PA0/PA4，不能泛化到所有高电平通道。公共 GND 仍待用户口头确认，且该单路 PWM
+不能替代 STEP、TimedBitstream 或跨板时序验收。
+完整边界见 [G431 CAN-FD 实体验收记录](docs/hardware-evidence-g431-2026-09-10.md)。
 配置入口、静态映射边界、设备参数与Studio构建/烧录目标见
 [固件配置与 RemoteBSP Studio 设计](docs/configuration-and-studio.md)。
 
@@ -477,6 +484,7 @@ CAN 已完全失效时，WeAct BluePill Plus 按住 PA0、WeAct STM32G431CBU6 Co
 - [Mellow FLY-D5 板卡说明](docs/mellow-fly-d5.md)
 - [WeAct BluePill Plus 板卡说明](docs/weact-bluepill-plus.md)
 - [WeAct STM32G431CBU6 Core 板卡说明](docs/weact-stm32g431cbu6-core.md)
+- [2026-09-10 G431 CAN-FD 实体验收记录](docs/hardware-evidence-g431-2026-09-10.md)
 - [STM32 固件编译与烧录](docs/stm32-build-and-flash.md)
 - [Katapult 双模式升级与应急恢复](docs/bootloader-upgrade.md)
 - [USB Vendor Bulk 传输](docs/usb-transport.md)

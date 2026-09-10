@@ -57,6 +57,10 @@
 
 - 对 compare 调度器做 F072/F103/G431 实板步频上限、抖动和 ISR 最坏耗时测试；
 - 用示波器/逻辑分析仪验证 STEP 高低宽度、DIR 建立时间、共享 EN 和同步边沿；
+  2026-09-10 关闭 DL16 官方上位机后，`atk-logic` 已完成 D5/PA6 的 10 MHz、20 ms、
+  200000 样本采集，1 kHz/50%、40 边沿、最短脉宽 499.9 µs、0 毛刺；此前
+  `incomplete` 只发生在 PA0/PA4，仍需确认公共 GND 并复测。单路 PWM 不得记作 STEP、
+  TimedBitstream 或跨板波形验收；
 - 主机四时间戳模型、`TimeSync v1`、Mock `boot_epoch`、同步管理器和 `toolbusd`
   有界周期调度已接入；通用双页启动代次日志及掉电故障注入已完成，但三板尚未划分
   独立保留区并接入回调；下一步增加实体计数器 BSP 和可靠启动代次板级验收，
@@ -77,8 +81,10 @@
 
 - Mock 与 Studio 已共用版本化板卡描述建立 I2C/SPI 总线、设备合同和公开端点；
   Studio 已从同一能力目录生成 GPIO/UART/PWM/定时位流只读静态表，并由三板启动校验
-  和运行时白名单直接消费；下一步迁移运动资源，I2C/SPI 仍须等实体 AF/DMA/电气能力
-  确认后才可进入正式表；
+  和运行时白名单直接消费；2026-09-10 真机发现 STM32 `ResourceEnum` 缺口后，已补齐
+  Enum/Describe/Status/Contract，G431 重刷后枚举 3 UART、PWM0、TimedBitstream0，
+  RuntimeSnapshot 返回 1 节点/5 资源；下一步迁移运动资源，I2C/SPI 仍须等实体
+  AF/DMA/电气能力确认后才可进入正式表；
 - 模拟 STEP/DIR/EN、限位/DIAG、按钮、UART、PWM、WS2812 和设备参数；
 - 注入时钟漂移、CAN 延迟/丢包、队列欠载、资源卡死、掉线和重启；
 - 导出全局时间、本地 tick 和 STEP 边沿，验证同板及跨板同步；
@@ -89,6 +95,9 @@
   仲裁、USB transaction 或真实复位时长；
 
 ## P1：遥测、监控与故障隔离
+
+- 将 STM32 `ResourceStatus` 从接口占位接到 UART/PWM/TimedBitstream/Bus/STEPGEN
+  的真实后端状态、缓冲水位、溢出和失败计数；未接入前不得把全零状态解释为实体健康。
 
 - MCU：CPU/空闲率、ISR 最大耗时、栈水位、运动队列余量、迟到和欠载计数；
 - `toolbusd`：CAN 利用率、排队延迟、丢帧、重试、超时、离线和流量准入统计；
@@ -190,7 +199,7 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 |---|---|---|
 | STM32F072RBT6 / Mellow FLY-D5 | Classical CAN、GPIO、五轴与五路 TMC2209 基础实测 | compare 压力、波形、双模式 Katapult 切换、设备参数掉电测试 |
 | STM32F103CBT6 / WeAct BluePill Plus | Classical CAN、GPIO、USART1、双模式 Katapult | 五轴/TMC、波形、静态 Studio 固件、设备参数实板验收 |
-| STM32G431CBU6 / WeAct Core | CAN-FD、GPIO、PWM、三路UART、单轴转动及Studio专用固件100 STEP空载调度实测 | 五轴/TMC持续负载、USB Vendor Bulk、WS2812波形、双模式 Katapult、参数区验收 |
+| STM32G431CBU6 / WeAct Core | CAN-FD、GPIO、PWM、三路UART、单轴转动、Studio专用固件100 STEP空载调度；2026-09-10 完成200次顺序、4×50并发、2023字节分片、三类恢复及5项静态资源到RuntimeSnapshot实测；DL16已取得PA6 1kHz/50% PWM原始采集 | 确认公共GND并复测PA0/PA4；五轴/TMC持续负载、STEP/TimedBitstream/WS2812波形、USB Vendor Bulk、双模式 Katapult、参数区验收 |
 
 ## 可审计成熟度门槛
 

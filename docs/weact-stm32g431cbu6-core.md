@@ -86,6 +86,37 @@ ST-Link VCP（Windows COM3），USART2/3使用CH348（本次枚举为COM9/COM7�
 6144字节逐字节一致，`dropped_bytes=0`、`lost_events=0`。CAN-FD链路在测试后
 保持ERROR-ACTIVE，TEC/REC均为0；toolbusd没有拒绝流量包。
 
+## 2026-09-10 CAN-FD 压力、恢复与资源枚举复验
+
+本轮使用枚举为 `1d50:606f` 的 CANable2.5 Candlelight/`gs_usb`、固件版本
+`V2J46S32` 的 ST-Link 和同类 G431 核心板。目标探测为 `chipid=0x468`、128 KiB
+Flash、32 KiB SRAM，目标电压约 3.225 V。公开文档不记录下载器序列号和完整节点 UUID。
+
+覆盖前已只读备份原厂 Flash；备份 SHA-256 为
+`11fff4a1abfebc6d9d485c052a5d1cba2fb3cac6aaabd13d1c1a0b0885459dbd`，离线识别与
+WeAct 示例程序相符。读取到 `OPTR=0xFBEFF8AA`、`nSWBOOT0=0`、`nBOOT0=1`。
+板卡专用 CAN-FD APP 经 ST-Link 写入后校验 `verified OK`，节点进入 ready，PING、
+信息和能力查询成功。
+
+实体压力 200/200 成功，4 个客户端各 50 次并发全部成功；普通请求最小 7 ms、平均
+8 ms、p95/最大 10 ms，2023 字节最大 PING 载荷分片往返 56 ms。测试结束保持
+ERROR-ACTIVE，TEC/REC、丢包和 bus-off 均为 0。重启 daemon、复位 MCU 以及将
+`can0` down/up 后均恢复，其中 MCU 复位后约 4 秒恢复可用。
+
+首次真机联调暴露 STM32 `ResourceEnum` 未连接静态资源表。本轮补齐
+Enum/Describe/Status/Contract 后重刷，实体节点枚举出 USART1/2/3、PWM0 和
+TimedBitstream0 共 5 项；`RuntimeSnapshot v2` 返回 1 节点、5 资源。配套 72/72
+主机测试和 F072、F103、F103/BluePill Plus、F072/FLY-D5、G431、G431/WeAct Core
+六目标交叉编译均通过，但它们仍属于软件证据。
+
+ALIENTEK DL16 已被采集工具识别为真正的 `dl16`。关闭官方上位机后，`atk-logic`
+成功采集 D5/PA6 的 1 kHz、50.00% 测试 PWM：10 MHz、20 ms、200000 样本、20 个
+上升沿和 20 个下降沿、最短脉宽 499.9 µs、0 毛刺。原始 CSV 和报告保存在 Git 忽略的
+`hardware-backups/round21/`。此前 `incomplete` 只发生在 PA0/PA4，不能泛化成任一高电平
+通道失败；这两路与公共 GND 仍待确认/复测。单路 PA6 PWM 不能据此关闭 STEP、
+TimedBitstream 或跨板确定性时序 blocker。通道映射、失败现象和完整证据分层见
+[本轮实体验收记录](hardware-evidence-g431-2026-09-10.md)。
+
 ## 构建
 
 在名为 `Ubuntu` 的 WSL 中执行：
