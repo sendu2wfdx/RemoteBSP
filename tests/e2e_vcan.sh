@@ -140,6 +140,22 @@ source_root="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHONPATH="$source_root" python3 \
     "$source_root/tests/health_runtime_process_e2e.py" \
     "$socket_path" "$remote_cli_bin"
+# 完整快照压力结束后，以 Mock 的真实周期心跳重新确认节点在线；不使用
+# 固定 sleep，也不绕过 provider/toolbusd 的在线性判定。
+for _ in $(seq 1 100); do
+    if "$remote_cli_bin" --socket "$socket_path" node-list 2>/dev/null | \
+            grep -Fq 'node_id=1 online=1 ready=1'; then
+        break
+    fi
+    kill -0 "$mock_pid"
+    kill -0 "$daemon_pid"
+    sleep 0.02
+done
+"$remote_cli_bin" --socket "$socket_path" node-list | \
+    grep -Fq 'node_id=1 online=1 ready=1'
+PYTHONPATH="$source_root" python3 \
+    "$source_root/tests/pwm_runtime_process_e2e.py" \
+    "$socket_path" "$remote_cli_bin"
 
 # 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。
 printf -v long_ping '%*s' 2023 ''

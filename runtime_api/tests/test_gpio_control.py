@@ -13,6 +13,7 @@ from runtime_api.auth import (
     CONTROL_LEASE_RELEASE_PERMISSION,
     CONTROL_LEASE_REVOKE_PERMISSION,
     GPIO_WRITE_PERMISSION,
+    PWM_WRITE_PERMISSION,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
     ApiKeyCredential,
@@ -38,6 +39,7 @@ from runtime_api.toolbusd_provider import (
 
 class FakeGpioProvider(MockSnapshotProvider):
     gpio_control_available = True
+    pwm_control_available = True
 
     def __init__(self):
         super().__init__()
@@ -117,6 +119,29 @@ class FakeGpioProvider(MockSnapshotProvider):
         self._operations[outcome["operation_id"]] = outcome
         if self.after_release is not None:
             self.after_release()
+        return outcome
+
+    pwm_control_acquire = gpio_control_acquire
+
+    def pwm_control_configure(self, _daemon, lease, _owner, _node, _resource,
+                              idem, frequency, duty, active_low):
+        outcome = {"operation_id": "8" * 64, "lease_id": lease,
+            "expected_node_uuid": "a" * 32, "resource_id": 0x06000000,
+            "kind": "pwm_configure", "state": "committed", "replayed": False,
+            "recovery": "none", "object_id": 81, "value": None,
+            "frequency_hz": frequency, "duty": duty, "active_low": active_low,
+            "error_code": None}
+        self._operations[("pwm_configure", lease, idem)] = outcome
+        return outcome
+
+    def pwm_control_stop(self, _daemon, lease, _owner, _node, _resource, idem):
+        outcome = {"operation_id": "9" * 64, "lease_id": lease,
+            "expected_node_uuid": "a" * 32, "resource_id": 0x06000000,
+            "kind": "pwm_stop", "state": "committed", "replayed": False,
+            "recovery": "safe_closed", "object_id": 81, "value": None,
+            "frequency_hz": None, "duty": None, "active_low": None,
+            "error_code": None}
+        self._operations[("pwm_stop", lease, idem)] = outcome
         return outcome
 
     def operation_status(self, daemon_id, owner, operation_id):
@@ -334,7 +359,7 @@ def _authenticator():
                        CONTROL_OPERATION_READ_PERMISSION,
                        CONTROL_LEASE_ACQUIRE_PERMISSION,
                        CONTROL_LEASE_RELEASE_PERMISSION,
-                       GPIO_WRITE_PERMISSION})),
+                       GPIO_WRITE_PERMISSION, PWM_WRITE_PERMISSION})),
         ApiKeyCredential(
             "other", "b" * 32,
             frozenset({CONTROL_LEASE_ACQUIRE_PERMISSION,
@@ -401,6 +426,61 @@ class GpioControlHttpTest(unittest.TestCase):
                 self._lease_body())) as response:
             self.assertEqual(response.status, 201)
             return json.loads(response.read())["data"]["lease"]["lease_id"]
+
+    def test_pwm_http_contract_permissions_validation_scope_and_commits(self):
+        lease_body = {"node_id": "mock-node-1", "resource_id": "pwm-0",
+            "command_group": "pwm.write", "ttl_ms": 1000,
+            "idempotency_key": "pwm-lease-1"}
+        code, _ = self._error(self._request(
+            "POST", "/api/v1/control-leases", "d" * 32, lease_body))
+        self.assertEqual(code, 403)
+        with urlopen(self._request("POST", "/api/v1/control-leases",
+                                  "a" * 32, lease_body)) as response:
+            lease_id = json.loads(response.read())["data"]["lease"]["lease_id"]
+        base = {"lease_id": lease_id, "node_id": "mock-node-1",
+                "resource_id": "pwm-0", "idempotency_key": "pwm-config-1",
+                "frequency_hz": 20000, "duty": 4200, "active_low": False}
+        code, _ = self._error(self._request(
+            "POST", "/api/v1/control/pwm/configure", "a" * 32,
+            {**base, "duty": 10001}))
+        self.assertEqual(code, 400)
+        code, _ = self._error(self._request(
+            "POST", "/api/v1/control/pwm/configure", "a" * 32,
+            {**base, "resource_id": "pwm-other"}))
+        self.assertEqual(code, 409)
+        with urlopen(self._request("POST", "/api/v1/control/pwm/configure",
+                                  "a" * 32, base)) as response:
+            configured = json.loads(response.read())["data"]["operation"]
+        self.assertEqual(configured["result"], {"object_id": 81,
+            "frequency_hz": 20000, "duty": 4200, "active_low": False})
+        stop = {"lease_id": lease_id, "node_id": "mock-node-1",
+                "resource_id": "pwm-0", "idempotency_key": "pwm-stop-1"}
+        with urlopen(self._request("POST", "/api/v1/control/pwm/stop",
+                                  "a" * 32, stop)) as response:
+            stopped = json.loads(response.read())["data"]["operation"]
+        self.assertEqual(stopped["result"], {"object_id": 81, "stopped": True})
+
+        def uncertain(_daemon, lease, _owner, _node, _resource, idem,
+                      frequency, duty, active_low):
+            outcome = {"operation_id": "7" * 64, "lease_id": lease,
+                "expected_node_uuid": "a" * 32, "resource_id": 0x06000000,
+                "kind": "pwm_configure", "state": "committed", "replayed": False,
+                "recovery": "none", "object_id": 82, "value": None,
+                "frequency_hz": frequency, "duty": duty,
+                "active_low": active_low, "error_code": None}
+            self.provider._operations[("pwm_configure", lease, idem)] = outcome
+            raise RuntimeProviderOperationError(
+                "backend_unavailable", category="transport",
+                retryable=False, possibly_committed=True)
+        self.provider.pwm_control_configure = uncertain
+        recovered_request = {**base, "idempotency_key": "pwm-recover-1"}
+        with urlopen(self._request("POST", "/api/v1/control/pwm/configure",
+                                  "a" * 32, recovered_request)) as response:
+            recovered = json.loads(response.read())["data"]["operation"]
+        self.assertEqual(recovered["operation_id"], "7" * 64)
+        self.assertTrue(recovered["replayed"])
+        self.assertIn(("pwm_configure", lease_id, "pwm-recover-1"),
+                      self.provider.lookup_calls)
 
     def test_request_deadline_returns_sanitized_gateway_timeout(self):
         self.server.request_io_timeout_seconds = 0.1  # type: ignore[attr-defined]

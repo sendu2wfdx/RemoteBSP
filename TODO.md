@@ -46,9 +46,11 @@
   离线拒绝和同 UUID 重启不复用缓存验证，实体板仍需完成烧录后的自动核验；
 - 非交互生产 CLI 已覆盖工程校验、构建、ST-Link/CAN Katapult 部署、批次生成/校验和
   本地历史，并复用 Studio 后端；下一步增加批量烧号编排、权限、签名和可信时间；
-- PWM 已贯通 `toolbusd` Gate、daemon、IPC、`libremotebsp` client、CLI 和独立持久账本；
-  下一步将 PWM 与 WS2812 接入 Runtime HTTP/Studio 操作页，不允许网页直连 CAN，并完成
-  PWM 本轮实体输出验收；
+- PWM 已贯通 `toolbusd` Gate、daemon、IPC、`libremotebsp` client、CLI、独立持久账本和
+  认证 Runtime HTTP；配置/停止读取 `data.operation.result`，状态统一读取
+  `/api/v1/snapshot`。Studio 已有独立运行时适配界面，但不保存 Bearer/API key；下一步由
+  服务器安全配置发布认证代理和 base paths 后再解锁，禁止网页直连 CAN/toolbusd。WS2812
+  Runtime HTTP/Studio 操作页与 PWM 本轮实体输出验收仍待完成；
 
 验收条件：不进入 `menuconfig`，从一份 Studio 工程可重复得到相同固件，完成构建、
 烧录、重启和回读核对；冲突配置在构建前被定位并拒绝。

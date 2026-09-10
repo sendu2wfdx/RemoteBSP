@@ -27,6 +27,7 @@ from .auth import (
     CONTROL_LEASE_RELEASE_PERMISSION,
     CONTROL_LEASE_REVOKE_PERMISSION,
     GPIO_WRITE_PERMISSION,
+    PWM_WRITE_PERMISSION,
     MAXIMUM_API_KEY_BYTES,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
@@ -107,9 +108,10 @@ _DASHBOARD_ASSETS = {
     "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
 }
 GPIO_WRITE_COMMAND_GROUP = "gpio.write"
+PWM_WRITE_COMMAND_GROUP = "pwm.write"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
 _OPERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
-_OPERATION_KINDS = {"gpio_write", "control_release"}
+_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop"}
 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
 MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
 MAXIMUM_REQUEST_IO_TIMEOUT_SECONDS = 30.0
@@ -725,9 +727,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 "value": outcome["value"],
             } if outcome["state"] == "committed" and
                 outcome["kind"] == "gpio_write" else ({
+                "object_id": outcome["object_id"],
+                "frequency_hz": outcome["frequency_hz"],
+                "duty": outcome["duty"],
+                "active_low": outcome["active_low"],
+            } if outcome["state"] == "committed" and
+                outcome["kind"] == "pwm_configure" else ({
+                "object_id": outcome["object_id"], "stopped": True,
+            } if outcome["state"] == "committed" and
+                outcome["kind"] == "pwm_stop" else ({
                     "released": True,
                 } if outcome["state"] == "committed" and
-                    outcome["kind"] == "control_release" else None)),
+                    outcome["kind"] == "control_release" else None)))),
             "error": error,
         }
 
@@ -1483,6 +1494,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
                             "当前API密钥没有GPIO写权限")
                 return
+            if command_group == PWM_WRITE_COMMAND_GROUP and \
+                    PWM_WRITE_PERMISSION not in principal.permissions:
+                self._error(HTTPStatus.FORBIDDEN, "permission_denied",
+                            "当前API密钥没有PWM写权限")
+                return
             if command_group == GPIO_WRITE_COMMAND_GROUP and \
                     not self.gpio_control_configured:
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1533,6 +1549,18 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self.request_deadline.check()
                 self._admit_gpio_control(
                     daemon_id, operational_revision)
+            elif command_group == PWM_WRITE_COMMAND_GROUP:
+                daemon_id = getattr(self.control_leases, "daemon_instance_id", None)
+                if not isinstance(daemon_id, str):
+                    raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                downstream_started = True
+                call_with_deadline(self.provider.pwm_control_acquire,
+                    daemon_id, lease.lease_id, principal.key_id, node_id,
+                    resource_id, lambda: call_with_deadline(
+                        self.control_leases.remaining_ttl_ms, lease.lease_id,
+                        requester_key_id=principal.key_id,
+                        deadline=self.request_deadline), deadline=self.request_deadline)
+                downstream_registered = True
         except ValueError as error:
             if audit_intent is not None and not self._complete_control_audit(
                     audit_intent, result="rejected",
@@ -1737,9 +1765,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             # 可能提交后的恢复查询必须沿用实际提交时的 owner，不能用
             # 管理员身份派生出另一个 locator。
             operation_owner_key_id = lease.owner_key_id
-            if lease.command_group == GPIO_WRITE_COMMAND_GROUP:
+            if lease.command_group in {GPIO_WRITE_COMMAND_GROUP,
+                                       PWM_WRITE_COMMAND_GROUP}:
                 if not self.gpio_control_configured:
-                    raise ControlLeaseError("GPIO写控制后端不可用")
+                    raise ControlLeaseError("Runtime控制后端不可用")
                 daemon_id = getattr(
                     self.control_leases, "daemon_instance_id", None)
                 if not isinstance(daemon_id, str):
@@ -2009,6 +2038,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         value = self._read_control_json()
         if value is None:
             return
+
         expected = {"lease_id", "node_id", "resource_id",
                     "idempotency_key", "value"}
         if set(value) != expected:
@@ -2259,6 +2289,109 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_operation(
             result, audit_result="gpio_write", principal=principal)
+
+    def _handle_pwm_operation(self, principal: AuthenticatedPrincipal,
+                              *, stop: bool) -> None:
+        value = self._read_control_json()
+        if value is None:
+            return
+        expected = {"lease_id", "node_id", "resource_id", "idempotency_key"}
+        if not stop:
+            expected |= {"frequency_hz", "duty", "active_low"}
+        if set(value) != expected:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "PWM控制请求字段不完整或包含未知字段")
+            return
+        kind = "pwm_stop" if stop else "pwm_configure"
+        action = kind
+        audit_intent = None
+        downstream_started = False
+        try:
+            lease_id = validate_lease_id(value["lease_id"])
+            node_id = validate_control_id(value["node_id"], "node_id")
+            resource_id = validate_control_id(value["resource_id"], "resource_id")
+            idempotency_key = validate_idempotency_key(value["idempotency_key"])
+            fields = dict(value)
+            audit_intent = self._begin_control_audit(
+                principal, action=action, lease_id=lease_id, fields=fields)
+            if audit_intent is None:
+                return
+            lease = call_with_deadline(
+                self.control_leases.authorize, lease_id,
+                requester_key_id=principal.key_id,
+                deadline=self.request_deadline)
+            if lease.command_group != PWM_WRITE_COMMAND_GROUP or \
+                    lease.node_id != node_id or lease.resource_id != resource_id:
+                raise ControlLeaseConflict("控制租约范围与PWM请求不匹配")
+            daemon_id = getattr(self.control_leases, "daemon_instance_id", None)
+            if not isinstance(daemon_id, str):
+                raise ControlLeaseError("toolbusd实例身份尚未绑定")
+            downstream_started = True
+            if stop:
+                outcome = call_with_deadline(
+                    self.provider.pwm_control_stop, daemon_id, lease_id,
+                    principal.key_id, node_id, resource_id, idempotency_key,
+                    deadline=self.request_deadline)
+            else:
+                frequency = value["frequency_hz"]
+                duty = value["duty"]
+                active_low = value["active_low"]
+                if type(frequency) is not int or not 1 <= frequency <= 0xFFFFFFFF:
+                    raise ValueError("frequency_hz必须位于1～4294967295")
+                if type(duty) is not int or not 0 <= duty <= 10000:
+                    raise ValueError("duty必须位于0～10000")
+                if type(active_low) is not bool:
+                    raise ValueError("active_low必须是布尔值")
+                outcome = call_with_deadline(
+                    self.provider.pwm_control_configure, daemon_id, lease_id,
+                    principal.key_id, node_id, resource_id, idempotency_key,
+                    frequency, duty, active_low, deadline=self.request_deadline)
+        except ValueError as error:
+            if audit_intent is not None:
+                self._complete_control_audit(audit_intent, result="rejected",
+                                             possibly_committed=False)
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid", str(error))
+            return
+        except ControlLeaseNotFound as error:
+            self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found", str(error)); return
+        except ControlLeaseOwnershipError as error:
+            self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner", str(error)); return
+        except ControlLeaseConflict as error:
+            self._error(HTTPStatus.CONFLICT, "control_lease_conflict", str(error)); return
+        except RequestDeadlineExceeded:
+            recovered = self._try_operation_lookup(
+                principal.key_id, kind=kind, lease_id=lease_id,
+                idempotency_key=idempotency_key) if downstream_started else None
+            if recovered is None:
+                if downstream_started:
+                    self._operation_uncertain(kind=kind, lease_id=lease_id,
+                                              idempotency_key=idempotency_key)
+                else:
+                    self._error(HTTPStatus.GATEWAY_TIMEOUT,
+                                "control_deadline_exceeded", "控制请求期限已耗尽")
+            else:
+                self._send_operation(recovered, audit_result=kind + "_recovered",
+                                     principal=principal)
+            return
+        except RuntimeProviderOperationError as error:
+            if error.possibly_committed:
+                recovered = self._try_operation_lookup(
+                    principal.key_id, kind=kind, lease_id=lease_id,
+                    idempotency_key=idempotency_key)
+                if recovered is None:
+                    self._operation_uncertain(kind=kind, lease_id=lease_id,
+                                              idempotency_key=idempotency_key)
+                else:
+                    self._send_operation(recovered,
+                                         audit_result=kind + "_recovered",
+                                         principal=principal)
+            else:
+                self._structured_provider_error(error)
+            return
+        if audit_intent is not None and not self._complete_operation_audit(
+                audit_intent, outcome, action=action):
+            return
+        self._send_operation(outcome, audit_result=kind, principal=principal)
 
     def _snapshot(self) -> SnapshotRead | None:
         try:
@@ -2647,6 +2780,21 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                             "GPIO写控制仅在认证回环与toolbusd安全IPC可用时开放")
                 return
             self._handle_gpio_write(principal)
+            return
+        if self.command == "POST" and len(parts) == 5 and \
+                parts[:4] == ["api", API_VERSION, "control", "pwm"] and \
+                parts[4] in {"configure", "stop"}:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "PWM控制要求启用API密钥认证")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=PWM_WRITE_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            self._handle_pwm_operation(principal, stop=parts[4] == "stop")
             return
         if self.command == "POST" and parts == [
                 "api", API_VERSION, "control", "operation-lookups"]:

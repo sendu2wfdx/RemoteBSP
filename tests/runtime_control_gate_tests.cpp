@@ -1615,8 +1615,20 @@ void check_pwm_configure_stop_and_typed_cleanup() {
         command.resource_id, protocol::ResourceType::Pwm, 1U,
         protocol::kResourceFlagNative, 0U, 0U};
     auto pwm_contract = contract(command.resource_id);
+    pwm_contract.access_flags |= protocol::kResourceAccessLeaseRequired;
     gate.acquire(acquire, daemon, 7U, pwm_descriptor, pwm_contract);
-    std::uint32_t creates = 0U, stops = 0U;
+    std::uint32_t creates = 0U, stops = 0U, remote_releases = 0U;
+    bool fail_remote_release = false;
+    gate.bind_pwm_remote_lease(lease, 0x1234U,
+        [&](std::uint32_t node, std::uint64_t generation,
+            const std::array<std::uint8_t, 16>& uuid,
+            std::uint32_t resource, std::uint64_t remote_lease) {
+            assert(node == command.node_id && generation == 7U);
+            assert(uuid == command.expected_node_uuid);
+            assert(resource == command.resource_id && remote_lease == 0x1234U);
+            ++remote_releases;
+            if (fail_remote_release) throw std::runtime_error("模拟ResourceRelease失败");
+        });
     toolbusd::RuntimeControlGate::PwmIo io{
         [&](std::uint32_t frequency, std::uint16_t duty, bool active_low) {
             ++creates; assert(frequency == 20000U); assert(duty == 2500U);
@@ -1647,6 +1659,7 @@ void check_pwm_configure_stop_and_typed_cleanup() {
         stop, daemon, 7U, pwm_descriptor, pwm_contract, io);
     assert(stopped.object_id == 91U && stopped.frequency_hz == 20000U);
     assert(stops == 1U);
+    assert(remote_releases == 0U);
     assert(gate.pwm_stop(stop, daemon, 7U, pwm_descriptor,
                          pwm_contract, io).replayed);
     assert(stops == 1U);
@@ -1656,9 +1669,35 @@ void check_pwm_configure_stop_and_typed_cleanup() {
     toolbusd::RuntimeControlReleaseRequest release;
     release.daemon_instance_id = daemon; release.lease_id = lease;
     release.owner_key_id = command.owner_key_id;
+    fail_remote_release = true;
+    expect_error(toolbusd::RuntimeControlError::SafeStopFailed, [&] {
+        gate.release(release, daemon);
+    });
+    assert(stops == 2U);
+    assert(remote_releases == 1U);
+    fail_remote_release = false;
     gate.release(release, daemon);
     assert(stops == 2U);
+    assert(remote_releases == 2U);
+
+    // 显式 STOP 后只剩远端租约；shutdown 必须仍遍历 LeaseState 并释放。
+    auto shutdown_lease = acquire;
+    shutdown_lease.lease_id[0] = 0x84U;
+    command.lease_id = shutdown_lease.lease_id;
+    command.idempotency_key = "pwm-configure-shutdown";
+    gate.acquire(shutdown_lease, daemon, 7U, pwm_descriptor, pwm_contract);
+    gate.bind_pwm_remote_lease(shutdown_lease.lease_id, 0x5678U,
+        [&](std::uint32_t, std::uint64_t,
+            const std::array<std::uint8_t, 16>&,
+            std::uint32_t, std::uint64_t remote_lease) {
+            assert(remote_lease == 0x5678U); ++remote_releases;
+        });
+    gate.pwm_configure(command, daemon, 7U, pwm_descriptor, pwm_contract, io);
+    stop.lease_id = shutdown_lease.lease_id;
+    stop.idempotency_key = "pwm-stop-shutdown";
+    gate.pwm_stop(stop, daemon, 7U, pwm_descriptor, pwm_contract, io);
     assert(gate.shutdown() == 0U);
+    assert(remote_releases == 3U);
 }
 
 void check_pwm_failed_stop_retains_retryable_object() {

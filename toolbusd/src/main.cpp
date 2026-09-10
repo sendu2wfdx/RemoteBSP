@@ -212,6 +212,8 @@ struct ToolbusDaemonTestOptions {
     std::uint32_t fail_terminal_record_sync_ordinal{};
     std::uint32_t gpio_post_lookup_barrier_participants{};
     std::uint32_t drop_stream_credit_ipc_response_ordinal{};
+    std::uint32_t drop_pwm_acquire_response_ordinal{};
+    std::uint32_t pwm_remote_lease_ttl_ms{};
 #endif
 };
 
@@ -402,7 +404,9 @@ remotebsp::toolbusd::IpcErrorEnvelope gate_error_envelope(
     const bool possibly_committed =
         error.code() == GateCode::SafeStopFailed &&
         (kind == remotebsp::toolbusd::IpcRequestKind::RuntimeGpioWrite ||
-         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeControlRelease);
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimeControlRelease ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmConfigureOperation ||
+         kind == remotebsp::toolbusd::IpcRequestKind::RuntimePwmStopOperation);
     return {remotebsp::toolbusd::kIpcErrorEnvelopeVersion, code, category,
             retryable && !possibly_committed, possibly_committed,
             message};
@@ -543,6 +547,9 @@ public:
                         test_options.gpio_post_lookup_barrier_participants)),
           drop_stream_credit_ipc_response_ordinal_(
               test_options.drop_stream_credit_ipc_response_ordinal),
+          drop_pwm_acquire_response_ordinal_(
+              test_options.drop_pwm_acquire_response_ordinal),
+          test_pwm_remote_lease_ttl_ms_(test_options.pwm_remote_lease_ttl_ms),
 #endif
           socket_path_(std::move(socket_path)) {}
 
@@ -918,6 +925,11 @@ private:
                     if (response.status ==
                             remotebsp::toolbusd::ResponseStatus::Matched &&
                         response.response.has_value()) {
+                        // 经过 session/request/路由匹配的响应同样证明节点仍
+                        // 在线。长快照会连续查询大量资源，不能只靠心跳更新
+                        // 活性，否则合法响应流中也可能跨过离线窗口。
+                        static_cast<void>(nodes_.observe_response(
+                            response_node_id, response_complete_at));
                         responses_[key] = *response.response;
                         state_changed_.notify_all();
                     }
@@ -1230,6 +1242,25 @@ private:
             }
             node_generation = bus_node_generations_[request.node_id];
         }
+        const auto runtime_scope =
+            (static_cast<std::uint64_t>(request.node_id) << 32U) |
+            request.resource_id;
+        {
+            std::lock_guard<std::mutex> policy_lock(
+                runtime_operation_policy_mutex_);
+            const auto quarantined = pwm_remote_lease_quarantine_.find(
+                runtime_scope);
+            if (quarantined != pwm_remote_lease_quarantine_.end()) {
+                if (quarantined->second.first == node_generation &&
+                    std::chrono::steady_clock::now() <
+                        quarantined->second.second) {
+                    throw remotebsp::toolbusd::RuntimeControlException(
+                        remotebsp::toolbusd::RuntimeControlError::LeaseConflict,
+                        "PWM 远端租约结果未知，TTL 安全届满前冻结作用域");
+                }
+                pwm_remote_lease_quarantine_.erase(quarantined);
+            }
+        }
         const auto descriptor = remotebsp::protocol::decode_resource_descriptor(
             request_snapshot_resource(
                 request.node_id,
@@ -1255,22 +1286,115 @@ private:
         // 合同查询在锁外执行。查询期间其他操作的 terminal fsync 可能把
         // 账本切到不可用，因此在 Gate 最终登记前与账本写边界线性化地
         // 二次检查；策略锁不覆盖任何远端 I/O。
-        std::lock_guard<std::mutex> policy_lock(
-            runtime_operation_policy_mutex_);
-        const auto final_blocked = operation_ledger_.blocked_scopes();
-        if (std::any_of(
+        {
+            std::lock_guard<std::mutex> policy_lock(
+                runtime_operation_policy_mutex_);
+            const auto final_blocked = operation_ledger_.blocked_scopes();
+            if (std::any_of(
                 final_blocked.begin(), final_blocked.end(),
                 [&](const auto& scope) {
                     return scope.expected_node_uuid ==
                                request.expected_node_uuid &&
                            scope.resource_id == request.resource_id;
-                })) {
-            throw remotebsp::toolbusd::RuntimeControlException(
-                remotebsp::toolbusd::RuntimeControlError::LeaseConflict,
-                "Runtime 操作账本在合同查询期间阻塞了该节点资源");
+                    })) {
+                throw remotebsp::toolbusd::RuntimeControlException(
+                    remotebsp::toolbusd::RuntimeControlError::LeaseConflict,
+                    "Runtime 操作账本在合同查询期间阻塞了该节点资源");
+            }
+            runtime_control_.acquire(request, daemon_instance_id_,
+                                     node_generation, descriptor, contract);
         }
-        runtime_control_.acquire(request, daemon_instance_id_,
-                                 node_generation, descriptor, contract);
+        if (request.permissions ==
+                remotebsp::toolbusd::kRuntimePermissionPwmWrite &&
+            (contract.access_flags &
+             remotebsp::protocol::kResourceAccessLeaseRequired) != 0U) {
+            const auto remote_ttl = std::min<std::uint32_t>(
+                60000U, request.ttl_ms > 55000U ? 60000U
+                                                : request.ttl_ms + 5000U);
+#ifdef REMOTEBSP_TEST_HOOKS
+            const auto effective_remote_ttl = test_pwm_remote_lease_ttl_ms_ == 0U
+                ? remote_ttl : test_pwm_remote_lease_ttl_ms_;
+#else
+            const auto effective_remote_ttl = remote_ttl;
+#endif
+            bool remote_acquire_response_ok = false;
+            try {
+                const auto response = request_runtime_control_packet(
+                    request.node_id, node_generation,
+                    request.expected_node_uuid,
+                    remotebsp::protocol::Command::ResourceAcquire,
+                    remotebsp::protocol::encode_resource_lease_request(
+                        {request.resource_id, effective_remote_ttl,
+                         remotebsp::protocol::ResourceLeaseMode::Exclusive}),
+                    0U, deadline);
+#ifdef REMOTEBSP_TEST_HOOKS
+                const auto acquire_ordinal =
+                    ++pwm_acquire_response_count_;
+                if (drop_pwm_acquire_response_ordinal_ != 0U &&
+                    acquire_ordinal == drop_pwm_acquire_response_ordinal_) {
+                    throw RuntimeTargetException(
+                        remotebsp::toolbusd::IpcErrorCode::DeadlineExceeded,
+                        true, "测试故障：ResourceAcquire 已提交后丢失响应");
+                }
+#endif
+                remote_acquire_response_ok = true;
+                const auto info = remotebsp::protocol::decode_resource_lease_info(
+                    {response.payload.begin() + 1U, response.payload.end()});
+                if (info.resource_id != request.resource_id ||
+                    info.owner_session_id != session_id_ ||
+                    info.mode != remotebsp::protocol::ResourceLeaseMode::Exclusive ||
+                    info.lease_id == 0U) {
+                    throw std::runtime_error("PWM 远端独占租约响应不匹配");
+                }
+                runtime_control_.bind_pwm_remote_lease(
+                    request.lease_id, info.lease_id,
+                    [this](std::uint32_t node_id, std::uint64_t generation,
+                           const std::array<std::uint8_t, 16>& uuid,
+                           std::uint32_t resource_id, std::uint64_t lease_id) {
+                        static_cast<void>(request_runtime_control_packet(
+                            node_id, generation, uuid,
+                            remotebsp::protocol::Command::ResourceRelease,
+                            remotebsp::protocol::encode_resource_lease_token_request(
+                                {resource_id, lease_id, 0U}), 0U,
+                            std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(1800)));
+                    });
+            } catch (const RuntimeTargetException& error) {
+                if (error.possibly_committed()) {
+                    std::lock_guard<std::mutex> lock(
+                        runtime_operation_policy_mutex_);
+                    pwm_remote_lease_quarantine_[runtime_scope] = {
+                        node_generation, std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(effective_remote_ttl)};
+                }
+                try {
+                    remotebsp::toolbusd::RuntimeControlReleaseRequest rollback;
+                    rollback.daemon_instance_id = request.daemon_instance_id;
+                    rollback.lease_id = request.lease_id;
+                    rollback.owner_key_id = request.owner_key_id;
+                    runtime_control_.release(rollback, daemon_instance_id_);
+                } catch (...) {
+                }
+                throw;
+            } catch (...) {
+                if (remote_acquire_response_ok) {
+                    std::lock_guard<std::mutex> lock(
+                        runtime_operation_policy_mutex_);
+                    pwm_remote_lease_quarantine_[runtime_scope] = {
+                        node_generation, std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(effective_remote_ttl)};
+                }
+                try {
+                    remotebsp::toolbusd::RuntimeControlReleaseRequest rollback;
+                    rollback.daemon_instance_id = request.daemon_instance_id;
+                    rollback.lease_id = request.lease_id;
+                    rollback.owner_key_id = request.owner_key_id;
+                    runtime_control_.release(rollback, daemon_instance_id_);
+                } catch (...) {
+                }
+                throw;
+            }
+        }
     }
 
     remotebsp::toolbusd::RuntimeGpioWriteResult runtime_gpio_write(
@@ -1584,14 +1708,17 @@ private:
         std::uint64_t generation,
         const remotebsp::protocol::ResourceDescriptor& descriptor,
         std::chrono::steady_clock::time_point deadline) {
+        const auto node_id = request.node_id;
+        const auto expected_uuid = request.expected_node_uuid;
+        const auto instance = static_cast<std::uint8_t>(descriptor.instance);
         return {
-            [&, this](std::uint32_t frequency_hz, std::uint16_t duty, bool active_low) {
+            [this, node_id, expected_uuid, generation, instance, deadline](
+                std::uint32_t frequency_hz, std::uint16_t duty, bool active_low) {
                 const auto response = request_runtime_control_packet(
-                    request.node_id, generation, request.expected_node_uuid,
+                    node_id, generation, expected_uuid,
                     remotebsp::protocol::Command::PwmCreate,
                     remotebsp::protocol::encode_pwm_create(
-                        {static_cast<std::uint8_t>(descriptor.instance),
-                         frequency_hz, duty, active_low}),
+                        {instance, frequency_hz, duty, active_low}),
                     0U, deadline);
                 if (response.header.object_id == 0U) {
                     throw RuntimeTargetException(
@@ -1614,7 +1741,8 @@ private:
     remotebsp::toolbusd::RuntimePwmResult runtime_pwm_configure(
         const remotebsp::toolbusd::RuntimePwmConfigureRequest& request,
         const remotebsp::toolbusd::RuntimeControlGate::PwmDurability& durability) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(1800);
         auto [generation, descriptor, contract] = resolve_runtime_pwm(request, deadline);
         return runtime_control_.pwm_configure(request, daemon_instance_id_, generation,
             descriptor, contract, pwm_io(request, generation, descriptor, deadline), durability);
@@ -1623,7 +1751,8 @@ private:
     remotebsp::toolbusd::RuntimePwmResult runtime_pwm_stop(
         const remotebsp::toolbusd::RuntimePwmStopRequest& request,
         const remotebsp::toolbusd::RuntimeControlGate::PwmDurability& durability) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(1800);
         auto [generation, descriptor, contract] = resolve_runtime_pwm(request, deadline);
         remotebsp::toolbusd::RuntimePwmConfigureRequest io_request;
         io_request.node_id = request.node_id;
@@ -3329,7 +3458,10 @@ private:
 #ifdef REMOTEBSP_TEST_HOOKS
     std::unique_ptr<OneShotTestBarrier> gpio_post_lookup_barrier_;
     const std::uint32_t drop_stream_credit_ipc_response_ordinal_{};
+    const std::uint32_t drop_pwm_acquire_response_ordinal_{};
+    const std::uint32_t test_pwm_remote_lease_ttl_ms_{};
     std::atomic<std::uint32_t> stream_credit_ipc_response_count_{0U};
+    std::atomic<std::uint32_t> pwm_acquire_response_count_{0U};
 #endif
     remotebsp::toolbusd::NodeRegistry nodes_;
     remotebsp::toolbusd::BusRuntime bus_runtime_;
@@ -3350,6 +3482,9 @@ private:
     remotebsp::toolbusd::RuntimeControlGate runtime_control_;
     // 只串行化账本可用性/阻断检查与持久写边界，不得覆盖远端 I/O。
     std::mutex runtime_operation_policy_mutex_;
+    std::unordered_map<std::uint64_t,
+        std::pair<std::uint64_t, std::chrono::steady_clock::time_point>>
+        pwm_remote_lease_quarantine_;
     std::timed_mutex runtime_snapshot_mutex_;
     std::mutex state_mutex_;
     std::condition_variable state_changed_;
@@ -3395,6 +3530,8 @@ int main(int argc, char** argv) {
                      " [--test-operation-ledger-fail-terminal-sync 序号]"
                      " [--test-runtime-gpio-post-lookup-barrier 参与数]"
                      " [--test-stream-credit-drop-ipc-response 序号]"
+                     " [--test-pwm-acquire-drop-response 序号]"
+                     " [--test-pwm-remote-lease-ttl-ms 毫秒]"
 #endif
                      "\n";
         return 2;
@@ -3524,6 +3661,16 @@ int main(int argc, char** argv) {
                         "STREAM 信用 IPC 响应丢失测试序号必须为 1～1024 且只能指定一次");
                 }
                 test_options.drop_stream_credit_ipc_response_ordinal = value;
+            } else if (option == "--test-pwm-acquire-drop-response") {
+                if (value > 1024U ||
+                    test_options.drop_pwm_acquire_response_ordinal != 0U)
+                    throw std::invalid_argument("PWM acquire响应丢失测试序号无效");
+                test_options.drop_pwm_acquire_response_ordinal = value;
+            } else if (option == "--test-pwm-remote-lease-ttl-ms") {
+                if (value < 100U || value > 5000U ||
+                    test_options.pwm_remote_lease_ttl_ms != 0U)
+                    throw std::invalid_argument("PWM 测试远端租约TTL必须为100～5000ms");
+                test_options.pwm_remote_lease_ttl_ms = value;
 #endif
             } else {
                 throw std::invalid_argument("未知 toolbusd 选项");

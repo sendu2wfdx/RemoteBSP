@@ -924,6 +924,12 @@ protocol::Packet RemoteCore::handle_resource_status(
             status.error_flags |= protocol::kResourceErrorBackendFailure;
             status.health = protocol::ResourceHealth::Failed;
         }
+    } else if (found->type == protocol::ResourceType::Pwm) {
+        const bool active = std::any_of(
+            pwm_objects_.begin(), pwm_objects_.end(), [&](const auto& entry) {
+                return entry.second.channel == found->instance;
+            });
+        if (active) status.health = protocol::ResourceHealth::Busy;
     } else if (found->type ==
                    protocol::ResourceType::StepgenAxis &&
                motion_) {
@@ -986,6 +992,13 @@ protocol::Packet RemoteCore::handle_resource_status(
             status.error_flags |= protocol::kResourceErrorBackendFailure;
             status.health = protocol::ResourceHealth::Failed;
         }
+    }
+    const auto resource_leases = leases_.find(resource_id);
+    const bool exclusively_leased = resource_leases != leases_.end() &&
+                                    !resource_leases->second.empty();
+    if (exclusively_leased &&
+        status.health == protocol::ResourceHealth::Normal) {
+        status.health = protocol::ResourceHealth::Busy;
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
     const auto encoded = protocol::encode_resource_status(status);
@@ -2737,6 +2750,7 @@ protocol::Packet RemoteCore::handle_pwm_stop(
     } catch (const std::exception&) {
         return make_response(request, StatusCode::ResourceFailed);
     }
+    pwm_objects_.erase(found);
     return make_response(request, StatusCode::Ok);
 }
 

@@ -92,6 +92,8 @@ public:
     bool mark_assignment_unconfirmed(const protocol::NodeUuid& uuid);
     bool accept_heartbeat(const protocol::Packet& heartbeat,
                           TimePoint now = Clock::now());
+    bool observe_response(std::uint32_t node_id,
+                          TimePoint now = Clock::now()) noexcept;
     std::vector<protocol::NodeUuid> expire(TimePoint now = Clock::now());
 
     /*

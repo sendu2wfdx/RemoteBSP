@@ -1,10 +1,13 @@
 # Runtime PWM 控制边界
 
 > 当前实现状态（2026-09-11）：独立 PWM 持久操作账本及 v1 读取兼容/v2 写入已经完成，
-> `toolbusd` Gate、daemon、IPC、`libremotebsp` client 与 `remote-cli` 已贯通 configure/stop。
-> 租约释放、过期和 daemon 关停按对象类型执行 `PWM_STOP`，不复用 GPIO close 语义。
-> Runtime HTTP、Studio 操作入口和从认证 HTTP 到 Mock 的三进程闭环尚未接入；本轮也没有
-> 新增实体 PWM 输出验收，因此仍不能宣称 Runtime/Studio PWM 端到端功能完成。
+> `toolbusd` Gate、daemon、IPC、`libremotebsp` client、`remote-cli` 与认证 Runtime HTTP 已
+> 贯通 configure/stop。HTTP 使用 `POST /api/v1/control/pwm/configure|stop`，响应结果位于
+> `data.operation.result`，资源状态统一从 `GET /api/v1/snapshot` 读取。租约释放、过期和
+> daemon 关停按对象类型执行 `PWM_STOP`，不复用 GPIO close 语义。Studio 已有与工程配置面
+> 分离的运行时适配界面，但不保存 Bearer/API key；服务器尚未配置安全认证代理与 base
+> paths，入口保持默认禁用。从认证 HTTP 到 Mock 的三进程闭环和实体 PWM 输出本轮均未新增
+> 验收，因此仍不能宣称 Studio 或实体 PWM 端到端功能完成。
 
 ## 目标
 
@@ -86,9 +89,9 @@ Remote Core 的 `PWM_STOP` 已定义对象释放语义，并能使资源状态�
 若 `PWM_STOP` 响应不确定，保留对象 ID、节点 generation 和 UUID，冻结本作用域并只允许以
 同一幂等操作查询/恢复；不得创建第二个对象，也不得假定资源已经空闲。
 
-## HTTP 最小合同
+## HTTP 合同
 
-建议保留一个原子配置端点和通用租约释放端点：
+稳定合同提供一个原子配置端点和一个显式停止端点；两者都需要 Bearer/API key：
 
 `POST /api/v1/control/pwm/configure`
 
@@ -103,6 +106,15 @@ Remote Core 的 `PWM_STOP` 已定义对象释放语义，并能使资源状态�
   "active_low": false
 }
 ```
+
+`POST /api/v1/control/pwm/stop`
+
+响应中的控制结果固定读取 `data.operation.result`，不得假设结果位于顶层。资源当前状态不
+提供独立 PWM status 端点，统一从 `GET /api/v1/snapshot` 的节点资源快照读取。
+
+Studio 不持久化认证密钥，也不允许浏览器绕过 Runtime 直连 CAN/toolbusd。只有服务器以安全
+配置发布认证代理及 `configure_path`、`stop_path`、`snapshot_path` 后，Studio 才能解锁；
+当前未配置，因此操作按钮失败关闭。
 
 显式 stop 也必须带独立幂等键；不能仅依赖无幂等键的租约 DELETE 来表达设备控制操作。
 HTTP 请求期限是单调绝对期限，并沿调用链传至 provider。下游开始前超时可安全重试；下游

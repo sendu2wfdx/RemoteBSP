@@ -289,6 +289,23 @@ add_test(
 set_tests_properties(e2e_usb_mock_tests PROPERTIES RUN_SERIAL TRUE)
 
 add_test(
+    NAME pwm_lease_required_process_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/pwm_lease_required_e2e.sh
+            $<TARGET_FILE:mock_mcu>
+            $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli>
+            ${CMAKE_SOURCE_DIR}
+)
+set_tests_properties(pwm_lease_required_process_tests PROPERTIES RUN_SERIAL TRUE)
+add_test(
+    NAME pwm_acquire_quarantine_process_tests
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/pwm_lease_required_e2e.sh
+            $<TARGET_FILE:mock_mcu> $<TARGET_FILE:toolbusd>
+            $<TARGET_FILE:remote-cli> ${CMAKE_SOURCE_DIR} quarantine
+)
+set_tests_properties(pwm_acquire_quarantine_process_tests PROPERTIES RUN_SERIAL TRUE)
+
+add_test(
     NAME multi_node_usb_mock_tests
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/multi_node_e2e.sh
             $<TARGET_FILE:mock_mcu>

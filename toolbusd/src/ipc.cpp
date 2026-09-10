@@ -420,7 +420,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::LogicalRecordingStatus)) {
+                      IpcRequestKind::RuntimePwmStopOperation)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);

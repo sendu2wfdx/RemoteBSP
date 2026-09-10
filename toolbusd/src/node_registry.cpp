@@ -145,6 +145,18 @@ bool NodeRegistry::accept_heartbeat(const protocol::Packet& heartbeat,
     return true;
 }
 
+bool NodeRegistry::observe_response(std::uint32_t node_id,
+                                    TimePoint now) noexcept {
+    for (auto& entry : nodes_) {
+        auto& node = entry.second;
+        if (node.node_id == node_id && node.assigned && node.online) {
+            node.last_seen = now;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<protocol::NodeUuid> NodeRegistry::expire(TimePoint now) {
     std::vector<protocol::NodeUuid> offline;
     for (auto& entry : nodes_) {

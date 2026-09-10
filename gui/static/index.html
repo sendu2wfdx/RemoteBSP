@@ -40,11 +40,12 @@
       </section>
 
       <section class="view" id="view-control">
-        <article class="card control-intro"><div><span class="tag live">LIVE CONTROL</span><h2>设备实时控制</h2><p>这里放运行时操作，不改变资源清单。当前为交互原型，操作只影响本地预览，后续统一通过 toolbusd IPC 下发。</p></div><span class="state-pill">原型模式</span></article>
+        <article class="card control-intro"><div><span class="tag live">LIVE CONTROL</span><h2>设备实时控制</h2><p>运行时操作与资源配置、固件构建严格分离。Studio 只通过 Runtime HTTP 适配层操作，不直连 CAN 或 toolbusd。</p></div><span class="state-pill" id="runtimePwmMode">等待 Runtime PWM HTTP</span></article>
         <div class="control-grid">
           <article class="card"><div class="card-head"><div><span class="tag">GPO</span><h2>数字输出</h2></div><small>即时电平</small></div><div class="control-list" id="controlGpio"></div></article>
           <article class="card"><div class="card-head"><div><span class="tag pwm">PWM</span><h2>PWM 输出</h2></div><small>启停 / 实时占空比</small></div><div class="control-list" id="controlPwm"></div></article>
         </div>
+        <article class="card runtime-pwm-panel"><div class="card-head"><div><span class="tag pwm">RUNTIME HTTP ADAPTER</span><h2>PWM 运行时操作</h2><p class="muted">此入口不修改 Studio 工程；Studio 不保存 API key，服务器未配置 Runtime 认证代理时保持失败关闭。</p></div><button class="ghost" id="runtimePwmRefresh">刷新快照状态</button></div><div class="resource-fields"><label>节点稳定 ID<input id="runtimePwmNode" maxlength="80" placeholder="node-&lt;UUID&gt;"></label><label>PWM 资源 ID<input id="runtimePwmResource" maxlength="32" placeholder="resource-06000000"></label><label>控制租约 ID<input id="runtimePwmLease" maxlength="64" autocomplete="off"></label><label>幂等键<input id="runtimePwmIdempotency" maxlength="64" autocomplete="off"></label><label>频率<input id="runtimePwmFrequency" type="number" min="1" max="1000000" value="1000"><span>Hz</span></label><label>占空比<input id="runtimePwmDuty" type="number" min="0" max="10000" value="5000"><span>万分比</span></label><label>有效极性<select id="runtimePwmPolarity"><option value="high">高有效</option><option value="low">低有效</option></select></label></div><div class="card-actions"><button class="primary" id="runtimePwmConfigure" disabled>配置 PWM</button><button class="stop" id="runtimePwmStop" disabled>停止 PWM</button></div><div id="runtimePwmStatus" class="compare-result">正在检查 Runtime PWM HTTP 能力…</div></article>
         <article class="card"><div class="card-head"><div><span class="tag pixel">WS2812</span><h2>灯带输出</h2></div><small>颜色属于运行时数据</small></div><div class="control-list strip-controls" id="controlStrips"></div></article>
       </section>
 

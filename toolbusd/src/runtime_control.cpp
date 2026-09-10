@@ -147,7 +147,8 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
             const auto object = gpio_objects_.find(scope);
             const auto pwm_object = pwm_objects_.find(scope);
             if (object == gpio_objects_.end() &&
-                pwm_object == pwm_objects_.end()) {
+                pwm_object == pwm_objects_.end() &&
+                !iterator->second.remote_lease_releaser) {
                 leases_by_scope_.erase(scope);
                 iterator = leases_.erase(iterator);
                 continue;
@@ -155,11 +156,19 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
             // 先完成所有可能抛异常的复制/扩容，再发布 in-flight 占位。
             // 若后续任一作用域准备失败，catch 会回滚本批次全部占位。
             if (pwm_object != pwm_objects_.end()) {
-                tasks.push_back({scope, iterator->first, {},
-                                 pwm_object->second});
+                tasks.push_back({scope, iterator->first, {}, pwm_object->second,
+                    iterator->second.resource_id, iterator->second.node_generation,
+                    iterator->second.expected_node_uuid,
+                    iterator->second.remote_lease_id,
+                    iterator->second.remote_lease_releaser});
             } else {
-                tasks.push_back({scope, iterator->first, object->second,
-                                 std::nullopt});
+                tasks.push_back({scope, iterator->first,
+                    object == gpio_objects_.end() ? GpioObject{} : object->second,
+                    std::nullopt, iterator->second.resource_id,
+                    iterator->second.node_generation,
+                    iterator->second.expected_node_uuid,
+                    iterator->second.remote_lease_id,
+                    iterator->second.remote_lease_releaser});
             }
             if (!in_flight_scopes_.insert(scope).second) {
                 tasks.pop_back();
@@ -259,10 +268,26 @@ std::size_t RuntimeControlGate::finish_cleanup(
                 stopped = true;
             } catch (...) {
             }
+            bool released = !task.remote_lease_releaser;
+            if (stopped && task.remote_lease_releaser) {
+                try {
+                    task.remote_lease_releaser(
+                        static_cast<std::uint32_t>(task.scope >> 32U),
+                        task.node_generation, task.expected_node_uuid,
+                        task.resource_id, task.remote_lease_id);
+                    released = true;
+                } catch (...) {
+                }
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             in_flight_scopes_.erase(task.scope);
             if (stopped) {
+                // PWM_STOP 已确定成功后对象永久退休；若随后远端租约释放
+                // 失败，重试路径只能重放 ResourceRelease，不能再次 STOP
+                // 已不存在的对象。
                 pwm_objects_.erase(task.scope);
+            }
+            if (stopped && released) {
                 erase_lease_locked(task.lease_key);
             } else if (retain_failed) {
                 const auto lease = leases_.find(task.lease_key);
@@ -270,7 +295,28 @@ std::size_t RuntimeControlGate::finish_cleanup(
             }
             scope_available_.notify_all();
             expiry_changed_.notify_all();
-            if (!stopped) ++failures;
+            if (!stopped || !released) ++failures;
+            continue;
+        }
+        if (!task.object.safe_stopper && task.remote_lease_releaser) {
+            bool released = false;
+            try {
+                task.remote_lease_releaser(
+                    static_cast<std::uint32_t>(task.scope >> 32U),
+                    task.node_generation, task.expected_node_uuid,
+                    task.resource_id, task.remote_lease_id);
+                released = true;
+            } catch (...) {
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            in_flight_scopes_.erase(task.scope);
+            if (released) erase_lease_locked(task.lease_key);
+            else if (retain_failed) {
+                const auto lease = leases_.find(task.lease_key);
+                if (lease != leases_.end()) lease->second.cleanup_failed = true;
+            }
+            scope_available_.notify_all(); expiry_changed_.notify_all();
+            if (!released) ++failures;
             continue;
         }
         if (stop_in_flight_scope(
@@ -284,6 +330,23 @@ std::size_t RuntimeControlGate::finish_cleanup(
         }
     }
     return failures;
+}
+
+void RuntimeControlGate::bind_pwm_remote_lease(
+    const std::array<std::uint8_t, 16>& lease_id,
+    std::uint64_t remote_lease_id, PwmLeaseReleaser releaser) {
+    if (remote_lease_id == 0U || !releaser)
+        reject(RuntimeControlError::InvalidRequest,
+               "PWM 远端租约绑定字段无效");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = leases_.find(binary_id(lease_id));
+    if (found == leases_.end() ||
+        found->second.permissions != kRuntimePermissionPwmWrite ||
+        found->second.remote_lease_id != 0U)
+        reject(RuntimeControlError::LeaseConflict,
+               "PWM 远端租约无法绑定到当前本地租约");
+    found->second.remote_lease_id = remote_lease_id;
+    found->second.remote_lease_releaser = std::move(releaser);
 }
 
 void RuntimeControlGate::acquire(
@@ -321,8 +384,9 @@ void RuntimeControlGate::acquire(
          protocol::kResourceAccessExclusiveWrite) == 0U ||
         (contract.access_flags &
          protocol::kResourceAccessLeaseSupported) == 0U ||
-        (contract.access_flags & protocol::kResourceAccessLeaseRequired) !=
-            0U) {
+        (expected_type == protocol::ResourceType::Gpio &&
+         (contract.access_flags & protocol::kResourceAccessLeaseRequired) !=
+             0U)) {
         reject(RuntimeControlError::ContractRejected,
                "目标资源不是允许独占写入的静态合同");
     }
@@ -390,7 +454,7 @@ void RuntimeControlGate::acquire(
                    request.owner_key_id,
                    request.permissions, request.node_id,
                    request.resource_id, node_generation, deadline,
-                   admission_id});
+                   admission_id, false, 0U, {}});
     if (!inserted_lease.second) {
         reject(RuntimeControlError::LeaseConflict,
                "Runtime 控制租约 ID 并发登记冲突");
@@ -892,8 +956,7 @@ RuntimePwmResult RuntimeControlGate::pwm_configure(
         contract.resource_id != request.resource_id ||
         (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
         (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
-        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U ||
-        (contract.access_flags & protocol::kResourceAccessLeaseRequired) != 0U)
+        (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U)
         reject(RuntimeControlError::ContractRejected,
                "目标资源不是允许独占写入的静态 PWM 合同");
 
@@ -1014,7 +1077,9 @@ RuntimePwmResult RuntimeControlGate::pwm_configure(
             reject(RuntimeControlError::LeaseExpired,
                    "PWM 创建完成时租约已失效");
         }
-        if (durable) durability.committed(result);
+        if (durable) {
+            durability.committed(result);
+        }
         lock.lock();
         auto saved = pwm_completed_.find(key);
         saved->second.result = result;
@@ -1101,7 +1166,6 @@ RuntimePwmResult RuntimeControlGate::pwm_stop(
         (contract.access_flags & protocol::kResourceAccessWritable) == 0U ||
         (contract.access_flags & protocol::kResourceAccessExclusiveWrite) == 0U ||
         (contract.access_flags & protocol::kResourceAccessLeaseSupported) == 0U ||
-        (contract.access_flags & protocol::kResourceAccessLeaseRequired) != 0U ||
         (durable && (!durability.pending || !durability.committed ||
                      !durability.failed)))
         reject(RuntimeControlError::InvalidRequest, "Runtime PWM stop 请求无效");
@@ -1255,7 +1319,10 @@ void RuntimeControlGate::release(
         found->second.admission_id};
     const auto pwm_object = pwm_objects_.find(scope);
     if (pwm_object != pwm_objects_.end()) {
-        CleanupTask task{scope, lease_key, {}, pwm_object->second};
+        CleanupTask task{scope, lease_key, {}, pwm_object->second,
+            found->second.resource_id, found->second.node_generation,
+            found->second.expected_node_uuid, found->second.remote_lease_id,
+            found->second.remote_lease_releaser};
         if (!in_flight_scopes_.insert(scope).second)
             reject(RuntimeControlError::LeaseConflict,
                    "Runtime PWM 清理占位冲突");
@@ -1282,9 +1349,30 @@ void RuntimeControlGate::release(
     }
     const auto object = gpio_objects_.find(scope);
     if (object == gpio_objects_.end()) {
-        if (found->second.cleanup_failed) {
+        if (found->second.cleanup_failed &&
+            !found->second.remote_lease_releaser) {
             reject(RuntimeControlError::SafeStopFailed,
                    "GPIO_CREATE 结果未知，节点换代前不能释放清理占位");
+        }
+        if (found->second.remote_lease_releaser) {
+            CleanupTask task{scope, lease_key, {}, std::nullopt,
+                found->second.resource_id, found->second.node_generation,
+                found->second.expected_node_uuid, found->second.remote_lease_id,
+                found->second.remote_lease_releaser};
+            if (!in_flight_scopes_.insert(scope).second)
+                reject(RuntimeControlError::LeaseConflict,
+                       "Runtime PWM 远端租约清理占位冲突");
+            lock.unlock();
+            if (durability_enabled) durability.pending(resolved);
+            if (finish_cleanup({std::move(task)}, true) != 0U) {
+                if (durability_enabled) durability.failed(
+                    DurableRecovery::ScopeBlocked,
+                    RuntimeControlError::SafeStopFailed);
+                reject(RuntimeControlError::SafeStopFailed,
+                       "ResourceRelease 未获得确定成功，租约保持故障占位");
+            }
+            if (durability_enabled) durability.committed();
+            return;
         }
         if (!durability_enabled) {
             erase_lease_locked(lease_key);
@@ -1317,7 +1405,10 @@ void RuntimeControlGate::release(
     }
     // CleanupTask/std::function 的复制与分配先完成，再发布 in-flight。
     // 任一异常都保持 lease/object 原样，可由调用者重试。
-    CleanupTask task{scope, lease_key, object->second, std::nullopt};
+    CleanupTask task{scope, lease_key, object->second, std::nullopt,
+        found->second.resource_id, found->second.node_generation,
+        found->second.expected_node_uuid, found->second.remote_lease_id,
+        found->second.remote_lease_releaser};
     if (!in_flight_scopes_.insert(scope).second) {
         reject(RuntimeControlError::LeaseConflict,
                "Runtime GPIO 清理占位冲突");
@@ -1413,8 +1504,14 @@ std::size_t RuntimeControlGate::shutdown() {
                     lease_key = owner->second;
                 }
                 // 先完成任务复制，再发布占位；异常时统一回滚本批次。
+                const auto lease = leases_.find(lease_key);
                 tasks.push_back({object.first, std::move(lease_key),
-                                 object.second, std::nullopt});
+                    object.second, std::nullopt,
+                    lease == leases_.end() ? 0U : lease->second.resource_id,
+                    lease == leases_.end() ? 0U : lease->second.node_generation,
+                    lease == leases_.end() ? std::array<std::uint8_t, 16>{} : lease->second.expected_node_uuid,
+                    lease == leases_.end() ? 0U : lease->second.remote_lease_id,
+                    lease == leases_.end() ? PwmLeaseReleaser{} : lease->second.remote_lease_releaser});
                 if (!in_flight_scopes_.insert(object.first).second) {
                     tasks.pop_back();
                 }
@@ -1423,10 +1520,33 @@ std::size_t RuntimeControlGate::shutdown() {
                 std::string lease_key;
                 const auto owner = leases_by_scope_.find(object.first);
                 if (owner != leases_by_scope_.end()) lease_key = owner->second;
+                const auto lease = leases_.find(lease_key);
                 tasks.push_back({object.first, std::move(lease_key), {},
-                                 object.second});
+                    object.second,
+                    lease == leases_.end() ? 0U : lease->second.resource_id,
+                    lease == leases_.end() ? 0U : lease->second.node_generation,
+                    lease == leases_.end() ? std::array<std::uint8_t, 16>{} : lease->second.expected_node_uuid,
+                    lease == leases_.end() ? 0U : lease->second.remote_lease_id,
+                    lease == leases_.end() ? PwmLeaseReleaser{} : lease->second.remote_lease_releaser});
                 if (!in_flight_scopes_.insert(object.first).second)
                     tasks.pop_back();
+            }
+            // PWM_STOP 已成功但 ResourceRelease 未确认时对象表为空，远端
+            // token 仍必须在 shutdown 中重试，不能被最终 clear 掩盖。
+            for (const auto& lease_entry : leases_) {
+                const auto& lease = lease_entry.second;
+                const auto scope = scope_key(lease.node_id, lease.resource_id);
+                if (!lease.remote_lease_releaser ||
+                    gpio_objects_.find(scope) != gpio_objects_.end() ||
+                    pwm_objects_.find(scope) != pwm_objects_.end() ||
+                    in_flight_scopes_.find(scope) != in_flight_scopes_.end()) {
+                    continue;
+                }
+                tasks.push_back({scope, lease_entry.first, {}, std::nullopt,
+                    lease.resource_id, lease.node_generation,
+                    lease.expected_node_uuid, lease.remote_lease_id,
+                    lease.remote_lease_releaser});
+                if (!in_flight_scopes_.insert(scope).second) tasks.pop_back();
             }
         } catch (...) {
             for (const auto& task : tasks) {
@@ -1445,7 +1565,8 @@ std::size_t RuntimeControlGate::shutdown() {
             const auto scope = scope_key(lease.second.node_id,
                                          lease.second.resource_id);
             if (lease.second.cleanup_failed &&
-                gpio_objects_.find(scope) == gpio_objects_.end()) {
+                gpio_objects_.find(scope) == gpio_objects_.end() &&
+                !lease.second.remote_lease_releaser) {
                 ++unknown_object_failures;
             }
         }

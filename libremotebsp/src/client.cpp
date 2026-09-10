@@ -176,8 +176,9 @@ RuntimeOperationOutcome public_operation_outcome(
     result.replayed = source.replayed;
     if (source.object_id != 0U) {
         result.object_id = source.object_id;
-        result.value = source.value;
-        if (source.kind == toolbusd::RuntimeOperationKind::PwmConfigure) {
+        if (source.kind == toolbusd::RuntimeOperationKind::GpioWrite) {
+            result.value = source.value;
+        } else if (source.kind == toolbusd::RuntimeOperationKind::PwmConfigure) {
             result.frequency_hz = source.frequency_hz;
             result.duty = source.duty;
             result.active_low = source.active_low;

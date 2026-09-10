@@ -157,11 +157,13 @@ void test_discovery_assignment_and_heartbeat(std::size_t mtu) {
     CHECK(registry.accept_heartbeat(
         heartbeat, start + std::chrono::milliseconds(600)));
     CHECK(registry.find(identity.uuid)->assigned);
+    CHECK(registry.observe_response(
+        25, start + std::chrono::milliseconds(1500)));
     CHECK(registry.expire(
-              start + std::chrono::milliseconds(2599))
+              start + std::chrono::milliseconds(3499))
               .empty());
     const auto offline =
-        registry.expire(start + std::chrono::milliseconds(2600));
+        registry.expire(start + std::chrono::milliseconds(3500));
     CHECK(offline.size() == 1);
     CHECK(offline[0] == identity.uuid);
     CHECK(registry.online_count() == 0);

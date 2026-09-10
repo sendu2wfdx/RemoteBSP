@@ -69,7 +69,7 @@ void test_pwm() {
 
     auto duplicate = request(protocol::Command::PwmCreate, 4);
     duplicate.payload = protocol::encode_pwm_create({0, 1000, 0, false});
-    status(core.handle(duplicate), mock_mcu::StatusCode::ResourceBusy);
+    status(core.handle(duplicate), mock_mcu::StatusCode::Ok);
 }
 
 void test_timed_bitstream() {

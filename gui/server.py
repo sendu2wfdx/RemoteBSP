@@ -196,6 +196,17 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 "parallel_jobs": self.build_jobs,
                 "project_schema_version": CURRENT_PROJECT_SCHEMA_VERSION,
                 "runtime_control_enabled": False,
+                "runtime_pwm": {
+                    "available": False,
+                    "auth_proxy": False,
+                    "reason": "runtime_pwm_auth_proxy_unconfigured",
+                    "contract": {
+                        "configure": "POST /api/v1/control/pwm/configure",
+                        "stop": "POST /api/v1/control/pwm/stop",
+                        "snapshot": "GET /api/v1/snapshot",
+                        "result": "data.operation.result",
+                    },
+                },
             })
             return
         if path == "/api/production-history/status":

@@ -159,6 +159,10 @@ public:
         std::uint32_t node_id, std::uint64_t node_generation,
         const std::array<std::uint8_t, 16>& expected_node_uuid,
         std::uint32_t object_id)>;
+    using PwmLeaseReleaser = std::function<void(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        std::uint32_t resource_id, std::uint64_t remote_lease_id)>;
     struct PwmIo {
         PwmCreator create;
         PwmStopper stop;
@@ -195,6 +199,9 @@ public:
         std::uint64_t node_generation,
         const protocol::ResourceDescriptor& descriptor,
         const protocol::ResourceContract& contract);
+    void bind_pwm_remote_lease(
+        const std::array<std::uint8_t, 16>& lease_id,
+        std::uint64_t remote_lease_id, PwmLeaseReleaser releaser);
 
     RuntimeGpioWriteResult gpio_write(
         const RuntimeGpioWriteRequest& request,
@@ -253,6 +260,8 @@ private:
         std::uint64_t deadline_ns{};
         std::uint64_t admission_id{};
         bool cleanup_failed{};
+        std::uint64_t remote_lease_id{};
+        PwmLeaseReleaser remote_lease_releaser;
     };
 
     struct CompletedCommand {
@@ -303,6 +312,11 @@ private:
         std::string lease_key;
         GpioObject object;
         std::optional<PwmObject> pwm_object;
+        std::uint32_t resource_id{};
+        std::uint64_t node_generation{};
+        std::array<std::uint8_t, 16> expected_node_uuid{};
+        std::uint64_t remote_lease_id{};
+        PwmLeaseReleaser remote_lease_releaser;
     };
 
     enum class CleanupResult {

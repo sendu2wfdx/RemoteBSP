@@ -77,7 +77,7 @@ flowchart LR
 | 本地 IPC / C++ API / CLI | 已实现、已测试 | 应用不直接访问CAN；覆盖节点、资源、GPIO、UART、运动、波形和升级，并含受信本机 Runtime GPIO 租约/写入竖切 |
 | 设备参数 | 第一阶段已实现、已测试 | schema、双页存储、Mock、STM32 Flash后端、协议/API/CLI、Katapult保护；Studio Web 已接入只读快照、v2完整性备份及默认关闭的两阶段受控写入/恢复，恢复兼容 v1，并与显式 CLI 共用 UUID+generation CAS 和 HMAC 审计后端；实体掉电验收仍待完成 |
 | GPIO / UART | 已实现、已测试 | Mock完整；三款 STM32 已交叉编译 GPIO 输入周期采样、去抖、有界事件队列和溢出统计，尚未实测输入时延；F103与G431 USART1/2/3均已完成115200三路全双工并发实测，各方向每路1024字节逐字节一致 |
-| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 协议、Linux API/CLI、Mock、数字孪生、Studio 配置 GUI 与三款 STM32 后端已完成第一阶段；Runtime PWM 已贯通 `toolbusd` Gate、daemon、IPC、client、CLI 和独立持久账本，HTTP 与 Studio 操作入口尚未接入，本轮没有新增实体 PWM 测试。既有 G431 PWM 证据包含 Busy -> Normal、停止后不复位重建对象和最高 100 kHz 两种占空比 0 毛刺；TimedBitstream 仅有忙/后端失败基础状态，实体 WS2812 波形待验收 |
+| PWM / 定时位流 / WS2812 | 第一阶段已实现、已测试 | 协议、Linux API/CLI、Mock、数字孪生、Studio 配置 GUI 与三款 STM32 后端已完成第一阶段；Runtime PWM 已贯通 `toolbusd` Gate、daemon、IPC、client、CLI、独立持久账本和认证 HTTP。配置/停止响应从 `data.operation.result` 读取，状态统一来自 `/api/v1/snapshot`。Studio 运行时适配界面因不保存 API key 且服务器安全认证代理尚未配置而默认禁用，尚不能宣称 Studio 操作闭环；本轮没有新增实体 PWM 测试。既有 G431 PWM 证据包含 Busy -> Normal、停止后不复位重建对象和最高 100 kHz 两种占空比 0 毛刺；TimedBitstream 仅有忙/后端失败基础状态，实体 WS2812 波形待验收 |
 | 智能运动 | 第一阶段已实现、已测试 | Mock多轴、TIM2 compare调度、限位停机和遥测；跨板事务已接入主机与STM32公共Core；可靠启动代次双页日志已通过故障注入，但尚未绑定实体Flash区，三板继续安全禁用跨板入口 |
 | TMC2209 | 第一阶段已实现、部分实测 | FLY-D5五路单线通信及五电机已实测，F103/G431待系统验收 |
 | Studio | 构建与部署编排软件阶段已实现 | 工程schema v2、冲突检查、构建归档、批产资料/历史 CLI、显式 ST-Link/CAN Katapult CLI 和默认关闭的两阶段 Web ST-Link 部署已实现；完整核验后生成自哈希部署记录。版本化 `FirmwareIdentity` 已贯通固件到 Studio；CAN Katapult 与 Web 烧录当前只有假执行器测试，尚无本轮实体闭环证据 |

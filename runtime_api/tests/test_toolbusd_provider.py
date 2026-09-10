@@ -494,7 +494,69 @@ class RemoteCliIpcClientTest(unittest.TestCase):
                 ).list_nodes()
 
 
+    def test_pwm_control_commands_and_strict_outcomes(self):
+        calls = []
+        def runner(command, _timeout, _maximum):
+            calls.append(list(command))
+            operation = command[-10] if "runtime-pwm-configure-operation" in command else command[-7]
+            if "runtime-pwm-acquire" in command:
+                operation = "runtime-pwm-acquire"
+                data = {}
+            elif "runtime-pwm-configure-operation" in command:
+                operation = "runtime-pwm-configure-operation"
+                data = {"operation_id": "a" * 64, "lease_id": "2" * 32,
+                    "expected_node_uuid": "3" * 32, "resource_id": 0x06000000,
+                    "kind": "pwm_configure", "state": "committed", "replayed": False,
+                    "recovery": "none", "object_id": 9, "value": None,
+                    "frequency_hz": 20000, "duty": 4200, "active_low": True,
+                    "error_code": None}
+            else:
+                operation = "runtime-pwm-stop-operation"
+                data = {"operation_id": "b" * 64, "lease_id": "2" * 32,
+                    "expected_node_uuid": "3" * 32, "resource_id": 0x06000000,
+                    "kind": "pwm_stop", "state": "committed", "replayed": False,
+                    "recovery": "safe_closed", "object_id": 9, "value": None,
+                    "frequency_hz": None, "duty": None, "active_low": None,
+                    "error_code": None}
+            return json.dumps({"schema_version": 1, "command": operation, "data": data})
+        client = RemoteCliIpcClient("/tmp/test.sock", runner=runner)
+        client.runtime_pwm_acquire("1" * 32, "2" * 32, "3" * 32,
+                                   "owner", 7, 0x06000000, 1000)
+        configured = client.runtime_pwm_configure_operation(
+            "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x06000000,
+            "pwm-1", 20000, 4200, True)
+        self.assertEqual(configured["duty"], 4200)
+        stopped = client.runtime_pwm_stop_operation(
+            "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x06000000, "stop-1")
+        self.assertEqual(stopped["kind"], "pwm_stop")
+        self.assertTrue(any("runtime-pwm-acquire" in call for call in calls))
+        with self.assertRaises(ToolbusIpcProtocolError):
+            client.runtime_pwm_configure_operation(
+                "1" * 32, "2" * 32, "3" * 32, "owner", 7, 0x06000000,
+                "bad", 0, 10001, False)
+
+
 class ToolbusdSnapshotProviderTest(unittest.TestCase):
+    def test_pwm_target_resolution_reuses_verified_structure_cache(self):
+        provider = ToolbusdSnapshotProvider(FakeToolbusClient(), cache_ttl_ms=0)
+        provider._cached_snapshot = {
+            "nodes": [{
+                "node_id": "node-" + "3" * 32,
+                "state": "online",
+                "runtime": {"bus_node_id": 7},
+                "resources": [{
+                    "resource_id": "resource-06000000",
+                    "kind": "pwm",
+                    "available": True,
+                }],
+            }],
+        }
+        with patch.object(provider, "read_snapshot",
+                          side_effect=AssertionError("不应刷新完整快照")):
+            self.assertEqual(provider._resolve_pwm_target(
+                "node-" + "3" * 32, "resource-06000000"),
+                ("3" * 32, 7, 0x06000000))
+
     def test_node_health_is_bound_to_route_and_source(self):
         valid = node_health_source(1)
         self.assertEqual(valid["source"], 2)

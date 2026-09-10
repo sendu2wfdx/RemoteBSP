@@ -793,6 +793,25 @@ class GuiTest(unittest.TestCase):
                                b"parameterRestorePreflight",
                                b"parameterExecute", b"parameterWriteResult"):
                     self.assertIn(marker, page)
+                for marker in (b"runtimePwmNode", b"runtimePwmResource",
+                               b"runtimePwmLease", b"runtimePwmIdempotency",
+                               b"runtimePwmFrequency", b"runtimePwmDuty",
+                               b"runtimePwmConfigure", b"runtimePwmStop",
+                               b"runtimePwmRefresh", b"runtimePwmStatus"):
+                    self.assertIn(marker, page)
+                target = json.loads(urlopen(
+                    base + "/api/project/target").read())
+                self.assertFalse(target["runtime_pwm"]["available"])
+                self.assertFalse(target["runtime_pwm"]["auth_proxy"])
+                self.assertEqual(
+                    target["runtime_pwm"]["reason"],
+                    "runtime_pwm_auth_proxy_unconfigured")
+                self.assertEqual(target["runtime_pwm"]["contract"], {
+                    "configure": "POST /api/v1/control/pwm/configure",
+                    "stop": "POST /api/v1/control/pwm/stop",
+                    "snapshot": "GET /api/v1/snapshot",
+                    "result": "data.operation.result",
+                })
                 script = urlopen(base + "/app.js").read()
                 self.assertIn(b"/api/deployment/preflight", script)
                 self.assertIn(b"/api/deployment/execute", script)
@@ -800,6 +819,10 @@ class GuiTest(unittest.TestCase):
                     b"/api/device-parameters/write-preflight", script)
                 self.assertIn(
                     b"/api/device-parameters/restore-preflight", script)
+                self.assertIn(b"snapshot_path", script)
+                self.assertIn(b"auth_proxy", script)
+                self.assertIn(b"data.operation.result", script)
+                self.assertNotIn(b"status_path", script)
                 self.assertNotIn(b"deployConfig", page)
             finally:
                 server.shutdown()

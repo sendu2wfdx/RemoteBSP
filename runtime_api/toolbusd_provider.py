@@ -56,13 +56,16 @@ _CONTROL_OPERATIONS = {
     "runtime-control-acquire", "runtime-gpio-write",
     "runtime-control-release", "runtime-gpio-write-operation",
     "runtime-control-release-operation",
+    "runtime-pwm-acquire", "runtime-pwm-configure-operation",
+    "runtime-pwm-stop-operation",
 }
-_OPERATION_FIELDS = {
+_OPERATION_BASE_FIELDS = {
     "operation_id", "lease_id", "expected_node_uuid", "resource_id",
     "kind", "state", "replayed", "recovery", "object_id", "value",
     "error_code",
 }
-_OPERATION_KINDS = {"gpio_write", "control_release"}
+_OPERATION_PWM_FIELDS = {"frequency_hz", "duty", "active_low"}
+_OPERATION_KINDS = {"gpio_write", "control_release", "pwm_configure", "pwm_stop"}
 _OPERATION_STATES = {
     "pending", "committed", "rejected", "unknown", "expired_unknown",
 }
@@ -225,6 +228,19 @@ class ToolbusIpcClient(Protocol):
     def runtime_control_release_operation(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str) -> dict: ...
+
+    def runtime_pwm_acquire(self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, ttl_ms: int) -> None: ...
+
+    def runtime_pwm_configure_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, idempotency_key: str,
+            frequency_hz: int, duty: int, active_low: bool) -> dict: ...
+
+    def runtime_pwm_stop_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, idempotency_key: str) -> dict: ...
 
     def runtime_operation_status(
             self, daemon_instance_id: str, owner_key_id: str,
@@ -475,7 +491,10 @@ class RemoteCliIpcClient:
                                 allow_unknown_kind: bool = False) -> dict:
         """严格验证 operation ledger 的状态组合，镜像 C++ wire 合同。"""
         data = RemoteCliIpcClient._document(output, command)
-        _exact_fields(data, _OPERATION_FIELDS, command + ".data")
+        pwm_document = bool(_OPERATION_PWM_FIELDS & set(data))
+        _exact_fields(data, _OPERATION_BASE_FIELDS |
+                      (_OPERATION_PWM_FIELDS if pwm_document else set()),
+                      command + ".data")
         operation_id = _json_string(
             data["operation_id"], command + ".operation_id")
         if _OPERATION_ID.fullmatch(operation_id) is None or \
@@ -531,6 +550,16 @@ class RemoteCliIpcClient:
             raw_error, command + ".error_code")
         if error_code is not None and error_code not in _OPERATION_ERRORS:
             raise ToolbusIpcProtocolError("操作结果包含未知error_code")
+        frequency_hz = duty = None
+        active_low = None
+        if pwm_document:
+            frequency_hz = None if data["frequency_hz"] is None else _json_integer(
+                data["frequency_hz"], command + ".frequency_hz", minimum=1,
+                maximum=0xFFFFFFFF)
+            duty = None if data["duty"] is None else _json_integer(
+                data["duty"], command + ".duty", maximum=10000)
+            active_low = None if data["active_low"] is None else _json_boolean(
+                data["active_low"], command + ".active_low")
 
         valid = False
         if kind is None:
@@ -548,6 +577,13 @@ class RemoteCliIpcClient:
         elif state == "committed" and kind == "control_release":
             valid = recovery == "safe_closed" and object_id is None and \
                 value is None and error_code is None
+        elif state == "committed" and kind == "pwm_configure":
+            valid = recovery == "none" and object_id is not None and value is None and \
+                frequency_hz is not None and duty is not None and active_low is not None and \
+                error_code is None
+        elif state == "committed" and kind == "pwm_stop":
+            valid = recovery == "safe_closed" and object_id is not None and value is None and \
+                frequency_hz is None and duty is None and active_low is None and error_code is None
         elif state == "rejected":
             valid = recovery in {"not_sent", "safe_closed"} and \
                 object_id is None and value is None and \
@@ -572,7 +608,7 @@ class RemoteCliIpcClient:
         if expected_value is not None and state == "committed" and \
                 value != expected_value:
             raise ToolbusIpcProtocolError("GPIO提交结果与请求目标电平不一致")
-        return {
+        result = {
             "operation_id": operation_id, "lease_id": lease_id,
             "expected_node_uuid": node_uuid, "resource_id": resource_id,
             "kind": kind, "state": state,
@@ -580,6 +616,10 @@ class RemoteCliIpcClient:
             "object_id": object_id, "value": value,
             "error_code": error_code,
         }
+        if pwm_document:
+            result.update(frequency_hz=frequency_hz, duty=duty,
+                          active_low=active_low)
+        return result
 
     @staticmethod
     def _json_traffic(output: str) -> dict:
@@ -1275,6 +1315,51 @@ class RemoteCliIpcClient:
             output, "runtime-gpio-write-operation",
             expected_kind="gpio_write", expected_value=value)
 
+    def runtime_pwm_acquire(self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, ttl_ms: int, *,
+            deadline: MonotonicDeadline | None = None) -> None:
+        output = self._run("runtime-pwm-acquire", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), str(ttl_ms)), deadline=deadline)
+        data = self._document(output, "runtime-pwm-acquire")
+        _exact_fields(data, set(), "runtime-pwm-acquire.data")
+
+    def runtime_pwm_configure_operation(self, daemon_instance_id: str,
+            lease_id: str, expected_node_uuid: str, owner_key_id: str,
+            node_id: int, resource_id: int, idempotency_key: str,
+            frequency_hz: int, duty: int, active_low: bool, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        if type(frequency_hz) is not int or frequency_hz <= 0 or frequency_hz > 0xFFFFFFFF or \
+                type(duty) is not int or duty < 0 or duty > 10000 or type(active_low) is not bool:
+            raise ToolbusIpcProtocolError("PWM配置参数无效")
+        output = self._run("runtime-pwm-configure-operation", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"), owner_key_id,
+                       str(resource_id), idempotency_key, str(frequency_hz), str(duty),
+                       "1" if active_low else "0"), deadline=deadline)
+        outcome = self._json_operation_outcome(output, "runtime-pwm-configure-operation",
+                                               expected_kind="pwm_configure")
+        if outcome["state"] == "committed" and (outcome["frequency_hz"], outcome["duty"],
+                outcome["active_low"]) != (frequency_hz, duty, active_low):
+            raise ToolbusIpcProtocolError("PWM提交结果与请求配置不一致")
+        return outcome
+
+    def runtime_pwm_stop_operation(self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int, idempotency_key: str, *,
+            deadline: MonotonicDeadline | None = None) -> dict:
+        output = self._run("runtime-pwm-stop-operation", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"), owner_key_id,
+                       str(resource_id), idempotency_key), deadline=deadline)
+        return self._json_operation_outcome(output, "runtime-pwm-stop-operation",
+                                            expected_kind="pwm_stop")
+
     def runtime_control_release_operation(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str, *,
@@ -1784,6 +1869,14 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "runtime_control_release_operation",
                 "runtime_operation_status", "runtime_operation_lookup"))
 
+    @property
+    def pwm_control_available(self) -> bool:
+        return bool(getattr(self.client, "structured_output", True)) and all(
+            callable(getattr(self.client, name, None)) for name in (
+                "runtime_pwm_acquire", "runtime_pwm_configure_operation",
+                "runtime_pwm_stop_operation", "runtime_operation_status",
+                "runtime_operation_lookup"))
+
     def _operation_singleflight(
             self, key: tuple[str, ...], operation: Callable[[], dict], *,
             deadline: MonotonicDeadline | None) -> dict:
@@ -1879,6 +1972,39 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 retryable=False, possibly_committed=False)
         return node_match.group(1), numeric_node, int(match.group(1), 16)
 
+    def _resolve_pwm_target(self, node_id: str, resource_id: str, *,
+                            deadline: MonotonicDeadline | None = None
+                            ) -> tuple[str, int, int]:
+        # PWM 控制只需要已经校验过的 UUID、总线节点号和资源类型，不应为
+        # 每次写操作重新读取所有资源状态。完整快照可能包含数十次状态查询，
+        # 会无谓消耗控制期限，甚至让没有主动心跳的节点跨过离线窗口。
+        # 缓存仅用作结构目录；在线性、UUID、代次及合同仍由 toolbusd Gate
+        # 在登记租约和执行操作时重新权威校验。
+        with self._cache_condition:
+            snapshot = copy.deepcopy(self._cached_snapshot)
+        if snapshot is None:
+            snapshot = self.read_snapshot(deadline=deadline).snapshot
+        node = next((item for item in snapshot["nodes"] if item["node_id"] == node_id), None)
+        resource = None if node is None else next((item for item in node["resources"]
+                                                   if item["resource_id"] == resource_id), None)
+        if node is None or node["state"] != "online" or resource is None or \
+                resource["kind"] != "pwm" or not resource["available"]:
+            raise RuntimeProviderOperationError("target_rejected", category="target",
+                retryable=False, possibly_committed=False)
+        numeric_node = node["runtime"].get("bus_node_id")
+        resource_match = re.fullmatch(r"resource-([0-9a-f]{8})", resource_id)
+        node_match = re.fullmatch(r"node-([0-9a-f]{32})", node_id)
+        if type(numeric_node) is not int or not 1 <= numeric_node <= 127 or \
+                resource_match is None or node_match is None:
+            raise RuntimeProviderOperationError("protocol_incompatible", category="protocol",
+                retryable=False, possibly_committed=False)
+        return node_match.group(1), numeric_node, int(resource_match.group(1), 16)
+
+    def _invalidate_snapshot_cache(self) -> None:
+        with self._cache_condition:
+            self._cached_snapshot = None
+            self._cache_stored_at_ms = None
+
     def gpio_control_acquire(
             self, daemon_instance_id: str, lease_id: str,
             owner_key_id: str, node_id: str, resource_id: str,
@@ -1967,6 +2093,64 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 self.client.runtime_control_release_operation,
                 daemon_instance_id, lease_id, owner_key_id,
                 deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
+        except ToolbusIpcError as error:
+            raise _provider_operation_error(error) from error
+
+    def pwm_control_acquire(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            remaining_ttl_ms: Callable[[], int], *,
+            deadline: MonotonicDeadline | None = None) -> None:
+        if not self.pwm_control_available:
+            raise RuntimeProviderError("toolbusd PWM控制IPC不可用")
+        try:
+            uuid, numeric_node, numeric_resource = self._resolve_pwm_target(
+                node_id, resource_id, deadline=deadline)
+            ttl_ms = call_with_deadline(remaining_ttl_ms, deadline=deadline)
+            call_with_deadline(self.client.runtime_operation_status,
+                daemon_instance_id, owner_key_id, "f" * 64, deadline=deadline)
+            call_with_deadline(self.client.runtime_pwm_acquire,
+                daemon_instance_id, lease_id, uuid, owner_key_id,
+                numeric_node, numeric_resource, ttl_ms, deadline=deadline)
+        except RequestDeadlineExceeded:
+            raise
+        except ToolbusIpcError as error:
+            raise _provider_operation_error(error) from error
+
+    def pwm_control_configure(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            idempotency_key: str, frequency_hz: int, duty: int,
+            active_low: bool, *, deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.pwm_control_available:
+            raise RuntimeProviderError("toolbusd PWM控制IPC不可用")
+        try:
+            uuid, numeric_node, numeric_resource = self._resolve_pwm_target(
+                node_id, resource_id, deadline=deadline)
+            outcome = call_with_deadline(self.client.runtime_pwm_configure_operation,
+                daemon_instance_id, lease_id, uuid, owner_key_id, numeric_node,
+                numeric_resource, idempotency_key, frequency_hz, duty, active_low,
+                deadline=deadline)
+            self._invalidate_snapshot_cache()
+            return outcome
+        except RequestDeadlineExceeded:
+            raise
+        except ToolbusIpcError as error:
+            raise _provider_operation_error(error) from error
+
+    def pwm_control_stop(self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            idempotency_key: str, *, deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.pwm_control_available:
+            raise RuntimeProviderError("toolbusd PWM控制IPC不可用")
+        try:
+            uuid, numeric_node, numeric_resource = self._resolve_pwm_target(
+                node_id, resource_id, deadline=deadline)
+            outcome = call_with_deadline(self.client.runtime_pwm_stop_operation,
+                daemon_instance_id, lease_id, uuid, owner_key_id, numeric_node,
+                numeric_resource, idempotency_key, deadline=deadline)
+            self._invalidate_snapshot_cache()
+            return outcome
         except RequestDeadlineExceeded:
             raise
         except ToolbusIpcError as error:
