@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import threading
 
+from .trend_store import MAXIMUM_NODES, RuntimeTrendStore
+
 
 DEFAULT_TREND_CAPACITY = 60
 MAXIMUM_TREND_CAPACITY = 600
@@ -13,15 +15,26 @@ MAXIMUM_TREND_CAPACITY = 600
 class RuntimeDashboard:
     """把已校验快照投影成适合下钻展示的只读模型。"""
 
-    def __init__(self, capacity: int = DEFAULT_TREND_CAPACITY):
+    def __init__(self, capacity: int = DEFAULT_TREND_CAPACITY,
+                 store: RuntimeTrendStore | None = None):
         if type(capacity) is not int or not 1 <= capacity <= MAXIMUM_TREND_CAPACITY:
             raise ValueError("趋势容量必须位于1～600")
         self.capacity = capacity
-        self._series: dict[str, list[dict]] = {}
-        self._health_series: list[dict] = []
-        self._last_health_sample: tuple[int, int] | None = None
-        self._last_snapshot_id: str | None = None
+        if store is not None and store.capacity != capacity:
+            raise ValueError("趋势存储容量必须与仪表盘容量一致")
+        self._store = store
+        restored = store.load() if store is not None else {
+            "nodes": {}, "toolbusd_health": []}
+        self._series: dict[str, list[dict]] = restored["nodes"]
+        self._health_series: list[dict] = restored["toolbusd_health"]
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _public_sample(sample: dict, *, health: bool = False) -> dict:
+        return {
+            "sample_time_ms" if health else "captured_at_ms": sample["time_ms"],
+            "values": copy.deepcopy(sample["values"]),
+        }
 
     @staticmethod
     def _resource(resource: dict, alerts: list[dict]) -> dict:
@@ -111,21 +124,30 @@ class RuntimeDashboard:
         snapshot_id = snapshot["snapshot_id"]
         projected_health = self._toolbusd_health(toolbusd_health)
         with self._lock:
-            if snapshot_id != self._last_snapshot_id:
-                for node in snapshot["nodes"]:
-                    samples = self._series.setdefault(node["node_id"], [])
+            changed = False
+            for node in snapshot["nodes"]:
+                samples = self._series.setdefault(node["node_id"], [])
+                identity = [snapshot_id, snapshot["captured_at_ms"]]
+                if not any(item["identity"] == identity for item in samples):
                     values = {
                         name: value for name, value in node["runtime"].items()
-                        if type(value) is int
+                        if type(value) is int and value >= 0
                     }
-                    samples.append({"captured_at_ms": snapshot["captured_at_ms"],
+                    samples.append({"identity": identity,
+                                    "time_ms": snapshot["captured_at_ms"],
                                     "values": values})
                     del samples[:-self.capacity]
-                live = {node["node_id"] for node in snapshot["nodes"]}
-                for node_id in tuple(self._series):
-                    if node_id not in live:
-                        del self._series[node_id]
-                self._last_snapshot_id = snapshot_id
+                    changed = True
+            live_node_ids = {node["node_id"] for node in snapshot["nodes"]}
+            while len(self._series) > MAXIMUM_NODES:
+                removable = [
+                    (samples[-1]["time_ms"] if samples else -1, node_id)
+                    for node_id, samples in self._series.items()
+                    if node_id not in live_node_ids]
+                if not removable:
+                    break
+                del self._series[min(removable)[1]]
+                changed = True
 
             raw_health = toolbusd_health.get("snapshot") if isinstance(
                 toolbusd_health, dict) else None
@@ -134,21 +156,30 @@ class RuntimeDashboard:
                 sample_key = (raw_health.get("producer_generation"),
                               raw_health.get("sample_sequence"))
                 if all(type(value) is int for value in sample_key) and \
-                        sample_key != self._last_health_sample:
+                        type(raw_health.get("sample_time_ms")) is int and \
+                        raw_health["sample_time_ms"] >= 0 and \
+                        not any(item["identity"] == list(sample_key)
+                                for item in self._health_series):
                     values = {item["name"]: item["value"]
                               for item in projected_health["metrics"]
                               if item["availability"] == "available"}
                     self._health_series.append({
-                        "sample_time_ms": raw_health.get("sample_time_ms"),
+                        "identity": list(sample_key),
+                        "time_ms": raw_health.get("sample_time_ms"),
                         "values": values})
                     del self._health_series[:-self.capacity]
-                    self._last_health_sample = sample_key
+                    changed = True
+
+            if changed and self._store is not None:
+                self._store.save({"nodes": self._series,
+                                  "toolbusd_health": self._health_series})
 
             nodes = []
             for node in snapshot["nodes"]:
                 node_alerts = [item for item in snapshot["alerts"]
                                if item["node_id"] == node["node_id"]]
-                samples = copy.deepcopy(self._series.get(node["node_id"], []))
+                samples = [self._public_sample(item) for item in
+                           self._series.get(node["node_id"], [])]
                 peaks: dict[str, int] = {}
                 for sample in samples:
                     for name, value in sample["values"].items():
@@ -175,7 +206,8 @@ class RuntimeDashboard:
                     health_peaks[name] = max(value, health_peaks.get(name, value))
             projected_health["trend"] = {
                 "capacity": self.capacity,
-                "samples": copy.deepcopy(self._health_series),
+                "samples": [self._public_sample(item, health=True)
+                            for item in self._health_series],
                 "peaks": health_peaks,
             }
             return {

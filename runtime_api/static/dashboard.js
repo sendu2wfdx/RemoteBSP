@@ -1,8 +1,8 @@
 "use strict";
 (() => {
-  const MAX_NODES = 128, MAX_RESOURCES = 256, REFRESH_MS = 2000;
+  const MAX_NODES = 128, MAX_RESOURCES = 256, REFRESH_MS = 2000, RETRY_STREAM_MS = 10000, MAX_STREAM_BUFFER = 1024 * 1024;
   const $ = id => document.getElementById(id);
-  const state = {busy:false, timer:null};
+  const state = {busy:false, timer:null, stream:null, generation:0};
   const text = (tag, value, cls) => { const e=document.createElement(tag); e.textContent=String(value); if(cls)e.className=cls; return e; };
   const chip = value => text("span", value ?? "unknown", `chip ${value ?? "unknown"}`);
   function kv(value) {
@@ -52,5 +52,41 @@
     } catch(error) { status.textContent=`刷新失败：${error instanceof Error ? error.message : "未知错误"}。已保留上次成功数据。`; status.className="connection error"; }
     finally { state.busy=false; }
   }
-  $("api-key").value=""; $("refresh").addEventListener("click",refresh); $("api-key").addEventListener("change",refresh); refresh(); state.timer=setInterval(refresh,REFRESH_MS);
+  function acceptOverview(body) {
+    if(!body || !body.ok || !body.data)throw new Error(body?.error?.message || "主动推送数据无效");
+    render(body.data); const status=$("connection"); status.textContent=`主动推送已连接 · 快照 ${body.data.snapshot_id} · ${new Date().toLocaleTimeString()}`; status.className="connection ok";
+  }
+  function startPolling(generation) {
+    if(generation !== state.generation)return;
+    if(state.timer===null)state.timer=setInterval(refresh,REFRESH_MS);
+    refresh();
+  }
+  async function startStream() {
+    const generation=++state.generation;
+    if(state.stream)state.stream.abort();
+    if(state.timer!==null){clearInterval(state.timer);state.timer=null;}
+    const controller=new AbortController(); state.stream=controller;
+    const headers={"Accept":"text/event-stream"}, key=$("api-key").value; if(key)headers["X-API-Key"]=key;
+    try {
+      const response=await fetch("/api/v1/overview/stream",{headers,cache:"no-store",credentials:"same-origin",signal:controller.signal});
+      if(!response.ok || !response.body)throw new Error(`HTTP ${response.status}`);
+      const reader=response.body.getReader(), decoder=new TextDecoder(); let buffer="";
+      while(true){
+        const result=await reader.read(); if(result.done)throw new Error("连接已断开");
+        buffer+=decoder.decode(result.value,{stream:true});
+        if(buffer.length>MAX_STREAM_BUFFER)throw new Error("推送事件超过浏览器缓冲上限");
+        let boundary;
+        while((boundary=buffer.indexOf("\n\n"))>=0){
+          const block=buffer.slice(0,boundary);buffer=buffer.slice(boundary+2);
+          const data=block.split("\n").filter(line=>line.startsWith("data: ")).map(line=>line.slice(6)).join("\n");
+          if(data)acceptOverview(JSON.parse(data));
+        }
+      }
+    } catch(error) {
+      if(controller.signal.aborted || generation!==state.generation)return;
+      const status=$("connection"); status.textContent=`主动推送中断，已退回轮询：${error instanceof Error ? error.message : "未知错误"}`; status.className="connection error";
+      startPolling(generation); setTimeout(()=>{if(generation===state.generation)startStream();},RETRY_STREAM_MS);
+    }
+  }
+  $("api-key").value=""; $("refresh").addEventListener("click",refresh); $("api-key").addEventListener("change",startStream); startStream();
 })();

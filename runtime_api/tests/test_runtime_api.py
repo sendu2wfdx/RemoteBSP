@@ -206,6 +206,9 @@ class RuntimeHttpTest(unittest.TestCase):
             self.assertIn("MAX_NODES = 128", script)
             self.assertIn("MAX_RESOURCES = 256", script)
             self.assertIn("已保留上次成功数据", script)
+            self.assertIn("/api/v1/overview/stream", script)
+            self.assertIn("已退回轮询", script)
+            self.assertIn("MAX_STREAM_BUFFER", script)
             self.assertNotIn("localStorage", script)
             self.assertNotIn("innerHTML", script)
         request = Request(self.base + "/dashboard.css", method="HEAD")
@@ -226,6 +229,102 @@ class RuntimeHttpTest(unittest.TestCase):
                           headers={"X-API-Key": "d" * 32})
         with urlopen(request) as response:
             self.assertEqual(response.status, 200)
+
+    def test_overview_sse_reuses_read_auth_and_emits_bounded_event(self):
+        self.server.authenticator = make_authenticator(
+            "stream-reader", "s" * 32)  # type: ignore[attr-defined]
+        self.server.overview_stream_interval_seconds = 0.1  # type: ignore[attr-defined]
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/api/v1/overview/stream")
+        self.assertEqual(caught.exception.code, 401)
+
+        request = Request(
+            self.base + "/api/v1/overview/stream",
+            headers={"X-API-Key": "s" * 32,
+                     "Accept": "text/event-stream"})
+        with urlopen(request, timeout=2) as response:
+            self.assertEqual(response.headers["Content-Type"],
+                             "text/event-stream; charset=utf-8")
+            self.assertEqual(response.headers["Cache-Control"],
+                             "no-store, no-transform")
+            self.assertEqual(response.headers["Vary"],
+                             "Authorization, X-API-Key")
+            self.assertEqual(response.readline(), b"event: overview\n")
+            data = response.readline()
+            self.assertLessEqual(len(data),
+                                 runtime_server.MAXIMUM_OVERVIEW_STREAM_EVENT_BYTES)
+            payload = json.loads(data.removeprefix(b"data: "))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["data"]["snapshot_id"], "mock-1")
+
+    def test_overview_sse_has_independent_connection_capacity(self):
+        server = make_server(
+            "127.0.0.1", 0, MockSnapshotProvider(),
+            authenticator=make_authenticator("only-reader", "q" * 32),
+            overview_stream_connections=1,
+            overview_stream_interval_seconds=0.1)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        headers = {"X-API-Key": "q" * 32,
+                   "Accept": "text/event-stream"}
+        first = urlopen(Request(base + "/api/v1/overview/stream",
+                                headers=headers), timeout=2)
+        try:
+            self.assertEqual(first.readline(), b"event: overview\n")
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(Request(base + "/api/v1/overview/stream",
+                                headers=headers), timeout=2)
+            self.assertEqual(caught.exception.code, 503)
+            self.assertEqual(caught.exception.headers["Retry-After"], "2")
+        finally:
+            first.close()
+            replacement = None
+            deadline = time.monotonic() + 2
+            while replacement is None and time.monotonic() < deadline:
+                try:
+                    replacement = urlopen(Request(
+                        base + "/api/v1/overview/stream", headers=headers),
+                        timeout=1)
+                except HTTPError as error:
+                    self.assertEqual(error.code, 503)
+                    time.sleep(0.05)
+            self.assertIsNotNone(replacement,
+                                 "断连后未及时归还SSE连接配额")
+            if replacement is not None:
+                self.assertEqual(replacement.readline(),
+                                 b"event: overview\n")
+                replacement.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_slow_overview_subscriber_does_not_block_another(self):
+        server = make_server(
+            "127.0.0.1", 0, MockSnapshotProvider(),
+            authenticator=make_authenticator("two-readers", "z" * 32),
+            overview_stream_connections=2,
+            overview_stream_interval_seconds=0.1)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = (f"http://127.0.0.1:{server.server_port}"
+               "/api/v1/overview/stream")
+        headers = {"X-API-Key": "z" * 32,
+                   "Accept": "text/event-stream"}
+        slow = urlopen(Request(url, headers=headers), timeout=2)
+        fast = None
+        try:
+            # 故意不消费slow响应体；另一订阅者仍应独立取得首帧。
+            fast = urlopen(Request(url, headers=headers), timeout=2)
+            self.assertEqual(fast.readline(), b"event: overview\n")
+            self.assertTrue(fast.readline().startswith(b"data: "))
+        finally:
+            if fast is not None:
+                fast.close()
+            slow.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_versioned_read_endpoints(self):
         root = self._get("/api/v1")

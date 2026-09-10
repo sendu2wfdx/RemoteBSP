@@ -21,7 +21,7 @@ CAN/USB 测量。
 - UART、运动、PWM、I2C、SPI 等其他写命令；
 - 固件生成、构建和烧录；
 - 用户目录、多租户与通用会话管理；
-- WebSocket、SSE 或遥测历史库；
+- WebSocket 或跨进程遥测历史库；
 - 设备协议、运动学和具体设备业务。
 
 服务默认绑定 `127.0.0.1`，此时可使用明确标记的无认证回环开发模式。`--host` 只接受
@@ -105,8 +105,9 @@ python3 -m runtime_api.server \
 输入上限为 1 MiB；数据损坏、文件缺失或 schema 错误返回 HTTP 503，不回退到陈旧
 快照或演示数据，以免界面把旧状态误报为在线。
 
-普通用户可直接打开 `http://127.0.0.1:8780/dashboard` 使用只读健康仪表盘。页面每 2 秒
-读取一次 `GET /api/v1/overview`，展示节点、链路、资源状态、节点健康快照、活动告警、最近趋势和窗口
+普通用户可直接打开 `http://127.0.0.1:8780/dashboard` 使用只读健康仪表盘。页面优先通过
+`GET /api/v1/overview/stream` 接收 SSE 完整状态事件，连接失败时每 2 秒读取一次
+`GET /api/v1/overview`，展示节点、链路、资源状态、节点健康快照、活动告警、最近趋势和窗口
 峰值。刷新失败只影响本轮读取，并明确保留上一次成功画面；单个节点或资源渲染失败也与
 其余条目隔离。页面和服务端趋势均有固定容量，节点、资源、告警及字段展开也有前端上限，
 避免长期运行导致 DOM 或历史无界增长。
@@ -124,10 +125,37 @@ python3 -m runtime_api.server \
 `GET /api/v1/overview` 是 Runtime Web 的单板只读下钻模型：每个节点包含链路、资源、
 活动告警和运行时趋势，资源明确区分 `available` 与 `unavailable`；toolbusd 健康载荷
 缺失、过期或无有效值时统一显示 `unknown`，绝不把缺失字段或数值 `0` 猜成健康。
-趋势窗口在进程内按不同 `snapshot_id` 最多保存 60 个样本，同一快照重复读取不重复
-计数，节点消失即清理其历史。峰值只统计 Runtime 契约中明确存在的整数测量，布尔值
+趋势窗口默认按不同样本身份最多保存 60 个样本，同一快照重复读取不重复计数。峰值只统计
+Runtime 契约中明确存在的非负整数测量，布尔值
 不会被当成数值。CPU/ISR 指标只有在 `availability=available` 时才参与阈值告警：
 千分之 800 为 warning、950 为 critical；这是一项软件展示策略，不是实体板测量结论。
+
+趋势重启恢复默认关闭。需要时显式配置专用目录：
+
+```bash
+python3 -m runtime_api.server \
+  --trend-store-dir /var/lib/remotebsp/runtime-trends \
+  --trend-capacity 60 \
+  --trend-store-maximum-bytes 1048576
+```
+
+目录固定使用 `trend-v1.json`，Unix 上要求目录不向组或其他用户开放；服务不会接受自定义
+文件名或跟随符号链接。文件采用版本化白名单格式，只保存节点 ID、样本身份、采样时间和
+非负整数指标，不保存 API key、控制请求、资源状态或原始快照。每个序列最多 600 条、总计
+最多 128 个节点和 1 MiB（可在 4 KiB～16 MiB 内显式调整）。写入通过独占临时文件、
+`fsync` 和原子替换完成；格式错误、未知字段或超限文件会被移到随机且不覆盖已有文件的
+`trend-v1.corrupt-*.json` 隔离副本，然后从空趋势继续。无法隔离或无法原子落盘时请求明确
+失败，不把内存结果冒充已持久化。节点趋势以 `snapshot_id + captured_at_ms` 去重，
+toolbusd 健康趋势以 `producer_generation + sample_sequence` 去重，重启后仍保持相同语义。
+
+`GET /api/v1/overview/stream` 使用 `text/event-stream` 主动发送与 overview 相同的完整只读
+投影，复用 `runtime.read` 权限；密钥仍只允许放在 `Authorization` 或 `X-API-Key` 请求头，
+不接受 URL token。浏览器因此使用支持请求头的 `fetch` 流读取，而不是会迫使密钥进入 URL
+的原生 `EventSource`。默认最多 8 条 SSE 连接，每条连接固定 2 秒采样一次、只有一个最新
+事件槽，单事件最多 1 MiB；慢客户端覆盖旧的未发送状态，不反压其他连接或生产端。写阻塞
+受 HTTP I/O 超时约束，断连后停止该连接的生产线程并释放连接配额。空闲时发送注释心跳，
+响应设置 `no-store, no-transform`、禁用代理缓冲并按认证头 `Vary`，服务端不在身份之间共享
+编码后的响应。SSE 只传完整当前投影，不承诺跨断线补发；重连后以首条新事件重新建立基线。
 
 Toolbusd Provider 默认只执行一次 `runtime-snapshot` 只读命令；命令使用参数数组启动，
 不经过 shell。显式旧文本兼容模式继续执行 `traffic-status`、`node-list`、

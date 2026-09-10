@@ -12,6 +12,7 @@ import socket
 import sys
 import threading
 import time
+import queue
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import asdict, dataclass, field
@@ -87,6 +88,11 @@ from .provider import (
 )
 from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 from .dashboard import RuntimeDashboard
+from .trend_store import (
+    DEFAULT_MAXIMUM_BYTES as DEFAULT_TREND_STORE_MAXIMUM_BYTES,
+    RuntimeTrendStore,
+    TrendStoreError,
+)
 
 
 API_VERSION = "v1"
@@ -109,6 +115,14 @@ _FOREIGN_RECOVERY_RESERVATIONS_PER_LOCATOR = 256
 _QUERY_CREDENTIAL_NAMES = {
     "api_key", "api-key", "apikey", "x-api-key", "access_token", "token",
 }
+DEFAULT_OVERVIEW_STREAM_CONNECTIONS = 8
+MAXIMUM_OVERVIEW_STREAM_CONNECTIONS = 32
+DEFAULT_OVERVIEW_STREAM_INTERVAL_SECONDS = 2.0
+MINIMUM_OVERVIEW_STREAM_INTERVAL_SECONDS = 0.1
+MAXIMUM_OVERVIEW_STREAM_INTERVAL_SECONDS = 30.0
+OVERVIEW_STREAM_QUEUE_CAPACITY = 1
+OVERVIEW_STREAM_HEARTBEAT_SECONDS = 10.0
+MAXIMUM_OVERVIEW_STREAM_EVENT_BYTES = 1024 * 1024
 
 
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
@@ -956,6 +970,109 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(encoded)
         return True
+
+    def _overview_stream_event(self) -> bytes:
+        """生成一条独立快照事件；绝不跨身份缓存编码后的响应。"""
+        deadline = MonotonicDeadline.after_seconds(
+            self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
+        read = call_with_deadline(self.provider.read_snapshot,
+                                  deadline=deadline)
+        self.event_log.observe(read.snapshot)
+        health_reader = getattr(self.provider, "health_snapshot", None)
+        health = {"available": False, "snapshot": None,
+                  "reason": "unsupported"}
+        if callable(health_reader):
+            try:
+                health = {"available": True, "snapshot": call_with_deadline(
+                    health_reader, deadline=deadline), "reason": None}
+            except RuntimeProviderError:
+                health = {"available": False, "snapshot": None,
+                          "reason": "temporarily_unavailable"}
+            except RequestDeadlineExceeded:
+                health = {"available": False, "snapshot": None,
+                          "reason": "deadline_exceeded"}
+        overview = self.server.runtime_dashboard.observe(  # type: ignore[attr-defined]
+            read.snapshot, health)
+        encoded = json.dumps({"api_version": API_VERSION, "ok": True,
+                              "data": overview}, ensure_ascii=False,
+                             separators=(",", ":")).encode("utf-8")
+        if len(encoded) > MAXIMUM_OVERVIEW_STREAM_EVENT_BYTES:
+            raise RuntimeProviderError("overview事件超过大小上限")
+        return b"event: overview\ndata: " + encoded + b"\n\n"
+
+    def _handle_overview_stream(self) -> None:
+        slots = self.server.overview_stream_slots  # type: ignore[attr-defined]
+        if not slots.acquire(blocking=False):
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "overview_stream_capacity",
+                        "主动推送连接已达到上限",
+                        headers={"Retry-After": "2"})
+            return
+        stop = threading.Event()
+        updates: queue.Queue[bytes | None] = queue.Queue(
+            maxsize=OVERVIEW_STREAM_QUEUE_CAPACITY)
+
+        def produce() -> None:
+            interval = self.server.overview_stream_interval_seconds  # type: ignore[attr-defined]
+            try:
+                while not stop.is_set():
+                    try:
+                        event = self._overview_stream_event()
+                    except (RuntimeProviderError, RequestDeadlineExceeded):
+                        event = None
+                    if event is not None:
+                        # 慢客户端只保留最新状态，生产者永不等待写端。
+                        try:
+                            updates.put_nowait(event)
+                        except queue.Full:
+                            try:
+                                updates.get_nowait()
+                            except queue.Empty:
+                                pass
+                            try:
+                                updates.put_nowait(event)
+                            except queue.Full:
+                                pass
+                    if stop.wait(interval):
+                        break
+            finally:
+                try:
+                    updates.put_nowait(None)
+                except queue.Full:
+                    pass
+
+        try:
+            self._emit_audit("allowed")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Vary", "Authorization, X-API-Key")
+            self.send_header("X-Request-ID", self._audit_request_id)
+            self.end_headers()
+            # 普通请求的头部期限不应误杀已经认证的长连接。
+            self._header_complete.set()
+            producer = threading.Thread(target=produce, daemon=True,
+                                        name="runtime-overview-sse")
+            producer.start()
+            self.close_connection = True
+            while not stop.is_set():
+                try:
+                    event = updates.get(timeout=OVERVIEW_STREAM_HEARTBEAT_SECONDS)
+                except queue.Empty:
+                    event = b": keepalive\n\n"
+                if event is None:
+                    break
+                self.wfile.write(event)
+                self.wfile.flush()
+        finally:
+            stop.set()
+            producer_thread = locals().get("producer")
+            if producer_thread is not None:
+                producer_thread.join(timeout=
+                    self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
+            slots.release()
 
     def _parse_request_target(self, *,
                               allow_event_query: bool = False
@@ -2217,6 +2334,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                               audit_result="public_probe")
                 return
 
+        if parts == ["api", API_VERSION, "overview", "stream"]:
+            if self.command == "HEAD":
+                self._send_empty(HTTPStatus.METHOD_NOT_ALLOWED,
+                                 headers={"Allow": "GET"},
+                                 audit_result="method_not_allowed")
+                return
+            self._handle_overview_stream()
+            return
+
         if parts == ["api", API_VERSION]:
             gpio_backend_operational = self._gpio_backend_operational()
             control_audit = self._control_audit_health()
@@ -2257,7 +2383,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     "authentication_mode": (
                         "api_key" if self.authenticator is not None
                         else "disabled_loopback"),
-                    "event_stream": False,
+                    "event_stream": True,
+                    "overview_stream": {
+                        "available": True,
+                        "transport": "sse",
+                        "path": f"/api/{API_VERSION}/overview/stream",
+                        "maximum_connections": self.server.overview_stream_maximum_connections,  # type: ignore[attr-defined]
+                        "queue_capacity_per_connection":
+                            OVERVIEW_STREAM_QUEUE_CAPACITY,
+                    },
                     "incremental_events": {
                         "available": True,
                         "schema_version": EVENT_SCHEMA_VERSION,
@@ -2267,7 +2401,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     },
                     **self._runtime_capabilities(),
                 },
-                "endpoints": ["health", "snapshot", "overview", "nodes", "resources",
+                "endpoints": ["health", "snapshot", "overview", "overview/stream", "nodes", "resources",
                               "alerts", "events", "control-leases",
                               "control/operations/{operation_id}",
                               "control/operation-lookups"] +
@@ -2565,6 +2699,11 @@ def make_server(host: str, port: int,
                 control_audit_journal: ControlAuditJournal | None = None,
                 request_io_timeout_seconds: float =
                 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS,
+                overview_stream_connections: int =
+                DEFAULT_OVERVIEW_STREAM_CONNECTIONS,
+                overview_stream_interval_seconds: float =
+                DEFAULT_OVERVIEW_STREAM_INTERVAL_SECONDS,
+                runtime_dashboard: RuntimeDashboard | None = None,
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -2575,6 +2714,16 @@ def make_server(host: str, port: int,
     if control_lease_manager is not None and \
             control_lease_capacity != DEFAULT_CONTROL_LEASE_CAPACITY:
         raise ValueError("不能同时注入控制租约管理器和非默认容量")
+    if type(overview_stream_connections) is not int or not \
+            1 <= overview_stream_connections <= \
+            MAXIMUM_OVERVIEW_STREAM_CONNECTIONS:
+        raise ValueError("主动推送连接数必须位于1～32")
+    if isinstance(overview_stream_interval_seconds, bool) or not isinstance(
+            overview_stream_interval_seconds, (int, float)) or not \
+            MINIMUM_OVERVIEW_STREAM_INTERVAL_SECONDS <= \
+            overview_stream_interval_seconds <= \
+            MAXIMUM_OVERVIEW_STREAM_INTERVAL_SECONDS:
+        raise ValueError("主动推送间隔必须位于0.1～30秒")
     resolved_control_leases = control_lease_manager or \
         ControlLeaseManager(control_lease_capacity)
     event_log = RuntimeEventLog(
@@ -2590,7 +2739,12 @@ def make_server(host: str, port: int,
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
         capacity=audit_capacity, output=audit_output)
     server.event_log = event_log  # type: ignore[attr-defined]
-    server.runtime_dashboard = RuntimeDashboard()  # type: ignore[attr-defined]
+    server.runtime_dashboard = runtime_dashboard or RuntimeDashboard()  # type: ignore[attr-defined]
+    server.overview_stream_maximum_connections = overview_stream_connections  # type: ignore[attr-defined]
+    server.overview_stream_slots = threading.BoundedSemaphore(  # type: ignore[attr-defined]
+        overview_stream_connections)
+    server.overview_stream_interval_seconds = float(  # type: ignore[attr-defined]
+        overview_stream_interval_seconds)
     server.control_leases = resolved_control_leases  # type: ignore[attr-defined]
     server.control_audit_journal = control_audit_journal  # type: ignore[attr-defined]
     server.control_audit_state_lock = threading.Lock()  # type: ignore[attr-defined]
@@ -2654,6 +2808,14 @@ def main() -> int:
     parser.add_argument("--event-capacity", type=int,
                         default=DEFAULT_EVENT_CAPACITY,
                         help="进程内增量事件保留条数，默认1024条")
+    parser.add_argument("--trend-capacity", type=int,
+                        default=60,
+                        help="每个趋势序列的样本上限，默认60条")
+    parser.add_argument("--trend-store-dir", type=Path,
+                        help="显式启用趋势重启恢复的专用目录")
+    parser.add_argument("--trend-store-maximum-bytes", type=int,
+                        default=DEFAULT_TREND_STORE_MAXIMUM_BYTES,
+                        help="趋势持久文件字节上限，默认1048576")
     parser.add_argument("--control-lease-capacity", type=int,
                         default=DEFAULT_CONTROL_LEASE_CAPACITY,
                         help="进程内活动控制租约上限，默认256条")
@@ -2688,6 +2850,14 @@ def main() -> int:
         parser.error("--http-request-timeout-ms必须位于100～30000")
     if args.event_capacity < 1 or args.event_capacity > MAXIMUM_EVENT_CAPACITY:
         parser.error(f"--event-capacity必须位于1～{MAXIMUM_EVENT_CAPACITY}")
+    if args.trend_capacity < 1 or args.trend_capacity > 600:
+        parser.error("--trend-capacity必须位于1～600")
+    if args.trend_store_maximum_bytes < 4096 or \
+            args.trend_store_maximum_bytes > 16 * 1024 * 1024:
+        parser.error("--trend-store-maximum-bytes必须位于4096～16777216")
+    if args.trend_store_dir is None and \
+            args.trend_store_maximum_bytes != DEFAULT_TREND_STORE_MAXIMUM_BYTES:
+        parser.error("--trend-store-maximum-bytes必须与--trend-store-dir一起使用")
     if args.control_lease_capacity < 1 or \
             args.control_lease_capacity > MAXIMUM_CONTROL_LEASE_CAPACITY:
         parser.error(
@@ -2752,6 +2922,14 @@ def main() -> int:
         except ControlAuditError as error:
             parser.error(f"控制审计配置无效：{error}")
     try:
+        trend_store = RuntimeTrendStore(
+            args.trend_store_dir, capacity=args.trend_capacity,
+            maximum_bytes=args.trend_store_maximum_bytes
+        ) if args.trend_store_dir is not None else None
+        runtime_dashboard = RuntimeDashboard(args.trend_capacity, trend_store)
+    except (TrendStoreError, ValueError) as error:
+        parser.error(f"趋势存储配置无效：{error}")
+    try:
         server = make_server(
             args.host, args.port, provider,
             maximum_workers=args.http_workers,
@@ -2764,7 +2942,8 @@ def main() -> int:
                 if control_lease_manager is not None
                 else args.control_lease_capacity),
             request_io_timeout_seconds=
-                args.http_request_timeout_ms / 1000.0)
+                args.http_request_timeout_ms / 1000.0,
+            runtime_dashboard=runtime_dashboard)
     except BaseException:
         if control_audit_journal is not None:
             control_audit_journal.close()
