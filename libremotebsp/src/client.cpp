@@ -362,7 +362,12 @@ ToolbusdHealthSnapshot Client::health_snapshot() const {
         throw_structured_ipc_error(response, "toolbusd 健康快照失败");
     }
     const auto source = toolbusd::decode_ipc_health_snapshot(response.body);
-    return {source.version, source.daemon_instance_id, source.health};
+    return {source.version, source.daemon_instance_id, source.health,
+            source.ipc_active_clients, source.ipc_maximum_clients,
+            source.ipc_peak_clients, source.ipc_accepted_total,
+            source.ipc_capacity_rejected_total,
+            source.ipc_oversized_frame_total, source.ipc_timeout_total,
+            source.ipc_thread_creation_failed_total};
 }
 
 void Client::logical_recording_start(const std::string& output_name) const {

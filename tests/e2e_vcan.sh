@@ -129,8 +129,15 @@ value = json.load(sys.stdin)
 assert value["schema_version"] == 1
 assert value["command"] == "health-snapshot"
 data = value["data"]
-assert data["ipc_version"] == 1
+assert data["ipc_version"] == 2
 assert len(data["daemon_instance_id"]) == 32
+ipc = data["ipc"]
+assert 0 <= ipc["active_clients"] <= ipc["peak_clients"] <= ipc["maximum_clients"]
+assert ipc["accepted_total"] >= 1
+assert ipc["capacity_rejected_total"] >= 0
+assert ipc["oversized_frame_total"] >= 0
+assert ipc["timeout_total"] >= 0
+assert ipc["thread_creation_failed_total"] >= 0
 health = data["health"]
 assert health["contract_version"] == 1
 assert health["source"] == 3

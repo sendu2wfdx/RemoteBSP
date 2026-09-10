@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import ipaddress
 import json
 import re
@@ -873,7 +874,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
 
     def _reconcile_operation(
             self, outcome: dict,
-            principal: AuthenticatedPrincipal | None = None) -> None:
+            principal: AuthenticatedPrincipal | None = None,
+            audit_result: str | None = None) -> None:
         node_uuid = outcome.get("expected_node_uuid")
         resource_id = outcome.get("resource_id")
         scope = None
@@ -895,6 +897,19 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 elif should_block and len(blocked) < \
                         self.server.operation_scope_capacity:  # type: ignore[attr-defined]
                     blocked.add(scope)
+        if outcome.get("kind") == "bus_resource_reset" and scope is not None:
+            with self.server.bus_operation_lock:  # type: ignore[attr-defined]
+                operations = self.server.bus_operation_states  # type: ignore[attr-defined]
+                operations.pop(scope, None)
+                operations[scope] = {
+                    "node_id": scope[0], "resource_id": scope[1],
+                    "operation": self._public_operation(outcome),
+                    "audit_result": audit_result,
+                }
+                self.server.bus_operation_revision += 1  # type: ignore[attr-defined]
+                while len(operations) > \
+                        self.server.bus_operation_capacity:  # type: ignore[attr-defined]
+                    operations.pop(next(iter(operations)))
         if principal is None or not safe or \
                 outcome["kind"] != "control_release" or \
                 not isinstance(outcome.get("lease_id"), str):
@@ -913,7 +928,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def _send_operation(self, outcome: dict, *,
                         audit_result: str,
                         principal: AuthenticatedPrincipal | None = None) -> None:
-        self._reconcile_operation(outcome, principal)
+        self._reconcile_operation(outcome, principal, audit_result)
         operation = self._public_operation(outcome)
         location = (f"/api/{API_VERSION}/control/operations/" +
                     outcome["operation_id"])
@@ -1127,7 +1142,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
         read = call_with_deadline(self.provider.read_snapshot,
                                   deadline=deadline)
-        self.event_log.observe(read.snapshot)
+        event_snapshot = self._snapshot_with_bus_operations(read.snapshot)
+        self.event_log.observe(event_snapshot)
         health_reader = getattr(self.provider, "health_snapshot", None)
         health = {"available": False, "snapshot": None,
                   "reason": "unsupported"}
@@ -1142,13 +1158,39 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 health = {"available": False, "snapshot": None,
                           "reason": "deadline_exceeded"}
         overview = self.server.runtime_dashboard.observe(  # type: ignore[attr-defined]
-            read.snapshot, health)
+            event_snapshot, health, self._bus_operation_snapshot())
         encoded = json.dumps({"api_version": API_VERSION, "ok": True,
                               "data": overview}, ensure_ascii=False,
                              separators=(",", ":")).encode("utf-8")
         if len(encoded) > MAXIMUM_OVERVIEW_STREAM_EVENT_BYTES:
             raise RuntimeProviderError("overview事件超过大小上限")
         return b"event: overview\ndata: " + encoded + b"\n\n"
+
+    def _bus_operation_snapshot(self) -> list[dict]:
+        with self.server.bus_operation_lock:  # type: ignore[attr-defined]
+            return copy.deepcopy(list(
+                self.server.bus_operation_states.values()))  # type: ignore[attr-defined]
+
+    def _snapshot_with_bus_operations(self, snapshot: dict) -> dict:
+        projected = copy.deepcopy(snapshot)
+        with self.server.bus_operation_lock:  # type: ignore[attr-defined]
+            revision = self.server.bus_operation_revision  # type: ignore[attr-defined]
+        if revision != 0:
+            projected["snapshot_id"] = f"{projected['snapshot_id']}-op-{revision}"
+        for item in self._bus_operation_snapshot():
+            operation = item["operation"]
+            projected["alerts"].append({
+                "alert_id": "bus-reset-" + operation["operation_id"],
+                "node_id": item["node_id"],
+                "resource_id": item["resource_id"],
+                "severity": "warning" if operation["state"] in {
+                    "unknown", "pending"} else "info",
+                "code": "bus_reset_" + operation["state"],
+                "message": "BusReset操作状态：" + operation["state"],
+                "active": operation["state"] in {"unknown", "pending"},
+                "occurred_at_ms": projected["captured_at_ms"],
+            })
+        return projected
 
     def _handle_overview_stream(self) -> None:
         slots = self.server.overview_stream_slots  # type: ignore[attr-defined]
@@ -2694,7 +2736,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "provider_unavailable",
                         "Runtime数据源暂时不可用")
             return None
-        self.event_log.observe(read.snapshot)
+        self.event_log.observe(self._snapshot_with_bus_operations(
+            read.snapshot))
         return read
 
     def _runtime_capabilities(self) -> dict:
@@ -2948,8 +2991,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             except RequestDeadlineExceeded:
                 toolbusd_health = {"available": False, "snapshot": None,
                                    "reason": "deadline_exceeded"}
+            event_snapshot = self._snapshot_with_bus_operations(snapshot)
+            self.event_log.observe(event_snapshot)
             dashboard = self.server.runtime_dashboard.observe(  # type: ignore[attr-defined]
-                snapshot, toolbusd_health)
+                event_snapshot, toolbusd_health,
+                self._bus_operation_snapshot())
             self._success(dashboard, read=read)
             return
         if parts == ["api", API_VERSION, "nodes"]:
@@ -3314,6 +3360,10 @@ def make_server(host: str, port: int,
     server.operation_scope_lock = threading.Lock()  # type: ignore[attr-defined]
     server.blocked_operation_scopes = set()  # type: ignore[attr-defined]
     server.operation_scope_capacity = 256  # type: ignore[attr-defined]
+    server.bus_operation_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.bus_operation_states = {}  # type: ignore[attr-defined]
+    server.bus_operation_capacity = 256  # type: ignore[attr-defined]
+    server.bus_operation_revision = 0  # type: ignore[attr-defined]
     # 管理员代释放时，daemon账本仍以原租约owner鉴权。该索引只在服务端
     # 有界保留调用管理员到真实owner的关联，HTTP locator从不携带owner。
     server.foreign_operation_recovery = _ForeignOperationRecoveryIndex()  # type: ignore[attr-defined]

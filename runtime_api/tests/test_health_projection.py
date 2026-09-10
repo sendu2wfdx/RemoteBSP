@@ -172,8 +172,15 @@ def health_document(instance="11" * 16, generation=9, sequence=1):
         "schema_version": 1,
         "command": "health-snapshot",
         "data": {
-            "ipc_version": 1,
+            "ipc_version": 2,
             "daemon_instance_id": instance,
+            "ipc": {
+                "active_clients": 1, "maximum_clients": 64,
+                "peak_clients": 4, "accepted_total": 10,
+                "capacity_rejected_total": 2,
+                "oversized_frame_total": 1, "timeout_total": 3,
+                "thread_creation_failed_total": 0,
+            },
             "health": {
                 "contract_version": 1,
                 "source": 3,
@@ -196,6 +203,7 @@ class RuntimeHealthBindingTests(unittest.TestCase):
         parsed = RemoteCliIpcClient._json_health_snapshot(health_document())
         self.assertEqual(parsed["daemon_instance_id"], "11" * 16)
         self.assertEqual(parsed["producer_generation"], 9)
+        self.assertEqual(parsed["ipc"]["maximum_clients"], 64)
         projection = TrustedToolbusdHealthProjection(9).ingest(parsed["wire"])
         self.assertEqual(projection["sample_sequence"], 1)
 

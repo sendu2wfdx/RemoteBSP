@@ -291,6 +291,28 @@ class StudioCliTest(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse(execute.call_args.kwargs["execute"])
 
+    def test_deployment_evidence_bundle_cli_create_and_offline_verify(self):
+        plan = self.directory / "plan.json"; attempt = self.directory / "attempt.json"
+        plan.write_text("{}", encoding="utf-8"); attempt.write_text("{}", encoding="utf-8")
+        bundle = self.directory / "evidence.zip"
+        with patch("studio_cli.create_bundle", return_value={
+                "ok": True, "format": "REMOTEBSP_DEPLOYMENT_EVIDENCE_BUNDLE_V1",
+                "package_sha256": "a" * 64}) as create:
+            code, response, _, _ = self._call([
+                "deployment-evidence-bundle-create", "--plan", str(plan),
+                "--attempt", str(attempt), "--output-root", str(self.directory),
+                "--output", str(bundle)])
+        self.assertEqual(code, 0); self.assertTrue(response["ok"])
+        create.assert_called_once()
+        bundle.write_bytes(b"mock")
+        with patch("studio_cli.verify_bundle", return_value={
+                "ok": True, "format": "REMOTEBSP_DEPLOYMENT_EVIDENCE_BUNDLE_V1",
+                "outcome": "failed", "hardware_success_claimed": False}) as verify:
+            code, response, _, _ = self._call([
+                "deployment-evidence-bundle-verify", "--bundle", str(bundle)])
+        self.assertEqual(code, 0); self.assertFalse(response["hardware_success_claimed"])
+        verify.assert_called_once_with(bundle)
+
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
         identity_file.write_text("{}", encoding="utf-8")

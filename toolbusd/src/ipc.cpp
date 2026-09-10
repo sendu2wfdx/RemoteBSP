@@ -27,7 +27,7 @@ constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
 constexpr std::size_t kDaemonIdentitySize = 20U;
-constexpr std::size_t kHealthSnapshotHeaderSize = 24U;
+constexpr std::size_t kHealthSnapshotHeaderSize = 88U;
 constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
 constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimePwmRequestHeaderSize = 70U;
@@ -1724,6 +1724,14 @@ std::vector<std::uint8_t> encode_ipc_health_snapshot(
     append_u16(body, 0U);
     body.insert(body.end(), snapshot.daemon_instance_id.begin(),
                 snapshot.daemon_instance_id.end());
+    append_u64(body, snapshot.ipc_active_clients);
+    append_u64(body, snapshot.ipc_maximum_clients);
+    append_u64(body, snapshot.ipc_peak_clients);
+    append_u64(body, snapshot.ipc_accepted_total);
+    append_u64(body, snapshot.ipc_capacity_rejected_total);
+    append_u64(body, snapshot.ipc_oversized_frame_total);
+    append_u64(body, snapshot.ipc_timeout_total);
+    append_u64(body, snapshot.ipc_thread_creation_failed_total);
     append_u16(body, static_cast<std::uint16_t>(health.size()));
     append_u16(body, 0U);
     body.insert(body.end(), health.begin(), health.end());
@@ -1735,10 +1743,10 @@ IpcToolbusdHealthSnapshot decode_ipc_health_snapshot(
     if (body.size() < kHealthSnapshotHeaderSize ||
         get_u16(body.data()) != kHealthSnapshotIpcVersion ||
         get_u16(body.data() + 2U) != 0U ||
-        get_u16(body.data() + 22U) != 0U) {
+        get_u16(body.data() + 86U) != 0U) {
         throw IpcException("toolbusd 健康快照 IPC 头部无效");
     }
-    const auto health_size = get_u16(body.data() + 20U);
+    const auto health_size = get_u16(body.data() + 84U);
     if (health_size == 0U ||
         body.size() != kHealthSnapshotHeaderSize + health_size) {
         throw IpcException("toolbusd 健康快照 IPC 长度无效");
@@ -1747,6 +1755,20 @@ IpcToolbusdHealthSnapshot decode_ipc_health_snapshot(
     snapshot.version = get_u16(body.data());
     std::copy_n(body.begin() + 4U, snapshot.daemon_instance_id.size(),
                 snapshot.daemon_instance_id.begin());
+    snapshot.ipc_active_clients = get_u64(body.data() + 20U);
+    snapshot.ipc_maximum_clients = get_u64(body.data() + 28U);
+    snapshot.ipc_peak_clients = get_u64(body.data() + 36U);
+    snapshot.ipc_accepted_total = get_u64(body.data() + 44U);
+    snapshot.ipc_capacity_rejected_total = get_u64(body.data() + 52U);
+    snapshot.ipc_oversized_frame_total = get_u64(body.data() + 60U);
+    snapshot.ipc_timeout_total = get_u64(body.data() + 68U);
+    snapshot.ipc_thread_creation_failed_total = get_u64(body.data() + 76U);
+    if (snapshot.ipc_maximum_clients == 0U ||
+        snapshot.ipc_active_clients > snapshot.ipc_maximum_clients ||
+        snapshot.ipc_peak_clients < snapshot.ipc_active_clients ||
+        snapshot.ipc_peak_clients > snapshot.ipc_maximum_clients) {
+        throw IpcException("toolbusd IPC容量统计无效");
+    }
     if (std::all_of(snapshot.daemon_instance_id.begin(),
                     snapshot.daemon_instance_id.end(),
                     [](std::uint8_t value) { return value == 0U; })) {

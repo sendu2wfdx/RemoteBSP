@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from runtime_api.auth import (ApiKeyAuthenticator, ApiKeyCredential,
     BUS_RESET_PERMISSION, CONTROL_LEASE_ACQUIRE_PERMISSION,
-    CONTROL_OPERATION_READ_PERMISSION)
+    CONTROL_OPERATION_READ_PERMISSION, RUNTIME_READ_PERMISSION)
 from runtime_api.control_leases import ControlLeaseManager, DaemonBoundControlLeaseManager
 from runtime_api.server import make_server
 from runtime_api.tests.control_audit_support import FakeControlAuditJournal
@@ -75,12 +75,17 @@ def main() -> int:
                 client.daemon_identity, manager=ControlLeaseManager(8))
             auth = ApiKeyAuthenticator([ApiKeyCredential("operator", "a" * 32,
                 frozenset({BUS_RESET_PERMISSION, CONTROL_LEASE_ACQUIRE_PERMISSION,
-                           CONTROL_OPERATION_READ_PERMISSION}))])
+                           CONTROL_OPERATION_READ_PERMISSION,
+                           RUNTIME_READ_PERMISSION}))])
             server = make_server("127.0.0.1", 0, provider, authenticator=auth,
                 control_lease_manager=manager,
                 control_audit_journal=FakeControlAuditJournal())
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
             base = f"http://127.0.0.1:{server.server_port}"
+            # 先建立事件日志基线；后续 Unknown 必须成为可分页的新增告警。
+            urlopen(request(base, "/api/v1/overview")).read()
+            event_cursor = json.loads(urlopen(request(
+                base, "/api/v1/events?limit=20")).read())["data"]["next_cursor"]
 
             def acquire(resource, key):
                 body = {"node_id": runtime_node["node_id"],
@@ -112,6 +117,38 @@ def main() -> int:
                 queried = json.loads(error.read())["error"]["details"]["operation"]
             assert queried["operation_id"] == operation["operation_id"]
             assert queried["replayed"] is True
+            overview = json.loads(urlopen(request(base, "/api/v1/overview")).read())["data"]
+            current = overview["bus_reset_operations"][-1]
+            assert current["operation"]["operation_id"] == operation["operation_id"]
+            assert current["operation"]["state"] == "unknown"
+            found_event = False
+            for _ in range(10):
+                events = json.loads(urlopen(request(
+                    base, "/api/v1/events?cursor=" + event_cursor +
+                    "&limit=20")).read())["data"]
+                found_event = found_event or any(
+                    item["entity_type"] == "alert" and
+                    isinstance(item["payload"], dict) and
+                    item["payload"].get("code") == "bus_reset_unknown"
+                    for item in events["events"])
+                event_cursor = events["next_cursor"]
+                if found_event or not events["has_more"]:
+                    break
+            assert found_event
+            stream = urlopen(Request(base + "/api/v1/overview/stream",
+                headers={"X-API-Key": "a" * 32, "Accept": "text/event-stream"}))
+            try:
+                payload = None
+                for _ in range(8):
+                    line = stream.readline().decode().strip()
+                    if line.startswith("data: "):
+                        payload = json.loads(line[6:])
+                        break
+                assert payload is not None
+                assert payload["data"]["bus_reset_operations"][-1][
+                    "operation"]["state"] == "unknown"
+            finally:
+                stream.close()
 
             blocked = {"node_id": runtime_node["node_id"],
                        "resource_id": devices[0]["resource_id"],

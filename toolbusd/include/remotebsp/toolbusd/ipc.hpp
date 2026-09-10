@@ -56,7 +56,7 @@ enum class IpcRequestKind : std::uint8_t {
 constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
-constexpr std::uint16_t kHealthSnapshotIpcVersion = 1U;
+constexpr std::uint16_t kHealthSnapshotIpcVersion = 2U;
 constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 3U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
@@ -199,6 +199,14 @@ struct IpcToolbusdHealthSnapshot {
     std::uint16_t version{kHealthSnapshotIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
     protocol::HealthSnapshot health;
+    std::uint64_t ipc_active_clients{};
+    std::uint64_t ipc_maximum_clients{};
+    std::uint64_t ipc_peak_clients{};
+    std::uint64_t ipc_accepted_total{};
+    std::uint64_t ipc_capacity_rejected_total{};
+    std::uint64_t ipc_oversized_frame_total{};
+    std::uint64_t ipc_timeout_total{};
+    std::uint64_t ipc_thread_creation_failed_total{};
 };
 
 struct IpcRequest {

@@ -91,6 +91,14 @@ class StudioDeploymentWorkflowHttpTests(unittest.TestCase):
                 self.assertEqual(manifest["sha256"], "f" * 64)
                 export.assert_called_once_with(build_id="",
                                                backend="stlink-openocd")
+                with patch.object(workflow, "create_evidence_bundle",
+                        return_value={"ok": True,
+                        "format": "REMOTEBSP_DEPLOYMENT_EVIDENCE_BUNDLE_V1",
+                        "package_sha256": "1" * 64}) as bundle:
+                    packaged = post("/api/deployment/history/bundle", {
+                        "attempt_filename": "build-0000-部署尝试-v1.json"})
+                self.assertEqual(packaged["package_sha256"], "1" * 64)
+                bundle.assert_called_once_with("build-0000-部署尝试-v1.json")
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 

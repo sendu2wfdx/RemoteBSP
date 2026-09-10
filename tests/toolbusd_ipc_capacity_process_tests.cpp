@@ -200,6 +200,17 @@ int main(int argc, char** argv) {
     CHECK(list_nodes_succeeds(ipc, std::chrono::milliseconds(500)));
     ::close(slow_reader);
 
+    const auto health = remotebsp::Client(ipc, 1U).health_snapshot();
+    CHECK(health.ipc_active_clients >= 1U);
+    CHECK(health.ipc_active_clients <= health.ipc_maximum_clients);
+    CHECK(health.ipc_maximum_clients == 4U);
+    CHECK(health.ipc_peak_clients == 4U);
+    CHECK(health.ipc_accepted_total >= 8U);
+    CHECK(health.ipc_capacity_rejected_total >= 1U);
+    CHECK(health.ipc_oversized_frame_total == 1U);
+    CHECK(health.ipc_timeout_total >= 1U);
+    CHECK(health.ipc_thread_creation_failed_total == 0U);
+
     for (const auto socket : slow) ::close(socket);
     return failures == 0 ? 0 : 1;
 }

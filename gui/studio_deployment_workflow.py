@@ -171,6 +171,25 @@ class StudioDeploymentWorkflow:
         manifest["sha256"] = hashlib.sha256(encoded).hexdigest()
         return manifest
 
+    def create_evidence_bundle(self, attempt_filename: str) -> dict:
+        """从已验证历史生成确定性包；文件名不能选择目录或任意路径。"""
+        if not isinstance(attempt_filename, str) or Path(attempt_filename).name != attempt_filename or \
+                not attempt_filename.endswith("-部署尝试-v1.json"):
+            raise FirmwareDeploymentError("部署attempt文件名无效")
+        history = self.history()
+        item = next((value for value in history["items"]
+                     if value["attempt"]["filename"] == attempt_filename), None)
+        if item is None:
+            raise FirmwareDeploymentError("部署attempt不存在、损坏或未通过严格校验")
+        plan = json.loads((self.plan_root / item["plan_filename"]).read_text(encoding="utf-8"))
+        attempt = json.loads((self.attempt_root / attempt_filename).read_text(encoding="utf-8"))
+        bundle_root = self.attempt_root / "bundles"
+        bundle_root.mkdir(exist_ok=True)
+        from deployment_evidence_bundle import create_bundle
+        return create_bundle(plan=plan, attempt=attempt,
+            output_root=self.output_root,
+            output=bundle_root / attempt_filename.replace(".json", ".zip"))
+
     def execute(self, *, confirmation_token: object, execute: object,
                 confirmation: object, expected_uuid: object = None,
                 flash_timeout: int = 120, reconnect_timeout: float = 10,

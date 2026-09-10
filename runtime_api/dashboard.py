@@ -132,7 +132,8 @@ class RuntimeDashboard:
             "threshold_alerts": projected.get("threshold_alerts", []),
         }
 
-    def observe(self, snapshot: dict, toolbusd_health: dict | None = None) -> dict:
+    def observe(self, snapshot: dict, toolbusd_health: dict | None = None,
+                bus_reset_operations: list[dict] | None = None) -> dict:
         snapshot_id = snapshot["snapshot_id"]
         projected_health = self._toolbusd_health(toolbusd_health)
         with self._lock:
@@ -228,4 +229,6 @@ class RuntimeDashboard:
                 "captured_at_ms": snapshot["captured_at_ms"],
                 "nodes": nodes,
                 "toolbusd_health": projected_health,
+                "bus_reset_operations": copy.deepcopy(
+                    (bus_reset_operations or [])[-256:]),
             }

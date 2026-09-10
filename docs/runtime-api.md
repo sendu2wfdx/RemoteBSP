@@ -797,6 +797,13 @@ Web 控制台会在 I2C/SPI 设备详情中显示 `bus_health`：最后远端状
 查询；查询得到安全终态后才解除前端冻结。这个前端状态只是防误操作，权威冻结仍位于
 toolbusd 持久账本。
 
+BusReset 状态还会进入 Runtime 的统一有界观测链路。服务端按节点资源保留最近 256 个
+操作状态，并把 `unknown/pending` 投影成活动资源告警；operation ID、恢复状态和审计结果
+同时出现在 overview 模型中。普通 `/overview`、`/overview/stream` SSE 与 `/events` 使用
+同一带操作修订号的快照，因此页面刷新或 SSE 断线重连后仍能恢复当前 Unknown 和禁用
+状态。`/events` 继续使用版本化游标与有限窗口，游标断代返回既有 reset cursor；SSE 每个
+连接仍只有一个槽位，慢客户端只覆盖自己的旧快照，不阻塞其他连接或采样线程。
+
 控制请求现在从读取请求行之前建立一次不可续期的单调绝对期限。头部、请求体、daemon
 身份单飞、目标快照、资源状态 fanout、`remote-cli` 子进程、租约登记、GPIO 写入与释放
 都消费同一份剩余预算；旧接口即使不识别 deadline，也会在调用前后校验，且兼容 fanout

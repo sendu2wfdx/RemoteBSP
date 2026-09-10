@@ -276,6 +276,18 @@ UART 4～7 为板级扩展接口；8 路串口都声明 4096 字节收发缓冲�
 它证明的是应用层准入、帧上限和期限合同，不等同于内核 FD 硬上限耗尽、Unix socket 洪泛
 或实体总线洪泛，后者必须在隔离系统和专用硬件环境中另行验证。
 
+`health-snapshot` IPC v2 还提供 `ipc` 对象：`active_clients` 是采样时当前水位，
+`maximum_clients` 是配置上限，`peak_clients` 是本进程峰值；`accepted_total`、
+`capacity_rejected_total`、`oversized_frame_total`、`timeout_total` 和
+`thread_creation_failed_total` 是本次 toolbusd 进程生命周期内单调累计值。它们经
+`remote-cli --json health-snapshot` 原样进入 Runtime 健康投影，并受严格字段、整数范围和
+`active <= peak <= maximum` 关系校验。进程重启后累计值重新从零开始，不能跨实例相加而
+伪装成连续计数。
+
+这些字段只统计 toolbusd 已接受或拒绝的应用层 Unix socket 客户端：`timeout_total` 是套接字
+收发期限触发次数，线程失败也是 `std::thread` 创建失败计数。它们不是系统打开 FD 数、内核
+拒绝连接数、CAN/CAN-FD 错误帧或总线负载，测试注入也不得解释成这些系统或实体指标。
+
 资源状态协议包含当前 RX/TX 缓冲占用、收发溢出、忙和后端故障字段。G431 现已把
 UART 接到真实环形缓冲水位与溢出计数，把 PWM/TimedBitstream 接到对象/后端忙和
 后端失败基础状态；PWM 停止成功还会释放对象，使状态回到 Normal 并允许同通道重建。

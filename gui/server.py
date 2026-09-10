@@ -481,6 +481,7 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                         "/api/deployment/usb-katapult/preflight",
                         "/api/deployment/usb-katapult/execute",
                         "/api/deployment/history/export",
+                        "/api/deployment/history/bundle",
                         "/api/device-parameters/write-preflight",
                         "/api/device-parameters/restore-preflight",
                         "/api/device-parameters/execute",
@@ -498,6 +499,19 @@ class GuiRequestHandler(SimpleHTTPRequestHandler):
                 json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
             project = request.get("project")
             if path.startswith("/api/deployment/"):
+                if path == "/api/deployment/history/bundle":
+                    workflow = self.studio_deployment_workflow
+                    if workflow is None:
+                        self._send_json({"ok": False,
+                            "error": "Studio部署历史未启用"},
+                            HTTPStatus.SERVICE_UNAVAILABLE)
+                        return
+                    if set(request) != {"attempt_filename"}:
+                        raise FirmwareDeploymentError("部署证据包请求字段无效")
+                    response = workflow.create_evidence_bundle(
+                        request["attempt_filename"])
+                    self._send_json(response)
+                    return
                 if path == "/api/deployment/history/export":
                     workflow = self.studio_deployment_workflow
                     if workflow is None:

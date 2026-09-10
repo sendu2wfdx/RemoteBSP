@@ -356,7 +356,16 @@ inline void write_health_snapshot(
            << "\"ipc_version\":" << snapshot.ipc_version
            << ",\"daemon_instance_id\":\"";
     write_uuid(output, snapshot.daemon_instance_id);
-    output << "\",\"health\":{\"contract_version\":" << health.version
+    output << "\",\"ipc\":{"
+           << "\"active_clients\":" << snapshot.ipc_active_clients
+           << ",\"maximum_clients\":" << snapshot.ipc_maximum_clients
+           << ",\"peak_clients\":" << snapshot.ipc_peak_clients
+           << ",\"accepted_total\":" << snapshot.ipc_accepted_total
+           << ",\"capacity_rejected_total\":" << snapshot.ipc_capacity_rejected_total
+           << ",\"oversized_frame_total\":" << snapshot.ipc_oversized_frame_total
+           << ",\"timeout_total\":" << snapshot.ipc_timeout_total
+           << ",\"thread_creation_failed_total\":" << snapshot.ipc_thread_creation_failed_total
+           << "},\"health\":{\"contract_version\":" << health.version
            << ",\"source\":" << static_cast<unsigned>(health.source)
            << ",\"overall\":" << static_cast<unsigned>(health.overall)
            << ",\"sample_sequence\":" << health.sample_sequence

@@ -1087,12 +1087,12 @@ class RemoteCliIpcClient:
     @staticmethod
     def _json_health_snapshot(output: str) -> dict:
         data = RemoteCliIpcClient._document(output, "health-snapshot")
-        _exact_fields(data, {"ipc_version", "daemon_instance_id", "health"},
+        _exact_fields(data, {"ipc_version", "daemon_instance_id", "ipc", "health"},
                       "health-snapshot.data")
         ipc_version = _json_integer(
             data["ipc_version"], "health-snapshot.ipc_version",
             minimum=1, maximum=0xFFFF)
-        if ipc_version != 1:
+        if ipc_version != 2:
             raise ToolbusIpcProtocolError(
                 f"health-snapshot IPC版本不受支持：{ipc_version}")
         instance_id = _json_string(
@@ -1100,6 +1100,20 @@ class RemoteCliIpcClient:
             "health-snapshot.daemon_instance_id").lower()
         if _UUID.fullmatch(instance_id) is None or instance_id == "0" * 32:
             raise ToolbusIpcProtocolError("health-snapshot daemon身份无效")
+        ipc = _json_object(data["ipc"], "health-snapshot.ipc")
+        ipc_fields = {"active_clients", "maximum_clients", "peak_clients",
+                      "accepted_total", "capacity_rejected_total",
+                      "oversized_frame_total", "timeout_total",
+                      "thread_creation_failed_total"}
+        _exact_fields(ipc, ipc_fields, "health-snapshot.ipc")
+        ipc = {name: _json_integer(ipc[name], f"health-snapshot.ipc.{name}",
+                                   maximum=0xFFFFFFFFFFFFFFFF)
+               for name in ipc_fields}
+        if ipc["maximum_clients"] < 1 or \
+                ipc["active_clients"] > ipc["maximum_clients"] or \
+                not ipc["active_clients"] <= ipc["peak_clients"] <= \
+                ipc["maximum_clients"]:
+            raise ToolbusIpcProtocolError("health-snapshot IPC容量统计无效")
         health = _json_object(data["health"], "health-snapshot.health")
         _exact_fields(health, {
             "contract_version", "source", "overall", "sample_sequence",
@@ -1164,6 +1178,7 @@ class RemoteCliIpcClient:
             "ipc_version": ipc_version,
             "daemon_instance_id": instance_id,
             "producer_generation": generation,
+            "ipc": ipc,
             "wire": wire,
         }
 
@@ -2005,7 +2020,8 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
             except HealthProjectionError as error:
                 raise RuntimeProviderError(
                     f"toolbusd 健康快照被可信边界拒绝：{error}") from error
-            return {"daemon_instance_id": instance_id, **projected}
+            return {"daemon_instance_id": instance_id,
+                    "ipc": source["ipc"], **projected}
         finally:
             self._health_lock.release()
 

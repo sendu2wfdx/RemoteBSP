@@ -40,6 +40,7 @@ from deployment_record import create_deployment_record, validate_deployment_reco
 from deployment_attempt import (
     EXECUTION_CONFIRMATION, create_absent_attempt, execute_deployment_plan,
     validate_deployment_attempt)
+from deployment_evidence_bundle import create_bundle, verify_bundle
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -378,6 +379,18 @@ def _run_deployment_attempt_validate(args) -> dict:
             "attempt_id": attempt["attempt_id"],
             "outcome": attempt["outcome"],
             "hardware_success_claimed": attempt["hardware_success_claimed"]}
+
+
+def _run_deployment_bundle_create(args) -> dict:
+    return create_bundle(
+        plan=_read_json(args.plan, "部署计划", MAX_DEPLOYMENT_PLAN_BYTES),
+        attempt=_read_json(args.attempt, "部署尝试", MAX_DEPLOYMENT_ATTEMPT_BYTES),
+        output_root=_bounded_path(args.output_root, "构建产物目录"),
+        output=_bounded_path(args.output, "部署证据包输出"), force=args.force)
+
+
+def _run_deployment_bundle_verify(args) -> dict:
+    return verify_bundle(_bounded_path(args.bundle, "部署证据包"))
 
 
 def _run_deployment_execute(args) -> dict:
@@ -938,6 +951,22 @@ def _parser() -> StrictParser:
     attempt_validate.add_argument("--attempt", required=True)
     attempt_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     attempt_validate.set_defaults(handler=_run_deployment_attempt_validate)
+
+    bundle_create = sub.add_parser(
+        "deployment-evidence-bundle-create",
+        help="确定性打包已严格验证的部署软件证据，不访问硬件")
+    bundle_create.add_argument("--plan", required=True)
+    bundle_create.add_argument("--attempt", required=True)
+    bundle_create.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    bundle_create.add_argument("--output", required=True)
+    bundle_create.add_argument("--force", action="store_true")
+    bundle_create.set_defaults(handler=_run_deployment_bundle_create)
+
+    bundle_verify = sub.add_parser(
+        "deployment-evidence-bundle-verify",
+        help="完全离线验证部署证据ZIP和终态，不访问硬件")
+    bundle_verify.add_argument("--bundle", required=True)
+    bundle_verify.set_defaults(handler=_run_deployment_bundle_verify)
 
     deployment_execute = sub.add_parser(
         "deployment-execute",

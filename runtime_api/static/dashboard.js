@@ -69,6 +69,7 @@
   }
   function render(data) {
     state.lastOverview=data;
+    (data.bus_reset_operations || []).slice(-256).forEach(item=>{const key=`${item.node_id}/${item.resource_id}`,operation=item.operation;if(operation?.state==="unknown"||operation?.state==="pending")state.unknownBusOperations.set(key,{location:`/api/v1/control/operations/${operation.operation_id}`,operation});else state.unknownBusOperations.delete(key);});
     let remaining=MAX_RESOURCES; const nodes=(data.nodes || []).slice(0,MAX_NODES).map(n=>{const resources=(n.resources || []).slice(0,remaining);remaining-=resources.length;return {...n,resources};}), resources=nodes.flatMap(n=>n.resources);
     $("node-count").textContent=nodes.length; $("available-count").textContent=resources.filter(r=>r.availability==="available").length; $("unavailable-count").textContent=resources.filter(r=>r.availability==="unavailable").length; $("unknown-count").textContent=resources.filter(r=>r.availability==="unknown").length; $("alert-count").textContent=nodes.reduce((n,x)=>n+(x.active_alerts || []).length,0);
     const daemon=$("daemon"), health=data.toolbusd_health || {}; daemon.replaceChildren(text("h2","toolbusd 健康"),chip(health.availability),chip(health.overall),kv({峰值:(health.trend || {}).peaks || {}}),trend((health.trend || {}).samples),renderAlerts(health.threshold_alerts));

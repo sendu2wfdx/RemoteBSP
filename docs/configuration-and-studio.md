@@ -259,6 +259,22 @@ execution/readback 三态与有界错误类型；不能由页面参数直接填�
 “导出证据包清单”只列出已存在的计划/attempt 相对文件名及 SHA-256，并明确
 `files_copied=false`、`reexecution_allowed=false`；清单本身也带 SHA-256。
 
+需要移交完整软件证据时，可生成确定性 ZIP：只包含 `studio-project.json`、完整
+`firmware.config`、`build-record.json`、对应 `firmware.elf`/`firmware.bin`、部署计划、
+attempt 和条目哈希清单，不包含签名私钥或 flashtool/OpenOCD 本体。条目采用固定字典序、
+1980-01-01 时间戳和 0644 权限，拒绝重复名、绝对路径及 `..`。ZIP 整体 SHA-256 在命令结果
+中返回，内部清单另有自哈希。离线核验会复算全部摘要及 plan/attempt 绑定，保持原始
+absent/failed/verified 语义，绝不会把未执行或失败记录提升为 verified：
+
+```text
+studio_cli.py deployment-evidence-bundle-create --plan plan.json \
+  --attempt attempt.json --output deployment-evidence.zip
+studio_cli.py deployment-evidence-bundle-verify --bundle deployment-evidence.zip
+```
+
+Studio HTTP 使用 `/api/deployment/history/bundle`，只接受已经出现在严格历史索引中的
+attempt 文件名，不接受任意路径。
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

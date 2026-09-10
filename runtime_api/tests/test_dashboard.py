@@ -15,6 +15,18 @@ class RuntimeDashboardTests(unittest.TestCase):
         self.assertIn("禁止重复提交", script)
         self.assertIn("查询操作状态", script)
 
+    def test_bus_reset_operations_are_bounded_in_overview_model(self):
+        operations = [{"node_id": "node-a", "resource_id": f"resource-{i:08x}",
+                       "operation": {"operation_id": f"{i:064x}",
+                                     "state": "unknown"},
+                       "audit_result": "bus_resource_reset"}
+                      for i in range(300)]
+        view = RuntimeDashboard().observe(mock_snapshot(),
+                                          bus_reset_operations=operations)
+        self.assertEqual(len(view["bus_reset_operations"]), 256)
+        self.assertEqual(view["bus_reset_operations"][0]["resource_id"],
+                         "resource-0000002c")
+
     def test_node_health_preserves_unavailable_instead_of_zero(self):
         snapshot = mock_snapshot()
         snapshot["nodes"][0]["runtime"]["health_snapshot"] = {

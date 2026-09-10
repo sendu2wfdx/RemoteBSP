@@ -61,6 +61,14 @@ void test_atomic_identity_and_health_round_trip() {
     toolbusd::IpcToolbusdHealthSnapshot input;
     input.daemon_instance_id.fill(0xA5U);
     input.health = health();
+    input.ipc_active_clients = 3U;
+    input.ipc_maximum_clients = 64U;
+    input.ipc_peak_clients = 9U;
+    input.ipc_accepted_total = 101U;
+    input.ipc_capacity_rejected_total = 7U;
+    input.ipc_oversized_frame_total = 5U;
+    input.ipc_timeout_total = 4U;
+    input.ipc_thread_creation_failed_total = 2U;
     const auto encoded = toolbusd::encode_ipc_health_snapshot(input);
     const auto decoded = toolbusd::decode_ipc_health_snapshot(encoded);
     CHECK(decoded.version == toolbusd::kHealthSnapshotIpcVersion);
@@ -69,13 +77,21 @@ void test_atomic_identity_and_health_round_trip() {
     CHECK(decoded.health.node_id == 0U);
     CHECK(decoded.health.producer_generation == 99U);
     CHECK(decoded.health.sample_sequence == 7U);
+    CHECK(decoded.ipc_active_clients == 3U);
+    CHECK(decoded.ipc_maximum_clients == 64U);
+    CHECK(decoded.ipc_peak_clients == 9U);
+    CHECK(decoded.ipc_accepted_total == 101U);
+    CHECK(decoded.ipc_capacity_rejected_total == 7U);
+    CHECK(decoded.ipc_oversized_frame_total == 5U);
+    CHECK(decoded.ipc_timeout_total == 4U);
+    CHECK(decoded.ipc_thread_creation_failed_total == 2U);
 
     auto malformed = encoded;
     malformed[2] = 1U;
     expect_decode_failure(malformed);
     malformed = encoded;
-    malformed[20] = 0U;
-    malformed[21] = 0U;
+    malformed[84] = 0U;
+    malformed[85] = 0U;
     expect_decode_failure(malformed);
     malformed = encoded;
     malformed.pop_back();

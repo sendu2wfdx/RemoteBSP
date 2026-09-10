@@ -50,6 +50,10 @@ struct ToolbusdHealthSnapshot {
     std::uint16_t ipc_version{};
     std::array<std::uint8_t, 16> daemon_instance_id{};
     protocol::HealthSnapshot health;
+    std::uint64_t ipc_active_clients{}, ipc_maximum_clients{}, ipc_peak_clients{};
+    std::uint64_t ipc_accepted_total{}, ipc_capacity_rejected_total{};
+    std::uint64_t ipc_oversized_frame_total{}, ipc_timeout_total{};
+    std::uint64_t ipc_thread_creation_failed_total{};
 };
 
 struct LogicalRecordingStatus {

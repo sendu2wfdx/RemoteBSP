@@ -618,10 +618,13 @@ public:
                 // 在创建线程之前执行准入。超限连接立即关闭；已接纳的慢
                 // 客户端仍受 2 秒收发期限约束，不能无限持有配额。
                 if (active_clients_ >= maximum_ipc_clients_) {
+                    increment_saturating(ipc_capacity_rejected_total_);
                     ::close(client);
                     continue;
                 }
                 ++active_clients_;
+                increment_saturating(ipc_accepted_total_);
+                ipc_peak_clients_ = std::max(ipc_peak_clients_, active_clients_);
             }
             try {
                 std::thread([this, client] {
@@ -640,6 +643,7 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(client_mutex_);
                     --active_clients_;
+                    increment_saturating(ipc_thread_creation_failed_total_);
                 }
                 clients_finished_.notify_all();
             }
@@ -2779,7 +2783,25 @@ private:
         remotebsp::toolbusd::IpcToolbusdHealthSnapshot result;
         result.daemon_instance_id = daemon_instance_id_;
         result.health = health_producer_.capture(observation);
+        {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            result.ipc_active_clients = active_clients_;
+            result.ipc_maximum_clients = maximum_ipc_clients_;
+            result.ipc_peak_clients = ipc_peak_clients_;
+            result.ipc_accepted_total = ipc_accepted_total_;
+            result.ipc_capacity_rejected_total = ipc_capacity_rejected_total_;
+            result.ipc_oversized_frame_total = ipc_oversized_frame_total_;
+            result.ipc_timeout_total = ipc_timeout_total_;
+            result.ipc_thread_creation_failed_total =
+                ipc_thread_creation_failed_total_;
+        }
         return result;
+    }
+
+    static void increment_saturating(std::uint64_t& counter) noexcept {
+        if (counter != std::numeric_limits<std::uint64_t>::max()) {
+            ++counter;
+        }
     }
 
     void handle_client(int client) {
@@ -3646,6 +3668,10 @@ private:
                 client, remotebsp::toolbusd::IpcStatus::TimedOut,
                 text_body("远端请求超时"));
         } catch (const remotebsp::toolbusd::IpcException& error) {
+            if (std::string(error.what()) == "本地 IPC 消息超过最大长度") {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                increment_saturating(ipc_oversized_frame_total_);
+            }
             try {
                 const auto error_kind = error.has_request_kind()
                     ? std::optional<remotebsp::toolbusd::IpcRequestKind>(
@@ -3699,6 +3725,14 @@ private:
             } catch (...) {
             }
         } catch (const std::exception& error) {
+            if (const auto* system_error =
+                    dynamic_cast<const std::system_error*>(&error);
+                system_error != nullptr &&
+                (system_error->code().value() == EAGAIN ||
+                 system_error->code().value() == EWOULDBLOCK)) {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                increment_saturating(ipc_timeout_total_);
+            }
             try {
                 if (structured_error_kind.has_value()) {
                     remotebsp::toolbusd::write_ipc_response(
@@ -3868,6 +3902,12 @@ private:
     std::mutex client_mutex_;
     std::condition_variable clients_finished_;
     std::size_t active_clients_{0};
+    std::size_t ipc_peak_clients_{0};
+    std::uint64_t ipc_accepted_total_{0};
+    std::uint64_t ipc_capacity_rejected_total_{0};
+    std::uint64_t ipc_oversized_frame_total_{0};
+    std::uint64_t ipc_timeout_total_{0};
+    std::uint64_t ipc_thread_creation_failed_total_{0};
     std::mutex send_mutex_;
     remotebsp::toolbusd::MotionGroupDispatchGate motion_dispatch_gate_;
     remotebsp::toolbusd::RuntimeControlGate runtime_control_;
