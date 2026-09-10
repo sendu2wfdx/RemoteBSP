@@ -20,7 +20,7 @@ void test_default_board_manifest() {
         remotebsp::mock_mcu::load_board_manifest(TEST_BOARD_MANIFEST);
     assert(manifest.schema_version == 1);
     assert(manifest.name == "mock-generic-v1");
-    assert(manifest.resources.size() == 30);
+    assert(manifest.resources.size() == 32);
     assert(manifest.contracts.size() == manifest.resources.size());
     assert(manifest.reserved_resources.size() == 1);
     assert(manifest.reserved_resources[0].type == ResourceType::Spi);
@@ -33,11 +33,13 @@ void test_default_board_manifest() {
            remotebsp::protocol::kResourceFlagExpanded);
     assert(manifest.contracts[23].maximum_tx_bits_per_second ==
            3000000);
-    assert(manifest.resources[24].type == ResourceType::StepgenAxis);
-    assert(manifest.resources[26].instance == 2);
-    assert(manifest.resources[27].type == ResourceType::Pwm);
-    assert(manifest.resources[28].instance == 1);
-    assert(manifest.resources[29].type == ResourceType::TimedBitstream);
+    assert(manifest.resources[24].type == ResourceType::Adc);
+    assert(manifest.resources[25].instance == 1);
+    assert(manifest.resources[26].type == ResourceType::StepgenAxis);
+    assert(manifest.resources[28].instance == 2);
+    assert(manifest.resources[29].type == ResourceType::Pwm);
+    assert(manifest.resources[30].instance == 1);
+    assert(manifest.resources[31].type == ResourceType::TimedBitstream);
     assert(manifest.waveform_endpoints.size() == 3);
     assert(manifest.waveform_endpoints[0].type == ResourceType::Pwm);
     assert(manifest.waveform_endpoints[0].pin == 9);
@@ -48,8 +50,12 @@ void test_default_board_manifest() {
     assert(manifest.motion_queue_capacity == 32);
     assert(manifest.motion_maximum_total_step_rate_hz == 200000U);
     assert(manifest.motion_axes[0].maximum_step_rate_hz == 100000);
-    assert((manifest.contracts[24].access_flags &
+    assert((manifest.contracts[26].access_flags &
             remotebsp::protocol::kResourceAccessLeaseRequired) != 0);
+    DigitalTwin adc_twin(manifest);
+    assert(adc_twin.adc());
+    assert((manifest.capabilities & remotebsp::mock_mcu::capability_mask(
+               remotebsp::mock_mcu::Capability::Adc)) != 0U);
 
     const auto first =
         remotebsp::mock_mcu::instantiate_node_info(manifest, 1);

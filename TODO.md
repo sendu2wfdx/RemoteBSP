@@ -255,6 +255,10 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
 
 按优先级依次实现 ADC、通用 Timer 和 Storage：
 
+- ADC v1 第二阶段已完成统一资源枚举/描述/状态、Mock 清单与数字孪生，以及
+  STM32 公共 Remote Core/BSP 条件编译骨架；CI 对 F072/F103/G431 开启骨架交叉编译。
+  三板尚无经 AF、参考电压和校准确认的实体采样后端，Studio 候选继续关闭；
+
 - 保持 Protocol、Transport、Remote Core、BSP 分层；
 - 提供资源合同、超时、有界缓冲、故障隔离和 Mock；
 - 没有启用的功能不链接、不占资源；

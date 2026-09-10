@@ -4,7 +4,7 @@
   "board_type": 1297040203,
   "uuid": "524253502d4d4f434b2d4e4f44450000",
   "firmware_version": [0, 2, 0],
-  "capabilities": ["gpio", "uart", "pwm", "timed_bitstream", "bootloader", "motion"],
+  "capabilities": ["gpio", "uart", "adc", "pwm", "timed_bitstream", "bootloader", "motion"],
   "resource_groups": [
     {
       "type": "gpio",
@@ -74,6 +74,24 @@
         "queue_capacity": 4096,
         "maximum_rx_bits_per_second": 3000000,
         "maximum_tx_bits_per_second": 3000000
+      }
+    },
+    {
+      "type": "adc",
+      "first_instance": 0,
+      "count": 2,
+      "id_base": 83886080,
+      "source": "native",
+      "rx_capacity": 64,
+      "tx_capacity": 0,
+      "contract": {
+        "access": ["read", "shared_read", "lease_supported"],
+        "timing_resolution_ns": 100000,
+        "worst_case_latency_us": 100,
+        "maximum_operations_per_second": 10000,
+        "queue_capacity": 0,
+        "maximum_rx_bits_per_second": 320000,
+        "maximum_tx_bits_per_second": 0
       }
     },
     {

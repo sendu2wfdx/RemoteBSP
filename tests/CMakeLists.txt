@@ -93,6 +93,16 @@ target_compile_options(adc_resource_tests PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>)
 add_test(NAME adc_resource_tests COMMAND adc_resource_tests)
 
+add_executable(storage_resource_tests storage_resource_tests.cpp)
+target_link_libraries(storage_resource_tests PRIVATE remotebsp remotebsp_remote_core)
+target_compile_options(storage_resource_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME storage_resource_tests COMMAND storage_resource_tests)
+add_executable(timer_resource_tests timer_resource_tests.cpp)
+target_link_libraries(timer_resource_tests PRIVATE remotebsp remotebsp_remote_core)
+target_compile_options(timer_resource_tests PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME timer_resource_tests COMMAND timer_resource_tests)
+
 add_executable(stream_session_tests stream_session_tests.cpp)
 target_link_libraries(stream_session_tests PRIVATE remotebsp_remote_core)
 target_compile_options(stream_session_tests PRIVATE

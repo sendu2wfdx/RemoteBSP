@@ -12,7 +12,9 @@ add_library(remotebsp_protocol
     src/motion_group.cpp
     src/packet.cpp
     src/resource.cpp
+    src/storage.cpp
     src/time_sync.cpp
+    src/timer.cpp
     src/waveform.cpp
 )
 

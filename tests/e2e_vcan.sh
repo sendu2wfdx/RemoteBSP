@@ -99,7 +99,9 @@ data = value["data"]
 assert data["snapshot_version"] == 2
 assert data["snapshot_sequence"] > 0
 assert len(data["nodes"]) == 1
-assert len(data["resources"]) == 30
+assert len(data["resources"]) == 32
+assert sum(item["descriptor"]["type"] == "adc"
+           for item in data["resources"]) == 2
 assert all(item["status_valid"] for item in data["resources"])
 assert len(data["clocks"]) == 1
 clock = data["clocks"][0]
@@ -169,7 +171,7 @@ grep -Fq 'firmware=0.2.0' <<<"$info_output"
 grep -Fq 'protocol_version=1' <<<"$info_output"
 
 capability_output="$("$remote_cli_bin" --socket "$socket_path" get-capability)"
-grep -Fq 'capabilities=0x1723' <<<"$capability_output"
+grep -Fq 'capabilities=0x1733' <<<"$capability_output"
 
 # 设备身份与校准参数使用独立持久化接口，不与资源清单混在一起。
 parameter_status_output="$("$remote_cli_bin" --socket "$socket_path" \

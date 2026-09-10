@@ -7,7 +7,9 @@
 #include "remotebsp/mock_mcu/motion_executor.hpp"
 #include "remotebsp/mock_mcu/motion_group_participant.hpp"
 #include "remotebsp/mock_mcu/stream_bsp.hpp"
+#include "remotebsp/mock_mcu/storage_bsp.hpp"
 #include "remotebsp/mock_mcu/time_sync_bsp.hpp"
+#include "remotebsp/mock_mcu/timer_bsp.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
@@ -20,7 +22,9 @@
 #include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
+#include "remotebsp/protocol/storage.hpp"
 #include "remotebsp/protocol/time_sync.hpp"
+#include "remotebsp/protocol/timer.hpp"
 
 #include <array>
 #include <chrono>
@@ -129,6 +133,8 @@ public:
     const NodeInfo& node_info() const noexcept;
     std::uint64_t capabilities() const noexcept;
     void set_adc_bsp(std::shared_ptr<AdcBsp> bsp) { adc_bsp_ = std::move(bsp); }
+    void set_storage_bsp(std::shared_ptr<StorageBsp> bsp) { storage_bsp_ = std::move(bsp); }
+    void set_timer_bsp(std::shared_ptr<TimerBsp> bsp) { timer_bsp_ = std::move(bsp); }
     bool bootloader_requested() const noexcept;
     std::size_t expire_leases(TimePoint now = Clock::now());
     std::size_t release_session(std::uint32_t session_id);
@@ -216,6 +222,12 @@ private:
         const protocol::Packet& request);
     protocol::Packet handle_adc_contract(const protocol::Packet& request) const;
     protocol::Packet handle_adc_sample(const protocol::Packet& request);
+    protocol::Packet handle_storage_contract(const protocol::Packet& request) const;
+    protocol::Packet handle_storage_read(const protocol::Packet& request);
+    protocol::Packet handle_storage_erase(const protocol::Packet& request);
+    protocol::Packet handle_storage_program(const protocol::Packet& request);
+    protocol::Packet handle_timer_contract(const protocol::Packet& request) const;
+    protocol::Packet handle_timer_execute(const protocol::Packet& request);
     protocol::Packet handle_stream_contract(
         const protocol::Packet& request) const;
     protocol::Packet handle_stream_open(
@@ -354,7 +366,10 @@ private:
     std::shared_ptr<TimeSyncBsp> time_sync_bsp_;
     std::shared_ptr<StreamBsp> stream_bsp_;
     std::shared_ptr<AdcBsp> adc_bsp_{std::make_shared<DeterministicAdcBsp>()};
+    std::shared_ptr<StorageBsp> storage_bsp_{std::make_shared<DeterministicStorageBsp>()};
     std::unordered_map<std::uint32_t, std::uint32_t> adc_sequences_;
+    std::shared_ptr<TimerBsp> timer_bsp_{std::make_shared<DeterministicTimerBsp>()};
+    std::unordered_map<std::uint32_t, std::uint32_t> timer_sequences_;
     std::vector<protocol::ResourceDescriptor> resources_;
     std::vector<protocol::ResourceContract> contracts_;
     std::unordered_map<std::uint32_t, std::vector<Lease>> leases_;

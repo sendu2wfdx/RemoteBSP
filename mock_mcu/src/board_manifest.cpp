@@ -1616,6 +1616,9 @@ DigitalTwin::DigitalTwin(BoardManifest manifest, FaultScenario scenario)
             stream_->add_resource(contract);
         }
     }
+    if ((manifest_.capabilities & capability_mask(Capability::Adc)) != 0U) {
+        adc_ = std::make_shared<DeterministicAdcBsp>();
+    }
     for (const auto& event : scenario_.events) {
         if (event.action == FaultAction::SetUartFailed) {
             require_resource(event.resource_id,
@@ -1678,6 +1681,10 @@ const std::shared_ptr<MockBusBsp>& DigitalTwin::bus() const noexcept {
 
 const std::shared_ptr<MockStreamBsp>& DigitalTwin::stream() const noexcept {
     return stream_;
+}
+
+const std::shared_ptr<AdcBsp>& DigitalTwin::adc() const noexcept {
+    return adc_;
 }
 
 bool DigitalTwin::online() const noexcept { return online_; }
@@ -1755,13 +1762,15 @@ RemoteCore make_remote_core(const DigitalTwin& twin,
                             std::uint32_t instance) {
     const auto& manifest = twin.manifest();
     auto device_parameters = std::make_shared<DeviceParameterStore>();
-    return RemoteCore(instantiate_node_info(manifest, instance),
+    RemoteCore core(instantiate_node_info(manifest, instance),
                       manifest.capabilities |
                           capability_mask(Capability::DeviceParameters),
                        twin.gpio(), twin.uart(),
                        manifest.resources, manifest.contracts,
                        twin.motion(), twin.waveform(), device_parameters,
                        twin.bus(), nullptr, twin.stream());
+    core.set_adc_bsp(twin.adc());
+    return core;
 }
 
 namespace {

@@ -923,6 +923,34 @@ protocol::AdcSampleResult Client::adc_sample(
         protocol::Command::AdcSample, protocol::encode_adc_sample_request(request))));
 }
 
+protocol::StorageContract Client::storage_contract(std::uint32_t resource_id) const {
+    return protocol::decode_storage_contract(body(command(
+        protocol::Command::StorageContract,protocol::encode_resource_id(resource_id))));
+}
+protocol::StorageReadResult Client::storage_read(const protocol::StorageRangeRequest& request) const {
+    return protocol::decode_storage_read_result(body(command(
+        protocol::Command::StorageRead,protocol::encode_storage_range_request(request))));
+}
+void Client::storage_erase(const protocol::StorageRangeRequest& request) const {
+    (void)body(command(protocol::Command::StorageErase,
+                       protocol::encode_storage_range_request(request)));
+}
+void Client::storage_program(const protocol::StorageProgramRequest& request) const {
+    (void)body(command(protocol::Command::StorageProgram,
+                       protocol::encode_storage_program_request(request)));
+}
+
+protocol::TimerContract Client::timer_contract(std::uint32_t resource_id) const {
+    return protocol::decode_timer_contract(body(command(
+        protocol::Command::TimerContract, protocol::encode_resource_id(resource_id))));
+}
+
+protocol::TimerExecuteResult Client::timer_execute(
+    const protocol::TimerExecuteRequest& request) const {
+    return protocol::decode_timer_execute_result(body(command(
+        protocol::Command::TimerExecute, protocol::encode_timer_execute_request(request))));
+}
+
 protocol::StreamContract Client::stream_contract(
     std::uint32_t resource_id) const {
     return protocol::decode_stream_contract(body(command(

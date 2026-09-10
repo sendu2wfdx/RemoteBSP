@@ -169,6 +169,17 @@ typedef struct {
     bool backend_failed;
 } rbsp_resource_runtime_status_t;
 
+#if defined(CONFIG_REMOTEBSP_ADC)
+typedef struct {
+    uint32_t resource_id;
+    uint32_t maximum_sample_rate_hz;
+    uint32_t reference_mv;
+    uint16_t maximum_batch_samples;
+    uint8_t resolution_bits;
+    uint8_t instance;
+} rbsp_adc_resource_config_t;
+#endif
+
 enum {
     RBSP_MCU_HEALTH_CPU_LOAD_AVAILABLE = 1U << 0,
     RBSP_MCU_HEALTH_ISR_LOAD_AVAILABLE = 1U << 1,
@@ -272,6 +283,15 @@ typedef struct {
     bool (*resource_status)(uint8_t resource_type, uint16_t instance,
                             rbsp_resource_runtime_status_t* status);
     bool (*health_sample)(rbsp_mcu_health_sample_t* sample);
+#if defined(CONFIG_REMOTEBSP_ADC)
+    /* 板级代码只可公布已经确认引脚复用和参考电压的完整 ADC 端点。 */
+    const rbsp_adc_resource_config_t* adc_resources;
+    uint8_t adc_resource_count;
+    bool (*adc_sample)(const rbsp_adc_resource_config_t* resource,
+                       uint32_t timeout_us, uint32_t interval_us,
+                       uint16_t* samples, uint16_t sample_count,
+                       uint32_t* elapsed_us);
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
     const rbsp_bus_resource_config_t* bus_resources;
     uint8_t bus_resource_count;
@@ -454,6 +474,10 @@ typedef struct {
         CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
     rbsp_core_resource_counters_t timed_bitstream_status[
         CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT];
+#endif
+#if defined(CONFIG_REMOTEBSP_ADC)
+    rbsp_core_resource_counters_t adc_status[CONFIG_ADC_RESOURCE_COUNT];
+    uint32_t adc_sequence[CONFIG_ADC_RESOURCE_COUNT];
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     rbsp_motion_queue_t motion;

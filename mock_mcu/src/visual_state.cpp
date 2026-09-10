@@ -137,6 +137,16 @@ void write_visual_state(const DigitalTwin& twin, std::uint64_t elapsed_ms,
     }
     output << (pwm.empty() ? "],\n" : "\n  ],\n");
 
+    output << "  \"adc\": {\"supported\": "
+           << (twin.adc() ? "true" : "false") << ", \"resources\": [";
+    bool first_adc = true;
+    for (const auto& resource : twin.manifest().resources) {
+        if (resource.type != protocol::ResourceType::Adc) continue;
+        output << (first_adc ? "" : ", ") << resource.resource_id;
+        first_adc = false;
+    }
+    output << "]},\n";
+
     const auto streams = twin.waveform()
                              ? twin.waveform()->bitstream_snapshot()
                              : std::vector<TimedBitstreamSnapshot>{};

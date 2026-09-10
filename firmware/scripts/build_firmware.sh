@@ -124,6 +124,14 @@ case "${target}" in
         build_one f103-bus-hal tests/configs/stm32f103_bus_hal_defconfig \
             remotebsp-stm32f103cbt6
         ;;
+    stm32-adc-core)
+        build_one f072-adc-core tests/configs/stm32f072_adc_core_defconfig \
+            remotebsp-stm32f072rbt6 remotebsp-stm32f072-adc-core
+        build_one f103-adc-core tests/configs/stm32f103_adc_core_defconfig \
+            remotebsp-stm32f103cbt6 remotebsp-stm32f103-adc-core
+        build_one g431-adc-core tests/configs/stm32g431_adc_core_defconfig \
+            remotebsp-stm32g431cbu6 remotebsp-stm32g431-adc-core
+        ;;
     weact-stm32g431cbu6-core-studio-identity)
         build_studio_identity
         ;;
@@ -178,6 +186,7 @@ case "${target}" in
         bash "$0" weact-stm32g431cbu6-core-bus-hal
         bash "$0" stm32f072-bus-hal
         bash "$0" stm32f103-bus-hal
+        bash "$0" stm32-adc-core
         bash "$0" mellow-fly-d5-motion
         bash "$0" weact-bluepill-plus-motion
         bash "$0" weact-stm32g431cbu6-core-motion

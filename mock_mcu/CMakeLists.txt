@@ -9,7 +9,9 @@ add_library(remotebsp_remote_core
     src/motion_group_participant.cpp
     src/remote_core.cpp
     src/stream_bsp.cpp
+    src/storage_bsp.cpp
     src/time_sync_bsp.cpp
+    src/timer_bsp.cpp
     src/transport_replay.cpp
     src/uart_bsp.cpp
     src/waveform_bsp.cpp

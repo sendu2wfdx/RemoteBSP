@@ -86,7 +86,7 @@ flowchart LR
 | Runtime API | GPIO 持久控制闭环已实现、已测试 | 认证回环 HTTP 已将细粒度权限、短时租约、稳定 UUID、节点代次与幂等键映射到 `toolbusd`；首次低电平创建、安全写低及 `GPIO_CLOSE`、Close 不确定冻结/重试和固件会话所有权已覆盖。GPIO 写入/释放操作账本具备写前 pending、同步终态、跨租约 TTL 查询、重启 unknown 恢复与资源阻断，Runtime 提供 status/lookup 和不确定结果自动恢复。结构化错误、统一单调期限、HMAC 持久控制审计、认证完整状态 SSE、慢客户端隔离/轮询降级，以及受控告警规则均已贯通。TLS、跨重启事件历史、系统级资源耗尽及实体失效安全验收待实现 |
 | 遥测健康契约 | 主机、Mock 与公共 MCU Core 已实现、已测试 | 稳定指标 ID、单位、生产者代际和可用性语义已定义；toolbusd、Remote Core、API、CLI 与 Runtime 可信投影已贯通。三款 STM32 已接入独立双页 Flash 健康代际日志，公共 Core 可报告运动队列、租约、故障和 uptime；实体 Flash 行为及 CPU/ISR/栈采样尚未验收，因此不会伪报实体数据。该健康日志不代表跨板运动 `boot_epoch` 已接入 |
 | 成熟度证据 | 基线与对照草案已建立、已测试 | 十个必需维度分层记录；2026-09-10 G431 证据已含 CAN-FD 压力/恢复、资源枚举、PWM 生命周期及 PA6 1 kHz/100 kHz 多占空比原始采集。PA0/PA4 仍不完整、公共 GND 待确认，单路 PWM 不构成 STEP/跨板时序通过。对照 v1 仍硬拒绝 executed/胜出 |
-| ADC / Timer / Storage | 尚未实现 | 按当前优先级后置 |
+| ADC / Timer / Storage | ADC 已完成协议、Mock、数字孪生与 STM32 条件编译骨架；Timer/Storage 尚未完成实体路径 | ADC 实体 AF/参考电压确认后再开放 Studio，Timer/Storage 按优先级推进 |
 
 ## 正式板卡
 

@@ -366,6 +366,25 @@ static bool fake_pwm_stop(uint8_t channel) {
     return true;
 }
 
+#if defined(CONFIG_REMOTEBSP_ADC)
+static const rbsp_adc_resource_config_t test_adc_resources[] = {
+    {0x05000000U, 10000U, 3300U, 32U, 12U, 0U},
+};
+
+static bool fake_adc_sample(const rbsp_adc_resource_config_t* resource,
+                            uint32_t timeout_us, uint32_t interval_us,
+                            uint16_t* samples, uint16_t sample_count,
+                            uint32_t* elapsed_us) {
+    (void)timeout_us;
+    if (resource == NULL || samples == NULL || elapsed_us == NULL) return false;
+    for (uint16_t index = 0U; index < sample_count; ++index) {
+        samples[index] = (uint16_t)(1000U + resource->instance + index);
+    }
+    *elapsed_us = interval_us * (sample_count - 1U);
+    return true;
+}
+#endif
+
 static bool fake_resource_status(
     uint8_t resource_type, uint16_t instance,
     rbsp_resource_runtime_status_t* status) {
@@ -738,6 +757,11 @@ int main(void) {
         .uart_reset = fake_uart_reset,
         .resource_status = fake_resource_status,
         .health_sample = fake_health_sample,
+#if defined(CONFIG_REMOTEBSP_ADC)
+        .adc_resources = test_adc_resources,
+        .adc_resource_count = 1U,
+        .adc_sample = fake_adc_sample,
+#endif
 #if defined(CONFIG_REMOTEBSP_BUS)
         .bus_resources = test_bus_resources,
         .bus_resource_count = 2U,
@@ -904,13 +928,13 @@ int main(void) {
 
     /*
      * 静态资源目录来自编译期能力，不得把 GPIO 对象池容量误当成固定端点。
-     * config_all 依次公开 2 UART、2 PWM、2 STEPGEN、1 定时位流和 2 BUS 项。
+     * config_all 依次公开 2 UART、2 PWM、2 STEPGEN、1 定时位流、1 ADC 和 2 BUS 项。
      */
     clear_sent();
     request_size = make_request(request, 0x0030U, 201U, 0U, NULL, 0U);
     feed_packet(&core, 0x619U, 201U, request, request_size);
-    assert(reassemble_sent(response, 0x599U) == 180U);
-    assert(response[24U] == 0U && get_u16(response + 25U) == 9U);
+    assert(reassemble_sent(response, 0x599U) == 197U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 10U);
     const uint8_t* descriptor = response + 27U;
     assert(get_u32(descriptor) == 0x02000000U && descriptor[4U] == 2U);
     assert(get_u16(descriptor + 5U) == 0U &&
@@ -930,11 +954,40 @@ int main(void) {
     assert(get_u32(descriptor) == 0x0A000000U && descriptor[4U] == 10U &&
            get_u32(descriptor + 13U) == 96U);
     descriptor += 17U;
+    assert(get_u32(descriptor) == 0x05000000U && descriptor[4U] == 5U &&
+           get_u32(descriptor + 9U) == 64U);
+    descriptor += 17U;
     assert(get_u32(descriptor) == TEST_I2C_BUS_ID && descriptor[4U] == 11U);
     descriptor += 17U;
     assert(get_u32(descriptor) == TEST_I2C_DEVICE_ID &&
            descriptor[4U] == 12U && get_u32(descriptor + 9U) == 128U &&
            get_u32(descriptor + 13U) == 128U);
+
+    uint8_t adc_id[4U];
+    put_u32(adc_id, 0x05000000U);
+    clear_sent();
+    request_size = make_request(request, 0x0500U, 208U, 0U,
+                                adc_id, sizeof(adc_id));
+    feed_packet(&core, 0x619U, 208U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 45U);
+    assert(response[24U] == 0U && get_u16(response + 25U) == 1U &&
+           get_u16(response + 27U) == 12U &&
+           get_u32(response + 29U) == 0x05000000U);
+
+    uint8_t adc_sample[16U] = {0U};
+    put_u32(adc_sample, 0x05000000U);
+    put_u32(adc_sample + 4U, 1000U);
+    put_u32(adc_sample + 8U, 100U);
+    put_u16(adc_sample + 12U, 3U);
+    clear_sent();
+    request_size = make_request(request, 0x0501U, 209U, 0U,
+                                adc_sample, sizeof(adc_sample));
+    feed_packet(&core, 0x619U, 209U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 47U);
+    assert(response[24U] == 0U && get_u32(response + 25U) == 0x05000000U &&
+           get_u32(response + 29U) == 1U && get_u32(response + 33U) == 200U &&
+           get_u16(response + 37U) == 3U && get_u16(response + 41U) == 1000U &&
+           get_u16(response + 45U) == 1002U);
 
     uint8_t static_resource_id[4U];
     put_u32(static_resource_id, 0x06000000U);

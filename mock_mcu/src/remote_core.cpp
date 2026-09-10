@@ -219,6 +219,18 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_adc_contract(request);
         case protocol::Command::AdcSample:
             return handle_adc_sample(request);
+        case protocol::Command::StorageContract:
+            return handle_storage_contract(request);
+        case protocol::Command::StorageRead:
+            return handle_storage_read(request);
+        case protocol::Command::StorageErase:
+            return handle_storage_erase(request);
+        case protocol::Command::StorageProgram:
+            return handle_storage_program(request);
+        case protocol::Command::TimerContract:
+            return handle_timer_contract(request);
+        case protocol::Command::TimerExecute:
+            return handle_timer_execute(request);
         case protocol::Command::StreamContract:
             return handle_stream_contract(request);
         case protocol::Command::StreamOpen:
@@ -2331,6 +2343,139 @@ protocol::Packet RemoteCore::handle_adc_sample(const protocol::Packet& request) 
         {sample.resource_id, sequence,
          sample.interval_us * (sample.sample_count - 1U), std::move(values)});
     response.payload.insert(response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_storage_contract(const protocol::Packet& request) const {
+    if (!storage_bsp_ || (capabilities_ & capability_mask(Capability::Storage)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    if (request.header.object_id != 0U || request.payload.size() != 4U)
+        return make_response(request, StatusCode::InvalidPayload);
+    const auto id=protocol::decode_resource_id(request.payload);
+    const auto* resource=find_resource(id);
+    if(resource==nullptr || resource->type!=protocol::ResourceType::Storage)
+        return make_response(request,StatusCode::ObjectNotFound);
+    try {
+        auto response=make_response(request,StatusCode::Ok);
+        const auto encoded=protocol::encode_storage_contract(storage_bsp_->contract(id));
+        response.payload.insert(response.payload.end(),encoded.begin(),encoded.end());return response;
+    } catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+}
+
+protocol::Packet RemoteCore::handle_storage_read(const protocol::Packet& request) {
+    if (!storage_bsp_ || (capabilities_ & capability_mask(Capability::Storage)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    protocol::StorageRangeRequest value;
+    try { value=protocol::decode_storage_range_request(request.payload); }
+    catch(const std::invalid_argument&) { return make_response(request,StatusCode::InvalidPayload); }
+    if(request.header.object_id!=0U)return make_response(request,StatusCode::InvalidPayload);
+    const auto* resource=find_resource(value.resource_id);
+    if(resource==nullptr || resource->type!=protocol::ResourceType::Storage)
+        return make_response(request,StatusCode::ObjectNotFound);
+    protocol::StorageContract contract;
+    try { contract=storage_bsp_->contract(value.resource_id); }
+    catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+    if(value.length>contract.maximum_transfer_bytes || value.length>contract.capacity_bytes ||
+       value.offset>contract.capacity_bytes-value.length)
+        return make_response(request,StatusCode::InvalidPayload);
+    if(!session_has_lease(value.resource_id,request.header.session_id))
+        return make_response(request,StatusCode::AccessDenied);
+    try {
+        const auto bytes=storage_bsp_->read(value);
+        if(bytes.size()!=value.length)return make_response(request,StatusCode::ResourceFailed);
+        auto response=make_response(request,StatusCode::Ok);const auto encoded=protocol::encode_storage_read_result({value.resource_id,value.offset,bytes});
+        response.payload.insert(response.payload.end(),encoded.begin(),encoded.end());return response;
+    } catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+}
+
+protocol::Packet RemoteCore::handle_storage_erase(const protocol::Packet& request) {
+    if (!storage_bsp_ || (capabilities_ & capability_mask(Capability::Storage)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    protocol::StorageRangeRequest value;
+    try { value=protocol::decode_storage_range_request(request.payload); }
+    catch(const std::invalid_argument&) { return make_response(request,StatusCode::InvalidPayload); }
+    if(request.header.object_id!=0U)return make_response(request,StatusCode::InvalidPayload);
+    const auto* resource=find_resource(value.resource_id);
+    if(resource==nullptr || resource->type!=protocol::ResourceType::Storage)
+        return make_response(request,StatusCode::ObjectNotFound);
+    protocol::StorageContract contract;
+    try { contract=storage_bsp_->contract(value.resource_id); }
+    catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+    if(value.length>contract.maximum_transfer_bytes || value.length>contract.capacity_bytes ||
+       value.offset>contract.capacity_bytes-value.length ||
+       value.offset%contract.erase_block_bytes || value.length%contract.erase_block_bytes)
+        return make_response(request,StatusCode::InvalidPayload);
+    if(!session_has_exclusive_lease(value.resource_id,request.header.session_id))
+        return make_response(request,StatusCode::AccessDenied);
+    try { storage_bsp_->erase(value);return make_response(request,StatusCode::Ok); }
+    catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+}
+
+protocol::Packet RemoteCore::handle_storage_program(const protocol::Packet& request) {
+    if (!storage_bsp_ || (capabilities_ & capability_mask(Capability::Storage)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    protocol::StorageProgramRequest value;
+    try { value=protocol::decode_storage_program_request(request.payload); }
+    catch(const std::invalid_argument&) { return make_response(request,StatusCode::InvalidPayload); }
+    if(request.header.object_id!=0U)return make_response(request,StatusCode::InvalidPayload);
+    const auto* resource=find_resource(value.resource_id);
+    if(resource==nullptr || resource->type!=protocol::ResourceType::Storage)
+        return make_response(request,StatusCode::ObjectNotFound);
+    protocol::StorageContract contract;
+    try { contract=storage_bsp_->contract(value.resource_id); }
+    catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+    if(value.data.size()>contract.maximum_transfer_bytes || value.data.size()>contract.capacity_bytes ||
+       value.offset>contract.capacity_bytes-value.data.size() ||
+       value.offset%contract.write_alignment_bytes || value.data.size()%contract.write_alignment_bytes)
+        return make_response(request,StatusCode::InvalidPayload);
+    if(!session_has_exclusive_lease(value.resource_id,request.header.session_id))
+        return make_response(request,StatusCode::AccessDenied);
+    try { storage_bsp_->program(value);return make_response(request,StatusCode::Ok); }
+    catch(const std::exception&) { return make_response(request,StatusCode::ResourceFailed); }
+}
+
+protocol::Packet RemoteCore::handle_timer_contract(const protocol::Packet& request) const {
+    if (!timer_bsp_ || (capabilities_ & capability_mask(Capability::Timer)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    if (request.header.object_id != 0U || request.payload.size() != 4U)
+        return make_response(request, StatusCode::InvalidPayload);
+    const auto id = protocol::decode_resource_id(request.payload);
+    const auto* resource = find_resource(id);
+    if (!resource || resource->type != protocol::ResourceType::Timer)
+        return make_response(request, StatusCode::ObjectNotFound);
+    auto response = make_response(request, StatusCode::Ok);
+    const auto encoded = protocol::encode_timer_contract({1U,
+        std::uint16_t(protocol::kTimerCapabilityCounterWindow |
+                      protocol::kTimerCapabilityPeriodCapture |
+                      protocol::kTimerCapabilityOneShot), id, 1000000U,
+        protocol::kMaximumTimerOperationUs});
+    response.payload.insert(response.payload.end(), encoded.begin(), encoded.end());
+    return response;
+}
+
+protocol::Packet RemoteCore::handle_timer_execute(const protocol::Packet& request) {
+    if (!timer_bsp_ || (capabilities_ & capability_mask(Capability::Timer)) == 0U)
+        return make_response(request, StatusCode::UnsupportedCapability);
+    if (request.header.object_id != 0U) return make_response(request, StatusCode::InvalidPayload);
+    protocol::TimerExecuteRequest value;
+    try { value = protocol::decode_timer_execute_request(request.payload); }
+    catch (const std::invalid_argument&) { return make_response(request, StatusCode::InvalidPayload); }
+    const auto* resource = find_resource(value.resource_id);
+    if (!resource || resource->type != protocol::ResourceType::Timer)
+        return make_response(request, StatusCode::ObjectNotFound);
+    if (!resource_access_allowed(value.resource_id, request.header.session_id))
+        return make_response(request, StatusCode::AccessDenied);
+    protocol::TimerExecuteResult result;
+    try { result = timer_bsp_->execute(value); }
+    catch (const std::exception&) { return make_response(request, StatusCode::ResourceFailed); }
+    if (result.resource_id != value.resource_id || result.operation != value.operation ||
+        result.elapsed_us > value.timeout_us)
+        return make_response(request, StatusCode::ResourceFailed);
+    result.sequence = ++timer_sequences_[value.resource_id];
+    auto response = make_response(request, StatusCode::Ok);
+    try { const auto encoded = protocol::encode_timer_execute_result(result);
+        response.payload.insert(response.payload.end(), encoded.begin(), encoded.end()); }
+    catch (const std::invalid_argument&) { return make_response(request, StatusCode::ResourceFailed); }
     return response;
 }
 

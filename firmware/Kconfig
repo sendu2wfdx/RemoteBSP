@@ -622,6 +622,25 @@ config G431_BUS_SPI2_PB13_PB14_PB15_CS_PB12
 
 endmenu
 
+menu "ADC（可选实验骨架）"
+
+config REMOTEBSP_ADC
+    bool "编译通用 ADC 原始码采样核心"
+    default n
+    depends on BOARD_STM32F072RBT6 || BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6
+    help
+      仅编译协议、静态资源枚举和 BSP 回调边界。当前三块实体目标均未提供
+      经 AF 与参考电压确认的板级采样后端，因此即使打开本项也不会公布 ADC
+      能力或资源；Studio 在实体确认前同样不得提供 ADC 引脚候选。
+
+config ADC_RESOURCE_COUNT
+    int "ADC 静态端点编译期上限"
+    range 1 16
+    default 1
+    depends on REMOTEBSP_ADC
+
+endmenu
+
 menu "PWM 与定时位流（可选）"
 
 config REMOTEBSP_PWM

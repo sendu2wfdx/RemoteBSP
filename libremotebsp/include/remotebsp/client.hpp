@@ -1,5 +1,7 @@
 #pragma once
 #include "remotebsp/protocol/adc.hpp"
+#include "remotebsp/protocol/storage.hpp"
+#include "remotebsp/protocol/timer.hpp"
 
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
@@ -447,6 +449,14 @@ public:
     protocol::AdcContract adc_contract(std::uint32_t resource_id) const;
     protocol::AdcSampleResult adc_sample(
         const protocol::AdcSampleRequest& request) const;
+    protocol::StorageContract storage_contract(std::uint32_t resource_id) const;
+    protocol::StorageReadResult storage_read(
+        const protocol::StorageRangeRequest& request) const;
+    void storage_erase(const protocol::StorageRangeRequest& request) const;
+    void storage_program(const protocol::StorageProgramRequest& request) const;
+    protocol::TimerContract timer_contract(std::uint32_t resource_id) const;
+    protocol::TimerExecuteResult timer_execute(
+        const protocol::TimerExecuteRequest& request) const;
     protocol::StreamContract stream_contract(
         std::uint32_t resource_id) const;
     protocol::StreamOpenResponse stream_open(

@@ -58,6 +58,8 @@ enum {
     RBSP_COMMAND_I2C_TRANSFER = 0x0301,
     RBSP_COMMAND_SPI_CONTRACT = 0x0400,
     RBSP_COMMAND_SPI_TRANSFER = 0x0401,
+    RBSP_COMMAND_ADC_CONTRACT = 0x0500,
+    RBSP_COMMAND_ADC_SAMPLE = 0x0501,
     RBSP_COMMAND_PWM_CREATE = 0x0600,
     RBSP_COMMAND_PWM_WRITE = 0x0601,
     RBSP_COMMAND_PWM_STOP = 0x0602,
@@ -87,6 +89,7 @@ enum {
     RBSP_RESOURCE_CONTRACT_SIZE = 32,
     RBSP_RESOURCE_FLAG_NATIVE = 1U << 0,
     RBSP_RESOURCE_TYPE_UART = 2,
+    RBSP_RESOURCE_TYPE_ADC = 5,
     RBSP_RESOURCE_TYPE_PWM = 6,
     RBSP_RESOURCE_TYPE_STEPGEN_AXIS = 9,
     RBSP_RESOURCE_TYPE_TIMED_BITSTREAM = 10,
@@ -119,6 +122,7 @@ enum {
 #endif
     RBSP_RESOURCE_ACCESS_READABLE = 1U << 0,
     RBSP_RESOURCE_ACCESS_WRITABLE = 1U << 1,
+    RBSP_RESOURCE_ACCESS_SHARED_READ = 1U << 2,
     RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE = 1U << 3,
     RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED = 1U << 4,
     RBSP_RESOURCE_ACCESS_LEASE_REQUIRED = 1U << 5,
@@ -1484,6 +1488,10 @@ typedef struct {
     uint16_t index;
 } rbsp_static_resource_iterator_t;
 
+#if defined(CONFIG_REMOTEBSP_ADC)
+static bool adc_configuration_valid(const rbsp_hal_t* hal);
+#endif
+
 #if defined(CONFIG_REMOTEBSP_BUS)
 static uint8_t bus_resource_type(uint8_t kind) {
     switch (kind) {
@@ -1578,6 +1586,22 @@ static bool next_static_resource(
                 iterator->index = 0U;
                 break;
             case 4U:
+#if defined(CONFIG_REMOTEBSP_ADC)
+                if (adc_configuration_valid(&core->hal) &&
+                    iterator->index < core->hal.adc_resource_count) {
+                    const rbsp_adc_resource_config_t* item =
+                        &core->hal.adc_resources[iterator->index++];
+                    *descriptor = (rbsp_static_resource_descriptor_t){
+                        item->resource_id, RBSP_RESOURCE_TYPE_ADC,
+                        item->instance, RBSP_RESOURCE_FLAG_NATIVE,
+                        item->maximum_batch_samples * 2U, 0U};
+                    return true;
+                }
+#endif
+                iterator->phase = 5U;
+                iterator->index = 0U;
+                break;
+            case 5U:
 #if defined(CONFIG_REMOTEBSP_BUS)
                 if (iterator->index < core->hal.bus_resource_count) {
                     const rbsp_bus_resource_config_t* item =
@@ -1596,7 +1620,7 @@ static bool next_static_resource(
                     return true;
                 }
 #endif
-                iterator->phase = 5U;
+                iterator->phase = 6U;
                 iterator->index = 0U;
                 break;
             default:
@@ -1629,6 +1653,44 @@ static bool find_static_resource(
     }
     return false;
 }
+
+#if defined(CONFIG_REMOTEBSP_ADC)
+static bool adc_configuration_valid(const rbsp_hal_t* hal) {
+    if (hal->adc_resources == NULL || hal->adc_sample == NULL ||
+        hal->adc_resource_count == 0U ||
+        hal->adc_resource_count > CONFIG_ADC_RESOURCE_COUNT) return false;
+    for (size_t index = 0U; index < hal->adc_resource_count; ++index) {
+        const rbsp_adc_resource_config_t* item = &hal->adc_resources[index];
+        if ((item->resource_id >> 24U) != RBSP_RESOURCE_TYPE_ADC ||
+            item->resolution_bits < 6U || item->resolution_bits > 16U ||
+            item->maximum_sample_rate_hz == 0U ||
+            item->maximum_sample_rate_hz > 1000000U ||
+            item->reference_mv == 0U || item->maximum_batch_samples == 0U ||
+            item->maximum_batch_samples > 32U) return false;
+        for (size_t previous = 0U; previous < index; ++previous) {
+            if (hal->adc_resources[previous].resource_id == item->resource_id ||
+                hal->adc_resources[previous].instance == item->instance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static const rbsp_adc_resource_config_t* find_adc_resource(
+    const rbsp_core_t* core, uint32_t resource_id, size_t* index_out) {
+    if (!adc_configuration_valid(&core->hal)) {
+        return NULL;
+    }
+    for (size_t index = 0U; index < core->hal.adc_resource_count; ++index) {
+        if (core->hal.adc_resources[index].resource_id == resource_id) {
+            if (index_out != NULL) *index_out = index;
+            return &core->hal.adc_resources[index];
+        }
+    }
+    return NULL;
+}
+#endif
 
 static uint32_t saturating_add_u32(uint32_t left, uint32_t right) {
     return UINT32_MAX - left < right ? UINT32_MAX : left + right;
@@ -1668,6 +1730,16 @@ static rbsp_core_resource_counters_t* resource_counters(
     if (descriptor->type == RBSP_RESOURCE_TYPE_TIMED_BITSTREAM &&
         instance < CONFIG_TIMED_BITSTREAM_RESOURCE_COUNT) {
         return &core->timed_bitstream_status[instance];
+    }
+#endif
+#if defined(CONFIG_REMOTEBSP_ADC)
+    if (descriptor->type == RBSP_RESOURCE_TYPE_ADC) {
+        for (size_t index = 0U; index < core->hal.adc_resource_count; ++index) {
+            if (core->hal.adc_resources[index].resource_id ==
+                descriptor->resource_id && index < CONFIG_ADC_RESOURCE_COUNT) {
+                return &core->adc_status[index];
+            }
+        }
     }
 #endif
     return NULL;
@@ -1785,6 +1857,10 @@ static bool basic_resource_contract(
     if (descriptor.type == RBSP_RESOURCE_TYPE_UART) {
         access = RBSP_RESOURCE_ACCESS_READABLE |
                  RBSP_RESOURCE_ACCESS_WRITABLE;
+    } else if (descriptor.type == RBSP_RESOURCE_TYPE_ADC) {
+        access = RBSP_RESOURCE_ACCESS_READABLE |
+                 RBSP_RESOURCE_ACCESS_SHARED_READ |
+                 RBSP_RESOURCE_ACCESS_LEASE_SUPPORTED;
     } else {
         access = RBSP_RESOURCE_ACCESS_WRITABLE |
                  RBSP_RESOURCE_ACCESS_EXCLUSIVE_WRITE;
@@ -2126,6 +2202,11 @@ static bool process_request(rbsp_core_t* core,
             }
             if (bus_has_device_kind(core, RBSP_BUS_I2C_DEVICE)) {
                 capabilities |= 1ULL << 3U;
+            }
+#endif
+#if defined(CONFIG_REMOTEBSP_ADC)
+            if (adc_configuration_valid(&core->hal)) {
+                capabilities |= 1ULL << 4U;
             }
 #endif
 #if defined(CONFIG_REMOTEBSP_PWM)
@@ -2810,6 +2891,92 @@ static bool process_request(rbsp_core_t* core,
                     core, request, RBSP_STATUS_OK, 0U,
                     data, sizeof(data));
             }
+            break;
+        }
+
+#endif
+#if defined(CONFIG_REMOTEBSP_ADC)
+        case RBSP_COMMAND_ADC_CONTRACT: {
+            const rbsp_adc_resource_config_t* resource = NULL;
+            if (request->object_id == 0U && request->payload_length == 4U) {
+                resource = find_adc_resource(
+                    core, get_u32(request->payload), NULL);
+            }
+            if (request->object_id != 0U || request->payload_length != 4U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+            } else if (resource == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+            } else {
+                uint8_t data[20U] = {0U};
+                put_u16(data, 1U);
+                put_u16(data + 2U, resource->resolution_bits);
+                put_u32(data + 4U, resource->resource_id);
+                put_u32(data + 8U, resource->maximum_sample_rate_hz);
+                put_u32(data + 12U, resource->reference_mv);
+                put_u16(data + 16U, resource->maximum_batch_samples);
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK, 0U, data, sizeof(data));
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_ADC_SAMPLE: {
+            const uint32_t resource_id = request->payload_length >= 4U
+                                             ? get_u32(request->payload) : 0U;
+            size_t resource_index = 0U;
+            const rbsp_adc_resource_config_t* resource =
+                find_adc_resource(core, resource_id, &resource_index);
+            if (request->object_id != 0U || request->payload_length != 16U ||
+                get_u16(request->payload + 14U) != 0U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            if (resource == NULL) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OBJECT_NOT_FOUND, 0U, NULL, 0U);
+                break;
+            }
+            const uint32_t timeout_us = get_u32(request->payload + 4U);
+            const uint32_t interval_us = get_u32(request->payload + 8U);
+            const uint16_t count = get_u16(request->payload + 12U);
+            const uint64_t duration = count > 0U
+                ? (uint64_t)interval_us * (uint64_t)(count - 1U) : 0U;
+            const uint32_t minimum_interval = resource->maximum_sample_rate_hz
+                ? (1000000U + resource->maximum_sample_rate_hz - 1U) /
+                      resource->maximum_sample_rate_hz : UINT32_MAX;
+            if (timeout_us == 0U || timeout_us > 1000000U || count == 0U ||
+                count > 32U || count > resource->maximum_batch_samples ||
+                (count > 1U && (interval_us == 0U ||
+                                interval_us < minimum_interval)) ||
+                duration > timeout_us) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD, 0U, NULL, 0U);
+                break;
+            }
+            uint16_t samples[32U];
+            uint32_t elapsed_us = 0U;
+            if (!core->hal.adc_sample(resource, timeout_us, interval_us,
+                                      samples, count, &elapsed_us) ||
+                elapsed_us > timeout_us) {
+                core->adc_status[resource_index].backend_failed = true;
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED, 0U, NULL, 0U);
+                break;
+            }
+            uint8_t data[80U] = {0U};
+            put_u32(data, resource_id);
+            put_u32(data + 4U, ++core->adc_sequence[resource_index]);
+            put_u32(data + 8U, elapsed_us);
+            put_u16(data + 12U, count);
+            for (uint16_t index = 0U; index < count; ++index) {
+                put_u16(data + 16U + index * 2U, samples[index]);
+            }
+            response_size = make_status_response(
+                core, request, RBSP_STATUS_OK, 0U, data,
+                (uint16_t)(16U + count * 2U));
             break;
         }
 #endif

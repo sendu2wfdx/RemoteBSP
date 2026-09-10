@@ -460,6 +460,12 @@ void print_usage() {
         << "  resource-lease-status <资源ID>\n"
         << "  adc-contract <资源ID>\n"
         << "  adc-sample <资源ID> <样本数1..32> <间隔us> <超时us>\n"
+        << "  storage-contract <资源ID>\n"
+        << "  storage-read <资源ID> <偏移> <长度> <超时us>\n"
+        << "  storage-erase <资源ID> <偏移> <长度> <超时us>\n"
+        << "  storage-program <资源ID> <偏移> <超时us> <hex数据>\n"
+        << "  timer-contract <资源ID>\n"
+        << "  timer-execute <资源ID> <counter|capture|one-shot> <参数us> <超时us>\n"
         << "  stream-contract <资源ID>\n"
         << "  stream-open <资源ID> <块字节> <flags> <初始信用字节>\n"
         << "  stream-read <stream ID> <预期序号> [超时毫秒]\n"
@@ -1239,6 +1245,52 @@ int run(const std::vector<std::string>& arguments,
             std::cout << value.samples[i];
         }
         std::cout << '\n'; return 0;
+    }
+    if (name == "storage-contract" && arguments.size() == 2) {
+        const auto value=client.storage_contract(parse_u32(arguments[1],"Storage资源ID"));
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << std::dec
+                  << " version=" << value.version << " flags=0x" << std::hex << value.flags << std::dec
+                  << " capacity_bytes=" << value.capacity_bytes
+                  << " erase_block_bytes=" << value.erase_block_bytes
+                  << " write_alignment_bytes=" << value.write_alignment_bytes
+                  << " maximum_transfer_bytes=" << value.maximum_transfer_bytes << '\n'; return 0;
+    }
+    if (name == "storage-read" && arguments.size() == 5) {
+        const auto value=client.storage_read({parse_u32(arguments[1],"Storage资源ID"),
+            parse_u32(arguments[2],"偏移"),parse_u32(arguments[3],"长度"),parse_u32(arguments[4],"超时")});
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << " offset=0x" << value.offset << " data=";
+        for(const auto byte:value.data)std::cout << std::setw(2) << std::setfill('0') << static_cast<unsigned>(byte);
+        std::cout << std::dec << '\n'; return 0;
+    }
+    if (name == "storage-erase" && arguments.size() == 5) {
+        client.storage_erase({parse_u32(arguments[1],"Storage资源ID"),parse_u32(arguments[2],"偏移"),
+            parse_u32(arguments[3],"长度"),parse_u32(arguments[4],"超时")});std::cout << "ok\n";return 0;
+    }
+    if (name == "storage-program" && arguments.size() == 5) {
+        client.storage_program({parse_u32(arguments[1],"Storage资源ID"),parse_u32(arguments[2],"偏移"),
+            parse_u32(arguments[3],"超时"),parse_hex(arguments[4])});std::cout << "ok\n";return 0;
+    }
+    if (name == "timer-contract" && arguments.size() == 2) {
+        const auto value = client.timer_contract(parse_u32(arguments[1], "Timer资源ID"));
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << std::dec
+                  << " version=" << value.version << " capabilities=" << value.capabilities
+                  << " tick_hz=" << value.tick_hz
+                  << " maximum_operation_us=" << value.maximum_operation_us << '\n';
+        return 0;
+    }
+    if (name == "timer-execute" && arguments.size() == 5) {
+        remotebsp::protocol::TimerOperation operation;
+        if (arguments[2] == "counter") operation = remotebsp::protocol::TimerOperation::CounterWindow;
+        else if (arguments[2] == "capture") operation = remotebsp::protocol::TimerOperation::PeriodCapture;
+        else if (arguments[2] == "one-shot") operation = remotebsp::protocol::TimerOperation::OneShot;
+        else throw std::invalid_argument("Timer操作必须是 counter、capture 或 one-shot");
+        const auto value = client.timer_execute({parse_u32(arguments[1], "Timer资源ID"), operation,
+            parse_u32(arguments[3], "Timer参数"), parse_u32(arguments[4], "Timer超时")});
+        std::cout << "resource_id=0x" << std::hex << value.resource_id << std::dec
+                  << " operation=" << static_cast<unsigned>(value.operation)
+                  << " sequence=" << value.sequence << " value=" << value.value
+                  << " elapsed_us=" << value.elapsed_us << '\n';
+        return 0;
     }
     if (name == "gpio-create" &&
         (arguments.size() == 3 || arguments.size() == 4)) {
