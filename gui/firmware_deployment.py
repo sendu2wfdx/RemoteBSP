@@ -357,10 +357,10 @@ class JsonIdentityFileReader:
         device_uuid = value["device_uuid"]
         if not isinstance(board_id, str) or board_id not in _OPENOCD_TARGET:
             raise FirmwareDeploymentError("身份文件board_id无效")
-        if not isinstance(device_uuid, str) or not device_uuid or \
-                len(device_uuid) > 128 or any(
-                    character in device_uuid for character in "\r\n\0"):
-            raise FirmwareDeploymentError("身份文件device_uuid无效")
+        if not isinstance(device_uuid, str) or not re.fullmatch(
+                r"[0-9a-fA-F]{32}", device_uuid):
+            raise FirmwareDeploymentError(
+                "身份文件device_uuid必须是32位十六进制")
         return DeviceIdentity(
             board_id=board_id,
             project_sha256=_require_hash(value["project_sha256"],
@@ -370,7 +370,7 @@ class JsonIdentityFileReader:
             firmware_identity_sha256=_require_hash(
                 value["firmware_identity_sha256"],
                 "firmware_identity_sha256"),
-            device_uuid=device_uuid)
+            device_uuid=device_uuid.lower())
 
 
 def _require_hash(value: object, field: str) -> str:

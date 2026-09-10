@@ -168,11 +168,11 @@ class FirmwareDeploymentTest(unittest.TestCase):
                 "project_sha256": "a" * 64,
                 "config_sha256": "b" * 64,
                 "firmware_identity_sha256": "c" * 64,
-                "device_uuid": "uuid-1",
+                "device_uuid": "ab" * 16,
             }
             path.write_text(json.dumps(identity), encoding="utf-8")
             observed = JsonIdentityFileReader(path).read_identity()
-            self.assertEqual(observed.device_uuid, "uuid-1")
+            self.assertEqual(observed.device_uuid, "ab" * 16)
             path.write_text('{"board_id":"x","board_id":"y"}',
                             encoding="utf-8")
             with self.assertRaisesRegex(FirmwareDeploymentError, "重复字段"):
@@ -250,7 +250,7 @@ class FirmwareDeploymentTest(unittest.TestCase):
             observed = DeviceIdentity(
                 expected.board_id, expected.project_sha256,
                 expected.config_sha256, expected.firmware_identity_sha256,
-                "uuid-1")
+                "ab" * 16)
             commands = []
             result = deploy_stlink(
                 build_id, Reader([TimeoutError("booting"), observed]),
@@ -267,7 +267,7 @@ class FirmwareDeploymentTest(unittest.TestCase):
             expected = expected_identity(build_id, output_root=root)
             bad = DeviceIdentity(
                 expected.board_id, expected.project_sha256, "c" * 64,
-                expected.firmware_identity_sha256, "uuid-1")
+                expected.firmware_identity_sha256, "ab" * 16)
             with self.assertRaisesRegex(FirmwareDeploymentError, "身份核对"):
                 deploy_stlink(
                     build_id, Reader(itertools.repeat(bad)), output_root=root,

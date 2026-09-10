@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 from project_artifacts import generate_project_reports
 from project_config import ProjectConfigError
+from deployment_record import validate_deployment_record
+from firmware_deployment import FirmwareDeploymentError
 
 
 PRODUCTION_RECORD_SCHEMA_VERSION = 1
@@ -66,7 +68,8 @@ def _percent(value: object) -> bool:
 _REQUIRED_BUILD_FIELDS = (
     "schema_version", "build_id", "built_at_utc", "board_id",
     "firmware_target", "resource_count", "project_sha256",
-    "config_sha256", "git_revision", "git_dirty", "parallel_jobs",
+    "config_sha256", "firmware_input_sha256", "git_revision", "git_dirty",
+    "parallel_jobs",
     "tool_versions.cmake", "tool_versions.ninja",
     "tool_versions.arm_none_eabi_gcc", "memory.ram.used_bytes",
     "memory.ram.capacity_bytes", "memory.ram.used_percent",
@@ -181,6 +184,9 @@ def _build_evidence(build_record: object | None,
          and bool(_HASH_PATTERN.fullmatch(build_record["project_sha256"]))),
         ("config_sha256", isinstance(build_record.get("config_sha256"), str)
          and bool(_HASH_PATTERN.fullmatch(build_record["config_sha256"]))),
+        ("firmware_input_sha256",
+         isinstance(build_record.get("firmware_input_sha256"), str) and
+         bool(_HASH_PATTERN.fullmatch(build_record["firmware_input_sha256"]))),
         ("git_dirty", isinstance(build_record.get("git_dirty"), bool)),
         ("build_id", _text(build_record.get("build_id"), 96)
          and bool(re.fullmatch(r"[a-z0-9-]+", build_record["build_id"]))),
@@ -242,6 +248,7 @@ def _build_evidence(build_record: object | None,
         "resource_count": build_record.get("resource_count"),
         "project_sha256": build_record.get("project_sha256"),
         "config_sha256": build_record.get("config_sha256"),
+        "firmware_input_sha256": build_record.get("firmware_input_sha256"),
         "git": {
             "revision": build_record.get("git_revision"),
             "dirty": build_record.get("git_dirty"),
@@ -257,7 +264,8 @@ def _build_evidence(build_record: object | None,
 
 def generate_production_record(
         project: dict, catalog: dict, *, build_record: object | None = None,
-        build_record_sha256: str | None = None) -> ProductionRecordResult:
+        build_record_sha256: str | None = None,
+        deployment_record: object | None = None) -> ProductionRecordResult:
     """生成只含软件证据的生产记录；不会构建、烧录或访问节点。"""
     reports = generate_project_reports(project, catalog)
     build, missing, warnings = _build_evidence(
@@ -284,6 +292,26 @@ def generate_production_record(
         archived_config is None or archived_config.get("sha256") is None or \
         build.get("config_sha256") is None else \
         archived_config["sha256"] == build["config_sha256"]
+    deployment = None
+    deployment_match = None
+    if deployment_record is not None:
+        try:
+            deployment = validate_deployment_record(deployment_record)
+        except FirmwareDeploymentError as error:
+            raise ProjectConfigError(f"部署记录不可用：{error}") from error
+        deployed = deployment["deployment"]
+        observed = deployment["observed_identity"]
+        deployment_match = bool(
+            build_record is not None and not missing and
+            deployed["build_id"] == build.get("build_id") and
+            deployed["board_id"] == reports.board_id == build.get("board_id") and
+            observed["project_sha256"] == reports.project_sha256 ==
+            build.get("project_sha256") and
+            observed["config_sha256"] == build.get("config_sha256") and
+            observed["firmware_identity_sha256"] ==
+            build.get("firmware_input_sha256") and
+            deployment["source_evidence"]["build_record"]["sha256"] ==
+            build.get("source_record_sha256"))
     if project_match is False:
         warnings.append("软件构建记录对应的工程哈希与当前工程不一致。")
     if board_match is False:
@@ -295,7 +323,14 @@ def generate_production_record(
     if archived_config_match is False:
         warnings.append("归档的固件配置产物哈希与构建记录不一致。")
 
-    if build_record is None:
+    if deployment_record is not None and deployment_match is not True:
+        status = "deployment_mismatch"
+        status_text = "部署证据不匹配：不能证明当前工程和构建已烧录"
+        warnings.append("部署记录与当前工程、构建记录或构建记录哈希不一致。")
+    elif deployment_match is True:
+        status = "firmware_deployed_verified"
+        status_text = "固件已烧录，运行中设备通过四重身份核验"
+    elif build_record is None:
         status = "design_only"
         status_text = "仅设计记录：尚未执行软件构建、烧录或硬件实测"
     elif False in (project_match, board_match, resource_count_match,
@@ -336,6 +371,7 @@ def generate_production_record(
             },
         },
         "software_build_evidence": build,
+        "deployment_evidence": deployment,
         "evidence_checks": {
             "project_sha256_matches_build": project_match,
             "board_id_matches_build": board_match,
@@ -345,16 +381,21 @@ def generate_production_record(
         },
         "execution_status": {
             "software_build": build["status"],
-            "firmware_flash": "not_performed",
+            "firmware_flash": (
+                "performed_and_verified" if deployment_match is True
+                else "not_performed"),
             "hardware_validation": "not_performed",
             "hardware_connected_by_this_operation": False,
         },
         "missing_or_invalid_fields": missing,
         "warnings": warnings,
         "declaration": (
-            "本记录仅整理已有软件证据，不证明固件已经烧录，不证明板卡、"
-            "接线、波形、时序或外设通过实测。"),
+            "本记录可引用独立部署证据证明固件写入和运行时四重身份；"
+            "无论是否存在部署证据，都不证明接线、波形、时序或外设通过实测。"),
     }
+    if deployment_record is not None:
+        record["evidence_checks"][
+            "deployment_matches_build_and_project"] = deployment_match
     content = _json_bytes(record)
     return ProductionRecordResult(
         record=record, content=content,

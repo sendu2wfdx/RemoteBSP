@@ -17,6 +17,7 @@ from production_record import (  # noqa: E402
 )
 from project_artifacts import generate_project_reports  # noqa: E402
 from project_config import ProjectConfigError  # noqa: E402
+from production_batch import export_production_batch  # noqa: E402
 
 
 CATALOG_PATH = GUI_ROOT / "data" / "pin_catalog.json"
@@ -62,6 +63,7 @@ def complete_build_record(project: dict, catalog: dict) -> dict:
         "resource_count": reports.resource_count,
         "project_sha256": reports.project_sha256,
         "config_sha256": config_sha256,
+        "firmware_input_sha256": "c" * 64,
         "git_revision": "a" * 40,
         "git_dirty": False,
         "parallel_jobs": 32,
@@ -133,6 +135,64 @@ class ProductionRecordTest(unittest.TestCase):
         response = production_record_response(result)
         self.assertEqual(response["format"], "PRODUCTION_RECORD_V1")
         self.assertRegex(response["record_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_verified_deployment_promotes_record_and_batch_compatible_status(self):
+        build_record = complete_build_record(self.project, self.catalog)
+        build_hash = "e" * 64
+        deployment = {
+            "schema_version": 1,
+            "format": "REMOTEBSP_DEPLOYMENT_RECORD_V1",
+            "status": "firmware_flash_verified",
+            "deployment": {
+                "build_id": build_record["build_id"],
+                "board_id": build_record["board_id"],
+                "device_uuid": "ab" * 16,
+                "backend": "stlink-openocd", "attempts": 1,
+                "verified": True,
+            },
+            "observed_identity": {
+                "project_sha256": build_record["project_sha256"],
+                "config_sha256": build_record["config_sha256"],
+                "firmware_identity_sha256": "c" * 64,
+            },
+            "source_evidence": {
+                "build_record": {"filename": "build-record.json",
+                                 "size": 123, "sha256": build_hash},
+                "flashed_artifact": {"filename": "firmware.elf",
+                                     "size": 456, "sha256": "f" * 64},
+            },
+            "recorded_time": {
+                "value_utc": "2026-09-10T08:30:00Z",
+                "source": "host_system_clock", "trusted": False,
+                "note": "主机系统时钟未经过可信时间源证明；仅用于排序，不作为审计时间戳。",
+            },
+            "declaration": "已完成写入及身份核验；不证明外设功能。",
+        }
+        unsigned = (json.dumps(deployment, ensure_ascii=False, allow_nan=False,
+                               sort_keys=True, indent=2) + "\n").encode()
+        deployment["record_sha256"] = hashlib.sha256(unsigned).hexdigest()
+        result = generate_production_record(
+            self.project, self.catalog, build_record=build_record,
+            build_record_sha256=build_hash, deployment_record=deployment)
+        self.assertEqual(result.record["status"],
+                         "firmware_deployed_verified")
+        self.assertEqual(result.record["execution_status"]["firmware_flash"],
+                         "performed_and_verified")
+        self.assertTrue(result.record["evidence_checks"]
+                        ["deployment_matches_build_and_project"])
+        batch = export_production_batch(
+            batch_id="verified-deployment-001", name="已核验部署",
+            note="不含跨板测试", production_records=[result.record],
+            comparison_exports=[])
+        self.assertTrue(batch.validation["valid"])
+
+        tampered = copy.deepcopy(deployment)
+        tampered["deployment"]["attempts"] = 2
+        with self.assertRaisesRegex(ProjectConfigError, "自哈希不匹配"):
+            generate_production_record(
+                self.project, self.catalog, build_record=build_record,
+                build_record_sha256=build_hash,
+                deployment_record=tampered)
 
     def test_missing_fields_and_mismatch_are_not_presented_as_success(self):
         incomplete = generate_production_record(

@@ -26,6 +26,7 @@ from firmware_deployment import (
     ToolbusdIdentityReader,
     deploy_stlink,
 )
+from deployment_record import create_deployment_record
 from device_parameters import (
     DeviceParameterError,
     DeviceParameterManager,
@@ -251,12 +252,23 @@ def _run_deploy_stlink(args) -> dict:
         flash_timeout=args.flash_timeout,
         reconnect_timeout=args.reconnect_timeout,
         poll_interval=args.poll_interval)
+    deployment_record = create_deployment_record(
+        result, output_root=output_root)
+    record_output = None
+    if args.record_output is not None:
+        record_output = _atomic_output(
+            args.record_output, deployment_record.content, force=args.force)
     return {
         "ok": True, "format": "STUDIO_CLI_STLINK_DEPLOYMENT_V1",
         "build_id": result.build_id, "backend": result.backend,
         "board_id": result.expected.board_id,
         "device_uuid": result.observed.device_uuid,
         "attempts": result.attempts, "verified": result.verified,
+        "deployment_record": deployment_record.record,
+        "deployment_record_sha256": deployment_record.sha256,
+        "deployment_record_filename": deployment_record.filename,
+        "deployment_record_output": (
+            str(record_output) if record_output is not None else None),
         "execution_status": {
             "software_build": "not_performed",
             "firmware_flash": "performed_and_verified",
@@ -473,6 +485,9 @@ def _parser() -> StrictParser:
     deploy.add_argument("--flash-timeout", type=int, default=120)
     deploy.add_argument("--reconnect-timeout", type=float, default=10.0)
     deploy.add_argument("--poll-interval", type=float, default=0.25)
+    deploy.add_argument("--record-output",
+                        help="完整核验成功后原子写入版本化部署记录")
+    deploy.add_argument("--force", action="store_true")
     deploy.set_defaults(handler=_run_deploy_stlink)
 
     inspect_identity = sub.add_parser(

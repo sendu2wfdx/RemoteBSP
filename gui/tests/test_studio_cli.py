@@ -145,7 +145,7 @@ class StudioCliTest(unittest.TestCase):
             "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64)
         observed = DeviceIdentity(
             "weact-g431-core-v10", "a" * 64, "b" * 64, "c" * 64,
-            "device-uuid")
+            "ab" * 16)
         result = DeploymentResult(
             "weact-g431-core-v10-01234567", "stlink-openocd", expected,
             observed, 2, True)
@@ -155,8 +155,16 @@ class StudioCliTest(unittest.TestCase):
             "--identity-file", str(identity_file),
             "--probe-serial", "probe-1", "--flash-timeout", "30",
             "--reconnect-timeout", "4", "--poll-interval", "0.1",
+            "--record-output", str(self.directory / "deployment.json"),
         ]
-        with patch("studio_cli.deploy_stlink", return_value=result) as deploy:
+        deployment_record = type("DeploymentRecord", (), {
+            "record": {"status": "firmware_flash_verified"},
+            "sha256": "d" * 64, "filename": "deployment.json",
+            "content": b"{}\n",
+        })()
+        with patch("studio_cli.deploy_stlink", return_value=result) as deploy, \
+                patch("studio_cli.create_deployment_record",
+                      return_value=deployment_record):
             code, response, _, _ = self._call(arguments)
         self.assertEqual(code, EXIT_OK)
         reader = deploy.call_args.args[1]
@@ -164,6 +172,9 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(deploy.call_args.kwargs["probe_serial"], "probe-1")
         self.assertEqual(deploy.call_args.kwargs["flash_timeout"], 30)
         self.assertTrue(response["verified"])
+        self.assertEqual(response["deployment_record_sha256"], "d" * 64)
+        self.assertEqual((self.directory / "deployment.json").read_bytes(),
+                         b"{}\n")
         self.assertEqual(response["execution_status"]["firmware_flash"],
                          "performed_and_verified")
         self.assertTrue(response["execution_status"]["hardware_access"])

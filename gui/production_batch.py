@@ -24,7 +24,7 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BATCH_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _RECORD_STATUSES = {
     "design_only", "build_incomplete", "build_mismatch",
-    "software_build_recorded",
+    "software_build_recorded", "firmware_deployed_verified",
 }
 
 
@@ -129,11 +129,13 @@ def _record_descriptor(value: object, index: int) -> dict:
     if status != "design_only" and (fields["build_id"] is None or
                                     fields["build_record_sha256"] is None):
         raise ProjectConfigError(f"生产记录[{index}]缺少构建ID或构建记录引用")
-    if execution.get("firmware_flash") != "not_performed" or \
+    expected_flash = ("performed_and_verified" if status ==
+                      "firmware_deployed_verified" else "not_performed")
+    if execution.get("firmware_flash") != expected_flash or \
             execution.get("hardware_validation") != "not_performed" or \
             execution.get("hardware_connected_by_this_operation") is not False:
         raise ProjectConfigError(
-            f"生产记录[{index}]不是本批次支持的纯软件记录")
+            f"生产记录[{index}]执行状态与记录状态不一致")
     return {
         "record_schema_version": 1,
         "record_sha256": record_sha256,
