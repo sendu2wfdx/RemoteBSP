@@ -174,6 +174,20 @@ studio_cli.py deployment-preflight-stlink --build-id <ID> --plan-output stlink-p
 studio_cli.py deployment-plan-validate --plan stlink-plan.json
 ```
 
+USB Katapult 同样提供 `REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1` 离线预检工件。
+除上述工程、完整配置、构建记录、APP `firmware.bin` 和四重身份外，它还绑定固定
+`/dev/serial/by-id` 设备、外部 flashtool 的解析路径与 SHA-256，以及精确参数数组。
+计划固定声明 `stage=katapult_usb_recovery`、`application_transport_active=false` 和
+`transport_exclusive=true`：USB Katapult 是独立恢复阶段，不能与 RemoteBSP APP 的
+CAN/CAN-FD 或 USB Vendor Bulk 运行态混作同一传输。离线生成和复核都不会打开 USB：
+
+```text
+studio_cli.py deployment-preflight-usb-katapult --build-id <ID> \
+  --usb-device /dev/serial/by-id/<设备> --flashtool ./flashtool.py \
+  --plan-output usb-katapult-plan.json
+studio_cli.py deployment-plan-validate --plan usb-katapult-plan.json
+```
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

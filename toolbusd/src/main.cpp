@@ -3228,6 +3228,7 @@ private:
             std::optional<remotebsp::toolbusd::BusRuntime::Reservation>
                 bus_reservation;
             std::optional<std::uint64_t> bus_node_generation;
+            std::optional<std::uint32_t> bus_device_resource_id;
             if (command == remotebsp::protocol::Command::I2cContract ||
                 command == remotebsp::protocol::Command::SpiContract) {
                 if (request.header.object_id != 0U) {
@@ -3254,6 +3255,7 @@ private:
                 const auto transfer =
                     remotebsp::protocol::decode_i2c_transfer_request(
                         request.payload);
+                bus_device_resource_id = transfer.device_resource_id;
                 bus_node_generation = ensure_bus_contract(
                     ipc_request.node_id, command,
                     transfer.device_resource_id);
@@ -3294,6 +3296,7 @@ private:
                 const auto transfer =
                     remotebsp::protocol::decode_spi_transfer_request(
                         request.payload);
+                bus_device_resource_id = transfer.device_resource_id;
                 bus_node_generation = ensure_bus_contract(
                     ipc_request.node_id, command,
                     transfer.device_resource_id);
@@ -3447,6 +3450,24 @@ private:
                     remember_direct_bus_contract_locked(
                         ipc_request.node_id, *bus_node_generation,
                         submission.packet, response->second);
+                }
+                if (bus_device_resource_id.has_value() &&
+                    bus_node_generation.has_value() &&
+                    bus_node_generations_[ipc_request.node_id] ==
+                        *bus_node_generation &&
+                    (response->second.header.flags &
+                     remotebsp::protocol::kErrorResponseFlag) == 0U) {
+                    // 严格解码成功才归类。未知新状态由协议层拒绝，绝不猜测为 Fault。
+                    try {
+                        const auto result =
+                            remotebsp::protocol::decode_bus_transfer_result(
+                                response->second.payload);
+                        bus_runtime_.observe_remote_result(
+                            ipc_request.node_id, *bus_device_resource_id,
+                            result.status);
+                    } catch (const std::exception&) {
+                        // 保持透明转发：旧主机仍可接收未知固件响应，但健康统计不归类。
+                    }
                 }
                 const auto encoded =
                     remotebsp::protocol::encode(response->second);

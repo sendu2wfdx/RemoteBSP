@@ -262,6 +262,32 @@ BusRuntime::Admission BusRuntime::admit_spi(
                  required_flags);
 }
 
+bool BusRuntime::observe_remote_result(
+    std::uint32_t node_id, std::uint32_t device_resource_id,
+    protocol::BusTransactionStatus status) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const DeviceKey key{node_id, device_resource_id};
+    if (contracts_.find(key) == contracts_.end()) return false;
+    auto& counters = telemetry_[key];
+    switch (status) {
+    case protocol::BusTransactionStatus::Ok:
+        saturating_increment(counters.remote_ok); break;
+    case protocol::BusTransactionStatus::Nack:
+        saturating_increment(counters.remote_nack); break;
+    case protocol::BusTransactionStatus::Timeout:
+        saturating_increment(counters.remote_timeout); break;
+    case protocol::BusTransactionStatus::Busy:
+        saturating_increment(counters.remote_busy); break;
+    case protocol::BusTransactionStatus::Fault:
+        saturating_increment(counters.remote_fault); break;
+    case protocol::BusTransactionStatus::LimitExceeded:
+        saturating_increment(counters.remote_limit_exceeded); break;
+    default:
+        return false;
+    }
+    return true;
+}
+
 BusRuntime::Admission BusRuntime::admit(
     std::uint32_t node_id, std::uint32_t resource_id,
     protocol::BusResourceKind expected_kind, std::uint32_t timeout_us,
@@ -349,11 +375,21 @@ BusTelemetrySnapshot BusRuntime::telemetry_snapshot() const {
     for (const auto& [key, counters] : telemetry_) {
         snapshot.resources.push_back({key.node_id, key.resource_id,
             counters.admitted, counters.rate_limited, counters.busy,
-            counters.contract_rejected});
+            counters.contract_rejected, counters.remote_ok,
+            counters.remote_nack, counters.remote_timeout,
+            counters.remote_busy, counters.remote_fault,
+            counters.remote_limit_exceeded});
         add(snapshot.admitted_total, counters.admitted);
         add(snapshot.rate_limited_total, counters.rate_limited);
         add(snapshot.busy_total, counters.busy);
         add(snapshot.contract_rejected_total, counters.contract_rejected);
+        add(snapshot.remote_ok_total, counters.remote_ok);
+        add(snapshot.remote_nack_total, counters.remote_nack);
+        add(snapshot.remote_timeout_total, counters.remote_timeout);
+        add(snapshot.remote_busy_total, counters.remote_busy);
+        add(snapshot.remote_fault_total, counters.remote_fault);
+        add(snapshot.remote_limit_exceeded_total,
+            counters.remote_limit_exceeded);
     }
     std::sort(snapshot.resources.begin(), snapshot.resources.end(),
         [](const auto& left, const auto& right) {

@@ -39,6 +39,7 @@
 - [安全威胁模型](security-threat-model.md)
 - [Runtime 持久控制审计](runtime-control-audit.md)
 - [Runtime 持久化恢复软件演练](runtime-persistence-recovery-drill.md)
+- [Runtime TLS 部署基线](runtime-tls-deployment-baseline.md)
 - [Runtime 受控告警规则](runtime-alert-rules.md)
 - [可审计成熟度基线](../maturity/README.md)
 - [RemoteBSP / Klipper 可复现对照基准](../benchmarks/README.md)

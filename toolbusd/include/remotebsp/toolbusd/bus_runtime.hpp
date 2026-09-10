@@ -36,6 +36,12 @@ struct BusResourceTelemetry {
     std::uint64_t rate_limited_total{};
     std::uint64_t busy_total{};
     std::uint64_t contract_rejected_total{};
+    std::uint64_t remote_ok_total{};
+    std::uint64_t remote_nack_total{};
+    std::uint64_t remote_timeout_total{};
+    std::uint64_t remote_busy_total{};
+    std::uint64_t remote_fault_total{};
+    std::uint64_t remote_limit_exceeded_total{};
 };
 
 struct BusTelemetrySnapshot {
@@ -45,6 +51,12 @@ struct BusTelemetrySnapshot {
     std::uint64_t rate_limited_total{};
     std::uint64_t busy_total{};
     std::uint64_t contract_rejected_total{};
+    std::uint64_t remote_ok_total{};
+    std::uint64_t remote_nack_total{};
+    std::uint64_t remote_timeout_total{};
+    std::uint64_t remote_busy_total{};
+    std::uint64_t remote_fault_total{};
+    std::uint64_t remote_limit_exceeded_total{};
     std::vector<BusResourceTelemetry> resources;
 };
 
@@ -124,6 +136,10 @@ public:
                         const protocol::I2cTransferRequest& request);
     Admission admit_spi(std::uint32_t node_id,
                         const protocol::SpiTransferRequest& request);
+    // 只接收已经通过线协议严格解码的 MCU 结果；未知值和已失效合同不计数。
+    bool observe_remote_result(
+        std::uint32_t node_id, std::uint32_t device_resource_id,
+        protocol::BusTransactionStatus status) noexcept;
 
     std::size_t contract_count() const noexcept;
     std::size_t active_bus_count() const noexcept;
@@ -153,6 +169,12 @@ private:
         std::uint64_t rate_limited{};
         std::uint64_t busy{};
         std::uint64_t contract_rejected{};
+        std::uint64_t remote_ok{};
+        std::uint64_t remote_nack{};
+        std::uint64_t remote_timeout{};
+        std::uint64_t remote_busy{};
+        std::uint64_t remote_fault{};
+        std::uint64_t remote_limit_exceeded{};
     };
 
     Admission admit(std::uint32_t node_id, std::uint32_t resource_id,

@@ -311,6 +311,44 @@ void check_spi_rate_shaping_and_contract_refresh() {
            toolbusd::BusAdmissionStatus::Accepted);
 }
 
+void check_remote_result_classification_and_isolation() {
+    toolbusd::BusRuntime runtime(4U);
+    const auto first = i2c_contract(0x0C000001U, 0x0B000000U, 0U);
+    const auto peer = i2c_contract(0x0C000002U, 0x0B000000U, 0U);
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::I2cDevice, first) ==
+           toolbusd::BusContractUpdate::Added);
+    assert(runtime.remember_contract(
+               1U, protocol::BusResourceKind::I2cDevice, peer) ==
+           toolbusd::BusContractUpdate::Added);
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Ok));
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Nack));
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Timeout));
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Fault));
+    assert(runtime.observe_remote_result(
+        1U, peer.resource_id, protocol::BusTransactionStatus::Nack));
+    // 未知状态和无合同资源不进入任何已知类别。
+    assert(!runtime.observe_remote_result(
+        1U, first.resource_id,
+        static_cast<protocol::BusTransactionStatus>(0x7FU)));
+    assert(!runtime.observe_remote_result(
+        2U, first.resource_id, protocol::BusTransactionStatus::Fault));
+
+    const auto telemetry = runtime.telemetry_snapshot();
+    assert(telemetry.remote_ok_total == 1U);
+    assert(telemetry.remote_nack_total == 2U);
+    assert(telemetry.remote_timeout_total == 1U);
+    assert(telemetry.remote_fault_total == 1U);
+    assert(telemetry.resources[0U].remote_nack_total == 1U);
+    assert(telemetry.resources[1U].remote_nack_total == 1U);
+    runtime.invalidate_node(1U);
+    assert(runtime.telemetry_snapshot().resources.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -322,4 +360,5 @@ int main() {
     check_device_rate_shaping_and_isolation();
     check_bus_contention_does_not_consume_device_quota();
     check_spi_rate_shaping_and_contract_refresh();
+    check_remote_result_classification_and_isolation();
 }

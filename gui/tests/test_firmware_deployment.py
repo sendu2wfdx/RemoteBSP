@@ -13,9 +13,10 @@ from firmware_deployment import (  # noqa: E402
     DeviceIdentity, FirmwareDeploymentError, deploy_can_katapult, deploy_stlink,
     deploy_usb_katapult,
     IdentityCapabilityError, JsonIdentityFileReader, ToolbusdIdentityReader,
-    create_stlink_deployment_plan, expected_identity, make_can_katapult_plan,
+    create_stlink_deployment_plan, create_usb_katapult_deployment_plan,
+    expected_identity, make_can_katapult_plan,
     make_stlink_plan, make_usb_katapult_plan,
-    validate_stlink_deployment_plan)
+    validate_stlink_deployment_plan, validate_usb_katapult_deployment_plan)
 
 
 class Reader:
@@ -381,7 +382,50 @@ class FirmwareDeploymentTest(unittest.TestCase):
             build_id = self._build(root)
             (root / build_id / "firmware.elf").write_bytes(b"tampered")
             with self.assertRaisesRegex(FirmwareDeploymentError, "不可用于部署"):
-                make_stlink_plan(build_id, output_root=root)
+                    make_stlink_plan(build_id, output_root=root)
+
+    def test_versioned_usb_katapult_plan_binds_tool_and_recovery_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build_id = self._build(root)
+            directory = root / build_id
+            project = directory / "studio-project.json"
+            project.write_text('{"schema_version":2}\n', encoding="utf-8")
+            record_path = directory / "build-record.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["project_sha256"] = hashlib.sha256(
+                project.read_bytes()).hexdigest()
+            config = directory / "firmware.config"
+            record["config_sha256"] = hashlib.sha256(
+                config.read_bytes()).hexdigest()
+            record["artifacts"].append({
+                "filename": project.name, "size": project.stat().st_size,
+                "sha256": record["project_sha256"]})
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            flashtool = root / "flashtool.py"
+            flashtool.write_text("# fixed test tool\n", encoding="utf-8")
+            device = "/dev/serial/by-id/usb-Katapult_test"
+
+            artifact = create_usb_katapult_deployment_plan(
+                build_id, output_root=root, usb_device=device,
+                flashtool=flashtool)
+            self.assertEqual(artifact["stage"], "katapult_usb_recovery")
+            self.assertTrue(artifact["transport_exclusive"])
+            self.assertFalse(artifact["application_transport_active"])
+            self.assertFalse(artifact["hardware_access"])
+            self.assertEqual(validate_usb_katapult_deployment_plan(
+                artifact, output_root=root), artifact)
+            changed = json.loads(json.dumps(artifact))
+            changed["transport_exclusive"] = False
+            with self.assertRaisesRegex(FirmwareDeploymentError,
+                                        "完整性|格式"):
+                validate_usb_katapult_deployment_plan(changed,
+                                                      output_root=root)
+            flashtool.write_text("# changed tool\n", encoding="utf-8")
+            with self.assertRaisesRegex(FirmwareDeploymentError,
+                                        "不一致"):
+                validate_usb_katapult_deployment_plan(artifact,
+                                                      output_root=root)
 
     def test_flash_retry_and_four_way_identity_verification(self):
         with tempfile.TemporaryDirectory() as temp:

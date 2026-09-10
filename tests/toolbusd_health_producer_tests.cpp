@@ -65,9 +65,18 @@ void test_real_software_state_to_wire_contract() {
     observation.resource_fault_count = 0U;
     observation.operation_ledger_mutation_available = true;
     observation.operation_ledger_operation_count = 7U;
-    observation.bus_telemetry = toolbusd::BusTelemetrySnapshot{
-        toolbusd::BusTelemetrySnapshot::kVersion, 3U, 2U, 1U, 4U,
-        {{1U, 0x0C000001U, 3U, 2U, 1U, 4U}}};
+    toolbusd::BusTelemetrySnapshot bus;
+    bus.admitted_total = 3U;
+    bus.rate_limited_total = 2U;
+    bus.busy_total = 1U;
+    bus.contract_rejected_total = 4U;
+    bus.remote_ok_total = 8U;
+    bus.remote_nack_total = 5U;
+    bus.remote_timeout_total = 6U;
+    bus.remote_fault_total = 7U;
+    bus.resources = {{1U, 0x0C000001U, 3U, 2U, 1U, 4U,
+                      8U, 5U, 6U, 0U, 7U, 0U}};
+    observation.bus_telemetry = bus;
 
     const auto snapshot = producer.capture(observation);
     CHECK(snapshot.version == protocol::kHealthContractVersion);
@@ -113,6 +122,16 @@ void test_real_software_state_to_wire_contract() {
     CHECK(bus_limited != nullptr && bus_limited->unit == protocol::HealthMetricUnit::Count &&
           bus_limited->value == 2U);
     CHECK(bus_rejected != nullptr && bus_rejected->value == 4U);
+    const auto* remote_nack = find_metric(snapshot, static_cast<std::uint16_t>(
+        toolbusd::ToolbusdHealthMetricId::BusRemoteNackTransactionTotal));
+    const auto* remote_timeout = find_metric(snapshot, static_cast<std::uint16_t>(
+        toolbusd::ToolbusdHealthMetricId::BusRemoteTimeoutTransactionTotal));
+    const auto* remote_fault = find_metric(snapshot, static_cast<std::uint16_t>(
+        toolbusd::ToolbusdHealthMetricId::BusRemoteFaultTransactionTotal));
+    CHECK(remote_nack != nullptr && remote_nack->value == 5U &&
+          remote_nack->unit == protocol::HealthMetricUnit::Count);
+    CHECK(remote_timeout != nullptr && remote_timeout->value == 6U);
+    CHECK(remote_fault != nullptr && remote_fault->value == 7U);
 
     const auto wire = protocol::encode_health_snapshot(snapshot);
     const auto decoded = protocol::decode_health_snapshot(wire);

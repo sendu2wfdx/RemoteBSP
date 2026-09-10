@@ -73,6 +73,8 @@ bool valid_traffic_snapshot(const TrafficSnapshot& snapshot) noexcept {
 bool valid_bus_telemetry(const BusTelemetrySnapshot& snapshot) noexcept {
     if (snapshot.version != BusTelemetrySnapshot::kVersion) return false;
     std::uint64_t admitted = 0U, limited = 0U, busy = 0U, rejected = 0U;
+    std::uint64_t remote_ok = 0U, remote_nack = 0U, remote_timeout = 0U;
+    std::uint64_t remote_busy = 0U, remote_fault = 0U, remote_limit = 0U;
     std::uint64_t previous = 0U;
     bool first = true;
     for (const auto& item : snapshot.resources) {
@@ -83,12 +85,25 @@ bool valid_bus_telemetry(const BusTelemetrySnapshot& snapshot) noexcept {
             !checked_add(admitted, item.admitted_total) ||
             !checked_add(limited, item.rate_limited_total) ||
             !checked_add(busy, item.busy_total) ||
-            !checked_add(rejected, item.contract_rejected_total)) return false;
+            !checked_add(rejected, item.contract_rejected_total) ||
+            !checked_add(remote_ok, item.remote_ok_total) ||
+            !checked_add(remote_nack, item.remote_nack_total) ||
+            !checked_add(remote_timeout, item.remote_timeout_total) ||
+            !checked_add(remote_busy, item.remote_busy_total) ||
+            !checked_add(remote_fault, item.remote_fault_total) ||
+            !checked_add(remote_limit,
+                         item.remote_limit_exceeded_total)) return false;
         first = false; previous = key;
     }
     return admitted == snapshot.admitted_total &&
            limited == snapshot.rate_limited_total && busy == snapshot.busy_total &&
-           rejected == snapshot.contract_rejected_total;
+           rejected == snapshot.contract_rejected_total &&
+           remote_ok == snapshot.remote_ok_total &&
+           remote_nack == snapshot.remote_nack_total &&
+           remote_timeout == snapshot.remote_timeout_total &&
+           remote_busy == snapshot.remote_busy_total &&
+           remote_fault == snapshot.remote_fault_total &&
+           remote_limit == snapshot.remote_limit_exceeded_total;
 }
 
 }  // namespace
@@ -248,6 +263,21 @@ protocol::HealthSnapshot ToolbusdHealthProducer::capture(
                         HealthMetricUnit::Count,
                         observation.bus_telemetry->contract_rejected_total)
             : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusContractRejectedTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusRemoteNackTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->remote_nack_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusRemoteNackTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusRemoteTimeoutTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->remote_timeout_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusRemoteTimeoutTransactionTotal), HealthMetricUnit::Count),
+        observation.bus_telemetry.has_value()
+            ? extension(ToolbusdHealthMetricId::BusRemoteFaultTransactionTotal,
+                        HealthMetricUnit::Count,
+                        observation.bus_telemetry->remote_fault_total)
+            : unknown(static_cast<HealthMetricId>(ToolbusdHealthMetricId::BusRemoteFaultTransactionTotal), HealthMetricUnit::Count),
     };
     last_sample_time_ms_ = observation.sample_time_ms;
 

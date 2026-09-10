@@ -24,6 +24,9 @@ enum class ToolbusdHealthMetricId : std::uint16_t {
     BusRateLimitedTransactionTotal = 0x8009U,
     BusBusyTransactionTotal = 0x800AU,
     BusContractRejectedTransactionTotal = 0x800BU,
+    BusRemoteNackTransactionTotal = 0x800CU,
+    BusRemoteTimeoutTransactionTotal = 0x800DU,
+    BusRemoteFaultTransactionTotal = 0x800EU,
 };
 
 // v1 公共单位暂不含纳秒；扩展单位仍按协议的未知枚举前向兼容规则传递。

@@ -47,6 +47,7 @@ _OPENOCD_TARGET = {
     "weact-g431-core-v10": "target/stm32g4x.cfg",
 }
 DEPLOYMENT_PLAN_FORMAT = "REMOTEBSP_STLINK_DEPLOYMENT_PLAN_V1"
+USB_KATAPULT_PLAN_FORMAT = "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1"
 
 
 @dataclass(frozen=True)
@@ -580,6 +581,92 @@ def make_usb_katapult_plan(
     return FlashPlan(
         "usb-katapult",
         ("python3", str(script), "-d", usb_device, "-f", str(artifact)), artifact)
+
+
+def create_usb_katapult_deployment_plan(
+        build_id: str, *, output_root: Path, usb_device: str,
+        flashtool: Path) -> dict:
+    """生成独立 USB Katapult 恢复阶段的离线计划，不打开设备。"""
+    plan = make_usb_katapult_plan(
+        build_id, output_root=output_root, usb_device=usb_device,
+        flashtool=flashtool)
+    expected = expected_identity(build_id, output_root=output_root)
+    try:
+        record = resolve_artifact(build_id, "build-record.json", output_root)
+        project = resolve_artifact(build_id, "studio-project.json", output_root)
+        config = resolve_artifact(build_id, "firmware.config", output_root)
+        firmware = resolve_artifact(build_id, "firmware.bin", output_root)
+        script = flashtool.resolve(strict=True)
+    except (FirmwareBuildError, OSError) as error:
+        raise FirmwareDeploymentError(
+            f"USB Katapult预检缺少受保护构建证据：{error}") from error
+    project_sha256 = _sha256(project)
+    config_sha256 = _sha256(config)
+    if project_sha256 != expected.project_sha256 or \
+            config_sha256 != expected.config_sha256:
+        raise FirmwareDeploymentError(
+            "归档工程或完整.config摘要与构建记录身份不一致")
+    artifact = {
+        "format": USB_KATAPULT_PLAN_FORMAT,
+        "schema_version": 1,
+        "backend": plan.backend,
+        "build_id": build_id,
+        "board_id": expected.board_id,
+        "usb_device": usb_device,
+        "flashtool": str(script),
+        "command_argv": list(plan.command),
+        "expected_identity": {
+            "board_id": expected.board_id,
+            "project_sha256": expected.project_sha256,
+            "config_sha256": expected.config_sha256,
+            "firmware_identity_sha256": expected.firmware_identity_sha256,
+        },
+        "evidence": {
+            "build_record_sha256": _sha256(record),
+            "studio_project_sha256": project_sha256,
+            "firmware_config_sha256": config_sha256,
+            "firmware_bin_sha256": _sha256(firmware),
+            "flashtool_sha256": _sha256(script),
+        },
+        "stage": "katapult_usb_recovery",
+        "application_transport_active": False,
+        "transport_exclusive": True,
+        "hardware_access": False,
+        "flash_performed": False,
+    }
+    artifact["sha256"] = _canonical_digest(artifact)
+    return artifact
+
+
+def validate_usb_katapult_deployment_plan(
+        artifact: object, *, output_root: Path) -> dict:
+    fields = {"format", "schema_version", "backend", "build_id", "board_id",
+              "usb_device", "flashtool", "command_argv", "expected_identity",
+              "evidence", "stage", "application_transport_active",
+              "transport_exclusive", "hardware_access", "flash_performed",
+              "sha256"}
+    if not isinstance(artifact, dict) or set(artifact) != fields or \
+            artifact.get("format") != USB_KATAPULT_PLAN_FORMAT or \
+            artifact.get("schema_version") != 1 or \
+            artifact.get("backend") != "usb-katapult" or \
+            artifact.get("stage") != "katapult_usb_recovery" or \
+            artifact.get("application_transport_active") is not False or \
+            artifact.get("transport_exclusive") is not True or \
+            artifact.get("hardware_access") is not False or \
+            artifact.get("flash_performed") is not False or \
+            not isinstance(artifact.get("flashtool"), str) or \
+            not isinstance(artifact.get("sha256"), str) or \
+            not hmac.compare_digest(artifact["sha256"],
+                                    _canonical_digest(artifact)):
+        raise FirmwareDeploymentError("USB Katapult部署计划格式或完整性无效")
+    regenerated = create_usb_katapult_deployment_plan(
+        artifact.get("build_id"), output_root=output_root,
+        usb_device=artifact.get("usb_device"),
+        flashtool=Path(artifact.get("flashtool")))
+    if artifact != regenerated:
+        raise FirmwareDeploymentError(
+            "USB Katapult部署计划与当前构建、工具或传输边界不一致")
+    return artifact
 
 
 def _run_flash(command: Sequence[str], timeout: int) -> None:

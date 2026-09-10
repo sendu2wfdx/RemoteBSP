@@ -165,14 +165,43 @@ class StudioCliTest(unittest.TestCase):
             "weact-test-01234567", output_root=self.directory,
             probe_serial="ABC-123")
         deploy.assert_not_called()
-        with patch("studio_cli.validate_stlink_deployment_plan",
+
+    def test_usb_katapult_preflight_is_dry_run_and_transport_specific(self):
+        plan_path = self.directory / "usb-plan.json"
+        flashtool = self.directory / "flashtool.py"
+        flashtool.write_text("# test\n", encoding="utf-8")
+        artifact = {
+            "format": "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1",
+            "schema_version": 1, "backend": "usb-katapult",
+            "build_id": "weact-test-01234567", "sha256": "b" * 64,
+            "stage": "katapult_usb_recovery",
+            "transport_exclusive": True,
+            "application_transport_active": False,
+            "hardware_access": False, "flash_performed": False}
+        device = "/dev/serial/by-id/usb-Katapult_test"
+        with patch("studio_cli.create_usb_katapult_deployment_plan",
+                   return_value=artifact) as create, \
+                patch("studio_cli.deploy_usb_katapult") as deploy:
+            code, response, _, _ = self._call([
+                "deployment-preflight-usb-katapult", "--build-id",
+                "weact-test-01234567", "--output-root", str(self.directory),
+                "--usb-device", device, "--flashtool", str(flashtool),
+                "--plan-output", str(plan_path)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(response["hardware_access"])
+        self.assertFalse(response["flash_performed"])
+        create.assert_called_once_with(
+            "weact-test-01234567", output_root=self.directory,
+            usb_device=device, flashtool=flashtool)
+        deploy.assert_not_called()
+        with patch("studio_cli.validate_usb_katapult_deployment_plan",
                    return_value=artifact) as validate, \
-                patch("studio_cli.deploy_stlink") as deploy:
+                patch("studio_cli.deploy_usb_katapult") as deploy:
             code, checked, _, _ = self._call([
                 "deployment-plan-validate", "--plan", str(plan_path),
                 "--output-root", str(self.directory)])
         self.assertEqual(code, EXIT_OK)
-        self.assertEqual(checked["plan_sha256"], "a" * 64)
+        self.assertEqual(checked["plan_sha256"], "b" * 64)
         self.assertFalse(checked["hardware_access"])
         validate.assert_called_once()
         deploy.assert_not_called()
