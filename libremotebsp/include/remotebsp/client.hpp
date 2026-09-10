@@ -2,6 +2,8 @@
 
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
+#include "remotebsp/protocol/gpio.hpp"
+#include "remotebsp/protocol/health.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/motion_group.hpp"
@@ -38,6 +40,12 @@ struct DiscoveredNode {
 struct DaemonIdentity {
     std::uint16_t version{};
     std::array<std::uint8_t, 16> instance_id{};
+};
+
+struct ToolbusdHealthSnapshot {
+    std::uint16_t ipc_version{};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    protocol::HealthSnapshot health;
 };
 
 struct RuntimeGpioWriteResult {
@@ -230,6 +238,7 @@ public:
     std::uint64_t get_capabilities() const;
     std::vector<DiscoveredNode> list_nodes() const;
     DaemonIdentity daemon_identity() const;
+    ToolbusdHealthSnapshot health_snapshot() const;
     void runtime_control_acquire(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
@@ -305,6 +314,7 @@ public:
                               bool initial_value = false) const;
     bool gpio_read(std::uint32_t object_id) const;
     void gpio_write(std::uint32_t object_id, bool value) const;
+    void gpio_close(std::uint32_t object_id) const;
 
     std::uint32_t pwm_create(
         const protocol::PwmCreatePayload& config) const;

@@ -1,6 +1,8 @@
 #include "remotebsp/protocol/fragmentation.hpp"
+#include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/toolbusd/bus_runtime.hpp"
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
+#include "remotebsp/toolbusd/health_producer.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
 #include "remotebsp/toolbusd/motion_group_dispatch_gate.hpp"
@@ -161,6 +163,32 @@ std::array<std::uint8_t, 16> make_daemon_instance_id(
         result[0] = 1U;
     }
     return result;
+}
+
+std::uint64_t make_health_generation() {
+    std::uint64_t generation = 0U;
+    while (generation == 0U) {
+        std::size_t received = 0U;
+        auto* output = reinterpret_cast<std::uint8_t*>(&generation);
+        while (received < sizeof(generation)) {
+            const auto count = ::getrandom(output + received,
+                                           sizeof(generation) - received, 0U);
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (count <= 0) {
+                throw std::system_error(
+                    count < 0 ? errno : EIO, std::generic_category(),
+                    "生成toolbusd健康生产者代际失败");
+            }
+            received += static_cast<std::size_t>(count);
+        }
+    }
+    return generation;
+}
+
+std::uint64_t steady_time_ms() noexcept {
+    return steady_time_ns() / 1000000U;
 }
 
 class ToolbusDaemon {
@@ -939,6 +967,19 @@ private:
                         node_id, node_generation, expected_node_uuid,
                         remotebsp::protocol::Command::GpioWrite, {0U},
                         object_id, stop_deadline));
+                },
+                [this](
+                    std::uint32_t node_id, std::uint64_t node_generation,
+                    const std::array<std::uint8_t, 16>& expected_node_uuid,
+                    std::uint32_t object_id) {
+                    const auto close_deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(1800);
+                    static_cast<void>(request_runtime_control_packet(
+                        node_id, node_generation, expected_node_uuid,
+                        remotebsp::protocol::Command::GpioClose,
+                        remotebsp::protocol::encode_gpio_close(), object_id,
+                        close_deadline));
                 }
             });
     }
@@ -1275,6 +1316,27 @@ private:
         return snapshot;
     }
 
+    remotebsp::toolbusd::IpcToolbusdHealthSnapshot
+    build_health_snapshot() {
+        remotebsp::toolbusd::ToolbusdHealthObservation observation;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            observation.request_queue_depth = requests_.pending_count();
+        }
+        {
+            std::lock_guard<std::mutex> lock(send_mutex_);
+            observation.traffic = traffic_.snapshot();
+        }
+        observation.active_lease_count =
+            runtime_control_.active_lease_count();
+        observation.sample_time_ms = steady_time_ms();
+
+        remotebsp::toolbusd::IpcToolbusdHealthSnapshot result;
+        result.daemon_instance_id = daemon_instance_id_;
+        result.health = health_producer_.capture(observation);
+        return result;
+    }
+
     void handle_client(int client) {
         try {
             auto ipc_request =
@@ -1328,6 +1390,15 @@ private:
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_daemon_identity(
                         identity));
+                return;
+            }
+            if (ipc_request.kind ==
+                remotebsp::toolbusd::IpcRequestKind::HealthSnapshot) {
+                const auto snapshot = build_health_snapshot();
+                remotebsp::toolbusd::write_ipc_response(
+                    client, remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_health_snapshot(
+                        snapshot));
                 return;
             }
             if (ipc_request.kind ==
@@ -1847,7 +1918,8 @@ private:
             const auto failures = runtime_control_.shutdown();
             if (failures != 0U) {
                 std::cerr << "Runtime GPIO 会话结束时有 " << failures
-                          << " 个资源未能验证安全低电平；资源保持故障占位\n";
+                          << " 个资源未能完成安全写低或 GPIO_CLOSE；"
+                             "资源保持故障占位\n";
             }
         }
         if (running_.exchange(false)) {
@@ -1922,6 +1994,10 @@ private:
     const std::uint32_t session_id_{make_session_id()};
     const std::array<std::uint8_t, 16> daemon_instance_id_{
         make_daemon_instance_id(session_id_)};
+    const std::uint64_t health_started_at_ms_{steady_time_ms()};
+    const std::uint64_t health_generation_{make_health_generation()};
+    remotebsp::toolbusd::ToolbusdHealthProducer health_producer_{
+        health_generation_, health_started_at_ms_};
 };
 
 }

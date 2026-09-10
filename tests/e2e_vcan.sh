@@ -114,6 +114,30 @@ if not clock["estimate_valid"]:
     assert clock["error_bound_ns"] is None
 ' <<<"$runtime_snapshot_output"
 
+health_snapshot_output="$("$remote_cli_bin" --json --socket \
+    "$socket_path" health-snapshot)"
+python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert value["schema_version"] == 1
+assert value["command"] == "health-snapshot"
+data = value["data"]
+assert data["ipc_version"] == 1
+assert len(data["daemon_instance_id"]) == 32
+health = data["health"]
+assert health["contract_version"] == 1
+assert health["source"] == 3
+assert health["node_id"] == 0
+assert health["producer_generation"] > 0
+assert health["sample_sequence"] > 0
+assert 1 <= len(health["metrics"]) <= 48
+' <<<"$health_snapshot_output"
+
+source_root="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHONPATH="$source_root" python3 \
+    "$source_root/tests/health_runtime_process_e2e.py" \
+    "$socket_path" "$remote_cli_bin"
+
 # 2023 字节 PING 加 24 字节协议头仍位于 2048 字节最大包内，覆盖完整长包分片。
 printf -v long_ping '%*s' 2023 ''
 long_ping="${long_ping// /x}"

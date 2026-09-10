@@ -99,12 +99,17 @@ public:
         std::uint32_t node_id, std::uint64_t node_generation,
         const std::array<std::uint8_t, 16>& expected_node_uuid,
         std::uint32_t object_id)>;
+    using GpioCloser = std::function<void(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        std::uint32_t object_id)>;
     struct GpioIo {
         // create_low 必须只以安全低电平创建对象；Gate 在取得对象 ID 后先
         // 登记可清理状态，之后才允许 write_value 写请求值。
         GpioCreator create_low;
         GpioValueWriter write_value;
         GpioSafeStopper safe_stop;
+        GpioCloser close;
     };
 
     explicit RuntimeControlGate(std::size_t capacity = 256U,
@@ -168,7 +173,10 @@ private:
         std::uint32_t object_id{};
         std::uint64_t node_generation{};
         std::array<std::uint8_t, 16> expected_node_uuid{};
+        // 仅当安全写低已确定成功、但 Close 尚未确定成功时为 true。
+        bool close_pending{};
         GpioSafeStopper safe_stopper;
+        GpioCloser closer;
     };
 
     struct CleanupTask {
@@ -177,17 +185,25 @@ private:
         GpioObject object;
     };
 
+    enum class CleanupResult {
+        Closed,
+        SafeLowFailed,
+        CloseUncertain,
+    };
+
     static std::string binary_id(
         const std::array<std::uint8_t, 16>& value);
     static std::uint64_t scope_key(std::uint32_t node_id,
                                    std::uint32_t resource_id) noexcept;
     void erase_lease_locked(const std::string& lease_key);
     std::vector<CleanupTask> collect_expired_locked(std::uint64_t now_ns);
-    bool stop_in_flight_scope(
+    CleanupResult stop_in_flight_scope(
         std::uint64_t scope, const std::string& lease_key,
         std::uint64_t node_generation,
         const std::array<std::uint8_t, 16>& expected_node_uuid,
-        std::uint32_t object_id, const GpioSafeStopper& safe_stopper,
+        std::uint32_t object_id, bool close_pending,
+        const GpioSafeStopper& safe_stopper,
+        const GpioCloser& closer,
         bool retain_failed);
     std::size_t finish_cleanup(std::vector<CleanupTask> tasks,
                                bool retain_failed);
@@ -202,7 +218,6 @@ private:
     std::unordered_map<std::uint64_t, std::string> leases_by_scope_;
     std::unordered_map<std::string, CompletedCommand> completed_;
     std::unordered_map<std::uint64_t, GpioObject> gpio_objects_;
-    std::unordered_map<std::uint64_t, std::uint64_t> retired_scopes_;
     std::unordered_set<std::uint64_t> in_flight_scopes_;
     std::condition_variable expiry_changed_;
     std::condition_variable shutdown_changed_;

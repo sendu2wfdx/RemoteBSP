@@ -277,6 +277,18 @@ DaemonIdentity Client::daemon_identity() const {
     return {source.version, source.instance_id};
 }
 
+ToolbusdHealthSnapshot Client::health_snapshot() const {
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_health_snapshot_request(socket.get());
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw ClientException(
+            std::string(response.body.begin(), response.body.end()));
+    }
+    const auto source = toolbusd::decode_ipc_health_snapshot(response.body);
+    return {source.version, source.daemon_instance_id, source.health};
+}
+
 void Client::runtime_control_acquire(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::array<std::uint8_t, 16>& lease_id,
@@ -714,7 +726,15 @@ void Client::gpio_write(std::uint32_t object_id, bool value) const {
         throw ClientException("GPIO 对象 ID 不能为零");
     }
     body(command(protocol::Command::GpioWrite,
-                 {static_cast<std::uint8_t>(value)}, object_id));
+                  {static_cast<std::uint8_t>(value)}, object_id));
+}
+
+void Client::gpio_close(std::uint32_t object_id) const {
+    if (object_id == 0U) {
+        throw ClientException("GPIO 对象 ID 不能为零");
+    }
+    body(command(protocol::Command::GpioClose,
+                 protocol::encode_gpio_close(), object_id));
 }
 
 std::uint32_t Client::pwm_create(

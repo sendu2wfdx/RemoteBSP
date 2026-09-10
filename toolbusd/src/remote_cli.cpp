@@ -385,6 +385,7 @@ void print_usage() {
         << "  node-list\n"
         << "  traffic-status\n"
         << "  daemon-identity\n"
+        << "  health-snapshot\n"
         << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
            "<预期节点UUID> <调用者ID> <GPIO资源ID> <租约ms>\n"
         << "  runtime-gpio-write <daemon实例ID> <控制租约ID> "
@@ -410,6 +411,7 @@ void print_usage() {
         << "  gpio-create <引脚> <input|output> [初始电平]\n"
         << "  gpio-read <对象ID>\n"
         << "  gpio-write <对象ID> <0|1>\n"
+        << "  gpio-close <对象ID>\n"
         << "  pwm-create <通道> <频率Hz> <占空比0..10000> [active-high|active-low]\n"
         << "  pwm-write <对象ID> <占空比0..10000>\n"
         << "  pwm-stop <对象ID>\n"
@@ -462,6 +464,27 @@ int run(const std::vector<std::string>& arguments,
                 identity.instance_id.begin(), identity.instance_id.end());
             print_hex(bytes);
             std::cout << '\n';
+        }
+        return 0;
+    }
+
+    if (name == "health-snapshot" && arguments.size() == 1) {
+        const auto snapshot = client.health_snapshot();
+        if (json_output) {
+            remotebsp::cli_json::write_health_snapshot(std::cout, snapshot);
+        } else {
+            std::cout << "ipc_version=" << snapshot.ipc_version
+                      << " health_version=" << snapshot.health.version
+                      << " source="
+                      << static_cast<unsigned>(snapshot.health.source)
+                      << " node_id=" << snapshot.health.node_id
+                      << " generation="
+                      << snapshot.health.producer_generation
+                      << " sequence=" << snapshot.health.sample_sequence
+                      << " sample_time_ms="
+                      << snapshot.health.sample_time_ms
+                      << " metrics=" << snapshot.health.metrics.size()
+                      << '\n';
         }
         return 0;
     }
@@ -869,6 +892,11 @@ int run(const std::vector<std::string>& arguments,
         }
         client.gpio_write(parse_u32(arguments[1], "GPIO 对象 ID"),
                           value != 0);
+        std::cout << "ok\n";
+        return 0;
+    }
+    if (name == "gpio-close" && arguments.size() == 2) {
+        client.gpio_close(parse_u32(arguments[1], "GPIO 对象 ID"));
         std::cout << "ok\n";
         return 0;
     }
@@ -1289,6 +1317,7 @@ int main(int argc, char** argv) {
         if (json_output && (arguments.empty() ||
             (arguments[0] != "traffic-status" &&
              arguments[0] != "daemon-identity" &&
+             arguments[0] != "health-snapshot" &&
              arguments[0] != "node-list" &&
              arguments[0] != "runtime-snapshot" &&
              arguments[0] != "resource-list" &&

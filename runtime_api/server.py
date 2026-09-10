@@ -851,6 +851,19 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def _runtime_capabilities(self) -> dict:
         return self.provider.runtime_capabilities()
 
+    def _toolbusd_health(self) -> dict:
+        reader = getattr(self.provider, "health_snapshot", None)
+        if not callable(reader):
+            return {"available": False, "snapshot": None,
+                    "reason": "unsupported"}
+        try:
+            snapshot = reader()
+        except RuntimeProviderError:
+            # 健康遥测失败与 Runtime 资源快照隔离，且不向 HTTP 泄漏后端细节。
+            return {"available": False, "snapshot": None,
+                    "reason": "temporarily_unavailable"}
+        return {"available": True, "snapshot": snapshot, "reason": None}
+
     @staticmethod
     def _node_summary(node: dict, alerts: list[dict]) -> dict:
         return {
@@ -934,7 +947,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._success({"status": "ok",
                                "snapshot_id": snapshot["snapshot_id"],
                                "capabilities":
-                                   self._runtime_capabilities()},
+                                   self._runtime_capabilities(),
+                               "toolbusd_health":
+                                   self._toolbusd_health()},
                               read=read)
             return
         if parts == ["api", API_VERSION, "events"]:

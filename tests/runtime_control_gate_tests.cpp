@@ -31,6 +31,9 @@ using namespace remotebsp;
 const toolbusd::RuntimeControlGate::GpioSafeStopper noop_stop =
     [](std::uint32_t, std::uint64_t,
        const std::array<std::uint8_t, 16>&, std::uint32_t) {};
+const toolbusd::RuntimeControlGate::GpioCloser noop_close =
+    [](std::uint32_t, std::uint64_t,
+       const std::array<std::uint8_t, 16>&, std::uint32_t) {};
 
 struct ThrowingCopyState {
     bool throw_on_copy{};
@@ -66,7 +69,8 @@ struct ThrowingCopyStopper {
 template <typename Writer>
 toolbusd::RuntimeControlGate::GpioIo test_io(
     Writer writer,
-    toolbusd::RuntimeControlGate::GpioSafeStopper stopper = noop_stop) {
+    toolbusd::RuntimeControlGate::GpioSafeStopper stopper = noop_stop,
+    toolbusd::RuntimeControlGate::GpioCloser closer = noop_close) {
     auto created_this_call = std::make_shared<bool>(false);
     return {
         [writer, created_this_call] {
@@ -81,6 +85,7 @@ toolbusd::RuntimeControlGate::GpioIo test_io(
             }
         },
         std::move(stopper),
+        std::move(closer),
     };
 }
 
@@ -324,10 +329,12 @@ void check_scope_expiry_generation_and_reuse() {
     });
 }
 
-void check_release_stops_low_and_retires_object() {
+void check_release_stops_low_closes_and_reuses_scope() {
     std::uint64_t now = 7000000000ULL;
     std::uint32_t stop_count = 0U;
     std::uint32_t stopped_object = 0U;
+    std::uint32_t close_count = 0U;
+    std::uint32_t closed_object = 0U;
     toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
     std::array<std::uint8_t, 16> daemon{};
     std::array<std::uint8_t, 16> lease{};
@@ -351,7 +358,15 @@ void check_release_stops_low_and_retires_object() {
         test_io([](auto object) {
             assert(!object.has_value());
             return 71U;
-        }, stopper)));
+        }, stopper,
+        [&](std::uint32_t node_id, std::uint64_t generation,
+            const std::array<std::uint8_t, 16>& uuid,
+            std::uint32_t object_id) {
+            ++close_count;
+            closed_object = object_id;
+            assert(node_id == command.node_id && generation == 21U);
+            assert(uuid == command.expected_node_uuid);
+        })));
 
     toolbusd::RuntimeControlReleaseRequest release;
     release.daemon_instance_id = daemon;
@@ -359,27 +374,87 @@ void check_release_stops_low_and_retires_object() {
     release.owner_key_id = command.owner_key_id;
     gate.release(release, daemon);
     assert(stop_count == 1U && stopped_object == 71U);
+    assert(close_count == 1U && closed_object == 71U);
     assert(gate.active_lease_count() == 0U);
 
     std::array<std::uint8_t, 16> next_lease{};
     next_lease[0] = 5U;
     auto next = request(daemon, next_lease);
     next.idempotency_key = "release-next-owner";
-    expect_error(toolbusd::RuntimeControlError::ObjectRetired, [&] {
-        gate.acquire(acquire_request(next), daemon, 21U, descriptor(),
-                     contract());
-    });
-    // 节点代次变化意味着旧 MCU 对象已随重启消失，才允许创建新对象。
-    gate.acquire(acquire_request(next), daemon, 22U, descriptor(),
+    // Close 已获得确定成功，同一节点代次即可重新登记并创建新对象。
+    gate.acquire(acquire_request(next), daemon, 21U, descriptor(),
                  contract());
     bool reused = false;
     static_cast<void>(gate.gpio_write(
-        next, daemon, 22U, descriptor(), contract(),
+        next, daemon, 21U, descriptor(), contract(),
         test_io([&](auto object) {
             reused = object.has_value();
             return 72U;
         })));
     assert(!reused);
+    assert(gate.shutdown() == 0U);
+}
+
+void check_close_uncertain_retries_close_only() {
+    std::uint64_t now = 8000000000ULL;
+    bool close_must_fail = true;
+    std::uint32_t stop_count = 0U;
+    std::uint32_t close_count = 0U;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 40U;
+    auto command = request(daemon, lease);
+    gate.acquire(acquire_request(command), daemon, 23U, descriptor(),
+                 contract());
+    static_cast<void>(gate.gpio_write(
+        command, daemon, 23U, descriptor(), contract(),
+        test_io(
+            [](auto object) {
+                assert(!object.has_value());
+                return 73U;
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&,
+                std::uint32_t object_id) {
+                assert(object_id == 73U);
+                ++stop_count;
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&,
+                std::uint32_t object_id) {
+                assert(object_id == 73U);
+                ++close_count;
+                if (close_must_fail) {
+                    throw std::runtime_error("模拟 GPIO_CLOSE 响应丢失");
+                }
+            })));
+
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon;
+    release.lease_id = lease;
+    release.owner_key_id = command.owner_key_id;
+    expect_error(toolbusd::RuntimeControlError::SafeStopFailed, [&] {
+        gate.release(release, daemon);
+    });
+    assert(stop_count == 1U && close_count == 1U);
+
+    std::array<std::uint8_t, 16> blocked_lease{};
+    blocked_lease[0] = 41U;
+    auto blocked = request(daemon, blocked_lease);
+    blocked.idempotency_key = "close-uncertain-blocked";
+    expect_error(toolbusd::RuntimeControlError::LeaseConflict, [&] {
+        gate.acquire(acquire_request(blocked), daemon, 23U,
+                     descriptor(), contract());
+    });
+
+    close_must_fail = false;
+    gate.release(release, daemon);
+    // 第二次只重试幂等 Close，不再向可能已经不存在的对象写低。
+    assert(stop_count == 1U && close_count == 2U);
+    gate.acquire(acquire_request(blocked), daemon, 23U,
+                 descriptor(), contract());
     assert(gate.shutdown() == 0U);
 }
 
@@ -447,10 +522,8 @@ void check_stop_failure_poison_and_other_scope_isolation() {
     release.owner_key_id = first.owner_key_id;
     gate.release(release, daemon);
     assert(first_stop_count == 2U);
-    expect_error(toolbusd::RuntimeControlError::ObjectRetired, [&] {
-        gate.acquire(acquire_request(replacement), daemon, 31U,
-                     descriptor(), contract());
-    });
+    gate.acquire(acquire_request(replacement), daemon, 31U,
+                 descriptor(), contract());
 
     // 第二个资源已经独立完成安全停机；换代后可重新使用，不受首资源故障影响。
     std::array<std::uint8_t, 16> other_lease{};
@@ -646,7 +719,7 @@ void check_first_create_crosses_ttl_without_orphan() {
                     std::uint32_t object_id) {
                     assert(object_id == 121U);
                     ++stop_count;
-                }});
+                }, noop_close});
     });
     create_started.get_future().wait();
     now.fetch_add(100000001ULL);
@@ -666,10 +739,13 @@ void check_first_create_crosses_ttl_without_orphan() {
     replacement_lease[0] = 25U;
     auto replacement = request(daemon, replacement_lease);
     replacement.idempotency_key = "cross-ttl-replacement";
-    expect_error(toolbusd::RuntimeControlError::ObjectRetired, [&] {
-        gate.acquire(acquire_request(replacement), daemon, 71U,
-                     descriptor(), contract());
-    });
+    gate.acquire(acquire_request(replacement), daemon, 71U,
+                 descriptor(), contract());
+    toolbusd::RuntimeControlReleaseRequest replacement_release;
+    replacement_release.daemon_instance_id = daemon;
+    replacement_release.lease_id = replacement_lease;
+    replacement_release.owner_key_id = replacement.owner_key_id;
+    gate.release(replacement_release, daemon);
 
     // 节点换代后复用同一租约/幂等键，必须重新执行而不能读到失败路径
     // 遗留的 pending 结果。
@@ -688,7 +764,7 @@ void check_first_create_crosses_ttl_without_orphan() {
                 assert(object_id == 122U && value);
                 ++retry_writes;
             },
-            noop_stop});
+            noop_stop, noop_close});
     assert(retried.object_id == 122U && !retried.replayed);
     assert(retry_creates == 1U && retry_writes == 1U);
     assert(gate.shutdown() == 0U);
@@ -719,7 +795,7 @@ void check_create_response_loss_poison_until_generation_change() {
                 [&](std::uint32_t, std::uint64_t,
                     const std::array<std::uint8_t, 16>&, std::uint32_t) {
                     ++stop_attempts;
-                }}));
+                }, noop_close}));
         assert(false);
     } catch (const std::runtime_error&) {
     }
@@ -750,7 +826,7 @@ void check_create_response_loss_poison_until_generation_change() {
                 []() -> std::uint32_t {
                     throw std::runtime_error("模拟 CREATE 响应丢失");
                 },
-                [](std::uint32_t, bool) {}, noop_stop}));
+                [](std::uint32_t, bool) {}, noop_stop, noop_close}));
     } catch (const std::runtime_error&) {
     }
     std::array<std::uint8_t, 16> new_lease{};
@@ -789,7 +865,7 @@ void check_second_stage_uncertain_write_is_stopped_or_poisoned() {
             if (stop_must_fail) {
                 throw std::runtime_error("模拟安全写低失败");
             }
-        }};
+        }, noop_close};
     try {
         static_cast<void>(gate.gpio_write(
             command, daemon, 91U, descriptor(), contract(), io));
@@ -798,14 +874,12 @@ void check_second_stage_uncertain_write_is_stopped_or_poisoned() {
     }
     assert(high_attempts == 1U && stop_attempts == 1U);
     assert(gate.active_lease_count() == 0U);
-    std::array<std::uint8_t, 16> retired_lease{};
-    retired_lease[0] = 29U;
-    auto retired = request(daemon, retired_lease);
-    retired.idempotency_key = "uncertain-retired";
-    expect_error(toolbusd::RuntimeControlError::ObjectRetired, [&] {
-        gate.acquire(acquire_request(retired), daemon, 91U,
-                     descriptor(), contract());
-    });
+    std::array<std::uint8_t, 16> reusable_lease{};
+    reusable_lease[0] = 29U;
+    auto reusable = request(daemon, reusable_lease);
+    reusable.idempotency_key = "uncertain-close-reusable";
+    gate.acquire(acquire_request(reusable), daemon, 91U,
+                 descriptor(), contract());
     assert(gate.shutdown() == 0U);
 
     // 安全写低也失败时，已登记的 object_id 必须留下 poison，供 release 重试。
@@ -875,7 +949,7 @@ void check_concurrent_idempotency_publishes_once() {
                 finish.wait();
             }
         },
-        noop_stop};
+        noop_stop, noop_close};
     auto first = std::async(std::launch::async, [&] {
         return gate.gpio_write(command, daemon, 100U, descriptor(),
                                contract(), io);
@@ -921,7 +995,7 @@ void check_concurrent_shutdown_has_single_owner() {
                 assert(++stops == 1U);
                 stop_started.set_value();
                 finish.wait();
-            }}));
+            }, noop_close}));
     auto first = std::async(std::launch::async,
                             [&] { return gate.shutdown(); });
     stop_started.get_future().wait();
@@ -933,6 +1007,58 @@ void check_concurrent_shutdown_has_single_owner() {
     assert(first.get() == 0U);
     assert(second.get() == 0U);
     assert(stops == 1U);
+}
+
+void check_concurrent_release_and_shutdown_close_once() {
+    std::uint64_t now = 20800000000ULL;
+    toolbusd::RuntimeControlGate gate(4U, [&] { return now; }, false);
+    std::array<std::uint8_t, 16> daemon{};
+    std::array<std::uint8_t, 16> lease{};
+    daemon[0] = 1U;
+    lease[0] = 35U;
+    auto command = request(daemon, lease);
+    gate.acquire(acquire_request(command), daemon, 105U, descriptor(),
+                 contract());
+
+    std::promise<void> stop_started;
+    std::promise<void> finish_stop;
+    auto finish = finish_stop.get_future().share();
+    std::atomic<std::uint32_t> stops{0U};
+    std::atomic<std::uint32_t> closes{0U};
+    static_cast<void>(gate.gpio_write(
+        command, daemon, 105U, descriptor(), contract(),
+        test_io(
+            [](auto) { return 182U; },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&,
+                std::uint32_t object_id) {
+                assert(object_id == 182U);
+                assert(++stops == 1U);
+                stop_started.set_value();
+                finish.wait();
+            },
+            [&](std::uint32_t, std::uint64_t,
+                const std::array<std::uint8_t, 16>&,
+                std::uint32_t object_id) {
+                assert(object_id == 182U);
+                assert(++closes == 1U);
+            })));
+
+    toolbusd::RuntimeControlReleaseRequest release;
+    release.daemon_instance_id = daemon;
+    release.lease_id = lease;
+    release.owner_key_id = command.owner_key_id;
+    auto releasing = std::async(std::launch::async,
+                                [&] { gate.release(release, daemon); });
+    stop_started.get_future().wait();
+    auto shutting = std::async(std::launch::async,
+                               [&] { return gate.shutdown(); });
+    assert(shutting.wait_for(std::chrono::milliseconds(20)) ==
+           std::future_status::timeout);
+    finish_stop.set_value();
+    releasing.get();
+    assert(shutting.get() == 0U);
+    assert(stops == 1U && closes == 1U);
 }
 
 void check_create_registration_copy_failure_has_no_remote_side_effect() {
@@ -956,7 +1082,7 @@ void check_create_registration_copy_failure_has_no_remote_side_effect() {
             return 151U;
         },
         [](std::uint32_t, bool) { assert(false); },
-        stopper};
+        stopper, noop_close};
 
     copy_state->throw_on_copy = true;
     try {
@@ -1007,7 +1133,8 @@ void check_cleanup_task_copy_failure_rolls_back_in_flight() {
         command, daemon, 102U, descriptor(), contract(),
         toolbusd::RuntimeControlGate::GpioIo{
             [] { return 161U; },
-            [](std::uint32_t, bool) { assert(false); }, stopper});
+            [](std::uint32_t, bool) { assert(false); }, stopper,
+            noop_close});
     assert(result.object_id == 161U);
 
     now += 100000001ULL;
@@ -1042,7 +1169,8 @@ void check_shutdown_task_copy_failure_is_memoized() {
         command, daemon, 103U, descriptor(), contract(),
         toolbusd::RuntimeControlGate::GpioIo{
             [] { return 171U; },
-            [](std::uint32_t, bool) { assert(false); }, stopper}));
+            [](std::uint32_t, bool) { assert(false); }, stopper,
+            noop_close}));
 
     copy_state->throw_on_copy = true;
     const auto first = gate.shutdown();
@@ -1120,7 +1248,8 @@ int main() {
     check_scope_expiry_generation_and_reuse();
     check_ipc_round_trip_and_strict_lengths();
     check_per_scope_isolation_and_serialization();
-    check_release_stops_low_and_retires_object();
+    check_release_stops_low_closes_and_reuses_scope();
+    check_close_uncertain_retries_close_only();
     check_stop_failure_poison_and_other_scope_isolation();
     check_shutdown_attempts_every_scope();
     check_shutdown_closes_concurrent_admission_window();
@@ -1131,6 +1260,7 @@ int main() {
     check_expiry_clock_failure_is_reported_without_terminate();
     check_concurrent_idempotency_publishes_once();
     check_concurrent_shutdown_has_single_owner();
+    check_concurrent_release_and_shutdown_close_once();
     check_create_registration_copy_failure_has_no_remote_side_effect();
     check_cleanup_task_copy_failure_rolls_back_in_flight();
     check_shutdown_task_copy_failure_is_memoized();

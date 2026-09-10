@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotebsp/protocol/health.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
@@ -35,9 +36,11 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeControlAcquire = 10,
     RuntimeGpioWrite = 11,
     RuntimeControlRelease = 12,
+    HealthSnapshot = 13,
 };
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
+constexpr std::uint16_t kHealthSnapshotIpcVersion = 1U;
 constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 2U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
@@ -52,6 +55,12 @@ struct IpcResponse {
 struct IpcDaemonIdentity {
     std::uint16_t version{kDaemonIdentityIpcVersion};
     std::array<std::uint8_t, 16> instance_id{};
+};
+
+struct IpcToolbusdHealthSnapshot {
+    std::uint16_t version{kHealthSnapshotIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    protocol::HealthSnapshot health;
 };
 
 struct IpcRequest {
@@ -156,6 +165,7 @@ void write_ipc_motion_group_cancel_request(
     int socket, std::uint64_t transaction_id, std::uint32_t group_id,
     std::uint32_t plan_generation);
 void write_ipc_daemon_identity_request(int socket);
+void write_ipc_health_snapshot_request(int socket);
 void write_ipc_runtime_control_acquire_request(
     int socket, const RuntimeControlAcquireRequest& request);
 void write_ipc_runtime_gpio_write_request(
@@ -191,6 +201,10 @@ MotionGroupServiceSnapshot decode_ipc_motion_group_snapshot(
 std::vector<std::uint8_t> encode_ipc_daemon_identity(
     const IpcDaemonIdentity& identity);
 IpcDaemonIdentity decode_ipc_daemon_identity(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_health_snapshot(
+    const IpcToolbusdHealthSnapshot& snapshot);
+IpcToolbusdHealthSnapshot decode_ipc_health_snapshot(
     const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_runtime_control_acquire(
     const RuntimeControlAcquireRequest& request);

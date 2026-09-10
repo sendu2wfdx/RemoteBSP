@@ -111,6 +111,34 @@ inline void write_daemon_identity(std::ostream& output,
     output << "\"}}\n";
 }
 
+inline void write_health_snapshot(
+    std::ostream& output, const ToolbusdHealthSnapshot& snapshot) {
+    const auto& health = snapshot.health;
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"health-snapshot\",\"data\":{"
+           << "\"ipc_version\":" << snapshot.ipc_version
+           << ",\"daemon_instance_id\":\"";
+    write_uuid(output, snapshot.daemon_instance_id);
+    output << "\",\"health\":{\"contract_version\":" << health.version
+           << ",\"source\":" << static_cast<unsigned>(health.source)
+           << ",\"overall\":" << static_cast<unsigned>(health.overall)
+           << ",\"sample_sequence\":" << health.sample_sequence
+           << ",\"sample_time_ms\":" << health.sample_time_ms
+           << ",\"node_id\":" << health.node_id
+           << ",\"producer_generation\":" << health.producer_generation
+           << ",\"metrics\":[";
+    for (std::size_t index = 0U; index < health.metrics.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& metric = health.metrics[index];
+        output << "{\"metric_id\":" << metric.metric_id
+               << ",\"availability\":"
+               << static_cast<unsigned>(metric.availability)
+               << ",\"unit\":" << static_cast<unsigned>(metric.unit)
+               << ",\"value\":" << metric.value << '}';
+    }
+    output << "]}}}\n";
+}
+
 inline void write_traffic_status(std::ostream& output,
                                  const CanTrafficStatus& status) {
     const auto available_permille =

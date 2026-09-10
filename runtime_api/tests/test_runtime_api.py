@@ -391,6 +391,9 @@ class RuntimeAuthenticationHttpTest(unittest.TestCase):
             def runtime_capabilities(self):
                 raise AssertionError("公开存活探针不应读取能力")
 
+            def health_snapshot(self):
+                raise AssertionError("公开存活探针不应读取健康遥测")
+
         provider = self.server.provider  # type: ignore[attr-defined]
         self.server.provider = ProbeMustNotReadProvider()  # type: ignore[attr-defined]
         health = json.loads(urlopen(

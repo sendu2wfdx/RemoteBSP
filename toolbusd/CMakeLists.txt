@@ -2,6 +2,7 @@ add_library(remotebsp_request_manager
     src/bus_runtime.cpp
     src/clock_model.cpp
     src/clock_sync_manager.cpp
+    src/health_producer.cpp
     src/ipc.cpp
     src/motion_group_coordinator.cpp
     src/motion_group_service.cpp

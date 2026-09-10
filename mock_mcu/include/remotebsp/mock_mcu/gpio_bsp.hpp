@@ -27,6 +27,7 @@ enum class MockGpioError {
     PinNotConfigured,
     WriteToInput,
     InjectToOutput,
+    WriteFailed,
 };
 
 struct GpioPinSnapshot {
@@ -58,6 +59,7 @@ public:
     void write(std::uint16_t pin, bool value) override;
 
     void set_input_value(std::uint16_t pin, bool value);
+    void fail_next_write() noexcept;
     std::uint64_t configure_count() const noexcept;
     std::uint64_t read_count() const noexcept;
     std::uint64_t write_count() const noexcept;
@@ -75,6 +77,7 @@ private:
     std::uint64_t configure_count_{};
     mutable std::uint64_t read_count_{};
     std::uint64_t write_count_{};
+    bool fail_next_write_{};
 };
 
 }

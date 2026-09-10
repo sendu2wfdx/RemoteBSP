@@ -3,17 +3,26 @@
 #include "remotebsp/mock_mcu/remote_core.hpp"
 #include "remotebsp/mock_mcu/uart_bsp.hpp"
 #include "remotebsp/protocol/fragmentation.hpp"
+#include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/resource.hpp"
 
-#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace {
+
+// 标准 assert 在 Release/NDEBUG 下会被移除；租约安全断言必须始终执行。
+#define assert(condition)                                                     \
+    do {                                                                      \
+        if (!(condition)) {                                                   \
+            throw std::runtime_error("测试断言失败: " #condition);           \
+        }                                                                     \
+    } while (false)
 
 using remotebsp::mock_mcu::RemoteCore;
 using remotebsp::mock_mcu::StatusCode;
@@ -234,6 +243,26 @@ void test_expiry_forces_safe_gpio_state() {
     check_status(created, StatusCode::Ok);
     assert(gpio->read(5));
 
+    check_status(core.handle(
+                     request(Command::GpioClose, 55,
+                             remotebsp::protocol::encode_gpio_close(),
+                             created.header.object_id),
+                     start),
+                 StatusCode::AccessDenied);
+    assert(gpio->read(5));
+
+    gpio->fail_next_write();
+    assert(core.expire_leases(
+               start + std::chrono::milliseconds(101)) == 0);
+    assert(gpio->read(5));
+    const auto retained_status = core.handle(
+        request(Command::ResourceLeaseStatus, 44,
+                remotebsp::protocol::encode_resource_id(kGpioResourceId)),
+        start);
+    assert(remotebsp::protocol::decode_resource_lease_info(
+               body(retained_status))
+               .active_lease_count == 1);
+
     assert(core.expire_leases(
                start + std::chrono::milliseconds(101)) == 1);
     assert(!gpio->read(5));
@@ -248,6 +277,76 @@ void test_expiry_forces_safe_gpio_state() {
         ResourceLeaseMode::Exclusive, 1000,
         start + std::chrono::milliseconds(101));
     assert(next.owner_session_id == 55);
+}
+
+void test_release_retains_high_gpio_and_lease_on_safe_stop_failure() {
+    auto gpio =
+        std::make_shared<remotebsp::mock_mcu::MockGpioBsp>();
+    auto uart =
+        std::make_shared<remotebsp::mock_mcu::MockUartBsp>();
+    auto core = make_core(gpio, uart);
+    const auto start = RemoteCore::Clock::now();
+
+    const auto lease = acquire(core, kGpioResourceId, 66,
+                               ResourceLeaseMode::Exclusive, 1000, start);
+    auto create = request(Command::GpioCreate, 66);
+    create.payload = {5, 0,
+                      static_cast<std::uint8_t>(
+                          remotebsp::mock_mcu::GpioDirection::Output),
+                      1};
+    const auto created = core.handle(create, start);
+    check_status(created, StatusCode::Ok);
+    assert(gpio->read(5));
+
+    auto release = request(
+        Command::ResourceRelease, 66,
+        remotebsp::protocol::encode_resource_lease_token_request(
+            {kGpioResourceId, lease.lease_id, 0}));
+    gpio->fail_next_write();
+    check_status(core.handle(release, start), StatusCode::ResourceFailed);
+    assert(gpio->read(5));
+    check_status(core.handle(
+                     request(Command::GpioRead, 66, {},
+                             created.header.object_id),
+                     start),
+                 StatusCode::Ok);
+
+    const auto retained_status = core.handle(
+        request(Command::ResourceLeaseStatus, 66,
+                remotebsp::protocol::encode_resource_id(kGpioResourceId)),
+        start);
+    assert(remotebsp::protocol::decode_resource_lease_info(
+               body(retained_status))
+               .active_lease_count == 1);
+    gpio->fail_next_write();
+    assert(core.release_session(66) == 0);
+    assert(gpio->read(5));
+    const auto session_retained_status = core.handle(
+        request(Command::ResourceLeaseStatus, 66,
+                remotebsp::protocol::encode_resource_id(kGpioResourceId)),
+        start);
+    assert(remotebsp::protocol::decode_resource_lease_info(
+               body(session_retained_status))
+               .active_lease_count == 1);
+    check_status(core.handle(
+                     request(
+                         Command::ResourceAcquire, 77,
+                         remotebsp::protocol::encode_resource_lease_request(
+                             {kGpioResourceId, 1000,
+                              ResourceLeaseMode::Exclusive})),
+                     start),
+                 StatusCode::ResourceBusy);
+
+    check_status(core.handle(release, start), StatusCode::Ok);
+    assert(!gpio->read(5));
+    check_status(core.handle(
+                     request(Command::GpioRead, 66, {},
+                             created.header.object_id),
+                     start),
+                 StatusCode::ObjectNotFound);
+    const auto next = acquire(core, kGpioResourceId, 77,
+                              ResourceLeaseMode::Exclusive, 1000, start);
+    assert(next.owner_session_id == 77);
 }
 
 std::optional<remotebsp::mock_mcu::NodeReply> send_request(
@@ -336,6 +435,7 @@ int main() {
     test_exclusive_lease_and_safe_release();
     test_shared_read_and_session_release();
     test_expiry_forces_safe_gpio_state();
+    test_release_retains_high_gpio_and_lease_on_safe_stop_failure();
     test_duplicate_acquire_is_idempotent();
     test_invalid_contract_catalog_is_rejected();
 }

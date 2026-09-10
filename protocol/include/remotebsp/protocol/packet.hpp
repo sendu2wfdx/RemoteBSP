@@ -51,6 +51,7 @@ enum class Command : std::uint16_t {
     GpioCreate = 0x0100,
     GpioRead = 0x0101,
     GpioWrite = 0x0102,
+    GpioClose = 0x0103,
     UartCreate = 0x0200,
     UartRead = 0x0201,
     UartWrite = 0x0202,

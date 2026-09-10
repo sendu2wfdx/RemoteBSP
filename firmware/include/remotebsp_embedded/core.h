@@ -304,6 +304,7 @@ typedef struct {
 typedef struct {
     bool used;
     uint32_t object_id;
+    uint32_t owner_session_id;
     uint16_t pin;
     rbsp_gpio_direction_t direction;
 } rbsp_gpio_object_t;
@@ -399,8 +400,9 @@ void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
 void rbsp_core_accept_link(rbsp_core_t* core,
                            const rbsp_link_frame_t* frame);
-#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
-/* 传输层确认会话结束时调用；返回被释放的资源租约数。 */
+#if CONFIG_GPIO_RESOURCE_COUNT > 0 || defined(CONFIG_REMOTEBSP_MOTION) || \
+    defined(CONFIG_REMOTEBSP_BUS)
+/* 传输层确认会话结束时调用；返回已安全释放的资源租约/对象数。 */
 size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id);
 #endif
 #if defined(CONFIG_REMOTEBSP_MOTION)

@@ -45,8 +45,17 @@ void MockGpioBsp::write(std::uint16_t pin, bool value) {
         throw MockGpioException(MockGpioError::WriteToInput,
                                 "不能写入 GPIO 输入引脚");
     }
+    if (fail_next_write_) {
+        fail_next_write_ = false;
+        throw MockGpioException(MockGpioError::WriteFailed,
+                                "模拟 GPIO 写入失败");
+    }
     found->second.value = value;
     ++write_count_;
+}
+
+void MockGpioBsp::fail_next_write() noexcept {
+    fail_next_write_ = true;
 }
 
 void MockGpioBsp::set_input_value(std::uint16_t pin, bool value) {

@@ -36,6 +36,7 @@ enum {
     RBSP_COMMAND_GPIO_CREATE = 0x0100,
     RBSP_COMMAND_GPIO_READ = 0x0101,
     RBSP_COMMAND_GPIO_WRITE = 0x0102,
+    RBSP_COMMAND_GPIO_CLOSE = 0x0103,
     RBSP_COMMAND_UART_CREATE = 0x0200,
     RBSP_COMMAND_UART_READ = 0x0201,
     RBSP_COMMAND_UART_WRITE = 0x0202,
@@ -2053,6 +2054,7 @@ static bool process_request(rbsp_core_t* core,
             } else {
                 free_object->used = true;
                 free_object->object_id = core->next_object_id++;
+                free_object->owner_session_id = request->session_id;
                 free_object->pin = pin;
                 free_object->direction =
                     (rbsp_gpio_direction_t)request->payload[2];
@@ -2074,6 +2076,10 @@ static bool process_request(rbsp_core_t* core,
             } else if (object == NULL) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
+                    request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
                     request->object_id, NULL, 0U);
             } else {
                 bool value = false;
@@ -2104,6 +2110,10 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OBJECT_NOT_FOUND,
                     request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
             } else if (object->direction != RBSP_GPIO_OUTPUT) {
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_ACCESS_DENIED,
@@ -2114,6 +2124,39 @@ static bool process_request(rbsp_core_t* core,
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
             } else {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            }
+            break;
+        }
+
+        case RBSP_COMMAND_GPIO_CLOSE: {
+            rbsp_gpio_object_t* object =
+                find_gpio_object(core, request->object_id);
+            if (request->object_id == 0U ||
+                request->payload_length != 1U ||
+                request->payload[0] != 1U) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_INVALID_PAYLOAD,
+                    request->object_id, NULL, 0U);
+            } else if (object == NULL) {
+                /* 不存在即已关闭：响应丢失后的重复请求确定成功。 */
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_OK,
+                    request->object_id, NULL, 0U);
+            } else if (object->owner_session_id != request->session_id) {
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_ACCESS_DENIED,
+                    request->object_id, NULL, 0U);
+            } else if (object->direction == RBSP_GPIO_OUTPUT &&
+                       !core->hal.gpio_write(object->pin, false)) {
+                /* 写低失败时保留对象，绝不能释放后让新所有者接管。 */
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            } else {
+                memset(object, 0, sizeof(*object));
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
                     request->object_id, NULL, 0U);
@@ -3341,12 +3384,29 @@ bool rbsp_core_motion_tick(rbsp_core_t* core) {
 }
 #endif
 
-#if defined(CONFIG_REMOTEBSP_MOTION) || defined(CONFIG_REMOTEBSP_BUS)
+#if CONFIG_GPIO_RESOURCE_COUNT > 0 || defined(CONFIG_REMOTEBSP_MOTION) || \
+    defined(CONFIG_REMOTEBSP_BUS)
 size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
     if (core == NULL || session_id == 0U) {
         return 0U;
     }
     size_t released = 0U;
+#if CONFIG_GPIO_RESOURCE_COUNT > 0
+    for (size_t index = 0U; index < CONFIG_GPIO_RESOURCE_COUNT; ++index) {
+        rbsp_gpio_object_t* object = &core->gpio_objects[index];
+        if (!object->used || object->owner_session_id != session_id) {
+            continue;
+        }
+        if (object->direction == RBSP_GPIO_OUTPUT &&
+            (core->hal.gpio_write == NULL ||
+             !core->hal.gpio_write(object->pin, false))) {
+            /* 无法确认安全低电平时保留所有权和对象，供后续清理重试。 */
+            continue;
+        }
+        memset(object, 0, sizeof(*object));
+        ++released;
+    }
+#endif
 #if defined(CONFIG_REMOTEBSP_MOTION)
     if (motion_available(core)) {
     const uint32_t critical_state = core->hal.motion_enter_critical();

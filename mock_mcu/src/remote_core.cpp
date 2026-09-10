@@ -184,6 +184,8 @@ protocol::Packet RemoteCore::handle(const protocol::Packet& request,
             return handle_gpio_read(request);
         case protocol::Command::GpioWrite:
             return handle_gpio_write(request);
+        case protocol::Command::GpioClose:
+            return handle_gpio_close(request);
         case protocol::Command::UartCreate:
             return handle_uart_create(request);
         case protocol::Command::UartRead:
@@ -355,8 +357,9 @@ bool RemoteCore::resource_access_allowed(
         });
 }
 
-void RemoteCore::release_resource_objects(
+bool RemoteCore::release_resource_objects(
     std::uint32_t resource_id, std::uint32_t owner_session_id) {
+    bool all_released = true;
     const auto* released_resource = find_resource(resource_id);
     bool group_aborted = false;
     if (released_resource != nullptr &&
@@ -394,7 +397,10 @@ void RemoteCore::release_resource_objects(
             try {
                 gpio_bsp_->write(object.pin, false);
             } catch (const std::exception&) {
-                // 释放路径必须继续清理对象，底层故障由资源状态另行报告。
+                // 未确认安全低电平时保留对象及所有权，租约调用方据此保留租约。
+                all_released = false;
+                ++iterator;
+                continue;
             }
         }
         iterator = gpio_objects_.erase(iterator);
@@ -470,6 +476,7 @@ void RemoteCore::release_resource_objects(
             }
         }
     }
+    return all_released;
 }
 
 std::size_t RemoteCore::expire_leases(TimePoint now) {
@@ -483,8 +490,11 @@ std::size_t RemoteCore::expire_leases(TimePoint now) {
                 ++iterator;
                 continue;
             }
-            release_resource_objects(resource_id,
-                                     iterator->owner_session_id);
+            if (!release_resource_objects(
+                    resource_id, iterator->owner_session_id)) {
+                ++iterator;
+                continue;
+            }
             iterator = entries.erase(iterator);
             ++expired;
         }
@@ -511,7 +521,10 @@ std::size_t RemoteCore::release_session(std::uint32_t session_id) {
                 ++iterator;
                 continue;
             }
-            release_resource_objects(resource_id, session_id);
+            if (!release_resource_objects(resource_id, session_id)) {
+                ++iterator;
+                continue;
+            }
             iterator = entries.erase(iterator);
             ++released;
         }
@@ -520,6 +533,26 @@ std::size_t RemoteCore::release_session(std::uint32_t session_id) {
         } else {
             ++map_iterator;
         }
+    }
+    // 无需 ResourceAcquire 的 GPIO 仍属于创建会话；会话断开时也要安全清理。
+    for (auto iterator = gpio_objects_.begin();
+         iterator != gpio_objects_.end();) {
+        const auto object = iterator->second;
+        if (object.owner_session_id != session_id ||
+            session_has_lease(object.resource_id, session_id)) {
+            ++iterator;
+            continue;
+        }
+        if (gpio_bsp_ && object.direction == GpioDirection::Output) {
+            try {
+                gpio_bsp_->write(object.pin, false);
+            } catch (const std::exception&) {
+                ++iterator;
+                continue;
+            }
+        }
+        iterator = gpio_objects_.erase(iterator);
+        ++released;
     }
     if (parameter_unlock_session_ == session_id) {
         parameter_unlock_session_ = 0U;
@@ -1109,8 +1142,10 @@ protocol::Packet RemoteCore::handle_resource_release(
     if (lease == entries.end()) {
         return make_response(request, StatusCode::AccessDenied);
     }
-    release_resource_objects(release.resource_id,
-                             request.header.session_id);
+    if (!release_resource_objects(release.resource_id,
+                                  request.header.session_id)) {
+        return make_response(request, StatusCode::ResourceFailed);
+    }
     entries.erase(lease);
     if (entries.empty()) {
         leases_.erase(found);
@@ -1386,7 +1421,7 @@ protocol::Packet RemoteCore::handle_gpio_create(
     if (catalog_has_gpio && resource == nullptr) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
-    std::uint32_t owner_session_id = 0;
+    const std::uint32_t owner_session_id = request.header.session_id;
     if (resource != nullptr) {
         const auto* contract = find_contract(resource->resource_id);
         const bool lease_required =
@@ -1399,10 +1434,6 @@ protocol::Packet RemoteCore::handle_gpio_create(
             !session_has_exclusive_lease(
                 resource->resource_id, request.header.session_id)) {
             return make_response(request, StatusCode::AccessDenied);
-        }
-        if (session_has_exclusive_lease(
-                resource->resource_id, request.header.session_id)) {
-            owner_session_id = request.header.session_id;
         }
     }
     const auto gpio_in_use = std::find_if(
@@ -1437,8 +1468,7 @@ protocol::Packet RemoteCore::handle_gpio_read(
     if (found == gpio_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
-    if (found->second.owner_session_id != 0 &&
-        found->second.owner_session_id != request.header.session_id) {
+    if (found->second.owner_session_id != request.header.session_id) {
         return make_response(request, StatusCode::AccessDenied);
     }
     protocol::Packet response = make_response(request, StatusCode::Ok);
@@ -1460,14 +1490,49 @@ protocol::Packet RemoteCore::handle_gpio_write(
     if (found == gpio_objects_.end()) {
         return make_response(request, StatusCode::ObjectNotFound);
     }
-    if (found->second.owner_session_id != 0 &&
-        found->second.owner_session_id != request.header.session_id) {
+    if (found->second.owner_session_id != request.header.session_id) {
         return make_response(request, StatusCode::AccessDenied);
     }
     if (found->second.direction != GpioDirection::Output) {
         return make_response(request, StatusCode::AccessDenied);
     }
     gpio_bsp_->write(found->second.pin, request.payload[0] != 0);
+    return make_response(request, StatusCode::Ok);
+}
+
+protocol::Packet RemoteCore::handle_gpio_close(
+    const protocol::Packet& request) {
+    if (!gpio_bsp_ ||
+        (capabilities_ & capability_mask(Capability::Gpio)) == 0U) {
+        return make_response(request, StatusCode::UnsupportedCapability);
+    }
+    if (request.header.object_id == 0U) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    try {
+        static_cast<void>(protocol::decode_gpio_close(request.payload));
+    } catch (const protocol::GpioPayloadException&) {
+        return make_response(request, StatusCode::InvalidPayload);
+    }
+    const auto found = gpio_objects_.find(request.header.object_id);
+    if (found == gpio_objects_.end()) {
+        // 不存在即“已经关闭”。这使响应丢失后的同命令重试仍能确定成功，
+        // 同时不需要保存无界 tombstone。
+        return make_response(request, StatusCode::Ok);
+    }
+    if (found->second.owner_session_id != request.header.session_id) {
+        return make_response(request, StatusCode::AccessDenied);
+    }
+    if (found->second.direction == GpioDirection::Output) {
+        try {
+            // GPIO_CLOSE 自身必须失效安全，不能假设调用方已经先写低。
+            gpio_bsp_->write(found->second.pin, false);
+        } catch (const std::exception&) {
+            // 写低未得到确定成功时保留对象，允许同一所有者重试。
+            return make_response(request, StatusCode::ResourceFailed);
+        }
+    }
+    gpio_objects_.erase(found);
     return make_response(request, StatusCode::Ok);
 }
 

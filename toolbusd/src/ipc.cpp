@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <system_error>
 
 namespace remotebsp::toolbusd {
@@ -23,6 +24,7 @@ constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
 constexpr std::size_t kDaemonIdentitySize = 20U;
+constexpr std::size_t kHealthSnapshotHeaderSize = 24U;
 constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
 constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
@@ -186,7 +188,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::RuntimeControlRelease)) {
+                      IpcRequestKind::HealthSnapshot)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -195,6 +197,16 @@ IpcRequest read_ipc_request(int socket) {
         kind == IpcRequestKind::DaemonIdentity) {
         if (body.size() != 1) {
             throw IpcException("本地状态请求载荷无效");
+        }
+        IpcRequest request;
+        request.kind = kind;
+        return request;
+    }
+    if (kind == IpcRequestKind::HealthSnapshot) {
+        if (body.size() != 5U ||
+            get_u16(body.data() + 1U) != kHealthSnapshotIpcVersion ||
+            get_u16(body.data() + 3U) != 0U) {
+            throw IpcException("健康快照请求版本或长度无效");
         }
         IpcRequest request;
         request.kind = kind;
@@ -322,6 +334,14 @@ IpcRequest read_ipc_request(int socket) {
 void write_ipc_daemon_identity_request(int socket) {
     send_body(socket,
               {static_cast<std::uint8_t>(IpcRequestKind::DaemonIdentity)});
+}
+
+void write_ipc_health_snapshot_request(int socket) {
+    std::vector<std::uint8_t> body{
+        static_cast<std::uint8_t>(IpcRequestKind::HealthSnapshot)};
+    append_u16(body, kHealthSnapshotIpcVersion);
+    append_u16(body, 0U);
+    send_body(socket, body);
 }
 
 void write_ipc_runtime_control_acquire_request(
@@ -1103,6 +1123,64 @@ IpcDaemonIdentity decode_ipc_daemon_identity(
         throw IpcException("toolbusd 实例身份不能为零");
     }
     return identity;
+}
+
+std::vector<std::uint8_t> encode_ipc_health_snapshot(
+    const IpcToolbusdHealthSnapshot& snapshot) {
+    if (snapshot.version != kHealthSnapshotIpcVersion ||
+        std::all_of(snapshot.daemon_instance_id.begin(),
+                    snapshot.daemon_instance_id.end(),
+                    [](std::uint8_t value) { return value == 0U; }) ||
+        snapshot.health.source != protocol::HealthSource::Toolbusd ||
+        snapshot.health.node_id != 0U) {
+        throw IpcException("toolbusd 健康快照身份无效");
+    }
+    const auto health = protocol::encode_health_snapshot(snapshot.health);
+    if (health.size() > std::numeric_limits<std::uint16_t>::max()) {
+        throw IpcException("toolbusd 健康快照超过 IPC 上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(kHealthSnapshotHeaderSize + health.size());
+    append_u16(body, snapshot.version);
+    append_u16(body, 0U);
+    body.insert(body.end(), snapshot.daemon_instance_id.begin(),
+                snapshot.daemon_instance_id.end());
+    append_u16(body, static_cast<std::uint16_t>(health.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), health.begin(), health.end());
+    return body;
+}
+
+IpcToolbusdHealthSnapshot decode_ipc_health_snapshot(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < kHealthSnapshotHeaderSize ||
+        get_u16(body.data()) != kHealthSnapshotIpcVersion ||
+        get_u16(body.data() + 2U) != 0U ||
+        get_u16(body.data() + 22U) != 0U) {
+        throw IpcException("toolbusd 健康快照 IPC 头部无效");
+    }
+    const auto health_size = get_u16(body.data() + 20U);
+    if (health_size == 0U ||
+        body.size() != kHealthSnapshotHeaderSize + health_size) {
+        throw IpcException("toolbusd 健康快照 IPC 长度无效");
+    }
+    IpcToolbusdHealthSnapshot snapshot;
+    snapshot.version = get_u16(body.data());
+    std::copy_n(body.begin() + 4U, snapshot.daemon_instance_id.size(),
+                snapshot.daemon_instance_id.begin());
+    if (std::all_of(snapshot.daemon_instance_id.begin(),
+                    snapshot.daemon_instance_id.end(),
+                    [](std::uint8_t value) { return value == 0U; })) {
+        throw IpcException("toolbusd 健康快照 daemon 身份不能为零");
+    }
+    snapshot.health = protocol::decode_health_snapshot(
+        {body.begin() + static_cast<std::ptrdiff_t>(kHealthSnapshotHeaderSize),
+         body.end()});
+    if (snapshot.health.source != protocol::HealthSource::Toolbusd ||
+        snapshot.health.node_id != 0U) {
+        throw IpcException("toolbusd 健康快照来源或节点无效");
+    }
+    return snapshot;
 }
 
 std::vector<std::uint8_t> encode_ipc_runtime_control_acquire(

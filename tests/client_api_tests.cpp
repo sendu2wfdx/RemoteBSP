@@ -1,11 +1,19 @@
 #include "remotebsp/client.hpp"
 
 #include <atomic>
-#include <cassert>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+
+// 标准 assert 在 Release/NDEBUG 下会被移除；进程级闭环必须保留检查。
+#define assert(condition)                                                     \
+    do {                                                                      \
+        if (!(condition)) {                                                   \
+            throw std::runtime_error("测试断言失败: " #condition);           \
+        }                                                                     \
+    } while (false)
 
 int main(int argc, char** argv) {
     assert(argc == 2);
@@ -62,6 +70,8 @@ int main(int argc, char** argv) {
         12, remotebsp::GpioDirection::Output, false);
     client.gpio_write(gpio, true);
     assert(client.gpio_read(gpio));
+    client.gpio_close(gpio);
+    client.gpio_close(gpio);
 
     remotebsp::UartConfig config;
     config.port = 1;

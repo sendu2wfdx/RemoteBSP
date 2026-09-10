@@ -176,33 +176,45 @@ RuntimeControlGate::collect_expired_locked(std::uint64_t now_ns) {
     return tasks;
 }
 
-bool RuntimeControlGate::stop_in_flight_scope(
+RuntimeControlGate::CleanupResult RuntimeControlGate::stop_in_flight_scope(
     std::uint64_t scope, const std::string& lease_key,
     std::uint64_t node_generation,
     const std::array<std::uint8_t, 16>& expected_node_uuid,
-    std::uint32_t object_id, const GpioSafeStopper& safe_stopper,
+    std::uint32_t object_id, bool close_pending,
+    const GpioSafeStopper& safe_stopper, const GpioCloser& closer,
     bool retain_failed) {
-    bool stopped = false;
-    try {
-        safe_stopper(static_cast<std::uint32_t>(scope >> 32U),
-                     node_generation, expected_node_uuid, object_id);
-        stopped = true;
-    } catch (...) {
+    if (!close_pending) {
+        try {
+            safe_stopper(static_cast<std::uint32_t>(scope >> 32U),
+                         node_generation, expected_node_uuid, object_id);
+            close_pending = true;
+        } catch (...) {
+        }
+        if (close_pending) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto object = gpio_objects_.find(scope);
+            if (object != gpio_objects_.end() &&
+                object->second.object_id == object_id) {
+                // Close 响应若丢失，后续 release 只重试幂等 Close，不能先
+                // 对可能已经不存在的对象 GPIO_WRITE 而误判无法清理。
+                object->second.close_pending = true;
+            }
+        }
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool retired = false;
-    if (stopped) {
+    bool closed = false;
+    if (close_pending) {
         try {
-            // 先记录同代禁止复用，再删除对象与租约。即使这里分配失败，
-            // 也保留原对象和 poison，绝不形成可被新所有者接管的空洞。
-            retired_scopes_.insert_or_assign(scope, node_generation);
-            retired = true;
+            closer(static_cast<std::uint32_t>(scope >> 32U),
+                   node_generation, expected_node_uuid, object_id);
+            closed = true;
         } catch (...) {
         }
     }
+
+    std::lock_guard<std::mutex> lock(mutex_);
     in_flight_scopes_.erase(scope);
-    if (stopped && retired) {
+    if (closed) {
         gpio_objects_.erase(scope);
         erase_lease_locked(lease_key);
     } else if (retain_failed) {
@@ -213,19 +225,24 @@ bool RuntimeControlGate::stop_in_flight_scope(
     }
     scope_available_.notify_all();
     expiry_changed_.notify_all();
-    return stopped && retired;
+    if (closed) {
+        return CleanupResult::Closed;
+    }
+    return close_pending ? CleanupResult::CloseUncertain
+                         : CleanupResult::SafeLowFailed;
 }
 
 std::size_t RuntimeControlGate::finish_cleanup(
     std::vector<CleanupTask> tasks, bool retain_failed) {
     std::size_t failures = 0U;
     for (auto& task : tasks) {
-        if (!stop_in_flight_scope(
+        if (stop_in_flight_scope(
                 task.scope, task.lease_key,
                 task.object.node_generation,
                 task.object.expected_node_uuid,
-                task.object.object_id, task.object.safe_stopper,
-                retain_failed)) {
+                task.object.object_id, task.object.close_pending,
+                task.object.safe_stopper, task.object.closer,
+                retain_failed) != CleanupResult::Closed) {
             ++failures;
         }
     }
@@ -302,14 +319,6 @@ void RuntimeControlGate::acquire(
             erase_lease_locked(old->first);
         }
     }
-    const auto retired = retired_scopes_.find(scope);
-    if (retired != retired_scopes_.end()) {
-        if (retired->second == node_generation) {
-            reject(RuntimeControlError::ObjectRetired,
-                   "GPIO 对象已安全退休；节点重启前拒绝静默复用");
-        }
-        retired_scopes_.erase(retired);
-    }
     if (in_flight_scopes_.find(scope) != in_flight_scopes_.end()) {
         reject(RuntimeControlError::LeaseConflict,
                "目标 GPIO 仍有 Runtime 命令在执行");
@@ -367,7 +376,7 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         !valid_idempotency(request.idempotency_key) ||
         request.node_id == 0U || request.node_id > 127U ||
         request.resource_id == 0U || !io.create_low || !io.write_value ||
-        !io.safe_stop) {
+        !io.safe_stop || !io.close) {
         reject(RuntimeControlError::InvalidRequest,
                "Runtime GPIO 写请求字段无效");
     }
@@ -463,9 +472,9 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         object = gpio_objects_.end();
     }
     if (object == gpio_objects_.end() &&
-        gpio_objects_.size() + retired_scopes_.size() >= capacity_) {
+        gpio_objects_.size() >= capacity_) {
         reject(RuntimeControlError::CapacityExceeded,
-               "Runtime GPIO 活动对象与退休作用域表已达到上限");
+               "Runtime GPIO 活动对象表已达到上限");
     }
     // 在任何远端 I/O 前分配完整幂等节点。执行成功后只原地更新固定大小
     // 字段，不再发生字符串复制或容器扩容；失败路径必须删除本 pending。
@@ -483,13 +492,15 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
     }
     const bool creating = object == gpio_objects_.end();
     std::uint32_t object_id = creating ? 0U : object->second.object_id;
+    bool object_close_pending =
+        creating ? false : object->second.close_pending;
     try {
         if (creating) {
             // stopper 的复制与对象表扩容必须发生在远端 CREATE 之前。这样
             // 本地异常不会留下 MCU 对象；object_id 在响应后原地更新。
             GpioObject staged_object{0U, node_generation,
                                      request.expected_node_uuid,
-                                     io.safe_stop};
+                                     false, io.safe_stop, io.close};
             const auto inserted = gpio_objects_.emplace(
                 scope, std::move(staged_object));
             if (!inserted.second) {
@@ -591,18 +602,24 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         stopping_ || prewrite_lease == leases_.end() ||
         prewrite_clock_failed ||
         prewrite_lease->second.deadline_ns <= prewrite_ns;
+    const bool will_write_value = !creating || request.value;
     lock.unlock();
     if (prewrite_must_stop) {
-        const bool stopped = stop_in_flight_scope(
+        const auto cleanup = stop_in_flight_scope(
                 scope, lease_key, node_generation,
-                request.expected_node_uuid, object_id, io.safe_stop, true);
+                request.expected_node_uuid, object_id,
+                object_close_pending, io.safe_stop, io.close, true);
         lock.lock();
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
-        if (!stopped) {
+        if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
-                   "目标值写入前租约失效且无法验证安全低电平");
+                   "目标值写入前租约失效且安全写低未获得确定成功");
+        }
+        if (cleanup == CleanupResult::CloseUncertain) {
+            reject(RuntimeControlError::SafeStopFailed,
+                   "目标值写入前租约失效且 GPIO_CLOSE 未获得确定成功");
         }
         if (prewrite_clock_failed) {
             reject(RuntimeControlError::SafeStopFailed,
@@ -614,23 +631,28 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
 
     std::exception_ptr write_error;
     try {
-        if (!creating || request.value) {
+        if (will_write_value) {
             io.write_value(object_id, request.value);
         }
     } catch (...) {
         write_error = std::current_exception();
     }
     if (write_error) {
-        const bool stopped = stop_in_flight_scope(
+        const auto cleanup = stop_in_flight_scope(
                 scope, lease_key, node_generation,
-                request.expected_node_uuid, object_id, io.safe_stop, true);
+                request.expected_node_uuid, object_id, false,
+                io.safe_stop, io.close, true);
         lock.lock();
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
-        if (!stopped) {
+        if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
-                   "GPIO 写响应不确定且安全低电平也未获得成功响应");
+                   "GPIO 写响应不确定且安全写低未获得确定成功");
+        }
+        if (cleanup == CleanupResult::CloseUncertain) {
+            reject(RuntimeControlError::SafeStopFailed,
+                   "GPIO 写响应不确定且 GPIO_CLOSE 未获得确定成功");
         }
         std::rethrow_exception(write_error);
     }
@@ -649,16 +671,21 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
                            active->second.deadline_ns <= completed_ns;
     if (must_stop) {
         lock.unlock();
-        const bool stopped = stop_in_flight_scope(
+        const auto cleanup = stop_in_flight_scope(
                 scope, lease_key, node_generation,
-                request.expected_node_uuid, object_id, io.safe_stop, true);
+                request.expected_node_uuid, object_id,
+                object_close_pending, io.safe_stop, io.close, true);
         lock.lock();
         completed_.erase(idempotency_key);
         lock.unlock();
         expiry_changed_.notify_all();
-        if (!stopped) {
+        if (cleanup == CleanupResult::SafeLowFailed) {
             reject(RuntimeControlError::SafeStopFailed,
-                   "跨期限 GPIO 写入后无法验证安全低电平");
+                   "跨期限 GPIO 写入后安全写低未获得确定成功");
+        }
+        if (cleanup == CleanupResult::CloseUncertain) {
+            reject(RuntimeControlError::SafeStopFailed,
+                   "跨期限 GPIO 写入后 GPIO_CLOSE 未获得确定成功");
         }
         if (clock_failed) {
             reject(RuntimeControlError::SafeStopFailed,
@@ -680,7 +707,8 @@ RuntimeGpioWriteResult RuntimeControlGate::gpio_write(
         lock.unlock();
         static_cast<void>(stop_in_flight_scope(
             scope, lease_key, node_generation,
-            request.expected_node_uuid, object_id, io.safe_stop, true));
+            request.expected_node_uuid, object_id,
+            object_close_pending, io.safe_stop, io.close, true));
         reject(RuntimeControlError::SafeStopFailed,
                "Runtime GPIO 幂等 pending 不变量失效，已进入安全清理");
     }
@@ -734,19 +762,26 @@ void RuntimeControlGate::release(
         expiry_changed_.notify_all();
         return;
     }
-    // CleanupTask/std::function/vector 的复制与分配先完成，再发布 in-flight。
+    // CleanupTask/std::function 的复制与分配先完成，再发布 in-flight。
     // 任一异常都保持 lease/object 原样，可由调用者重试。
-    std::vector<CleanupTask> tasks;
-    tasks.reserve(1U);
-    tasks.push_back({scope, lease_key, object->second});
+    CleanupTask task{scope, lease_key, object->second};
     if (!in_flight_scopes_.insert(scope).second) {
         reject(RuntimeControlError::LeaseConflict,
                "Runtime GPIO 清理占位冲突");
     }
     lock.unlock();
-    if (finish_cleanup(std::move(tasks), true) != 0U) {
+    const auto cleanup = stop_in_flight_scope(
+        task.scope, task.lease_key, task.object.node_generation,
+        task.object.expected_node_uuid, task.object.object_id,
+        task.object.close_pending, task.object.safe_stopper,
+        task.object.closer, true);
+    if (cleanup == CleanupResult::SafeLowFailed) {
         reject(RuntimeControlError::SafeStopFailed,
-               "GPIO 安全低电平未获得可验证的下游成功响应");
+               "GPIO 安全写低未获得确定成功，租约保持故障占位");
+    }
+    if (cleanup == CleanupResult::CloseUncertain) {
+        reject(RuntimeControlError::SafeStopFailed,
+               "GPIO_CLOSE 未获得确定成功，租约保持故障占位");
     }
 }
 

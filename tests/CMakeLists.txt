@@ -24,6 +24,26 @@ target_compile_options(health_contract_tests PRIVATE
 )
 add_test(NAME health_contract_tests COMMAND health_contract_tests)
 
+add_executable(toolbusd_health_producer_tests
+    toolbusd_health_producer_tests.cpp)
+target_link_libraries(toolbusd_health_producer_tests PRIVATE
+    remotebsp_request_manager)
+target_compile_options(toolbusd_health_producer_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME toolbusd_health_producer_tests
+    COMMAND toolbusd_health_producer_tests)
+
+add_executable(toolbusd_health_ipc_tests toolbusd_health_ipc_tests.cpp)
+target_link_libraries(toolbusd_health_ipc_tests PRIVATE
+    remotebsp_request_manager)
+target_compile_options(toolbusd_health_ipc_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+)
+add_test(NAME toolbusd_health_ipc_tests COMMAND toolbusd_health_ipc_tests)
+
 add_executable(bus_stream_protocol_tests bus_stream_protocol_tests.cpp)
 target_link_libraries(bus_stream_protocol_tests PRIVATE remotebsp_protocol)
 target_compile_options(bus_stream_protocol_tests PRIVATE

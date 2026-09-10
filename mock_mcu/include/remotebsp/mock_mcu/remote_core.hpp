@@ -11,6 +11,7 @@
 #include "remotebsp/mock_mcu/waveform_bsp.hpp"
 #include "remotebsp/protocol/device_parameters.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
+#include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/motion.hpp"
 #include "remotebsp/protocol/motion_group.hpp"
 #include "remotebsp/protocol/packet.hpp"
@@ -182,6 +183,7 @@ private:
     protocol::Packet handle_gpio_create(const protocol::Packet& request);
     protocol::Packet handle_gpio_read(const protocol::Packet& request) const;
     protocol::Packet handle_gpio_write(const protocol::Packet& request);
+    protocol::Packet handle_gpio_close(const protocol::Packet& request);
     protocol::Packet handle_uart_create(const protocol::Packet& request);
     protocol::Packet handle_uart_read(const protocol::Packet& request);
     protocol::Packet handle_uart_write(const protocol::Packet& request);
@@ -305,7 +307,7 @@ private:
         std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
     bool resource_access_allowed(
         std::uint32_t resource_id, std::uint32_t session_id) const noexcept;
-    void release_resource_objects(std::uint32_t resource_id,
+    bool release_resource_objects(std::uint32_t resource_id,
                                   std::uint32_t owner_session_id);
     protocol::ResourceLeaseInfo make_lease_info(
         std::uint32_t resource_id, std::uint32_t requester_session_id,

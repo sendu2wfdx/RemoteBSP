@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import struct
 import subprocess
 import threading
 import time
@@ -13,6 +14,10 @@ from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 from .models import normalize_snapshot
+from .health_projection import (
+    HealthProjectionError,
+    TrustedToolbusdHealthProjection,
+)
 from .provider import RuntimeProvider, RuntimeProviderError, SnapshotRead
 
 
@@ -71,6 +76,8 @@ class ToolbusIpcClient(Protocol):
     def resource_status(self, node_id: int, resource_id: int) -> dict: ...
 
     def runtime_snapshot(self, maximum_resources: int) -> dict: ...
+
+    def health_snapshot(self) -> dict: ...
 
 
 CommandRunner = Callable[[Sequence[str], float, int], str]
@@ -654,6 +661,89 @@ class RemoteCliIpcClient:
             "clocks": clocks,
         }
 
+    @staticmethod
+    def _json_health_snapshot(output: str) -> dict:
+        data = RemoteCliIpcClient._document(output, "health-snapshot")
+        _exact_fields(data, {"ipc_version", "daemon_instance_id", "health"},
+                      "health-snapshot.data")
+        ipc_version = _json_integer(
+            data["ipc_version"], "health-snapshot.ipc_version",
+            minimum=1, maximum=0xFFFF)
+        if ipc_version != 1:
+            raise ToolbusIpcProtocolError(
+                f"health-snapshot IPC版本不受支持：{ipc_version}")
+        instance_id = _json_string(
+            data["daemon_instance_id"],
+            "health-snapshot.daemon_instance_id").lower()
+        if _UUID.fullmatch(instance_id) is None or instance_id == "0" * 32:
+            raise ToolbusIpcProtocolError("health-snapshot daemon身份无效")
+        health = _json_object(data["health"], "health-snapshot.health")
+        _exact_fields(health, {
+            "contract_version", "source", "overall", "sample_sequence",
+            "sample_time_ms", "node_id", "producer_generation", "metrics",
+        }, "health-snapshot.health")
+        version = _json_integer(
+            health["contract_version"], "health-snapshot.contract_version",
+            minimum=1, maximum=0xFFFF)
+        source = _json_integer(
+            health["source"], "health-snapshot.source",
+            minimum=1, maximum=0xFF)
+        overall = _json_integer(
+            health["overall"], "health-snapshot.overall", maximum=0xFF)
+        sequence = _json_integer(
+            health["sample_sequence"], "health-snapshot.sample_sequence",
+            minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+        sample_time_ms = _json_integer(
+            health["sample_time_ms"], "health-snapshot.sample_time_ms",
+            maximum=0xFFFFFFFFFFFFFFFF)
+        node_id = _json_integer(
+            health["node_id"], "health-snapshot.node_id", maximum=0xFFFFFFFF)
+        generation = _json_integer(
+            health["producer_generation"],
+            "health-snapshot.producer_generation",
+            minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
+        raw_metrics = _json_array(
+            health["metrics"], "health-snapshot.metrics")
+        if len(raw_metrics) < 1 or len(raw_metrics) > 48:
+            raise ToolbusIpcProtocolError(
+                "health-snapshot指标数量必须位于1～48")
+        encoded_metrics = bytearray()
+        for index, raw in enumerate(raw_metrics):
+            item = _json_object(raw, f"health-snapshot.metrics[{index}]")
+            _exact_fields(item, {"metric_id", "availability", "unit", "value"},
+                          f"health-snapshot.metrics[{index}]")
+            metric_id = _json_integer(
+                item["metric_id"], "health-snapshot.metric_id",
+                minimum=1, maximum=0xFFFF)
+            availability = _json_integer(
+                item["availability"], "health-snapshot.availability",
+                minimum=1, maximum=0xFF)
+            unit = _json_integer(
+                item["unit"], "health-snapshot.unit",
+                minimum=1, maximum=0xFF)
+            value = _json_integer(
+                item["value"], "health-snapshot.value",
+                maximum=0xFFFFFFFFFFFFFFFF)
+            encoded_metrics.extend(struct.pack(
+                "<HBBQ", metric_id, availability, unit, value))
+        wire = struct.pack(
+            "<HBBQQIQHH", version, source, overall, sequence,
+            sample_time_ms, node_id, generation, len(raw_metrics), 0)
+        wire += bytes(encoded_metrics)
+        # 先用一次无状态严格解码封闭 JSON→wire 转换，再交给 Provider
+        # 的有状态可信路由注册表。
+        try:
+            TrustedToolbusdHealthProjection(generation).ingest(wire)
+        except HealthProjectionError as error:
+            raise ToolbusIpcProtocolError(
+                f"health-snapshot语义无效：{error}") from error
+        return {
+            "ipc_version": ipc_version,
+            "daemon_instance_id": instance_id,
+            "producer_generation": generation,
+            "wire": wire,
+        }
+
     def traffic_status(self) -> dict:
         output = self._run("traffic-status")
         if self.structured_output:
@@ -894,6 +984,12 @@ class RemoteCliIpcClient:
                 "Runtime单次快照要求结构化remote-cli输出")
         return self._json_runtime_snapshot(output)
 
+    def health_snapshot(self) -> dict:
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError(
+                "健康快照要求结构化remote-cli输出")
+        return self._json_health_snapshot(self._run("health-snapshot"))
+
 
 class _RuntimeSnapshotView:
     """把单次 IPC 结果适配为既有快照组装接口，不再启动子进程。"""
@@ -973,6 +1069,10 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         self._cached_error: str | None = None
         self._error_stored_at_ms: int | None = None
         self._refreshing = False
+        self._health_lock = threading.Lock()
+        self._health_daemon_instance_id: str | None = None
+        self._health_generation: int | None = None
+        self._health_projection: TrustedToolbusdHealthProjection | None = None
 
     def runtime_capabilities(self) -> dict:
         structured_output = bool(
@@ -994,7 +1094,47 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 "maximum_sample_age_ms":
                     self.maximum_clock_sample_age_ms,
             },
+            "toolbusd_health_snapshot": {
+                "available": structured_output and callable(
+                    getattr(self.client, "health_snapshot", None)),
+                "contract_version": 1,
+                "source": "local_toolbusd_ipc",
+            },
         }
+
+    def health_snapshot(self) -> dict:
+        reader = getattr(self.client, "health_snapshot", None)
+        if not bool(getattr(self.client, "structured_output", True)) or \
+                not callable(reader):
+            raise RuntimeProviderError("toolbusd 健康快照 IPC 不可用")
+        # 串行覆盖调用和状态切换，防止旧 daemon 的迟到结果反向覆盖新世代。
+        with self._health_lock:
+            try:
+                source = reader()
+            except ToolbusIpcProtocolError as error:
+                raise RuntimeProviderError(
+                    f"toolbusd 健康快照协议不兼容：{error}") from error
+            except ToolbusIpcError as error:
+                raise RuntimeProviderError(
+                    f"toolbusd 健康快照不可用：{error}") from error
+            instance_id = str(source["daemon_instance_id"])
+            generation = int(source["producer_generation"])
+            if self._health_daemon_instance_id == instance_id:
+                if self._health_generation != generation or \
+                        self._health_projection is None:
+                    raise RuntimeProviderError(
+                        "同一toolbusd实例的健康生产者代际发生变化")
+            else:
+                self._health_daemon_instance_id = instance_id
+                self._health_generation = generation
+                self._health_projection = \
+                    TrustedToolbusdHealthProjection(generation)
+            try:
+                projected = self._health_projection.ingest(source["wire"])
+            except HealthProjectionError as error:
+                raise RuntimeProviderError(
+                    f"toolbusd 健康快照被可信边界拒绝：{error}") from error
+            return {"daemon_instance_id": instance_id, **projected}
 
     @property
     def gpio_control_available(self) -> bool:

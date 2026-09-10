@@ -1,5 +1,6 @@
 #include "remotebsp/mock_mcu/gpio_bsp.hpp"
 #include "remotebsp/mock_mcu/mock_node.hpp"
+#include "remotebsp/protocol/gpio.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -115,6 +116,103 @@ void test_input_and_errors() {
                  mock_mcu::StatusCode::UnsupportedCapability);
 }
 
+void test_close_is_versioned_idempotent_and_safe() {
+    auto gpio = std::make_shared<mock_mcu::MockGpioBsp>();
+    auto core = make_core(gpio);
+    auto create = make_request(protocol::Command::GpioCreate, 20);
+    create.payload = {9U, 0U,
+                      static_cast<std::uint8_t>(
+                          mock_mcu::GpioDirection::Output),
+                      1U};
+    const auto created = core.handle(create);
+    check_status(created, mock_mcu::StatusCode::Ok);
+    CHECK(gpio->read(9U));
+
+    auto close = make_request(protocol::Command::GpioClose, 21,
+                              created.header.object_id);
+    close.payload = protocol::encode_gpio_close();
+    gpio->fail_next_write();
+    check_status(core.handle(close), mock_mcu::StatusCode::ResourceFailed);
+    CHECK(gpio->read(9U));
+    check_status(core.handle(close), mock_mcu::StatusCode::Ok);
+    CHECK(!gpio->read(9U));
+
+    // 重复或未知对象关闭都表示“确定已不存在”，保持幂等成功。
+    check_status(core.handle(close), mock_mcu::StatusCode::Ok);
+    auto unknown = close;
+    unknown.header.request_id = 22U;
+    unknown.header.object_id = 999U;
+    check_status(core.handle(unknown), mock_mcu::StatusCode::Ok);
+
+    // 成功关闭后同一引脚可在同一节点代次重新创建。
+    create.header.request_id = 23U;
+    const auto recreated = core.handle(create);
+    check_status(recreated, mock_mcu::StatusCode::Ok);
+    CHECK(recreated.header.object_id != created.header.object_id);
+
+    auto invalid = close;
+    invalid.header.request_id = 24U;
+    invalid.payload.clear();
+    check_status(core.handle(invalid), mock_mcu::StatusCode::InvalidPayload);
+    invalid.payload = {2U};
+    check_status(core.handle(invalid), mock_mcu::StatusCode::InvalidPayload);
+    invalid.payload = protocol::encode_gpio_close();
+    invalid.header.object_id = 0U;
+    check_status(core.handle(invalid), mock_mcu::StatusCode::InvalidPayload);
+
+    CHECK(protocol::decode_gpio_close(protocol::encode_gpio_close()).version ==
+          protocol::kGpioClosePayloadVersion);
+    try {
+        static_cast<void>(protocol::decode_gpio_close({}));
+        CHECK(false);
+    } catch (const protocol::GpioPayloadException& error) {
+        CHECK(error.code() == protocol::GpioPayloadError::InvalidLength);
+    }
+}
+
+void test_unleased_object_is_session_owned_and_released() {
+    auto gpio = std::make_shared<mock_mcu::MockGpioBsp>();
+    auto core = make_core(gpio);
+
+    auto create = make_request(protocol::Command::GpioCreate, 30U);
+    create.payload = {10U, 0U,
+                      static_cast<std::uint8_t>(
+                          mock_mcu::GpioDirection::Output),
+                      1U};
+    const auto created = core.handle(create);
+    check_status(created, mock_mcu::StatusCode::Ok);
+    CHECK(gpio->read(10U));
+
+    auto other_read = make_request(
+        protocol::Command::GpioRead, 31U, created.header.object_id);
+    other_read.header.session_id = 2U;
+    check_status(core.handle(other_read),
+                 mock_mcu::StatusCode::AccessDenied);
+
+    auto other_write = make_request(
+        protocol::Command::GpioWrite, 32U, created.header.object_id);
+    other_write.header.session_id = 2U;
+    other_write.payload = {0U};
+    check_status(core.handle(other_write),
+                 mock_mcu::StatusCode::AccessDenied);
+    CHECK(gpio->read(10U));
+
+    auto other_close = make_request(
+        protocol::Command::GpioClose, 33U, created.header.object_id);
+    other_close.header.session_id = 2U;
+    other_close.payload = protocol::encode_gpio_close();
+    check_status(core.handle(other_close),
+                 mock_mcu::StatusCode::AccessDenied);
+    CHECK(gpio->read(10U));
+
+    CHECK(core.release_session(1U) == 1U);
+    CHECK(!gpio->read(10U));
+    check_status(core.handle(make_request(
+                     protocol::Command::GpioRead, 34U,
+                     created.header.object_id)),
+                 mock_mcu::StatusCode::ObjectNotFound);
+}
+
 std::optional<mock_mcu::NodeReply> send_request(
     mock_mcu::MockNode& node, const protocol::Packet& request,
     std::uint16_t transfer_id) {
@@ -168,6 +266,8 @@ void test_duplicate_write_is_atomic() {
 int main() {
     test_create_read_write();
     test_input_and_errors();
+    test_close_is_versioned_idempotent_and_safe();
+    test_unleased_object_is_session_owned_and_released();
     test_duplicate_write_is_atomic();
     if (failures != 0) {
         std::cerr << failures << " 个测试失败\n";

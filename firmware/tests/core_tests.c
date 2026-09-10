@@ -3,7 +3,19 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* 标准 assert 在 Release/NDEBUG 下会消失；固件安全断言必须始终执行。 */
+#undef assert
+#define assert(condition)                                                     \
+    do {                                                                      \
+        if (!(condition)) {                                                   \
+            (void)fprintf(stderr, "%s:%d: 测试断言失败: %s\n",              \
+                          __FILE__, __LINE__, #condition);                    \
+            abort();                                                          \
+        }                                                                     \
+    } while (0)
 
 static rbsp_can_frame_t sent_frames[1024];
 static size_t sent_count;
@@ -13,6 +25,7 @@ static rbsp_gpio_direction_t gpio_directions[256];
 static rbsp_gpio_pull_t gpio_pulls[256];
 static unsigned gpio_configure_count;
 static unsigned gpio_write_count;
+static bool gpio_write_must_fail;
 static unsigned uart_read_count;
 #if defined(CONFIG_REMOTEBSP_BUS)
 enum {
@@ -181,6 +194,9 @@ static bool fake_gpio_configure_pull(uint16_t pin,
 
 static bool fake_gpio_write(uint16_t pin, bool value) {
     if (pin >= sizeof(gpio_values) / sizeof(gpio_values[0])) {
+        return false;
+    }
+    if (gpio_write_must_fail) {
         return false;
     }
     gpio_values[pin] = value;
@@ -969,9 +985,36 @@ int main(void) {
 
     /* 后续既有测试仍需使用刚创建的 GPIO 对象。 */
     core.gpio_objects[0].used = true;
+    assert(core.gpio_objects[0].owner_session_id == 0x12345678U);
+
+    /* 其他会话不能读取、写入或关闭现有对象，原会话仍可继续使用。 */
+    const uint32_t other_gpio_session = 0x87654321U;
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0101U, other_gpio_session, 40U, gpio_object, NULL, 0U);
+    feed_packet(&core, 0x619U, 40U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 4U);
+
+    const uint8_t high[] = {1U};
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0102U, other_gpio_session, 41U, gpio_object,
+        high, sizeof(high));
+    feed_packet(&core, 0x619U, 41U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 4U && !gpio_values[7]);
+
+    const uint8_t close_v1[] = {1U};
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0103U, other_gpio_session, 42U, gpio_object,
+        close_v1, sizeof(close_v1));
+    feed_packet(&core, 0x619U, 42U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 4U && core.gpio_objects[0].used);
 
     clear_sent();
-    const uint8_t high[] = {1U};
     request_size = make_request(request, 0x0102U, 4U, gpio_object,
                                 high, sizeof(high));
     feed_packet(&core, 0x619U, 4U, request, request_size);
@@ -980,6 +1023,107 @@ int main(void) {
     feed_packet(&core, 0x619U, 5U, request, request_size);
     assert(gpio_write_count == 1U);
     reassemble_sent(response, 0x599U);
+
+    clear_sent();
+    request_size = make_request(request, 0x0101U, 43U, gpio_object,
+                                NULL, 0U);
+    feed_packet(&core, 0x619U, 43U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 26U);
+    assert(response[24U] == 0U && response[25U] == 1U);
+
+    /* GPIO_CLOSE 自身先写低；失败保留对象，成功后允许同引脚重建。 */
+    gpio_write_must_fail = true;
+    clear_sent();
+    request_size = make_request(request, 0x0103U, 50U, gpio_object,
+                                close_v1, sizeof(close_v1));
+    feed_packet(&core, 0x619U, 50U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 7U && core.gpio_objects[0].used &&
+           gpio_values[7]);
+
+    gpio_write_must_fail = false;
+    clear_sent();
+    request_size = make_request(request, 0x0103U, 51U, gpio_object,
+                                close_v1, sizeof(close_v1));
+    feed_packet(&core, 0x619U, 51U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && !core.gpio_objects[0].used &&
+           !gpio_values[7]);
+
+    clear_sent();
+    request_size = make_request(request, 0x0100U, 52U, 0U,
+                                create, sizeof(create));
+    feed_packet(&core, 0x619U, 52U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && core.gpio_objects[0].used);
+    const uint32_t recreated_gpio_object = get_u32(response + 12U);
+    assert(recreated_gpio_object != 0U &&
+           recreated_gpio_object != gpio_object);
+
+    clear_sent();
+    request_size = make_request(request, 0x0103U, 53U,
+                                recreated_gpio_object,
+                                close_v1, sizeof(close_v1));
+    feed_packet(&core, 0x619U, 53U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U);
+    clear_sent();
+    request_size = make_request(request, 0x0103U, 54U,
+                                recreated_gpio_object,
+                                close_v1, sizeof(close_v1));
+    feed_packet(&core, 0x619U, 54U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U);
+
+    /* 会话结束只清理本会话对象；输出必须先确认写低，失败则保留。 */
+    const uint32_t first_gpio_session = 0x11111111U;
+    const uint32_t second_gpio_session = 0x22222222U;
+    const uint8_t create_pin8[] = {8U, 0U, 1U, 0U};
+    const uint8_t create_pin9[] = {9U, 0U, 1U, 0U};
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0100U, first_gpio_session, 1U, 0U,
+        create_pin8, sizeof(create_pin8));
+    feed_packet(&core, 0x619U, 60U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    const uint32_t first_session_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && first_session_object != 0U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0102U, first_gpio_session, 2U,
+        first_session_object, high, sizeof(high));
+    feed_packet(&core, 0x619U, 61U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && gpio_values[8]);
+
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0100U, second_gpio_session, 1U, 0U,
+        create_pin9, sizeof(create_pin9));
+    feed_packet(&core, 0x619U, 62U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    const uint32_t second_session_object = get_u32(response + 12U);
+    assert(response[24U] == 0U && second_session_object != 0U);
+    clear_sent();
+    request_size = make_request_for_session(
+        request, 0x0102U, second_gpio_session, 2U,
+        second_session_object, high, sizeof(high));
+    feed_packet(&core, 0x619U, 63U, request, request_size);
+    assert(reassemble_sent(response, 0x599U) == 25U);
+    assert(response[24U] == 0U && gpio_values[9]);
+
+    assert(rbsp_core_release_session(&core, first_gpio_session) == 1U);
+    assert(!gpio_values[8] && gpio_values[9]);
+    assert(!core.gpio_objects[0].used && core.gpio_objects[1].used);
+    assert(core.gpio_objects[1].owner_session_id == second_gpio_session);
+
+    gpio_write_must_fail = true;
+    assert(rbsp_core_release_session(&core, second_gpio_session) == 0U);
+    assert(core.gpio_objects[1].used && gpio_values[9]);
+    gpio_write_must_fail = false;
+    assert(rbsp_core_release_session(&core, second_gpio_session) == 1U);
+    assert(!core.gpio_objects[1].used && !gpio_values[9]);
+    assert(rbsp_core_release_session(&core, second_gpio_session) == 0U);
 
     /*
      * 1024 字节测试配置下，999 字节 PING 产生恰好 1024 字节的响应。
