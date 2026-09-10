@@ -11,12 +11,14 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace remotebsp::toolbusd {
 
-constexpr std::uint16_t kRuntimeControlIpcVersion = 1U;
+constexpr std::uint16_t kRuntimeControlIpcVersion = 2U;
 constexpr std::uint16_t kRuntimePermissionGpioWrite = 0x0001U;
 constexpr std::size_t kMaximumRuntimeControlIdentityBytes = 64U;
 constexpr std::size_t kMaximumRuntimeControlIdempotencyBytes = 64U;
@@ -26,6 +28,7 @@ struct RuntimeControlAcquireRequest {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
     std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
     std::string owner_key_id;
     std::uint16_t permissions{kRuntimePermissionGpioWrite};
     std::uint32_t node_id{};
@@ -37,6 +40,7 @@ struct RuntimeGpioWriteRequest {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
     std::array<std::uint8_t, 16> lease_id{};
+    std::array<std::uint8_t, 16> expected_node_uuid{};
     std::string owner_key_id;
     std::uint16_t permissions{kRuntimePermissionGpioWrite};
     std::uint32_t node_id{};
@@ -69,6 +73,8 @@ enum class RuntimeControlError {
     ContractRejected,
     CapacityExceeded,
     IdempotencyConflict,
+    SafeStopFailed,
+    ObjectRetired,
 };
 
 class RuntimeControlException : public std::runtime_error {
@@ -81,16 +87,30 @@ private:
     RuntimeControlError code_;
 };
 
-// toolbusd 内部的最终授权门。所有字段校验、资源互斥、幂等判定和命令提交
-// 都在同一把锁下完成；回调只允许提交已经验证的单个 GPIO 目标。
+// toolbusd 内部的最终授权门。全局锁只覆盖校验、资源占位和结果提交；
+// 远端 writer 在锁外执行，同一作用域由有界 in-flight 状态串行化。
 class RuntimeControlGate {
 public:
     using Clock = std::function<std::uint64_t()>;
-    using GpioWriter = std::function<std::uint32_t(
-        std::optional<std::uint32_t> existing_object_id)>;
+    using GpioCreator = std::function<std::uint32_t()>;
+    using GpioValueWriter = std::function<void(std::uint32_t object_id,
+                                               bool value)>;
+    using GpioSafeStopper = std::function<void(
+        std::uint32_t node_id, std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        std::uint32_t object_id)>;
+    struct GpioIo {
+        // create_low 必须只以安全低电平创建对象；Gate 在取得对象 ID 后先
+        // 登记可清理状态，之后才允许 write_value 写请求值。
+        GpioCreator create_low;
+        GpioValueWriter write_value;
+        GpioSafeStopper safe_stop;
+    };
 
     explicit RuntimeControlGate(std::size_t capacity = 256U,
-                                Clock monotonic_ns = {});
+                                Clock monotonic_ns = {},
+                                bool start_expiry_worker = true);
+    ~RuntimeControlGate() noexcept;
 
     void acquire(
         const RuntimeControlAcquireRequest& request,
@@ -105,7 +125,7 @@ public:
         std::uint64_t node_generation,
         const protocol::ResourceDescriptor& descriptor,
         const protocol::ResourceContract& contract,
-        const GpioWriter& writer);
+        const GpioIo& io);
 
     void release(
         const RuntimeControlReleaseRequest& request,
@@ -113,15 +133,25 @@ public:
 
     std::size_t active_lease_count();
 
+    // 立即处理已经到期的租约。返回无法验证安全低电平的资源数；失败资源
+    // 会保留占位并阻止后续所有者接管，不影响其他资源继续清理。
+    std::size_t reap_expired();
+
+    // daemon 会话结束前停止后台清理，并对所有已创建对象执行安全停机。
+    // 返回停机失败数；本方法幂等，且会继续处理其余资源。
+    std::size_t shutdown();
+
 private:
     struct LeaseState {
         std::array<std::uint8_t, 16> lease_id{};
+        std::array<std::uint8_t, 16> expected_node_uuid{};
         std::string owner_key_id;
         std::uint16_t permissions{};
         std::uint32_t node_id{};
         std::uint32_t resource_id{};
         std::uint64_t node_generation{};
         std::uint64_t deadline_ns{};
+        bool cleanup_failed{};
     };
 
     struct CompletedCommand {
@@ -137,13 +167,31 @@ private:
     struct GpioObject {
         std::uint32_t object_id{};
         std::uint64_t node_generation{};
+        std::array<std::uint8_t, 16> expected_node_uuid{};
+        GpioSafeStopper safe_stopper;
+    };
+
+    struct CleanupTask {
+        std::uint64_t scope{};
+        std::string lease_key;
+        GpioObject object;
     };
 
     static std::string binary_id(
         const std::array<std::uint8_t, 16>& value);
     static std::uint64_t scope_key(std::uint32_t node_id,
                                    std::uint32_t resource_id) noexcept;
-    void expire(std::uint64_t now_ns);
+    void erase_lease_locked(const std::string& lease_key);
+    std::vector<CleanupTask> collect_expired_locked(std::uint64_t now_ns);
+    bool stop_in_flight_scope(
+        std::uint64_t scope, const std::string& lease_key,
+        std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
+        std::uint32_t object_id, const GpioSafeStopper& safe_stopper,
+        bool retain_failed);
+    std::size_t finish_cleanup(std::vector<CleanupTask> tasks,
+                               bool retain_failed);
+    void expiry_loop();
 
     std::size_t capacity_;
     std::size_t history_capacity_;
@@ -154,7 +202,17 @@ private:
     std::unordered_map<std::uint64_t, std::string> leases_by_scope_;
     std::unordered_map<std::string, CompletedCommand> completed_;
     std::unordered_map<std::uint64_t, GpioObject> gpio_objects_;
+    std::unordered_map<std::uint64_t, std::uint64_t> retired_scopes_;
     std::unordered_set<std::uint64_t> in_flight_scopes_;
+    std::condition_variable expiry_changed_;
+    std::condition_variable shutdown_changed_;
+    bool expiry_worker_enabled_{};
+    bool stopping_{};
+    bool shutdown_in_progress_{};
+    bool shutdown_complete_{};
+    std::size_t shutdown_failures_{};
+    bool expiry_worker_failed_{};
+    std::thread expiry_worker_;
 };
 
 }  // namespace remotebsp::toolbusd

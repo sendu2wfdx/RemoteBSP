@@ -48,6 +48,22 @@ class ToolbusIpcClient(Protocol):
 
     def daemon_identity(self) -> str: ...
 
+    def runtime_control_acquire(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int,
+            ttl_ms: int) -> None: ...
+
+    def runtime_gpio_write(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int,
+            idempotency_key: str, value: bool) -> dict: ...
+
+    def runtime_control_release(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str) -> None: ...
+
     def list_nodes(self) -> list[dict]: ...
 
     def list_resources(self, node_id: int) -> list[dict]: ...
@@ -687,6 +703,78 @@ class RemoteCliIpcClient:
                 "daemon-identity.instance_id必须是非零128位十六进制")
         return instance_id
 
+    @staticmethod
+    def _control_id(value: str, name: str) -> str:
+        if not isinstance(value, str) or not _UUID.fullmatch(value) or \
+                value == "0" * 32:
+            raise ToolbusIpcProtocolError(f"{name}必须是非零128位十六进制")
+        return value.lower()
+
+    def runtime_control_acquire(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int,
+            ttl_ms: int) -> None:
+        output = self._run(
+            "runtime-control-acquire", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), str(ttl_ms)))
+        if not self.structured_output:
+            if output.strip() != "ok":
+                raise ToolbusIpcProtocolError("控制租约登记返回值无效")
+            return
+        data = self._document(output, "runtime-control-acquire")
+        _exact_fields(data, set(), "runtime-control-acquire.data")
+
+    def runtime_gpio_write(
+            self, daemon_instance_id: str, lease_id: str,
+            expected_node_uuid: str, owner_key_id: str, node_id: int,
+            resource_id: int,
+            idempotency_key: str, value: bool) -> dict:
+        if type(value) is not bool:
+            raise ToolbusIpcProtocolError("GPIO目标电平必须是布尔值")
+        output = self._run(
+            "runtime-gpio-write", node_id=node_id,
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       self._control_id(expected_node_uuid, "预期节点UUID"),
+                       owner_key_id, str(resource_id), idempotency_key,
+                       "1" if value else "0"))
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("GPIO写控制要求结构化remote-cli输出")
+        data = self._document(output, "runtime-gpio-write")
+        _exact_fields(data, {"object_id", "value", "replayed"},
+                      "runtime-gpio-write.data")
+        returned_value = _json_boolean(
+            data["value"], "runtime-gpio-write.value")
+        if returned_value != value:
+            raise ToolbusIpcProtocolError("GPIO写结果电平与请求不一致")
+        return {
+            "object_id": _json_integer(
+                data["object_id"], "runtime-gpio-write.object_id",
+                minimum=1, maximum=0xFFFFFFFF),
+            "value": returned_value,
+            "replayed": _json_boolean(
+                data["replayed"], "runtime-gpio-write.replayed"),
+        }
+
+    def runtime_control_release(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str) -> None:
+        output = self._run(
+            "runtime-control-release",
+            arguments=(self._control_id(daemon_instance_id, "daemon实例ID"),
+                       self._control_id(lease_id, "控制租约ID"),
+                       owner_key_id))
+        if not self.structured_output:
+            if output.strip() != "ok":
+                raise ToolbusIpcProtocolError("控制租约释放返回值无效")
+            return
+        data = self._document(output, "runtime-control-release")
+        _exact_fields(data, set(), "runtime-control-release.data")
+
     def list_nodes(self) -> list[dict]:
         output = self._run("node-list")
         if self.structured_output:
@@ -907,6 +995,81 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     self.maximum_clock_sample_age_ms,
             },
         }
+
+    @property
+    def gpio_control_available(self) -> bool:
+        """只有新版结构化客户端完整提供三个命令时才声明可写。"""
+        return bool(getattr(self.client, "structured_output", True)) and all(
+            callable(getattr(self.client, name, None)) for name in (
+                "runtime_control_acquire", "runtime_gpio_write",
+                "runtime_control_release"))
+
+    def _resolve_gpio_target(self, node_id: str,
+                             resource_id: str) -> tuple[str, int, int]:
+        read = self.read_snapshot()
+        node = next((item for item in read.snapshot["nodes"]
+                     if item["node_id"] == node_id), None)
+        if node is None:
+            raise RuntimeProviderError(f"控制目标节点不存在：{node_id}")
+        if node["state"] != "online":
+            raise RuntimeProviderError(f"控制目标节点当前不可用：{node_id}")
+        resource = next((item for item in node["resources"]
+                         if item["resource_id"] == resource_id), None)
+        if resource is None:
+            raise RuntimeProviderError(f"控制目标资源不存在：{resource_id}")
+        if resource["kind"] != "gpio" or not resource["available"]:
+            raise RuntimeProviderError("控制目标不是当前可用的GPIO资源")
+        numeric_node = node["runtime"].get("bus_node_id")
+        if type(numeric_node) is not int or not 1 <= numeric_node <= 127:
+            raise RuntimeProviderError("控制目标缺少有效的总线节点ID")
+        match = re.fullmatch(r"resource-([0-9a-f]{8})", resource_id)
+        if match is None:
+            raise RuntimeProviderError("控制目标资源ID不是toolbusd规范ID")
+        node_match = re.fullmatch(r"node-([0-9a-f]{32})", node_id)
+        if node_match is None:
+            raise RuntimeProviderError("控制目标节点ID不是toolbusd规范UUID")
+        return node_match.group(1), numeric_node, int(match.group(1), 16)
+
+    def gpio_control_acquire(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            remaining_ttl_ms: Callable[[], int]) -> None:
+        if not self.gpio_control_available:
+            raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
+        node_uuid, numeric_node, numeric_resource = self._resolve_gpio_target(
+            node_id, resource_id)
+        ttl_ms = remaining_ttl_ms()
+        try:
+            self.client.runtime_control_acquire(
+                daemon_instance_id, lease_id, node_uuid, owner_key_id,
+                numeric_node, numeric_resource, ttl_ms)
+        except ToolbusIpcError as error:
+            raise RuntimeProviderError(f"toolbusd拒绝控制租约：{error}") from error
+
+    def gpio_control_write(
+            self, daemon_instance_id: str, lease_id: str,
+            owner_key_id: str, node_id: str, resource_id: str,
+            idempotency_key: str, value: bool) -> dict:
+        if not self.gpio_control_available:
+            raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
+        node_uuid, numeric_node, numeric_resource = self._resolve_gpio_target(
+            node_id, resource_id)
+        try:
+            return self.client.runtime_gpio_write(
+                daemon_instance_id, lease_id, node_uuid, owner_key_id,
+                numeric_node, numeric_resource, idempotency_key, value)
+        except ToolbusIpcError as error:
+            raise RuntimeProviderError(f"toolbusd拒绝GPIO写入：{error}") from error
+
+    def gpio_control_release(self, daemon_instance_id: str, lease_id: str,
+                             owner_key_id: str) -> None:
+        if not self.gpio_control_available:
+            raise RuntimeProviderError("toolbusd GPIO控制IPC不可用")
+        try:
+            self.client.runtime_control_release(
+                daemon_instance_id, lease_id, owner_key_id)
+        except ToolbusIpcError as error:
+            raise RuntimeProviderError(f"toolbusd拒绝控制租约释放：{error}") from error
 
     @staticmethod
     def _link_kind(mode: str) -> str:

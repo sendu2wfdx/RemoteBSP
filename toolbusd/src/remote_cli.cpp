@@ -386,9 +386,9 @@ void print_usage() {
         << "  traffic-status\n"
         << "  daemon-identity\n"
         << "  runtime-control-acquire <daemon实例ID> <控制租约ID> "
-           "<调用者ID> <GPIO资源ID> <租约ms>\n"
-        << "  runtime-gpio-write <daemon实例ID> <控制租约ID> <调用者ID> "
-           "<GPIO资源ID> <幂等键> <0|1>\n"
+           "<预期节点UUID> <调用者ID> <GPIO资源ID> <租约ms>\n"
+        << "  runtime-gpio-write <daemon实例ID> <控制租约ID> "
+           "<预期节点UUID> <调用者ID> <GPIO资源ID> <幂等键> <0|1>\n"
         << "  runtime-control-release <daemon实例ID> <控制租约ID> "
            "<调用者ID>\n"
         << "  runtime-snapshot [最大资源数] [总超时毫秒]\n"
@@ -466,12 +466,13 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
 
-    if (name == "runtime-control-acquire" && arguments.size() == 6) {
+    if (name == "runtime-control-acquire" && arguments.size() == 7) {
         client.runtime_control_acquire(
             parse_hex_id(arguments[1], "daemon实例ID"),
-            parse_hex_id(arguments[2], "控制租约ID"), arguments[3],
-            parse_u32(arguments[4], "GPIO资源ID"),
-            parse_u32(arguments[5], "租约毫秒"));
+            parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4],
+            parse_u32(arguments[5], "GPIO资源ID"),
+            parse_u32(arguments[6], "租约毫秒"));
         if (json_output) {
             std::cout << "{\"schema_version\":1,\"command\":"
                          "\"runtime-control-acquire\",\"data\":{}}\n";
@@ -481,16 +482,17 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
 
-    if (name == "runtime-gpio-write" && arguments.size() == 7) {
-        const auto value = parse_u32(arguments[6], "GPIO 电平");
+    if (name == "runtime-gpio-write" && arguments.size() == 8) {
+        const auto value = parse_u32(arguments[7], "GPIO 电平");
         if (value > 1U) {
             throw std::invalid_argument("GPIO 电平必须是0或1");
         }
         const auto result = client.runtime_gpio_write(
             parse_hex_id(arguments[1], "daemon实例ID"),
-            parse_hex_id(arguments[2], "控制租约ID"), arguments[3],
-            parse_u32(arguments[4], "GPIO资源ID"),
-            arguments[5], value != 0U);
+            parse_hex_id(arguments[2], "控制租约ID"),
+            parse_hex_id(arguments[3], "预期节点UUID"), arguments[4],
+            parse_u32(arguments[5], "GPIO资源ID"),
+            arguments[6], value != 0U);
         if (json_output) {
             std::cout << "{\"schema_version\":1,\"command\":"
                          "\"runtime-gpio-write\",\"data\":{"

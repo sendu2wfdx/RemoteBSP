@@ -4,12 +4,13 @@
 
 Runtime API 是位于 `toolbusd` 和浏览器/上层应用之间的长期运行服务边界，作用类似
 Moonraker，但面向通用 RemoteBSP 节点和资源。当前实现可替换 Provider 之上的只读
-状态面，以及绑定 toolbusd 实例的进程内短时控制租约；控制租约只协调上位机写意图，不访问 SocketCAN、
-USB 或实体板，也不表示设备命令已经执行。
+状态面，以及绑定 toolbusd 实例的进程内短时控制租约。GPIO 输出已经形成受信本机的
+最小写控制闭环；Runtime 不访问 SocketCAN、USB 或实体板，成功响应只证明对应远端
+命令收到成功应答，不等于更高层业务事务完成。
 
 当前明确不提供：
 
-- GPIO、UART、运动等写命令；
+- UART、运动、PWM、I2C、SPI 等其他写命令；
 - 固件生成、构建和烧录；
 - 用户目录、多租户与通用会话管理；
 - WebSocket、SSE 或遥测历史库；
@@ -564,13 +565,16 @@ Runtime 根据该对象生成以下稳定告警码；这些都是主机模型状
 Mock/文件 Provider 仍使用 `runtime_process` 进程世代。能力字段
 `control_leases.backend_binding` 分别报告 `toolbusd_instance` 或 `runtime_process`。
 
-这个 HTTP 绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`，当前 Runtime 路由也
-不会发送任何设备写命令。toolbusd 已有尚未接入 HTTP 的受信本地 GPIO 控制 IPC 实验竖切，
-其顺序、最终准入和本地信任边界见 [Runtime 到 toolbusd 的 GPIO 写控制边界](runtime-gpio-control.md)。
-身份检查与未来实际命令之间仍可能发生 daemon 重启；真正的写命令竖切必须把实例标识和
-租约校验带入 toolbusd 的同一原子准入点，而不能只在 HTTP 入口预检。因此能力声明保持
-`write_commands=false`、`control_leases.downstream_commands=false`，且
-`control_leases.loopback_only=true`。未来写命令入口
+这个 HTTP 绑定不能阻止同机其他进程绕过 Runtime 连接 `toolbusd`。当前只有 GPIO 输出
+完成受信本地纵向控制竖切，其顺序、最终准入和本地信任边界见
+[Runtime 到 toolbusd 的 GPIO 写控制边界](runtime-gpio-control.md)。
+GPIO 写竖切已经把实例标识、稳定节点 UUID、节点代次和租约校验带入 toolbusd 最终
+准入点，而不是只在 HTTP 入口预检。因此能力声明仅在
+认证回环、daemon 世代绑定和完整结构化 GPIO IPC 已配置且至少一次最终准入成功时报告
+`write_commands=true`、`control_leases.downstream_commands=true`；独立的
+`gpio_write.configured/operational` 字段区分已配置与曾完成最终准入；operational 状态
+还绑定 daemon 身份和单调 revision，旧并发结果不能复活已经撤销的能力证明，并始终保持
+`control_leases.loopback_only=true`。后续写命令入口
 必须在同一原子决策中校验身份、租约所有权和命令范围，并由 toolbusd 重新执行最终准入；
 不能仅凭客户端持有一个字符串 `lease_id` 就认为已获准执行。
 
@@ -606,6 +610,7 @@ API 已有本地租约状态写入口，不能据此推断设备可写；是否�
 SocketCAN、USB 或传输层。
 
 当前认证授权和短租约竖切解决的是“哪个密钥身份可以读、申请、本人释放或监督撤销”、
-单进程内并发写意图互斥，以及 toolbusd 进程重启后的旧租约失效。TLS、反向代理信任边界、
-用户目录和动态角色、密钥热加载/撤销、速率限制、租约与设备命令的原子准入绑定，以及审计异步持久化与完整性保护仍是后续
+单进程内并发写意图互斥、GPIO 最终准入和失效安全停机，以及 toolbusd 进程重启后的旧
+租约失效。TLS、反向代理信任边界、用户目录和动态角色、密钥热加载/撤销、速率限制、
+其他资源的原子准入、结构化 IPC 错误，以及审计异步持久化与完整性保护仍是后续
 部署门槛，不能把本轮的软件测试当作公网暴露、真实设备控制或硬件环境的安全实测证据。

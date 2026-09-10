@@ -280,11 +280,13 @@ DaemonIdentity Client::daemon_identity() const {
 void Client::runtime_control_acquire(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
     const std::string& owner_key_id, std::uint32_t resource_id,
     std::uint32_t ttl_ms) const {
     toolbusd::RuntimeControlAcquireRequest request;
     request.daemon_instance_id = daemon_instance_id;
     request.lease_id = lease_id;
+    request.expected_node_uuid = expected_node_uuid;
     request.owner_key_id = owner_key_id;
     request.node_id = node_id_;
     request.resource_id = resource_id;
@@ -303,11 +305,13 @@ void Client::runtime_control_acquire(
 RuntimeGpioWriteResult Client::runtime_gpio_write(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::array<std::uint8_t, 16>& lease_id,
+    const std::array<std::uint8_t, 16>& expected_node_uuid,
     const std::string& owner_key_id, std::uint32_t resource_id,
     const std::string& idempotency_key, bool value) const {
     toolbusd::RuntimeGpioWriteRequest request;
     request.daemon_instance_id = daemon_instance_id;
     request.lease_id = lease_id;
+    request.expected_node_uuid = expected_node_uuid;
     request.owner_key_id = owner_key_id;
     request.node_id = node_id_;
     request.resource_id = resource_id;

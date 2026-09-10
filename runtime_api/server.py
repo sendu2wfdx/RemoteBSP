@@ -21,6 +21,7 @@ from .auth import (
     CONTROL_LEASE_ACQUIRE_PERMISSION,
     CONTROL_LEASE_RELEASE_PERMISSION,
     CONTROL_LEASE_REVOKE_PERMISSION,
+    GPIO_WRITE_PERMISSION,
     MAXIMUM_API_KEY_BYTES,
     RUNTIME_READ_PERMISSION,
     ApiKeyAuthenticator,
@@ -73,6 +74,7 @@ from .toolbusd_provider import RemoteCliIpcClient, ToolbusdSnapshotProvider
 
 
 API_VERSION = "v1"
+GPIO_WRITE_COMMAND_GROUP = "gpio.write"
 MAXIMUM_CONTROL_REQUEST_BYTES = 4096
 DEFAULT_REQUEST_IO_TIMEOUT_SECONDS = 5.0
 MINIMUM_REQUEST_IO_TIMEOUT_SECONDS = 0.1
@@ -198,6 +200,77 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def control_leases_available(self) -> bool:
         return self.server.control_leases_available  # type: ignore[attr-defined]
 
+    @property
+    def gpio_control_configured(self) -> bool:
+        return self.server.gpio_control_configured  # type: ignore[attr-defined]
+
+    @property
+    def gpio_control_operational(self) -> bool:
+        if not self.gpio_control_configured or not isinstance(
+                self.control_leases, DaemonBoundControlLeaseManager):
+            return False
+        state_lock = self.server.gpio_control_state_lock  # type: ignore[attr-defined]
+        with state_lock:
+            revision = self.server.gpio_control_state_revision  # type: ignore[attr-defined]
+            admitted = self.server.gpio_control_admitted_daemon_id  # type: ignore[attr-defined]
+            operational = self.server.gpio_control_operational  # type: ignore[attr-defined]
+        if not operational or not isinstance(admitted, str):
+            return False
+        try:
+            matches = self.control_leases.matches_current_daemon(admitted)
+        except (ControlLeaseError, ValueError):
+            matches = False
+        if not matches:
+            self._clear_gpio_control_operational(
+                expected_instance_id=admitted,
+                expected_revision=revision)
+            return False
+        # 身份读取期间另一个请求可能已完成新实例准入；本次只证明旧快照，
+        # 因此必须再次核对状态，不能把旧证明套用到新实例。
+        with state_lock:
+            return bool(
+                self.server.gpio_control_operational and  # type: ignore[attr-defined]
+                self.server.gpio_control_admitted_daemon_id == admitted and  # type: ignore[attr-defined]
+                self.server.gpio_control_state_revision == revision)  # type: ignore[attr-defined]
+
+    def _gpio_control_revision(self) -> int:
+        state_lock = self.server.gpio_control_state_lock  # type: ignore[attr-defined]
+        with state_lock:
+            return self.server.gpio_control_state_revision  # type: ignore[attr-defined]
+
+    def _admit_gpio_control(
+            self, daemon_instance_id: str,
+            expected_revision: int) -> bool:
+        current_daemon_id = getattr(
+            self.control_leases, "daemon_instance_id", None)
+        if current_daemon_id != daemon_instance_id:
+            return False
+        state_lock = self.server.gpio_control_state_lock  # type: ignore[attr-defined]
+        with state_lock:
+            if self.server.gpio_control_state_revision != expected_revision:  # type: ignore[attr-defined]
+                return False
+            self.server.gpio_control_admitted_daemon_id = daemon_instance_id  # type: ignore[attr-defined]
+            self.server.gpio_control_operational = True  # type: ignore[attr-defined]
+            self.server.gpio_control_state_revision += 1  # type: ignore[attr-defined]
+            return True
+
+    def _clear_gpio_control_operational(
+            self, expected_instance_id: str | None = None,
+            expected_revision: int | None = None) -> bool:
+        state_lock = self.server.gpio_control_state_lock  # type: ignore[attr-defined]
+        with state_lock:
+            admitted = self.server.gpio_control_admitted_daemon_id  # type: ignore[attr-defined]
+            if expected_instance_id is not None and \
+                    admitted != expected_instance_id:
+                return False
+            if expected_revision is not None and \
+                    self.server.gpio_control_state_revision != expected_revision:  # type: ignore[attr-defined]
+                return False
+            self.server.gpio_control_operational = False  # type: ignore[attr-defined]
+            self.server.gpio_control_admitted_daemon_id = None  # type: ignore[attr-defined]
+            self.server.gpio_control_state_revision += 1  # type: ignore[attr-defined]
+            return True
+
     def _begin_request_audit(self) -> None:
         # BaseHTTPRequestHandler 只有在请求行和全部头部解析完成后才分派到
         # do_*；此时停止头部总期限，后续请求体由自身总期限负责。
@@ -224,6 +297,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                              "alerts", "events", "control-leases"}:
             return "control_leases" if parts[2] == "control-leases" \
                 else parts[2]
+        if parts == ["api", API_VERSION, "control", "gpio", "write"]:
+            return "gpio_control"
         return "unknown"
 
     def _emit_audit(self, result: str) -> None:
@@ -536,6 +611,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "控制租约字段必须且只能包含node_id、resource_id、"
                         "command_group、ttl_ms和idempotency_key")
             return
+        lease = None
+        replayed = False
+        downstream_registered = False
+        daemon_id = None
+        operational_revision = self._gpio_control_revision()
         try:
             node_id = validate_control_id(value["node_id"], "node_id")
             resource_id = validate_control_id(
@@ -545,10 +625,41 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             ttl_ms = validate_ttl_ms(value["ttl_ms"])
             idempotency_key = validate_idempotency_key(
                 value["idempotency_key"])
+            if command_group == GPIO_WRITE_COMMAND_GROUP and \
+                    GPIO_WRITE_PERMISSION not in principal.permissions:
+                self._error(HTTPStatus.FORBIDDEN, "permission_denied",
+                            "当前API密钥没有GPIO写权限")
+                return
+            if command_group == GPIO_WRITE_COMMAND_GROUP and \
+                    not self.gpio_control_configured:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "gpio_control_unavailable",
+                            "GPIO写控制后端不可用")
+                return
             lease, replayed = self.control_leases.acquire(
                 owner_key_id=principal.key_id, node_id=node_id,
                 resource_id=resource_id, command_group=command_group,
                 ttl_ms=ttl_ms, idempotency_key=idempotency_key)
+            if command_group == GPIO_WRITE_COMMAND_GROUP:
+                daemon_id = getattr(
+                    self.control_leases, "daemon_instance_id", None)
+                if not isinstance(daemon_id, str):
+                    raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                # replay 也必须重新经过下游幂等登记，不能只凭 Runtime
+                # 进程内历史恢复 operational 证明。
+                self.provider.gpio_control_acquire(  # type: ignore[attr-defined]
+                    daemon_id, lease.lease_id, principal.key_id,
+                    node_id, resource_id,
+                    lambda: self.control_leases.remaining_ttl_ms(
+                        lease.lease_id,
+                        requester_key_id=principal.key_id))
+                downstream_registered = True
+                # 远端登记可能接近 IPC 总期限；成功响应前再次按单调时钟
+                # 确认本地租约仍活动，绝不返回一个已经过期的租约。
+                self.control_leases.authorize(
+                    lease.lease_id, requester_key_id=principal.key_id)
+                self._admit_gpio_control(
+                    daemon_id, operational_revision)
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
                         str(error))
@@ -561,9 +672,26 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
                         "control_lease_capacity_exceeded", str(error))
             return
-        except ControlLeaseError as error:
+        except (ControlLeaseError, RuntimeProviderError) as error:
+            if downstream_registered and isinstance(daemon_id, str) and \
+                    lease is not None:
+                try:
+                    self.provider.gpio_control_release(  # type: ignore[attr-defined]
+                        daemon_id, lease.lease_id, lease.owner_key_id)
+                except RuntimeProviderError:
+                    pass
+            if lease is not None and not replayed:
+                self.control_leases.rollback_acquire(
+                    lease.lease_id, owner_key_id=lease.owner_key_id)
+            if isinstance(error, ControlLeaseError):
+                self._clear_gpio_control_operational(
+                    expected_revision=operational_revision)
+            # IPC v2 尚无结构化业务/传输错误码。RuntimeProviderError 可能只是
+            # 错误节点、资源或合同拒绝，不能由任意请求污染全局 operational；
+            # 下一次 GET 会独立核验 daemon 身份，失败或换代时再降级。
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                        "control_lease_unavailable", str(error))
+                        "control_lease_unavailable",
+                        "无法安全完成控制租约登记")
             return
         self._success({"lease": lease.to_dict(), "replayed": replayed},
                       HTTPStatus.OK if replayed else HTTPStatus.CREATED,
@@ -572,6 +700,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_control_lease_release(self, principal: AuthenticatedPrincipal,
                                       lease_id: str) -> None:
+        operational_revision = self._gpio_control_revision()
+        daemon_id_before = getattr(
+            self.control_leases, "daemon_instance_id", None)
+        daemon_id = None
         try:
             lease_id = validate_lease_id(lease_id)
             allow_foreign = CONTROL_LEASE_REVOKE_PERMISSION in \
@@ -581,6 +713,20 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.FORBIDDEN, "permission_denied",
                             "当前API密钥没有释放控制租约的权限")
                 return
+            lease = self.control_leases.authorize(
+                lease_id, requester_key_id=principal.key_id,
+                allow_foreign=allow_foreign)
+            if lease.command_group == GPIO_WRITE_COMMAND_GROUP:
+                if not self.gpio_control_configured:
+                    raise ControlLeaseError("GPIO写控制后端不可用")
+                daemon_id = getattr(
+                    self.control_leases, "daemon_instance_id", None)
+                if not isinstance(daemon_id, str):
+                    raise ControlLeaseError("toolbusd实例身份尚未绑定")
+                # 管理员撤销权限来自服务端认证配置；v1 IPC 不携带可伪造的
+                # foreign/admin 位，而是以登记时的真实所有者释放。
+                self.provider.gpio_control_release(  # type: ignore[attr-defined]
+                    daemon_id, lease.lease_id, lease.owner_key_id)
             self.control_leases.release(
                 lease_id, requester_key_id=principal.key_id,
                 allow_foreign=allow_foreign)
@@ -589,6 +735,15 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         str(error))
             return
         except ControlLeaseNotFound as error:
+            daemon_id_after = getattr(
+                self.control_leases, "daemon_instance_id", None)
+            # 普通的未知或过期租约是调用方状态，不说明 GPIO 后端失效；
+            # 只有身份读取发现 daemon 已换代时才撤销既有 operational 证明。
+            if daemon_id_before is not None and \
+                    daemon_id_after != daemon_id_before:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=daemon_id_before,
+                    expected_revision=operational_revision)
             self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found",
                         str(error))
             return
@@ -596,19 +751,99 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
                         str(error))
             return
-        except ControlLeaseError as error:
+        except (ControlLeaseError, RuntimeProviderError):
+            self._clear_gpio_control_operational(
+                expected_instance_id=(daemon_id if isinstance(daemon_id, str)
+                                      else daemon_id_before),
+                expected_revision=operational_revision)
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                        "control_lease_unavailable", str(error))
+                        "control_lease_unavailable",
+                        "无法安全完成控制租约释放")
             return
         self._send_empty(HTTPStatus.NO_CONTENT,
                          audit_result="control_lease_released")
 
+    def _handle_gpio_write(self, principal: AuthenticatedPrincipal) -> None:
+        value = self._read_control_json()
+        if value is None:
+            return
+        expected = {"lease_id", "node_id", "resource_id",
+                    "idempotency_key", "value"}
+        if set(value) != expected:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        "GPIO写字段必须且只能包含lease_id、node_id、"
+                        "resource_id、idempotency_key和value")
+            return
+        operational_revision = self._gpio_control_revision()
+        daemon_id_before = getattr(
+            self.control_leases, "daemon_instance_id", None)
+        daemon_id = None
+        try:
+            lease_id = validate_lease_id(value["lease_id"])
+            node_id = validate_control_id(value["node_id"], "node_id")
+            resource_id = validate_control_id(
+                value["resource_id"], "resource_id")
+            idempotency_key = validate_idempotency_key(
+                value["idempotency_key"])
+            desired = value["value"]
+            if type(desired) is not bool:
+                raise ValueError("value必须是布尔值")
+            lease = self.control_leases.authorize(
+                lease_id, requester_key_id=principal.key_id)
+            if lease.command_group != GPIO_WRITE_COMMAND_GROUP or \
+                    lease.node_id != node_id or \
+                    lease.resource_id != resource_id:
+                raise ControlLeaseConflict("控制租约范围与GPIO写请求不匹配")
+            daemon_id = getattr(
+                self.control_leases, "daemon_instance_id", None)
+            if not isinstance(daemon_id, str):
+                raise ControlLeaseError("toolbusd实例身份尚未绑定")
+            result = self.provider.gpio_control_write(  # type: ignore[attr-defined]
+                daemon_id, lease_id, principal.key_id, node_id,
+                resource_id, idempotency_key, desired)
+        except ValueError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "request_body_invalid",
+                        str(error))
+            return
+        except ControlLeaseNotFound as error:
+            daemon_id_after = getattr(
+                self.control_leases, "daemon_instance_id", None)
+            if daemon_id_before is not None and \
+                    daemon_id_after != daemon_id_before:
+                self._clear_gpio_control_operational(
+                    expected_instance_id=daemon_id_before,
+                    expected_revision=operational_revision)
+            self._error(HTTPStatus.NOT_FOUND, "control_lease_not_found",
+                        str(error))
+            return
+        except ControlLeaseOwnershipError as error:
+            self._error(HTTPStatus.FORBIDDEN, "control_lease_not_owner",
+                        str(error))
+            return
+        except ControlLeaseConflict as error:
+            self._error(HTTPStatus.CONFLICT, "control_lease_conflict",
+                        str(error))
+            return
+        except (ControlLeaseError, RuntimeProviderError):
+            self._clear_gpio_control_operational(
+                expected_instance_id=(daemon_id if isinstance(daemon_id, str)
+                                      else daemon_id_before),
+                expected_revision=operational_revision)
+            self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                        "gpio_control_unavailable",
+                        "GPIO写入未获得可验证的下游成功结果")
+            return
+        self._success({"lease_id": lease_id, **result},
+                      audit_result=("gpio_write_replayed" if result["replayed"]
+                                    else "gpio_write_completed"))
+
     def _snapshot(self) -> SnapshotRead | None:
         try:
             read = self.provider.read_snapshot()
-        except RuntimeProviderError as error:
+        except RuntimeProviderError:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE,
-                        "provider_unavailable", str(error))
+                        "provider_unavailable",
+                        "Runtime数据源暂时不可用")
             return None
         self.event_log.observe(read.snapshot)
         return read
@@ -650,11 +885,16 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return
 
         if parts == ["api", API_VERSION]:
+            gpio_control_operational = self.gpio_control_operational
             self._success({
                 "snapshot_schema_version": RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 "capabilities": {
                     "read_only": not self.control_leases_available,
-                    "write_commands": False,
+                    "write_commands": gpio_control_operational,
+                    "gpio_write": {
+                        "configured": self.gpio_control_configured,
+                        "operational": gpio_control_operational,
+                    },
                     "control_leases": {
                         "available": self.control_leases_available,
                         "schema_version": CONTROL_LEASE_SCHEMA_VERSION,
@@ -664,7 +904,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                 self.control_leases,
                                 DaemonBoundControlLeaseManager)
                             else "runtime_process",
-                        "downstream_commands": False,
+                        "downstream_commands": gpio_control_operational,
                         "loopback_only": True,
                     },
                     "authentication": self.authenticator is not None,
@@ -682,7 +922,9 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     **self._runtime_capabilities(),
                 },
                 "endpoints": ["health", "snapshot", "nodes", "resources",
-                              "alerts", "events", "control-leases"],
+                              "alerts", "events", "control-leases"] +
+                             (["control/gpio/write"]
+                              if self.gpio_control_configured else []),
             })
             return
         if parts == ["api", API_VERSION, "health"]:
@@ -815,6 +1057,25 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 return
             self._handle_control_lease_acquire(principal)
             return
+        if self.command == "POST" and parts == [
+                "api", API_VERSION, "control", "gpio", "write"]:
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "control_authentication_disabled",
+                            "GPIO写控制要求启用API密钥认证")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=GPIO_WRITE_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            if not self.gpio_control_configured:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "gpio_control_unavailable",
+                            "GPIO写控制仅在认证回环与toolbusd安全IPC可用时开放")
+                return
+            self._handle_gpio_write(principal)
+            return
         if len(parts) >= 2 and parts[:2] == ["api", API_VERSION]:
             if self._authorize(parsed.path, public_health=False,
                                required_permission=None) is None:
@@ -880,6 +1141,11 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                                  headers={"Allow": "DELETE, OPTIONS"},
                                  audit_result="options")
                 return
+            if parts == ["api", API_VERSION, "control", "gpio", "write"]:
+                self._send_empty(HTTPStatus.NO_CONTENT,
+                                 headers={"Allow": "POST, OPTIONS"},
+                                 audit_result="options")
+                return
             self._send_empty(HTTPStatus.NO_CONTENT,
                              headers={"Allow": "GET, HEAD, OPTIONS"},
                              audit_result="options")
@@ -932,6 +1198,16 @@ def make_server(host: str, port: int,
     server.control_leases = resolved_control_leases  # type: ignore[attr-defined]
     server.control_leases_available = (  # type: ignore[attr-defined]
         loopback and authenticator is not None)
+    server.gpio_control_configured = (  # type: ignore[attr-defined]
+        loopback and authenticator is not None and
+        isinstance(resolved_control_leases, DaemonBoundControlLeaseManager) and
+        bool(getattr(provider, "gpio_control_available", False)))
+    # operational 必须由一次成功的 daemon 最终准入证明；旧 daemon 或
+    # 不完整 IPC 仅能处于 configured，不能在根能力中虚报可执行。
+    server.gpio_control_state_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.gpio_control_state_revision = 0  # type: ignore[attr-defined]
+    server.gpio_control_admitted_daemon_id = None  # type: ignore[attr-defined]
+    server.gpio_control_operational = False  # type: ignore[attr-defined]
     return server
 
 

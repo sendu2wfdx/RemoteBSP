@@ -23,8 +23,8 @@ constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
 constexpr std::size_t kDaemonIdentitySize = 20U;
-constexpr std::size_t kRuntimeControlAcquireHeaderSize = 49U;
-constexpr std::size_t kRuntimeGpioWriteHeaderSize = 47U;
+constexpr std::size_t kRuntimeControlAcquireHeaderSize = 65U;
+constexpr std::size_t kRuntimeGpioWriteHeaderSize = 63U;
 constexpr std::size_t kRuntimeControlReleaseHeaderSize = 35U;
 constexpr std::size_t kRuntimeGpioWriteResultSize = 8U;
 
@@ -1120,6 +1120,8 @@ std::vector<std::uint8_t> encode_ipc_runtime_control_acquire(
     body.insert(body.end(), request.daemon_instance_id.begin(),
                 request.daemon_instance_id.end());
     body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.expected_node_uuid.begin(),
+                request.expected_node_uuid.end());
     append_u32(body, request.node_id);
     append_u32(body, request.resource_id);
     append_u32(body, request.ttl_ms);
@@ -1135,7 +1137,7 @@ RuntimeControlAcquireRequest decode_ipc_runtime_control_acquire(
         get_u16(body.data()) != kRuntimeControlIpcVersion) {
         throw IpcException("Runtime 控制租约登记 IPC 版本或长度无效");
     }
-    const auto owner_length = static_cast<std::size_t>(body[48U]);
+    const auto owner_length = static_cast<std::size_t>(body[64U]);
     if (owner_length == 0U ||
         owner_length > kMaximumRuntimeControlIdentityBytes ||
         body.size() != kRuntimeControlAcquireHeaderSize + owner_length) {
@@ -1148,9 +1150,11 @@ RuntimeControlAcquireRequest decode_ipc_runtime_control_acquire(
                 request.daemon_instance_id.begin());
     std::copy_n(body.begin() + 20U, request.lease_id.size(),
                 request.lease_id.begin());
-    request.node_id = get_u32(body.data() + 36U);
-    request.resource_id = get_u32(body.data() + 40U);
-    request.ttl_ms = get_u32(body.data() + 44U);
+    std::copy_n(body.begin() + 36U, request.expected_node_uuid.size(),
+                request.expected_node_uuid.begin());
+    request.node_id = get_u32(body.data() + 52U);
+    request.resource_id = get_u32(body.data() + 56U);
+    request.ttl_ms = get_u32(body.data() + 60U);
     request.owner_key_id.assign(
         body.begin() + static_cast<std::ptrdiff_t>(
                            kRuntimeControlAcquireHeaderSize),
@@ -1176,6 +1180,8 @@ std::vector<std::uint8_t> encode_ipc_runtime_gpio_write(
     body.insert(body.end(), request.daemon_instance_id.begin(),
                 request.daemon_instance_id.end());
     body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    body.insert(body.end(), request.expected_node_uuid.begin(),
+                request.expected_node_uuid.end());
     append_u32(body, request.node_id);
     append_u32(body, request.resource_id);
     body.push_back(request.value ? 1U : 0U);
@@ -1193,11 +1199,11 @@ RuntimeGpioWriteRequest decode_ipc_runtime_gpio_write(
     const std::vector<std::uint8_t>& body) {
     if (body.size() < kRuntimeGpioWriteHeaderSize ||
         get_u16(body.data()) != kRuntimeControlIpcVersion ||
-        body[44U] > 1U) {
+        body[60U] > 1U) {
         throw IpcException("Runtime GPIO 写 IPC 版本、长度或布尔值无效");
     }
-    const auto owner_length = static_cast<std::size_t>(body[45U]);
-    const auto idempotency_length = static_cast<std::size_t>(body[46U]);
+    const auto owner_length = static_cast<std::size_t>(body[61U]);
+    const auto idempotency_length = static_cast<std::size_t>(body[62U]);
     if (owner_length == 0U ||
         owner_length > kMaximumRuntimeControlIdentityBytes ||
         idempotency_length == 0U ||
@@ -1213,9 +1219,11 @@ RuntimeGpioWriteRequest decode_ipc_runtime_gpio_write(
                 request.daemon_instance_id.begin());
     std::copy_n(body.begin() + 20U, request.lease_id.size(),
                 request.lease_id.begin());
-    request.node_id = get_u32(body.data() + 36U);
-    request.resource_id = get_u32(body.data() + 40U);
-    request.value = body[44U] != 0U;
+    std::copy_n(body.begin() + 36U, request.expected_node_uuid.size(),
+                request.expected_node_uuid.begin());
+    request.node_id = get_u32(body.data() + 52U);
+    request.resource_id = get_u32(body.data() + 56U);
+    request.value = body[60U] != 0U;
     request.owner_key_id.assign(
         body.begin() + static_cast<std::ptrdiff_t>(
                            kRuntimeGpioWriteHeaderSize),

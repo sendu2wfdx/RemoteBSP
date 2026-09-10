@@ -249,6 +249,55 @@ class ControlLeaseManager:
                 raise ControlLeaseOwnershipError("不能释放其他身份的控制租约")
             return self._remove_locked(lease_id, now_ns)
 
+    def authorize(self, lease_id: str, *, requester_key_id: str,
+                  allow_foreign: bool = False) -> ControlLease:
+        """只读取并校验活动租约；不会续租或改变终态历史。"""
+        lease_id = validate_lease_id(lease_id)
+        requester_key_id = validate_control_id(
+            requester_key_id, "requester_key_id")
+        with self._lock:
+            self._expire_locked(self._monotonic_ns())
+            active = self._by_id.get(lease_id)
+            if active is None:
+                raise ControlLeaseNotFound("控制租约不存在或已经过期")
+            if active.lease.owner_key_id != requester_key_id and \
+                    not allow_foreign:
+                raise ControlLeaseOwnershipError("不能使用其他身份的控制租约")
+            return active.lease
+
+    def remaining_ttl_ms(self, lease_id: str, *,
+                         requester_key_id: str) -> int:
+        """返回向下游登记时可使用的、不超过本地期限的整毫秒 TTL。"""
+        lease_id = validate_lease_id(lease_id)
+        requester_key_id = validate_control_id(
+            requester_key_id, "requester_key_id")
+        with self._lock:
+            now_ns = self._monotonic_ns()
+            self._expire_locked(now_ns)
+            active = self._by_id.get(lease_id)
+            if active is None:
+                raise ControlLeaseNotFound("控制租约不存在或已经过期")
+            if active.lease.owner_key_id != requester_key_id:
+                raise ControlLeaseOwnershipError("不能使用其他身份的控制租约")
+            remaining = (active.deadline_ns - now_ns) // 1_000_000
+            if remaining < 1:
+                raise ControlLeaseNotFound("控制租约剩余时间不足1毫秒")
+            return min(remaining, MAXIMUM_CONTROL_LEASE_TTL_MS)
+
+    def rollback_acquire(self, lease_id: str, *, owner_key_id: str) -> None:
+        """仅撤销一次未完成的下游登记，不生成会阻止安全重试的终态。"""
+        lease_id = validate_lease_id(lease_id)
+        owner_key_id = validate_control_id(owner_key_id, "owner_key_id")
+        with self._lock:
+            active = self._by_id.get(lease_id)
+            if active is None or active.lease.owner_key_id != owner_key_id:
+                return
+            lease = active.lease
+            self._by_id.pop(lease_id, None)
+            self._by_scope.pop((lease.node_id, lease.resource_id), None)
+            self._by_idempotency.pop(
+                (lease.owner_key_id, active.idempotency_key), None)
+
     def active_count(self) -> int:
         with self._lock:
             now_ns = self._monotonic_ns()
@@ -298,6 +347,19 @@ class DaemonBoundControlLeaseManager:
     def daemon_instance_id(self) -> str | None:
         with self._binding_condition:
             return self._daemon_instance_id
+
+    def matches_current_daemon(self, expected_instance_id: str) -> bool:
+        """重新读取 daemon 身份，并判断是否仍为已准入的同一实例。
+
+        身份不可读时沿用租约管理器的失败关闭语义；身份换代时
+        ``_with_current_identity`` 会先原子撤销旧租约，再返回 False。
+        """
+        if not isinstance(expected_instance_id, str) or \
+                re.fullmatch(r"[0-9a-f]{32}", expected_instance_id) is None or \
+                expected_instance_id == "0" * 32:
+            raise ValueError("待核对的toolbusd实例身份无效")
+        return bool(self._with_current_identity(
+            lambda: self._daemon_instance_id == expected_instance_id))
 
     def _read_identity(self) -> str:
         try:
@@ -357,6 +419,25 @@ class DaemonBoundControlLeaseManager:
             lambda: self._manager.release(
                 lease_id, requester_key_id=requester_key_id,
                 allow_foreign=allow_foreign))
+
+    def authorize(self, lease_id: str, *, requester_key_id: str,
+                  allow_foreign: bool = False) -> ControlLease:
+        return self._with_current_identity(
+            lambda: self._manager.authorize(
+                lease_id, requester_key_id=requester_key_id,
+                allow_foreign=allow_foreign))
+
+    def remaining_ttl_ms(self, lease_id: str, *,
+                         requester_key_id: str) -> int:
+        return self._with_current_identity(
+            lambda: self._manager.remaining_ttl_ms(
+                lease_id, requester_key_id=requester_key_id))
+
+    def rollback_acquire(self, lease_id: str, *, owner_key_id: str) -> None:
+        # 普通目标或下游登记失败只回滚本次租约；不把无关租约和幂等历史清空。
+        with self._binding_condition:
+            self._manager.rollback_acquire(
+                lease_id, owner_key_id=owner_key_id)
 
     def active_count(self) -> int:
         return self._with_current_identity(self._manager.active_count)

@@ -748,6 +748,7 @@ private:
 
     remotebsp::protocol::Packet request_runtime_control_packet(
         std::uint32_t node_id, std::uint64_t node_generation,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
         remotebsp::protocol::Command command,
         std::vector<std::uint8_t> payload, std::uint32_t object_id,
         std::chrono::steady_clock::time_point deadline) {
@@ -768,6 +769,7 @@ private:
             const auto* node = nodes_.find_by_node_id(node_id);
             if (node == nullptr || !node->online || !node->assigned ||
                 node_id > kMaximumNodeId ||
+                node->identity.uuid != expected_node_uuid ||
                 bus_node_generations_[node_id] != node_generation) {
                 throw std::runtime_error(
                     "Runtime GPIO 写入前目标节点已离线或重启");
@@ -826,7 +828,8 @@ private:
             std::lock_guard<std::mutex> lock(state_mutex_);
             const auto* node = nodes_.find_by_node_id(request.node_id);
             if (node == nullptr || !node->online || !node->assigned ||
-                request.node_id > kMaximumNodeId) {
+                request.node_id > kMaximumNodeId ||
+                node->identity.uuid != request.expected_node_uuid) {
                 throw std::runtime_error(
                     "Runtime 控制租约目标节点尚未发现或已经离线");
             }
@@ -846,7 +849,10 @@ private:
                 deadline));
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (bus_node_generations_[request.node_id] != node_generation) {
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr ||
+                node->identity.uuid != request.expected_node_uuid ||
+                bus_node_generations_[request.node_id] != node_generation) {
                 throw std::runtime_error(
                     "Runtime 控制租约登记期间节点代次变化");
             }
@@ -864,7 +870,8 @@ private:
             std::lock_guard<std::mutex> lock(state_mutex_);
             const auto* node = nodes_.find_by_node_id(request.node_id);
             if (node == nullptr || !node->online || !node->assigned ||
-                request.node_id > kMaximumNodeId) {
+                request.node_id > kMaximumNodeId ||
+                node->identity.uuid != request.expected_node_uuid) {
                 throw std::runtime_error(
                     "Runtime GPIO 目标节点尚未发现或已经离线");
             }
@@ -886,7 +893,10 @@ private:
             remotebsp::protocol::decode_resource_contract(contract_body);
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (bus_node_generations_[request.node_id] != node_generation) {
+            const auto* node = nodes_.find_by_node_id(request.node_id);
+            if (node == nullptr ||
+                node->identity.uuid != request.expected_node_uuid ||
+                bus_node_generations_[request.node_id] != node_generation) {
                 throw std::runtime_error(
                     "Runtime GPIO 合同查询期间节点代次变化");
             }
@@ -894,28 +904,42 @@ private:
         return runtime_control_.gpio_write(
             request, daemon_instance_id_, node_generation,
             descriptor, contract,
-            [&](std::optional<std::uint32_t> existing_object_id) {
-                if (existing_object_id.has_value()) {
+            remotebsp::toolbusd::RuntimeControlGate::GpioIo{
+                [&] {
+                    const auto response = request_runtime_control_packet(
+                        request.node_id, node_generation,
+                        request.expected_node_uuid,
+                        remotebsp::protocol::Command::GpioCreate,
+                        {static_cast<std::uint8_t>(descriptor.instance),
+                         static_cast<std::uint8_t>(descriptor.instance >> 8U),
+                         1U, 0U},
+                        0U, deadline);
+                    if (response.header.object_id == 0U) {
+                        throw std::runtime_error(
+                            "Runtime GPIO_CREATE 未返回对象 ID");
+                    }
+                    return response.header.object_id;
+                },
+                [&](std::uint32_t object_id, bool value) {
                     static_cast<void>(request_runtime_control_packet(
                         request.node_id, node_generation,
+                        request.expected_node_uuid,
                         remotebsp::protocol::Command::GpioWrite,
-                        {static_cast<std::uint8_t>(request.value)},
-                        *existing_object_id, deadline));
-                    return *existing_object_id;
+                        {static_cast<std::uint8_t>(value)}, object_id,
+                        deadline));
+                },
+                [this](
+                    std::uint32_t node_id, std::uint64_t node_generation,
+                    const std::array<std::uint8_t, 16>& expected_node_uuid,
+                    std::uint32_t object_id) {
+                    const auto stop_deadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(1800);
+                    static_cast<void>(request_runtime_control_packet(
+                        node_id, node_generation, expected_node_uuid,
+                        remotebsp::protocol::Command::GpioWrite, {0U},
+                        object_id, stop_deadline));
                 }
-                const auto response = request_runtime_control_packet(
-                    request.node_id, node_generation,
-                    remotebsp::protocol::Command::GpioCreate,
-                    {static_cast<std::uint8_t>(descriptor.instance),
-                     static_cast<std::uint8_t>(descriptor.instance >> 8U),
-                     1U,
-                     static_cast<std::uint8_t>(request.value)},
-                    0U, deadline);
-                if (response.header.object_id == 0U) {
-                    throw std::runtime_error(
-                        "Runtime GPIO_CREATE 未返回对象 ID");
-                }
-                return response.header.object_id;
             });
     }
 
@@ -1819,6 +1843,13 @@ private:
     }
 
     void stop() {
+        if (running_) {
+            const auto failures = runtime_control_.shutdown();
+            if (failures != 0U) {
+                std::cerr << "Runtime GPIO 会话结束时有 " << failures
+                          << " 个资源未能验证安全低电平；资源保持故障占位\n";
+            }
+        }
         if (running_.exchange(false)) {
             state_changed_.notify_all();
         }

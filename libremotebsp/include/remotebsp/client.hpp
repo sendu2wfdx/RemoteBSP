@@ -233,11 +233,13 @@ public:
     void runtime_control_acquire(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
         const std::string& owner_key_id, std::uint32_t resource_id,
         std::uint32_t ttl_ms) const;
     RuntimeGpioWriteResult runtime_gpio_write(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
+        const std::array<std::uint8_t, 16>& expected_node_uuid,
         const std::string& owner_key_id, std::uint32_t resource_id,
         const std::string& idempotency_key, bool value) const;
     void runtime_control_release(

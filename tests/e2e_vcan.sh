@@ -173,26 +173,32 @@ daemon_identity_output="$("$remote_cli_bin" --socket "$socket_path" \
     daemon-identity)"
 daemon_instance_id="${daemon_identity_output##*instance_id=}"
 [[ "$daemon_instance_id" =~ ^[0-9a-f]{32}$ ]]
+runtime_node_uuid="$($remote_cli_bin --socket "$socket_path" node-list |
+    sed -n 's/.* uuid=\([0-9a-fA-F]\{32\}\).*/\1/p' | head -n 1)"
+[[ "$runtime_node_uuid" =~ ^[0-9a-fA-F]{32}$ ]]
 runtime_lease_id="11223344556677889900aabbccddeeff"
 unknown_runtime_lease_id="ffeeddccbbaa00998877665544332211"
 runtime_gpio_resource="0x1000005"
 if "$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-gpio-write "$daemon_instance_id" "$unknown_runtime_lease_id" \
-    e2e-runtime "$runtime_gpio_resource" unknown-before-acquire 1 \
+    "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
+    unknown-before-acquire 1 \
     >/dev/null 2>&1; then
     echo "未登记的 Runtime 控制租约不应允许 GPIO 写入" >&2
     exit 1
 fi
 "$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-control-acquire "$daemon_instance_id" "$runtime_lease_id" \
-    e2e-runtime "$runtime_gpio_resource" 5000 >/dev/null
+    "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" 5000 >/dev/null
 runtime_gpio_first="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
-    e2e-runtime "$runtime_gpio_resource" gpio-e2e-command 1)"
+    "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
+    gpio-e2e-command 1)"
 grep -Fq 'value=1 replayed=no' <<<"$runtime_gpio_first"
 runtime_gpio_replay="$("$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-gpio-write "$daemon_instance_id" "$runtime_lease_id" \
-    e2e-runtime "$runtime_gpio_resource" gpio-e2e-command 1)"
+    "$runtime_node_uuid" e2e-runtime "$runtime_gpio_resource" \
+    gpio-e2e-command 1)"
 grep -Fq 'value=1 replayed=yes' <<<"$runtime_gpio_replay"
 "$remote_cli_bin" --socket "$socket_path" --node 1 \
     runtime-control-release "$daemon_instance_id" "$runtime_lease_id" \
