@@ -34,6 +34,7 @@
 - [遥测与健康契约](telemetry-health-contract.md)
 - [安全威胁模型](security-threat-model.md)
 - [Runtime 持久控制审计](runtime-control-audit.md)
+- [Runtime 受控告警规则](runtime-alert-rules.md)
 - [可审计成熟度基线](../maturity/README.md)
 - [RemoteBSP / Klipper 可复现对照基准](../benchmarks/README.md)
 

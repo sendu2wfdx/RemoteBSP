@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import threading
 
+from .alert_rules import AlertRuleEvaluator, AlertRuleManager
 from .trend_store import MAXIMUM_NODES, RuntimeTrendStore
 
 
@@ -16,7 +17,8 @@ class RuntimeDashboard:
     """把已校验快照投影成适合下钻展示的只读模型。"""
 
     def __init__(self, capacity: int = DEFAULT_TREND_CAPACITY,
-                 store: RuntimeTrendStore | None = None):
+                 store: RuntimeTrendStore | None = None,
+                 alert_rules: AlertRuleManager | None = None):
         if type(capacity) is not int or not 1 <= capacity <= MAXIMUM_TREND_CAPACITY:
             raise ValueError("趋势容量必须位于1～600")
         self.capacity = capacity
@@ -28,6 +30,19 @@ class RuntimeDashboard:
         self._series: dict[str, list[dict]] = restored["nodes"]
         self._health_series: list[dict] = restored["toolbusd_health"]
         self._lock = threading.Lock()
+        self._alert_evaluator = AlertRuleEvaluator(
+            alert_rules or AlertRuleManager())
+
+    def storage_status(self) -> dict:
+        """仅公开配置与容量，不公开本地持久化路径。"""
+        return {
+            "availability": "available",
+            "configured": self._store is not None,
+            "persistence": "enabled" if self._store is not None else "disabled",
+            "sample_capacity_per_series": self.capacity,
+            "maximum_file_bytes": (
+                self._store.maximum_bytes if self._store is not None else None),
+        }
 
     @staticmethod
     def _public_sample(sample: dict, *, health: bool = False) -> dict:
@@ -52,8 +67,7 @@ class RuntimeDashboard:
                               and item["active"]],
         }
 
-    @staticmethod
-    def _toolbusd_health(value: dict | None) -> dict:
+    def _toolbusd_health(self, value: dict | None, *, scope: str = "toolbusd") -> dict:
         if not isinstance(value, dict) or value.get("available") is not True:
             return {"availability": "unknown", "overall": "unknown",
                     "metrics": []}
@@ -78,26 +92,11 @@ class RuntimeDashboard:
         overall = snapshot.get("overall")
         if overall not in {"healthy", "degraded", "fault", "unknown"}:
             overall = "unknown"
-        threshold_alerts = []
-        for metric in metrics:
-            if metric["availability"] != "available" or \
-                    metric.get("name") not in {
-                        "cpu_load_permille", "isr_load_permille"}:
-                continue
-            measured = metric["value"]
-            severity = "critical" if measured >= 950 else \
-                "warning" if measured >= 800 else None
-            if severity is not None:
-                threshold_alerts.append({
-                    "metric": metric["name"], "severity": severity,
-                    "value": measured, "unit": metric.get("unit"),
-                    "warning_threshold": 800, "critical_threshold": 950,
-                })
+        threshold_alerts = self._alert_evaluator.evaluate(metrics, scope=scope)
         return {"availability": "available", "overall": overall,
                 "metrics": metrics, "threshold_alerts": threshold_alerts}
 
-    @classmethod
-    def _node_health(cls, value: object) -> dict:
+    def _node_health(self, value: object) -> dict:
         if not isinstance(value, dict):
             return {"availability": "unknown", "reason":
                     "node_health_missing", "sample_age_ms": None,
@@ -105,10 +104,12 @@ class RuntimeDashboard:
         availability = value.get("availability")
         if availability not in {"available", "unavailable", "unknown"}:
             availability = "unknown"
-        projected = cls._toolbusd_health({
+        source = value.get("snapshot") if isinstance(value.get("snapshot"), dict) else {}
+        scope = source.get("node_uuid") if isinstance(source.get("node_uuid"), str) else "node"
+        projected = self._toolbusd_health({
             "available": availability == "available",
             "snapshot": value.get("snapshot"),
-        })
+        }, scope=scope)
         return {
             "availability": availability,
             "reason": value.get("reason") if isinstance(

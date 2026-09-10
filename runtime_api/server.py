@@ -21,6 +21,7 @@ from typing import Callable
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 
 from .auth import (
+    ALERT_RULE_WRITE_PERMISSION,
     CONTROL_OPERATION_READ_PERMISSION,
     CONTROL_LEASE_ACQUIRE_PERMISSION,
     CONTROL_LEASE_RELEASE_PERMISSION,
@@ -33,6 +34,7 @@ from .auth import (
     AuthConfigurationError,
     load_api_key_authenticator,
 )
+from .alert_rules import AlertRuleError, AlertRuleManager, AlertRuleStore
 from .control_leases import (
     CONTROL_LEASE_SCHEMA_VERSION,
     DEFAULT_CONTROL_LEASE_CAPACITY,
@@ -93,6 +95,7 @@ from .trend_store import (
     RuntimeTrendStore,
     TrendStoreError,
 )
+from .operations import RuntimeOperationalState
 
 
 API_VERSION = "v1"
@@ -384,6 +387,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     @property
     def audit_sink(self) -> BoundedAuditSink:
         return self.server.audit_sink  # type: ignore[attr-defined]
+
+    @property
+    def alert_rules(self) -> AlertRuleManager:
+        return self.server.alert_rules  # type: ignore[attr-defined]
 
     @property
     def event_log(self) -> RuntimeEventLog:
@@ -843,10 +850,10 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
         if parts == ["api", API_VERSION]:
             return "root"
         if len(parts) >= 3 and parts[:2] == ["api", API_VERSION] and \
-                parts[2] in {"health", "snapshot", "overview", "nodes", "resources",
-                             "alerts", "events", "control-leases"}:
+                parts[2] in {"health", "snapshot", "overview", "operations", "nodes", "resources",
+                             "alerts", "events", "control-leases", "alert-rules"}:
             return "control_leases" if parts[2] == "control-leases" \
-                else parts[2]
+                else "alert_rules" if parts[2] == "alert-rules" else parts[2]
         if parts == ["api", API_VERSION, "control", "gpio", "write"]:
             return "gpio_control"
         if len(parts) >= 3 and parts[:3] == [
@@ -896,6 +903,8 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
     def _error(self, status: HTTPStatus, code: str, message: str,
                *, headers: dict[str, str] | None = None,
                details: dict | None = None) -> None:
+        if int(status) >= 500:
+            self.server.operational_state.record_error(code)  # type: ignore[attr-defined]
         error_payload = {"code": code, "message": message}
         if details is not None:
             error_payload["details"] = details
@@ -1008,6 +1017,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                         "主动推送连接已达到上限",
                         headers={"Retry-After": "2"})
             return
+        self.server.operational_state.stream_opened()  # type: ignore[attr-defined]
         stop = threading.Event()
         updates: queue.Queue[bytes | None] = queue.Queue(
             maxsize=OVERVIEW_STREAM_QUEUE_CAPACITY)
@@ -1073,6 +1083,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                 producer_thread.join(timeout=
                     self.server.request_io_timeout_seconds)  # type: ignore[attr-defined]
             slots.release()
+            self.server.operational_state.stream_closed()  # type: ignore[attr-defined]
 
     def _parse_request_target(self, *,
                               allow_event_query: bool = False
@@ -2343,6 +2354,26 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             self._handle_overview_stream()
             return
 
+        if parts == ["api", API_VERSION, "alert-rules"]:
+            self._success(self.alert_rules.snapshot())
+            return
+
+        if parts == ["api", API_VERSION, "operations"]:
+            reader = getattr(self.provider, "operational_status", None)
+            toolbusd = {"availability": "unknown", "connection": "unknown"}
+            if callable(reader):
+                try:
+                    toolbusd = call_with_deadline(
+                        reader, deadline=self.request_deadline)
+                except (RuntimeProviderError, RequestDeadlineExceeded):
+                    toolbusd = {"availability": "unavailable",
+                                "connection": "unavailable"}
+            self._success(self.server.operational_state.snapshot(  # type: ignore[attr-defined]
+                stream_limit=self.server.overview_stream_maximum_connections,  # type: ignore[attr-defined]
+                trend=self.server.runtime_dashboard.storage_status(),  # type: ignore[attr-defined]
+                toolbusd=toolbusd))
+            return
+
         if parts == ["api", API_VERSION]:
             gpio_backend_operational = self._gpio_backend_operational()
             control_audit = self._control_audit_health()
@@ -2401,7 +2432,7 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
                     },
                     **self._runtime_capabilities(),
                 },
-                "endpoints": ["health", "snapshot", "overview", "overview/stream", "nodes", "resources",
+                "endpoints": ["health", "snapshot", "overview", "overview/stream", "operations", "nodes", "resources",
                               "alerts", "events", "control-leases",
                               "control/operations/{operation_id}",
                               "control/operation-lookups"] +
@@ -2539,6 +2570,38 @@ class RuntimeRequestHandler(BaseHTTPRequestHandler):
             return
         parts = self._path_parts(parsed.path)
         if parts is None:
+            return
+        if parts in (["api", API_VERSION, "alert-rules", "preflight"],
+                     ["api", API_VERSION, "alert-rules", "apply"]):
+            if self.authenticator is None:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE,
+                            "alert_rule_authentication_disabled",
+                            "告警规则更新要求启用API密钥认证")
+                return
+            principal = self._authorize(
+                parsed.path, public_health=False,
+                required_permission=ALERT_RULE_WRITE_PERMISSION)
+            if not isinstance(principal, AuthenticatedPrincipal):
+                return
+            body = self._read_control_json()
+            if body is None:
+                return
+            try:
+                if parts[-1] == "preflight":
+                    if set(body) != {"expected_revision", "rules"}:
+                        raise AlertRuleError("预检请求字段不合法")
+                    result = self.alert_rules.preflight(
+                        body["expected_revision"], body["rules"])
+                else:
+                    if set(body) != {"confirmation_token", "confirmation"}:
+                        raise AlertRuleError("应用请求字段不合法")
+                    result = self.alert_rules.apply(
+                        body["confirmation_token"], body["confirmation"])
+            except AlertRuleError as error:
+                self._error(HTTPStatus.CONFLICT, "alert_rule_update_rejected",
+                            str(error))
+                return
+            self._success(result)
             return
         if self.command == "POST" and \
                 parts == ["api", API_VERSION, "control-leases"]:
@@ -2704,6 +2767,7 @@ def make_server(host: str, port: int,
                 overview_stream_interval_seconds: float =
                 DEFAULT_OVERVIEW_STREAM_INTERVAL_SECONDS,
                 runtime_dashboard: RuntimeDashboard | None = None,
+                alert_rules: AlertRuleManager | None = None,
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -2739,7 +2803,11 @@ def make_server(host: str, port: int,
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
         capacity=audit_capacity, output=audit_output)
     server.event_log = event_log  # type: ignore[attr-defined]
-    server.runtime_dashboard = runtime_dashboard or RuntimeDashboard()  # type: ignore[attr-defined]
+    resolved_alert_rules = alert_rules or AlertRuleManager()
+    server.alert_rules = resolved_alert_rules  # type: ignore[attr-defined]
+    server.runtime_dashboard = runtime_dashboard or RuntimeDashboard(  # type: ignore[attr-defined]
+        alert_rules=resolved_alert_rules)
+    server.operational_state = RuntimeOperationalState()  # type: ignore[attr-defined]
     server.overview_stream_maximum_connections = overview_stream_connections  # type: ignore[attr-defined]
     server.overview_stream_slots = threading.BoundedSemaphore(  # type: ignore[attr-defined]
         overview_stream_connections)
@@ -2813,6 +2881,8 @@ def main() -> int:
                         help="每个趋势序列的样本上限，默认60条")
     parser.add_argument("--trend-store-dir", type=Path,
                         help="显式启用趋势重启恢复的专用目录")
+    parser.add_argument("--alert-rule-store-dir", type=Path,
+                        help="显式启用受控告警规则更新及重启恢复的专用目录")
     parser.add_argument("--trend-store-maximum-bytes", type=int,
                         default=DEFAULT_TREND_STORE_MAXIMUM_BYTES,
                         help="趋势持久文件字节上限，默认1048576")
@@ -2922,13 +2992,17 @@ def main() -> int:
         except ControlAuditError as error:
             parser.error(f"控制审计配置无效：{error}")
     try:
+        alert_rules = AlertRuleManager(AlertRuleStore(
+            args.alert_rule_store_dir)) if args.alert_rule_store_dir else \
+            AlertRuleManager()
         trend_store = RuntimeTrendStore(
             args.trend_store_dir, capacity=args.trend_capacity,
             maximum_bytes=args.trend_store_maximum_bytes
         ) if args.trend_store_dir is not None else None
-        runtime_dashboard = RuntimeDashboard(args.trend_capacity, trend_store)
-    except (TrendStoreError, ValueError) as error:
-        parser.error(f"趋势存储配置无效：{error}")
+        runtime_dashboard = RuntimeDashboard(
+            args.trend_capacity, trend_store, alert_rules)
+    except (TrendStoreError, AlertRuleError, ValueError) as error:
+        parser.error(f"Runtime持久配置无效：{error}")
     try:
         server = make_server(
             args.host, args.port, provider,
@@ -2943,7 +3017,8 @@ def main() -> int:
                 else args.control_lease_capacity),
             request_io_timeout_seconds=
                 args.http_request_timeout_ms / 1000.0,
-            runtime_dashboard=runtime_dashboard)
+            runtime_dashboard=runtime_dashboard,
+            alert_rules=alert_rules)
     except BaseException:
         if control_audit_journal is not None:
             control_audit_journal.close()

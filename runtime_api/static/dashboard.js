@@ -44,17 +44,31 @@
     const daemon=$("daemon"), health=data.toolbusd_health || {}; daemon.replaceChildren(text("h2","toolbusd 健康"),chip(health.availability),chip(health.overall),kv({峰值:(health.trend || {}).peaks || {}}),trend((health.trend || {}).samples),renderAlerts(health.threshold_alerts));
     const root=$("nodes"); root.replaceChildren(); nodes.forEach(n=>{try{root.append(renderNode(n));}catch(_){root.append(text("p",`节点 ${n.node_id || "unknown"} 暂时无法展示。`,"empty"));}}); if(!nodes.length)root.append($("empty-template").content.cloneNode(true));
   }
+  function known(value) { return value === null || value === undefined ? "unknown" : value; }
+  function renderOperations(data) {
+    const root=$("operations"), runtime=data.runtime || {}, daemon=data.toolbusd || {}, recording=data.logical_recording || {}, trendStore=data.trend_store || {}, stream=data.overview_stream || {}, errors=data.recent_errors || {};
+    const errorList=document.createElement("ul"); errorList.className="alerts";
+    (errors.items || []).slice(0,16).forEach(item=>errorList.append(text("li",`${known(item.code)} · ${known(item.age_ms)} ms 前`)));
+    root.replaceChildren(text("h2","运维状态"),kv({Runtime版本:known(runtime.version),启动时长毫秒:known(runtime.uptime_ms),toolbusd连接:known(daemon.connection),录制可用性:known(recording.availability),录制已配置:known(recording.configured),录制活动:known(recording.active),录制事件数:known(recording.event_count),录制事件上限:known(recording.maximum_events),趋势持久化:known(trendStore.persistence),趋势序列容量:known(trendStore.sample_capacity_per_series),SSE活动连接:known(stream.active_connections),SSE连接上限:known(stream.maximum_connections)}),text("h3","最近服务错误"),errorList);
+    if(!(errors.items || []).length)root.append(text("p","当前没有已记录的服务错误。","empty"));
+  }
+  async function refreshOperations() {
+    const headers={"Accept":"application/json"}, key=$("api-key").value; if(key)headers["X-API-Key"]=key;
+    const response=await fetch("/api/v1/operations",{headers,cache:"no-store",credentials:"same-origin"}); const body=await response.json();
+    if(!response.ok || !body.ok)throw new Error(body.error?.message || `HTTP ${response.status}`);
+    renderOperations(body.data);
+  }
   async function refresh() {
     if(state.busy)return; state.busy=true; const status=$("connection");
     try { const headers={"Accept":"application/json"}, key=$("api-key").value; if(key)headers["X-API-Key"]=key;
       const response=await fetch("/api/v1/overview",{headers,cache:"no-store",credentials:"same-origin"}); const body=await response.json(); if(!response.ok || !body.ok)throw new Error(body.error?.message || `HTTP ${response.status}`);
-      render(body.data); status.textContent=`已连接 · 快照 ${body.data.snapshot_id} · ${new Date().toLocaleTimeString()}`; status.className="connection ok";
+      render(body.data); await refreshOperations(); status.textContent=`已连接 · 快照 ${body.data.snapshot_id} · ${new Date().toLocaleTimeString()}`; status.className="connection ok";
     } catch(error) { status.textContent=`刷新失败：${error instanceof Error ? error.message : "未知错误"}。已保留上次成功数据。`; status.className="connection error"; }
     finally { state.busy=false; }
   }
   function acceptOverview(body) {
     if(!body || !body.ok || !body.data)throw new Error(body?.error?.message || "主动推送数据无效");
-    render(body.data); const status=$("connection"); status.textContent=`主动推送已连接 · 快照 ${body.data.snapshot_id} · ${new Date().toLocaleTimeString()}`; status.className="connection ok";
+    render(body.data); refreshOperations().catch(()=>{}); const status=$("connection"); status.textContent=`主动推送已连接 · 快照 ${body.data.snapshot_id} · ${new Date().toLocaleTimeString()}`; status.className="connection ok";
   }
   function startPolling(generation) {
     if(generation !== state.generation)return;

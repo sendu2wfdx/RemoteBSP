@@ -230,6 +230,28 @@ class RuntimeHttpTest(unittest.TestCase):
         with urlopen(request) as response:
             self.assertEqual(response.status, 200)
 
+    def test_operations_status_is_authenticated_unknown_and_sanitized(self):
+        secret = "never-expose-this-secret-123456789"
+        self.server.authenticator = make_authenticator(
+            "ops-reader", secret)  # type: ignore[attr-defined]
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/api/v1/operations")
+        self.assertEqual(caught.exception.code, 401)
+        request = Request(self.base + "/api/v1/operations",
+                          headers={"X-API-Key": secret})
+        with urlopen(request) as response:
+            payload = json.loads(response.read())
+        status = payload["data"]
+        self.assertEqual(status["toolbusd"]["connection"], "unknown")
+        self.assertEqual(status["logical_recording"]["availability"],
+                         "unknown")
+        self.assertFalse(status["trend_store"]["configured"])
+        self.assertIsNone(status["trend_store"]["maximum_file_bytes"])
+        encoded = json.dumps(status)
+        self.assertNotIn(secret, encoded)
+        self.assertNotIn("socket", encoded)
+        self.assertNotIn("command", encoded)
+
     def test_overview_sse_reuses_read_auth_and_emits_bounded_event(self):
         self.server.authenticator = make_authenticator(
             "stream-reader", "s" * 32)  # type: ignore[attr-defined]

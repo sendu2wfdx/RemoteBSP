@@ -86,6 +86,27 @@ def node_health_source(node_id, generation=10, sequence=1, sample_time_ms=100,
 
 
 class RemoteCliIpcClientTest(unittest.TestCase):
+    def test_logical_recording_status_is_strict_and_hides_output_name(self):
+        document = json.dumps({
+            "schema_version": 1, "command": "logical-recording-status",
+            "data": {"configured": True, "active": True,
+                     "evidence_scope": "logical_link_frames",
+                     "output_name": "private-capture.json",
+                     "event_count": 12, "maximum_events": 100,
+                     "maximum_file_bytes": 4096}})
+        client = RemoteCliIpcClient(
+            "/private/toolbusd.sock", "remote-cli",
+            runner=lambda *_: document)
+        status = client.logical_recording_status()
+        self.assertTrue(status["active"])
+        self.assertEqual(status["event_count"], 12)
+        self.assertNotIn("output_name", status)
+        bad = json.loads(document)
+        bad["data"]["private_path"] = "/secret"
+        client.runner = lambda *_: json.dumps(bad)
+        with self.assertRaises(ToolbusIpcProtocolError):
+            client.logical_recording_status()
+
     @staticmethod
     def _runtime_snapshot_document():
         counters = {

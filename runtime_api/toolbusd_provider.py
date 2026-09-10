@@ -1464,6 +1464,36 @@ class RemoteCliIpcClient:
         return self._json_health_snapshot(
             self._run("health-snapshot", deadline=deadline))
 
+    def logical_recording_status(
+            self, *, deadline: MonotonicDeadline | None = None) -> dict:
+        if not self.structured_output:
+            raise ToolbusIpcProtocolError("逻辑录制状态要求结构化remote-cli输出")
+        command = "logical-recording-status"
+        data = self._document(self._run(command, deadline=deadline), command)
+        _exact_fields(data, {"configured", "active", "evidence_scope",
+                             "output_name", "event_count", "maximum_events",
+                             "maximum_file_bytes"}, command + ".data")
+        configured = _json_boolean(data["configured"], command + ".configured")
+        active = _json_boolean(data["active"], command + ".active")
+        evidence_scope = _json_string(
+            data["evidence_scope"], command + ".evidence_scope")
+        if evidence_scope != "logical_link_frames":
+            raise ToolbusIpcProtocolError("逻辑录制证据范围不受支持")
+        output_name = _json_string(data["output_name"], command + ".output_name")
+        if len(output_name.encode("utf-8")) > 255 or any(
+                ord(char) < 0x20 for char in output_name):
+            raise ToolbusIpcProtocolError("逻辑录制输出名无效")
+        return {
+            "configured": configured, "active": active,
+            "evidence_scope": evidence_scope,
+            "event_count": _json_integer(
+                data["event_count"], command + ".event_count"),
+            "maximum_events": _json_integer(
+                data["maximum_events"], command + ".maximum_events"),
+            "maximum_file_bytes": _json_integer(
+                data["maximum_file_bytes"], command + ".maximum_file_bytes"),
+        }
+
     def node_health_snapshot(
             self, node_id: int, *,
             deadline: MonotonicDeadline | None = None) -> dict:
@@ -1613,6 +1643,31 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     self.maximum_node_health_sample_age_ms,
             },
         }
+
+    def operational_status(
+            self, *, deadline: MonotonicDeadline | None = None) -> dict:
+        identity_reader = getattr(self.client, "daemon_identity", None)
+        if not callable(identity_reader):
+            return {"availability": "unknown", "connection": "unknown"}
+        try:
+            # 只用成功与否证明本次连接；实例身份本身不进入 Web 响应。
+            call_with_deadline(identity_reader, deadline=deadline)
+        except (ToolbusIpcError, RequestDeadlineExceeded):
+            return {"availability": "unavailable",
+                    "connection": "unavailable"}
+        reader = getattr(self.client, "logical_recording_status", None)
+        recording = {"availability": "unknown", "configured": None,
+                     "active": None, "event_count": None,
+                     "maximum_events": None, "maximum_file_bytes": None,
+                     "evidence_scope": None}
+        if callable(reader) and bool(getattr(self.client, "structured_output", True)):
+            try:
+                recording = {"availability": "available", **call_with_deadline(
+                    reader, deadline=deadline)}
+            except (ToolbusIpcError, RequestDeadlineExceeded):
+                recording["availability"] = "unavailable"
+        return {"availability": "available", "connection": "connected",
+                "logical_recording": recording}
 
     def _node_health(self, uuid: str, numeric_id: int, captured_at_ms: int,
                      *, deadline: MonotonicDeadline | None) -> dict:
