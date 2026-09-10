@@ -173,6 +173,40 @@ class StudioCliTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OPERATION)
         self.assertIn("身份核对失败", error["error"])
 
+    def test_runtime_identity_inspection_is_read_only_and_admits_gaps(self):
+        arguments = [
+            "inspect-runtime-identity",
+            "--toolbusd-socket", "/tmp/toolbusd.sock", "--node-id", "7",
+            "--node-uuid", "ab" * 16, "--remote-cli", "/bin/remote-cli",
+            "--identity-timeout", "1.25",
+        ]
+        runtime_node = type("RuntimeNode", (), {
+            "node_id": 7, "board_id": "weact-g431-core-v10",
+            "device_uuid": "ab" * 16, "online": True, "ready": True,
+            "firmware_version": (0, 2, 0), "protocol_version": 1,
+        })()
+        with patch("studio_cli.ToolbusdIdentityReader") as reader_type:
+            reader_type.return_value.read_runtime_node.return_value = runtime_node
+            code, response, _, _ = self._call(arguments)
+        self.assertEqual(code, EXIT_OK)
+        reader_type.assert_called_once_with(
+            "/tmp/toolbusd.sock", 7, expected_uuid="ab" * 16,
+            remote_cli="/bin/remote-cli", timeout=1.25)
+        self.assertFalse(response["identity_complete"])
+        self.assertFalse(response["deployment_verified"])
+        self.assertEqual(response["firmware"], {
+            "major": 0, "minor": 2, "patch": 0})
+        self.assertEqual(response["capabilities_missing"], [
+            "project_sha256", "config_sha256",
+            "firmware_identity_sha256"])
+        self.assertFalse(response["execution_status"]["hardware_access"])
+
+        code, error, _, _ = self._call([
+            "deploy-stlink", "--build-id", "weact-g431-core-v10-01234567",
+            "--toolbusd-socket", "/tmp/toolbusd.sock"])
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertEqual(error["exit_code"], EXIT_USAGE)
+
     def test_batch_create_validate_and_atomic_archive_output(self):
         archive = self.directory / "batch.zip"
         arguments = [

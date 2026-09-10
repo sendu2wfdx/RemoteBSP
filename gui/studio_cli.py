@@ -20,6 +20,8 @@ from firmware_builder import (
 from firmware_deployment import (
     FirmwareDeploymentError,
     JsonIdentityFileReader,
+    RUNTIME_IDENTITY_CAPABILITIES_MISSING,
+    ToolbusdIdentityReader,
     deploy_stlink,
 )
 from production_batch import (
@@ -233,9 +235,10 @@ def _run_build(args) -> dict:
 
 def _run_deploy_stlink(args) -> dict:
     output_root = _bounded_path(args.output_root, "构建产物目录")
-    identity_file = _bounded_path(args.identity_file, "设备身份文件")
+    reader = JsonIdentityFileReader(
+        _bounded_path(args.identity_file, "设备身份文件"))
     result = deploy_stlink(
-        args.build_id, JsonIdentityFileReader(identity_file),
+        args.build_id, reader,
         output_root=output_root, probe_serial=args.probe_serial,
         flash_timeout=args.flash_timeout,
         reconnect_timeout=args.reconnect_timeout,
@@ -251,6 +254,29 @@ def _run_deploy_stlink(args) -> dict:
             "firmware_flash": "performed_and_verified",
             "hardware_access": True,
         },
+    }
+
+
+def _run_inspect_runtime_identity(args) -> dict:
+    node = ToolbusdIdentityReader(
+        args.toolbusd_socket, args.node_id,
+        expected_uuid=args.node_uuid, remote_cli=args.remote_cli,
+        timeout=args.identity_timeout).read_runtime_node()
+    return {
+        "ok": True, "format": "STUDIO_CLI_RUNTIME_IDENTITY_V1",
+        "identity_complete": False,
+        "node_id": node.node_id, "board_id": node.board_id,
+        "device_uuid": node.device_uuid, "online": node.online,
+        "ready": node.ready,
+        "firmware": {
+            "major": node.firmware_version[0],
+            "minor": node.firmware_version[1],
+            "patch": node.firmware_version[2],
+        },
+        "protocol_version": node.protocol_version,
+        "capabilities_missing": list(RUNTIME_IDENTITY_CAPABILITIES_MISSING),
+        "deployment_verified": False,
+        "execution_status": _execution_status(software_build="not_performed"),
     }
 
 
@@ -375,6 +401,17 @@ def _parser() -> StrictParser:
     deploy.add_argument("--reconnect-timeout", type=float, default=10.0)
     deploy.add_argument("--poll-interval", type=float, default=0.25)
     deploy.set_defaults(handler=_run_deploy_stlink)
+
+    inspect_identity = sub.add_parser(
+        "inspect-runtime-identity",
+        help="只读检查toolbusd当前公开的节点身份子集")
+    inspect_identity.add_argument("--toolbusd-socket", required=True)
+    inspect_identity.add_argument("--node-id", type=int, default=1)
+    inspect_identity.add_argument("--node-uuid")
+    inspect_identity.add_argument("--remote-cli", default="remote-cli")
+    inspect_identity.add_argument(
+        "--identity-timeout", type=float, default=2.0)
+    inspect_identity.set_defaults(handler=_run_inspect_runtime_identity)
 
     create = sub.add_parser("batch-create", help="生成确定性生产批次")
     create.add_argument("--batch-id", required=True)

@@ -11,7 +11,8 @@ sys.path.insert(0, str(GUI_ROOT))
 
 from firmware_deployment import (  # noqa: E402
     DeviceIdentity, FirmwareDeploymentError, deploy_stlink,
-    JsonIdentityFileReader, expected_identity, make_stlink_plan)
+    IdentityCapabilityError, JsonIdentityFileReader, ToolbusdIdentityReader,
+    expected_identity, make_stlink_plan)
 
 
 class Reader:
@@ -26,6 +27,77 @@ class Reader:
 
 
 class FirmwareDeploymentTest(unittest.TestCase):
+    @staticmethod
+    def _node_list(*, uuid="ab" * 16, node_id=7, online=True,
+                   ready=True, board_type=0x0431CB):
+        return json.dumps({
+            "schema_version": 1, "command": "node-list", "data": {
+                "nodes": [{
+                    "node_id": node_id, "online": online, "ready": ready,
+                    "board_type": board_type,
+                    "firmware": {"major": 0, "minor": 2, "patch": 0},
+                    "protocol_version": 1, "uuid": uuid,
+                }],
+            },
+        }).encode()
+
+    def test_toolbusd_reader_strictly_selects_runtime_node(self):
+        calls = []
+
+        def runner(command, timeout, maximum):
+            calls.append((tuple(command), timeout, maximum))
+            return self._node_list()
+
+        reader = ToolbusdIdentityReader(
+            "/tmp/toolbusd.sock", 7, expected_uuid="AB" * 16,
+            remote_cli="/opt/remotebsp/remote-cli", timeout=1.25,
+            runner=runner)
+        node = reader.read_runtime_node()
+        self.assertEqual(node.board_id, "weact-g431-core-v10")
+        self.assertEqual(node.device_uuid, "ab" * 16)
+        self.assertTrue(node.online and node.ready)
+        self.assertEqual(node.firmware_version, (0, 2, 0))
+        self.assertEqual(node.protocol_version, 1)
+        self.assertEqual(calls[0][0], (
+            "/opt/remotebsp/remote-cli", "--json", "--socket",
+            "/tmp/toolbusd.sock", "node-list"))
+        self.assertEqual(calls[0][1:], (1.25, 64 * 1024))
+
+    def test_toolbusd_reader_rejects_ambiguous_or_untrusted_identity(self):
+        cases = (
+            (self._node_list(node_id=8), "不存在"),
+            (self._node_list(online=False), "尚未在线"),
+            (self._node_list(board_type=123), "不受Studio支持"),
+            (b'{"schema_version":1,"schema_version":1}', "重复字段"),
+            (b"x" * (64 * 1024 + 1), "64 KiB"),
+        )
+        for output, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    FirmwareDeploymentError, message):
+                ToolbusdIdentityReader(
+                    "/tmp/toolbusd.sock", 7,
+                    runner=lambda *_args, value=output: value
+                ).read_runtime_node()
+        with self.assertRaisesRegex(FirmwareDeploymentError, "UUID"):
+            ToolbusdIdentityReader(
+                "/tmp/toolbusd.sock", 7, expected_uuid="cd" * 16,
+                runner=lambda *_: self._node_list()).read_runtime_node()
+
+    def test_toolbusd_incomplete_contract_fails_before_flash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_id = self._build(root)
+            flashed = []
+            reader = ToolbusdIdentityReader(
+                "/tmp/toolbusd.sock", 7,
+                runner=lambda *_: self._node_list())
+            with self.assertRaisesRegex(IdentityCapabilityError,
+                                        "不公开project_sha256"):
+                deploy_stlink(
+                    build_id, reader, output_root=root,
+                    runner=lambda *_: flashed.append(True))
+            self.assertEqual(flashed, [])
+
     def test_json_identity_reader_is_strict_and_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "identity.json"
