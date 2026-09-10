@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/protocol/health.hpp"
+#include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
 #include "remotebsp/toolbusd/traffic_control.hpp"
@@ -55,7 +56,7 @@ constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
 constexpr std::uint16_t kHealthSnapshotIpcVersion = 1U;
-constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 2U;
+constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 3U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
 constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
@@ -260,6 +261,17 @@ struct IpcRuntimeResource {
     protocol::ResourceStatusPayload status;
 };
 
+struct IpcRuntimeBusHealth {
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    bool last_status_valid{};
+    protocol::BusTransactionStatus last_status{
+        protocol::BusTransactionStatus::Ok};
+    std::uint32_t consecutive_failures{};
+    std::uint32_t peak_consecutive_failures{};
+    std::uint64_t last_result_time_us{};
+};
+
 enum class IpcRuntimeNodeError : std::uint8_t {
     ResourceInventoryUnavailable = 1U,
 };
@@ -294,6 +306,7 @@ struct IpcRuntimeSnapshot {
     std::vector<IpcRuntimeResource> resources;
     std::vector<IpcRuntimeNodeIssue> node_issues;
     std::vector<IpcRuntimeClockQuality> clocks;
+    std::vector<IpcRuntimeBusHealth> bus_health;
 };
 
 class IpcException : public std::runtime_error {

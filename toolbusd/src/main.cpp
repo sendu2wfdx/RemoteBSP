@@ -2634,6 +2634,14 @@ private:
             std::lock_guard<std::mutex> lock(send_mutex_);
             snapshot.traffic = traffic_.snapshot();
         }
+        for (const auto& item : bus_runtime_.telemetry_snapshot().resources) {
+            snapshot.bus_health.push_back({
+                item.node_id, item.resource_id,
+                item.last_remote_status_valid, item.last_remote_status,
+                item.consecutive_remote_failures,
+                item.peak_consecutive_remote_failures,
+                item.last_remote_result_time_us});
+        }
         snapshot.sequence = next_runtime_snapshot_sequence_++;
         if (snapshot.sequence == 0U) {
             snapshot.sequence = next_runtime_snapshot_sequence_++;

@@ -28,3 +28,21 @@ Runtime 只信任直连对端和自身 API key，不把代理提供的客户端�
 工件，并由外部监控检查证书有效期和吊销状态。
 
 本阶段不宣称已完成公网暴露、生产 CA、mTLS、OCSP、证书自动轮换或真实代理兼容测试。
+
+## Runtime 启动接入
+
+显式传入同一工件可让 Runtime 自身在回环地址终止 HTTPS：
+
+```bash
+python3 -m runtime_api.server --host 127.0.0.1 --port 8780 \
+  --tls-baseline-config /etc/remotebsp/runtime-tls-baseline.json
+```
+
+启动入口会重新执行完整预检，并要求 `--host` 与工件的 `proxy_bind` 完全一致。证书和私钥
+只装载一次进入内存 TLS 上下文，避免“预检通过后再次从漂移路径读取”的窗口。缺少工件、
+摘要漂移、证书/私钥变化或权限变化都会在监听前失败关闭。未传该选项时行为保持原样：
+Runtime 继续提供默认的回环 HTTP 开发入口。
+
+自动测试使用运行时生成、仅存于临时目录的一日自签名证书，启动独立 Runtime 进程完成
+真实 HTTPS 握手，并确认向同一端口发送明文 HTTP 得不到成功 HTTP 响应。该证书仅用于
+测试，既不打包也不构成生产证书或真实公网部署证据。

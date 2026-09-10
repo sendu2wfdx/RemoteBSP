@@ -177,6 +177,17 @@ struct RuntimeResourceSnapshot {
     protocol::ResourceStatusPayload status;
 };
 
+struct RuntimeBusHealth {
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    bool last_status_valid{};
+    protocol::BusTransactionStatus last_status{
+        protocol::BusTransactionStatus::Ok};
+    std::uint32_t consecutive_failures{};
+    std::uint32_t peak_consecutive_failures{};
+    std::uint64_t last_result_time_us{};
+};
+
 struct RuntimeNodeIssue {
     std::uint32_t node_id{};
     std::uint8_t code{};
@@ -213,6 +224,7 @@ struct RuntimeSnapshot {
     std::vector<RuntimeResourceSnapshot> resources;
     std::vector<RuntimeNodeIssue> node_issues;
     std::vector<RuntimeClockQuality> clocks;
+    std::vector<RuntimeBusHealth> bus_health;
 };
 
 enum class GpioDirection : std::uint8_t {

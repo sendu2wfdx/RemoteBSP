@@ -42,6 +42,9 @@ toolbusd::IpcRuntimeSnapshot make_snapshot() {
     snapshot.clocks.push_back({
         3U, true, true, toolbusd::ClockSyncState::Synced,
         11U, 7U, 8U, 6U, 25U, -80, 100U, 200U, 300U, 400U});
+    snapshot.bus_health.push_back({
+        3U, 0x0C000001U, true, protocol::BusTransactionStatus::Timeout,
+        2U, 5U, 123456U});
     return snapshot;
 }
 
@@ -78,6 +81,11 @@ void test_snapshot_round_trip_and_strict_flags() {
     assert(decoded.clocks[0].model_generation == 7U);
     assert(decoded.clocks[0].rate_deviation_ppb == -80);
     assert(decoded.clocks[0].error_bound_ns == 200U);
+    assert(decoded.bus_health.size() == 1U);
+    assert(decoded.bus_health[0].last_status ==
+           protocol::BusTransactionStatus::Timeout);
+    assert(decoded.bus_health[0].consecutive_failures == 2U);
+    assert(decoded.bus_health[0].peak_consecutive_failures == 5U);
 
     auto invalid = encoded;
     constexpr std::size_t header_size = 28U;

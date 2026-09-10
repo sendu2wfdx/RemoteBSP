@@ -789,6 +789,14 @@ RuntimeSnapshot Client::runtime_snapshot(
             clock.error_bound_ns, clock.sample_age_ns,
             clock.last_sample_host_time_ns});
     }
+    result.bus_health.reserve(source.bus_health.size());
+    for (const auto& health : source.bus_health) {
+        result.bus_health.push_back({
+            health.node_id, health.resource_id, health.last_status_valid,
+            health.last_status, health.consecutive_failures,
+            health.peak_consecutive_failures,
+            health.last_result_time_us});
+    }
     return result;
 }
 

@@ -345,6 +345,18 @@ void check_remote_result_classification_and_isolation() {
     assert(telemetry.remote_fault_total == 1U);
     assert(telemetry.resources[0U].remote_nack_total == 1U);
     assert(telemetry.resources[1U].remote_nack_total == 1U);
+    assert(telemetry.resources[0U].last_remote_status ==
+           protocol::BusTransactionStatus::Fault);
+    assert(telemetry.resources[0U].consecutive_remote_failures == 3U);
+    assert(telemetry.resources[0U].peak_consecutive_remote_failures == 3U);
+    assert(telemetry.resources[0U].last_remote_result_time_us != 0U);
+    assert(runtime.observe_remote_result(
+        1U, first.resource_id, protocol::BusTransactionStatus::Ok));
+    const auto recovered = runtime.telemetry_snapshot();
+    assert(recovered.resources[0U].last_remote_status ==
+           protocol::BusTransactionStatus::Ok);
+    assert(recovered.resources[0U].consecutive_remote_failures == 0U);
+    assert(recovered.resources[0U].peak_consecutive_remote_failures == 3U);
     runtime.invalidate_node(1U);
     assert(runtime.telemetry_snapshot().resources.empty());
 }

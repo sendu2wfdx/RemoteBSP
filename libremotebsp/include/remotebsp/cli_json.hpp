@@ -528,6 +528,23 @@ inline void write_runtime_snapshot(std::ostream& output,
         write_uuid(output, node.identity.uuid);
         output << "\"}";
     }
+    output << "],\"bus_health\":[";
+    for (std::size_t index = 0U; index < snapshot.bus_health.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& health = snapshot.bus_health[index];
+        output << "{\"node_id\":" << health.node_id
+               << ",\"resource_id\":" << health.resource_id
+               << ",\"last_status_valid\":"
+               << (health.last_status_valid ? "true" : "false")
+               << ",\"last_status\":"
+               << static_cast<unsigned>(health.last_status)
+               << ",\"consecutive_failures\":"
+               << health.consecutive_failures
+               << ",\"peak_consecutive_failures\":"
+               << health.peak_consecutive_failures
+               << ",\"last_result_time_us\":"
+               << health.last_result_time_us << '}';
+    }
     output << "],\"resources\":[";
     for (std::size_t index = 0U; index < snapshot.resources.size(); ++index) {
         if (index != 0U) output << ',';

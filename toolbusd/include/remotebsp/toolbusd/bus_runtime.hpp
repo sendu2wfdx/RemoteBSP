@@ -42,10 +42,16 @@ struct BusResourceTelemetry {
     std::uint64_t remote_busy_total{};
     std::uint64_t remote_fault_total{};
     std::uint64_t remote_limit_exceeded_total{};
+    bool last_remote_status_valid{};
+    protocol::BusTransactionStatus last_remote_status{
+        protocol::BusTransactionStatus::Ok};
+    std::uint32_t consecutive_remote_failures{};
+    std::uint32_t peak_consecutive_remote_failures{};
+    std::uint64_t last_remote_result_time_us{};
 };
 
 struct BusTelemetrySnapshot {
-    static constexpr std::uint16_t kVersion = 1U;
+    static constexpr std::uint16_t kVersion = 2U;
     std::uint16_t version{kVersion};
     std::uint64_t admitted_total{};
     std::uint64_t rate_limited_total{};
@@ -175,6 +181,12 @@ private:
         std::uint64_t remote_busy{};
         std::uint64_t remote_fault{};
         std::uint64_t remote_limit_exceeded{};
+        bool last_remote_status_valid{};
+        protocol::BusTransactionStatus last_remote_status{
+            protocol::BusTransactionStatus::Ok};
+        std::uint32_t consecutive_remote_failures{};
+        std::uint32_t peak_consecutive_remote_failures{};
+        std::uint64_t last_remote_result_time_us{};
     };
 
     Admission admit(std::uint32_t node_id, std::uint32_t resource_id,

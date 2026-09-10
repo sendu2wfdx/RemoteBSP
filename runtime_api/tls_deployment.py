@@ -104,7 +104,7 @@ def create_artifact(output: Path, *, runtime_bind: str, proxy_bind: str,
     return document
 
 
-def preflight(path: Path) -> dict:
+def _preflight(path: Path) -> tuple[dict, ssl.SSLContext]:
     path = Path(path)
     _secure_regular(path, private=True)
     digest_path = path.with_suffix(path.suffix + ".sha256")
@@ -136,10 +136,23 @@ def preflight(path: Path) -> dict:
         context.load_cert_chain(str(certificate), str(private_key))
     except (OSError, ssl.SSLError) as error:
         raise TlsDeploymentError("证书/私钥不可加载或不匹配") from error
+    return document, context
+
+
+def preflight(path: Path) -> dict:
+    document, _ = _preflight(path)
     return {"ok": True, "schema_version": SCHEMA_VERSION,
             "runtime_bind": document["runtime_bind"],
             "proxy_bind": document["proxy_bind"],
             "forwarded_headers": "strip_all", "tls_minimum": "1.2"}
+
+
+def prepare_server_context(path: Path, expected_bind: str) -> ssl.SSLContext:
+    """预检并返回已经装载密钥材料的服务端上下文，消除检查后再读漂移。"""
+    document, context = _preflight(path)
+    if document["proxy_bind"] != _numeric_loopback(expected_bind, "--host"):
+        raise TlsDeploymentError("--host 与 TLS 基线 proxy_bind 不一致")
+    return context
 
 
 def main() -> int:

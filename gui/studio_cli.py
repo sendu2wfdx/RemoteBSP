@@ -25,12 +25,14 @@ from firmware_deployment import (
     JsonIdentityFileReader,
     RUNTIME_IDENTITY_CAPABILITIES_MISSING,
     ToolbusdIdentityReader,
+    create_can_katapult_deployment_plan,
     create_stlink_deployment_plan,
     create_usb_katapult_deployment_plan,
     deploy_can_katapult,
     deploy_usb_katapult,
     deploy_stlink,
     validate_stlink_deployment_plan,
+    validate_can_katapult_deployment_plan,
     validate_usb_katapult_deployment_plan,
 )
 from deployment_record import create_deployment_record, validate_deployment_record
@@ -328,6 +330,10 @@ def _run_deployment_plan_validate(args) -> dict:
             "REMOTEBSP_USB_KATAPULT_DEPLOYMENT_PLAN_V1":
         validated = validate_usb_katapult_deployment_plan(
             artifact, output_root=output_root)
+    elif isinstance(artifact, dict) and artifact.get("format") == \
+            "REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1":
+        validated = validate_can_katapult_deployment_plan(
+            artifact, output_root=output_root)
     else:
         raise FirmwareDeploymentError("部署计划类型不受支持")
     return {"ok": True,
@@ -349,6 +355,21 @@ def _run_deployment_preflight_usb_katapult(args) -> dict:
     written = _atomic_output(args.plan_output, content, force=args.force)
     return {"ok": True,
             "format": "STUDIO_CLI_USB_KATAPULT_PREFLIGHT_V1",
+            "plan": artifact, "plan_output": str(written),
+            "hardware_access": False, "flash_performed": False}
+
+
+def _run_deployment_preflight_can_katapult(args) -> dict:
+    artifact = create_can_katapult_deployment_plan(
+        args.build_id,
+        output_root=_bounded_path(args.output_root, "构建产物目录"),
+        can_interface=args.can_interface, katapult_uuid=args.katapult_uuid,
+        flashtool=_bounded_path(args.flashtool, "Katapult flashtool"))
+    content = (json.dumps(artifact, ensure_ascii=False, allow_nan=False,
+                          sort_keys=True, indent=2) + "\n").encode("utf-8")
+    written = _atomic_output(args.plan_output, content, force=args.force)
+    return {"ok": True,
+            "format": "STUDIO_CLI_CAN_KATAPULT_PREFLIGHT_V1",
             "plan": artifact, "plan_output": str(written),
             "hardware_access": False, "flash_performed": False}
 
@@ -821,9 +842,23 @@ def _parser() -> StrictParser:
     usb_deployment_preflight.set_defaults(
         handler=_run_deployment_preflight_usb_katapult)
 
+    can_deployment_preflight = sub.add_parser(
+        "deployment-preflight-can-katapult",
+        help="离线生成定向CAN Katapult恢复阶段计划，不打开CAN")
+    can_deployment_preflight.add_argument("--build-id", required=True)
+    can_deployment_preflight.add_argument(
+        "--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    can_deployment_preflight.add_argument("--can-interface", required=True)
+    can_deployment_preflight.add_argument("--katapult-uuid", required=True)
+    can_deployment_preflight.add_argument("--flashtool", required=True)
+    can_deployment_preflight.add_argument("--plan-output", required=True)
+    can_deployment_preflight.add_argument("--force", action="store_true")
+    can_deployment_preflight.set_defaults(
+        handler=_run_deployment_preflight_can_katapult)
+
     deployment_validate = sub.add_parser(
         "deployment-plan-validate",
-        help="离线复核ST-Link或USB Katapult计划，拒绝产物漂移")
+        help="离线复核ST-Link、CAN或USB Katapult计划，拒绝产物漂移")
     deployment_validate.add_argument("--plan", required=True)
     deployment_validate.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     deployment_validate.set_defaults(handler=_run_deployment_plan_validate)

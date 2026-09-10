@@ -829,12 +829,12 @@ class RemoteCliIpcClient:
         data = RemoteCliIpcClient._document(output, "runtime-snapshot")
         _exact_fields(data, {
             "snapshot_version", "snapshot_sequence", "traffic", "nodes",
-            "resources", "node_issues", "clocks",
+            "resources", "node_issues", "clocks", "bus_health",
         }, "runtime-snapshot.data")
         version = _json_integer(
             data["snapshot_version"], "runtime-snapshot.snapshot_version",
             minimum=1, maximum=0xFFFF)
-        if version != 2:
+        if version != 3:
             raise ToolbusIpcProtocolError(
                 f"runtime-snapshot版本不受支持：{version}")
         sequence = _json_integer(
@@ -1018,10 +1018,57 @@ class RemoteCliIpcClient:
                 "drift_uncertainty_ppm": drift_uncertainty_ppm,
                 **nullable_values,
             })
+        bus_health = []
+        bus_identities: set[tuple[int, int]] = set()
+        for index, raw in enumerate(_json_array(
+                data["bus_health"], "runtime-snapshot.bus_health")):
+            field_name = f"runtime-snapshot.bus_health[{index}]"
+            item = _json_object(raw, field_name)
+            _exact_fields(item, {
+                "node_id", "resource_id", "last_status_valid",
+                "last_status", "consecutive_failures",
+                "peak_consecutive_failures", "last_result_time_us",
+            }, field_name)
+            node_id = _json_integer(item["node_id"], field_name + ".node_id",
+                                    minimum=1, maximum=127)
+            resource_id = _json_integer(
+                item["resource_id"], field_name + ".resource_id",
+                minimum=1, maximum=0xFFFFFFFF)
+            identity = (node_id, resource_id)
+            if node_id not in node_ids or identity in bus_identities:
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot总线健康项重复或引用未知节点")
+            bus_identities.add(identity)
+            valid = _json_boolean(
+                item["last_status_valid"], field_name + ".last_status_valid")
+            status = _json_integer(item["last_status"],
+                                   field_name + ".last_status", maximum=5)
+            current = _json_integer(
+                item["consecutive_failures"],
+                field_name + ".consecutive_failures", maximum=0xFFFFFFFF)
+            peak = _json_integer(
+                item["peak_consecutive_failures"],
+                field_name + ".peak_consecutive_failures", maximum=0xFFFFFFFF)
+            last_time = _json_integer(
+                item["last_result_time_us"],
+                field_name + ".last_result_time_us",
+                maximum=0xFFFFFFFFFFFFFFFF)
+            if current > peak or (not valid and
+                                  (status != 0 or current != 0 or peak != 0 or
+                                   last_time != 0)):
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot总线健康状态字段不一致")
+            bus_health.append({
+                "node_id": node_id, "resource_id": resource_id,
+                "last_status_valid": valid, "last_status": status,
+                "consecutive_failures": current,
+                "peak_consecutive_failures": peak,
+                "last_result_time_us": last_time,
+            })
         return {
             "version": version, "sequence": sequence, "traffic": traffic,
             "nodes": nodes, "resources": resources, "node_issues": issues,
-            "clocks": clocks,
+            "clocks": clocks, "bus_health": bus_health,
         }
 
     @staticmethod

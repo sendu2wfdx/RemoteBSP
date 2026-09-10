@@ -271,7 +271,9 @@ bool BusRuntime::observe_remote_result(
     auto& counters = telemetry_[key];
     switch (status) {
     case protocol::BusTransactionStatus::Ok:
-        saturating_increment(counters.remote_ok); break;
+        saturating_increment(counters.remote_ok);
+        counters.consecutive_remote_failures = 0U;
+        break;
     case protocol::BusTransactionStatus::Nack:
         saturating_increment(counters.remote_nack); break;
     case protocol::BusTransactionStatus::Timeout:
@@ -284,6 +286,18 @@ bool BusRuntime::observe_remote_result(
         saturating_increment(counters.remote_limit_exceeded); break;
     default:
         return false;
+    }
+    counters.last_remote_status_valid = true;
+    counters.last_remote_status = status;
+    counters.last_remote_result_time_us = clock_();
+    if (status != protocol::BusTransactionStatus::Ok) {
+        if (counters.consecutive_remote_failures !=
+            std::numeric_limits<std::uint32_t>::max()) {
+            ++counters.consecutive_remote_failures;
+        }
+        counters.peak_consecutive_remote_failures = std::max(
+            counters.peak_consecutive_remote_failures,
+            counters.consecutive_remote_failures);
     }
     return true;
 }
@@ -378,7 +392,12 @@ BusTelemetrySnapshot BusRuntime::telemetry_snapshot() const {
             counters.contract_rejected, counters.remote_ok,
             counters.remote_nack, counters.remote_timeout,
             counters.remote_busy, counters.remote_fault,
-            counters.remote_limit_exceeded});
+            counters.remote_limit_exceeded,
+            counters.last_remote_status_valid,
+            counters.last_remote_status,
+            counters.consecutive_remote_failures,
+            counters.peak_consecutive_remote_failures,
+            counters.last_remote_result_time_us});
         add(snapshot.admitted_total, counters.admitted);
         add(snapshot.rate_limited_total, counters.rate_limited);
         add(snapshot.busy_total, counters.busy);

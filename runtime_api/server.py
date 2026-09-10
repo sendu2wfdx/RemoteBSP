@@ -60,6 +60,7 @@ from .control_audit_journal import (
     ControlAuditJournal,
     ControlAuditRecord,
 )
+from .tls_deployment import TlsDeploymentError, prepare_server_context
 from .audit import (
     BoundedAuditSink,
     DEFAULT_AUDIT_CAPACITY,
@@ -3022,6 +3023,7 @@ def make_server(host: str, port: int,
                 DEFAULT_OVERVIEW_STREAM_INTERVAL_SECONDS,
                 runtime_dashboard: RuntimeDashboard | None = None,
                 alert_rules: AlertRuleManager | None = None,
+                tls_baseline_config: Path | None = None,
                 ) -> ThreadingHTTPServer:
     try:
         loopback = ipaddress.ip_address(host).is_loopback
@@ -3052,6 +3054,10 @@ def make_server(host: str, port: int,
                          maximum_workers=maximum_workers,
                          request_io_timeout_seconds=
                          request_io_timeout_seconds)
+    if tls_baseline_config is not None:
+        context = prepare_server_context(tls_baseline_config, host)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.tls_enabled = tls_baseline_config is not None  # type: ignore[attr-defined]
     server.provider = provider  # type: ignore[attr-defined]
     server.authenticator = authenticator  # type: ignore[attr-defined]
     server.audit_sink = BoundedAuditSink(  # type: ignore[attr-defined]
@@ -3100,6 +3106,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8780, help="监听端口")
     parser.add_argument("--api-key-file", type=Path,
                         help="版本化API密钥JSON文件；不支持命令行明文密钥")
+    parser.add_argument(
+        "--tls-baseline-config", type=Path,
+        help="显式启用回环HTTPS的已校验TLS基线工件；默认仍为回环HTTP")
     parser.add_argument(
         "--control-audit-dir", type=Path,
         help="持久控制审计目录；必须与--control-audit-key-file成对配置")
@@ -3291,14 +3300,20 @@ def main() -> int:
             request_io_timeout_seconds=
                 args.http_request_timeout_ms / 1000.0,
             runtime_dashboard=runtime_dashboard,
-            alert_rules=alert_rules)
+            alert_rules=alert_rules,
+            tls_baseline_config=args.tls_baseline_config)
+    except TlsDeploymentError as error:
+        if control_audit_journal is not None:
+            control_audit_journal.close()
+        parser.error(f"TLS基线无效：{error}")
     except BaseException:
         if control_audit_journal is not None:
             control_audit_journal.close()
         raise
     display_host = f"[{args.host}]" if ":" in args.host else args.host
     auth_mode = "API密钥认证" if authenticator is not None else "回环开发模式"
-    print(f"RemoteBSP Runtime API已启动：http://{display_host}:"
+    scheme = "https" if args.tls_baseline_config is not None else "http"
+    print(f"RemoteBSP Runtime API已启动：{scheme}://{display_host}:"
           f"{server.server_port}/api/{API_VERSION}（{auth_mode}）")
     try:
         server.serve_forever()

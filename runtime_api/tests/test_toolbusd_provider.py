@@ -117,7 +117,7 @@ class RemoteCliIpcClientTest(unittest.TestCase):
             "schema_version": 1,
             "command": "runtime-snapshot",
             "data": {
-                "snapshot_version": 2,
+                "snapshot_version": 3,
                 "snapshot_sequence": 7,
                 "traffic": {
                     "mode": "fd", "arbitration_bitrate": 1000000,
@@ -152,6 +152,13 @@ class RemoteCliIpcClientTest(unittest.TestCase):
                         "rx_overruns": 0, "tx_overruns": 0,
                     },
                 }],
+                "bus_health": [{
+                    "node_id": 1, "resource_id": 0x0C000001,
+                    "last_status_valid": True, "last_status": 2,
+                    "consecutive_failures": 2,
+                    "peak_consecutive_failures": 4,
+                    "last_result_time_us": 123456,
+                }],
                 "node_issues": [],
                 "clocks": [{
                     "node_id": 1,
@@ -184,7 +191,8 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         snapshot = client.runtime_snapshot(64)
         self.assertEqual(snapshot["sequence"], 7)
         self.assertFalse(snapshot["resources"][0]["status_valid"])
-        self.assertEqual(snapshot["version"], 2)
+        self.assertEqual(snapshot["version"], 3)
+        self.assertEqual(snapshot["bus_health"][0]["consecutive_failures"], 2)
         self.assertEqual(snapshot["clocks"][0]["state"], "synced")
         self.assertEqual(snapshot["clocks"][0]["rate_deviation_ppb"], -80)
         self.assertEqual(len(calls), 1)

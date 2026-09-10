@@ -206,6 +206,44 @@ class StudioCliTest(unittest.TestCase):
         validate.assert_called_once()
         deploy.assert_not_called()
 
+    def test_can_katapult_preflight_is_dry_run_and_uuid_targeted(self):
+        plan_path = self.directory / "can-plan.json"
+        flashtool = self.directory / "flashtool.py"
+        flashtool.write_text("# test\n", encoding="utf-8")
+        artifact = {
+            "format": "REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1",
+            "schema_version": 1, "backend": "can-katapult",
+            "build_id": "weact-test-01234567", "sha256": "c" * 64,
+            "stage": "katapult_can_recovery",
+            "targeting": "direct_katapult_uuid", "broadcast_allowed": False,
+            "transport_exclusive": True,
+            "application_transport_active": False,
+            "hardware_access": False, "flash_performed": False}
+        with patch("studio_cli.create_can_katapult_deployment_plan",
+                   return_value=artifact) as create, \
+                patch("studio_cli.deploy_can_katapult") as deploy:
+            code, response, _, _ = self._call([
+                "deployment-preflight-can-katapult", "--build-id",
+                "weact-test-01234567", "--output-root", str(self.directory),
+                "--can-interface", "can0", "--katapult-uuid", "A1b2C3d4e5f6",
+                "--flashtool", str(flashtool), "--plan-output", str(plan_path)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertFalse(response["hardware_access"])
+        self.assertFalse(response["flash_performed"])
+        create.assert_called_once_with(
+            "weact-test-01234567", output_root=self.directory,
+            can_interface="can0", katapult_uuid="A1b2C3d4e5f6",
+            flashtool=flashtool)
+        deploy.assert_not_called()
+        with patch("studio_cli.validate_can_katapult_deployment_plan",
+                   return_value=artifact) as validate:
+            code, checked, _, _ = self._call([
+                "deployment-plan-validate", "--plan", str(plan_path),
+                "--output-root", str(self.directory)])
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(checked["backend"], "can-katapult")
+        validate.assert_called_once()
+
     def test_explicit_stlink_deployment_uses_identity_file_and_reports_result(self):
         identity_file = self.directory / "identity.json"
         identity_file.write_text("{}", encoding="utf-8")

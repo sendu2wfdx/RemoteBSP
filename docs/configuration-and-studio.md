@@ -188,6 +188,20 @@ studio_cli.py deployment-preflight-usb-katapult --build-id <ID> \
 studio_cli.py deployment-plan-validate --plan usb-katapult-plan.json
 ```
 
+CAN Katapult 使用独立的 `REMOTEBSP_CAN_KATAPULT_DEPLOYMENT_PLAN_V1`。它绑定 CAN
+接口和规范化的小写 Katapult UUID，并固定 `targeting=direct_katapult_uuid`、
+`broadcast_allowed=false`；空 UUID、`all` 或命令注入字符不会形成计划。工件同时绑定
+8 KiB APP、flashtool 路径/摘要和精确 argv，并声明 `stage=katapult_can_recovery`、
+运行 APP 传输未激活且恢复传输互斥。Katapult UUID 只是恢复阶段的定向目标，不冒充
+RemoteBSP APP 重启后的设备 UUID；真正部署仍必须用四重身份和设备 UUID 回读收口。
+
+```text
+studio_cli.py deployment-preflight-can-katapult --build-id <ID> \
+  --can-interface can0 --katapult-uuid <UUID> --flashtool ./flashtool.py \
+  --plan-output can-katapult-plan.json
+studio_cli.py deployment-plan-validate --plan can-katapult-plan.json
+```
+
 尚未完成：
 
 - 把现有显式 ST-Link CLI 部署作业接入 Studio API/界面，并增加 CAN Katapult、

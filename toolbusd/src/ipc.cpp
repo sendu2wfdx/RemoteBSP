@@ -22,6 +22,7 @@ constexpr std::size_t kRuntimeSnapshotHeaderSize = 28U;
 constexpr std::size_t kRuntimeResourceSize = 50U;
 constexpr std::size_t kRuntimeNodeIssueSize = 8U;
 constexpr std::size_t kRuntimeClockQualitySize = 68U;
+constexpr std::size_t kRuntimeBusHealthSize = 28U;
 constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
@@ -1276,6 +1277,7 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         snapshot.sequence == 0U || snapshot.nodes.size() > 127U ||
         snapshot.resources.size() > kMaximumRuntimeSnapshotResources ||
         snapshot.node_issues.size() > 127U ||
+        snapshot.bus_health.size() > kMaximumRuntimeSnapshotResources ||
         snapshot.clocks.size() != snapshot.nodes.size()) {
         throw IpcException("Runtime 快照版本、序号或条目数量无效");
     }
@@ -1296,14 +1298,15 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         snapshot.resources.size() * kRuntimeResourceSize +
         snapshot.node_issues.size() * kRuntimeNodeIssueSize;
     const auto total_size = expected_size +
-        snapshot.clocks.size() * kRuntimeClockQualitySize;
+        snapshot.clocks.size() * kRuntimeClockQualitySize +
+        snapshot.bus_health.size() * kRuntimeBusHealthSize;
     if (total_size > kMaximumIpcBodySize) {
         throw IpcException("Runtime 快照超过本地 IPC 字节上限");
     }
     std::vector<std::uint8_t> body;
     body.reserve(total_size);
     append_u16(body, snapshot.version);
-    append_u16(body, 0U);
+    append_u16(body, static_cast<std::uint16_t>(snapshot.bus_health.size()));
     append_u64(body, snapshot.sequence);
     append_u16(body, static_cast<std::uint16_t>(snapshot.nodes.size()));
     append_u16(body, static_cast<std::uint16_t>(snapshot.resources.size()));
@@ -1408,18 +1411,47 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         append_u64(body, clock.sample_age_ns);
         append_u64(body, clock.last_sample_host_time_ns);
     }
+    std::vector<std::uint64_t> bus_identities;
+    for (const auto& health : snapshot.bus_health) {
+        const auto identity = (static_cast<std::uint64_t>(health.node_id) << 32U) |
+                              health.resource_id;
+        const auto status = static_cast<std::uint8_t>(health.last_status);
+        if (health.node_id == 0U || health.node_id > 127U ||
+            health.resource_id == 0U || status > static_cast<std::uint8_t>(
+                protocol::BusTransactionStatus::LimitExceeded) ||
+            (!health.last_status_valid &&
+             (status != 0U || health.consecutive_failures != 0U ||
+              health.peak_consecutive_failures != 0U ||
+              health.last_result_time_us != 0U)) ||
+            health.consecutive_failures > health.peak_consecutive_failures ||
+            std::find(node_ids.begin(), node_ids.end(), health.node_id) ==
+                node_ids.end() ||
+            std::find(bus_identities.begin(), bus_identities.end(), identity) !=
+                bus_identities.end()) {
+            throw IpcException("Runtime 总线健康项无效");
+        }
+        bus_identities.push_back(identity);
+        append_u32(body, health.node_id);
+        append_u32(body, health.resource_id);
+        body.push_back(static_cast<std::uint8_t>(health.last_status_valid));
+        body.push_back(status);
+        append_u16(body, 0U);
+        append_u32(body, health.consecutive_failures);
+        append_u32(body, health.peak_consecutive_failures);
+        append_u64(body, health.last_result_time_us);
+    }
     return body;
 }
 
 IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
     const std::vector<std::uint8_t>& body) {
     if (body.size() < kRuntimeSnapshotHeaderSize ||
-        get_u16(body.data()) != kRuntimeSnapshotIpcVersion ||
-        get_u16(body.data() + 2U) != 0U) {
+        get_u16(body.data()) != kRuntimeSnapshotIpcVersion) {
         throw IpcException("Runtime 快照响应版本或头部无效");
     }
     IpcRuntimeSnapshot snapshot;
     snapshot.version = get_u16(body.data());
+    const auto bus_health_count = get_u16(body.data() + 2U);
     snapshot.sequence = get_u64(body.data() + 4U);
     const auto node_count = get_u16(body.data() + 12U);
     const auto resource_count = get_u16(body.data() + 14U);
@@ -1432,10 +1464,12 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
                            kRuntimeResourceSize +
         static_cast<std::size_t>(node_issue_count) * kRuntimeNodeIssueSize;
     const auto total_size = expected_size +
-        static_cast<std::size_t>(clock_count) * kRuntimeClockQualitySize;
+        static_cast<std::size_t>(clock_count) * kRuntimeClockQualitySize +
+        static_cast<std::size_t>(bus_health_count) * kRuntimeBusHealthSize;
     if (snapshot.sequence == 0U || node_count > 127U ||
         resource_count > kMaximumRuntimeSnapshotResources ||
         node_issue_count > 127U || clock_count != node_count ||
+        bus_health_count > kMaximumRuntimeSnapshotResources ||
         total_size != body.size()) {
         throw IpcException("Runtime 快照响应长度或条目数量无效");
     }
@@ -1574,6 +1608,39 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
         clock_nodes.push_back(clock.node_id);
         snapshot.clocks.push_back(clock);
         cursor += static_cast<std::ptrdiff_t>(kRuntimeClockQualitySize);
+    }
+    std::vector<std::uint64_t> bus_identities;
+    snapshot.bus_health.reserve(bus_health_count);
+    for (std::size_t index = 0U; index < bus_health_count; ++index) {
+        IpcRuntimeBusHealth health;
+        health.node_id = get_u32(&*cursor);
+        health.resource_id = get_u32(&cursor[4]);
+        const auto valid = cursor[8];
+        const auto status = cursor[9];
+        health.last_status_valid = valid != 0U;
+        health.last_status = static_cast<protocol::BusTransactionStatus>(status);
+        health.consecutive_failures = get_u32(&cursor[12]);
+        health.peak_consecutive_failures = get_u32(&cursor[16]);
+        health.last_result_time_us = get_u64(&cursor[20]);
+        const auto identity = (static_cast<std::uint64_t>(health.node_id) << 32U) |
+                              health.resource_id;
+        if (valid > 1U || get_u16(&cursor[10]) != 0U ||
+            status > static_cast<std::uint8_t>(
+                protocol::BusTransactionStatus::LimitExceeded) ||
+            (!health.last_status_valid &&
+             (status != 0U || health.consecutive_failures != 0U ||
+              health.peak_consecutive_failures != 0U ||
+              health.last_result_time_us != 0U)) ||
+            health.consecutive_failures > health.peak_consecutive_failures ||
+            std::find(node_ids.begin(), node_ids.end(), health.node_id) ==
+                node_ids.end() ||
+            std::find(bus_identities.begin(), bus_identities.end(), identity) !=
+                bus_identities.end()) {
+            throw IpcException("Runtime 总线健康项无效");
+        }
+        bus_identities.push_back(identity);
+        snapshot.bus_health.push_back(health);
+        cursor += static_cast<std::ptrdiff_t>(kRuntimeBusHealthSize);
     }
     return snapshot;
 }

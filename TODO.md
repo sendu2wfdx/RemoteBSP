@@ -48,7 +48,8 @@
   构建记录、ELF、板卡 target、探针选择和四重预期身份；计划复核会重新读取受保护产物，
   不访问硬件，也不把预检记作烧录或回读成功；
   USB Katapult 也已补齐等价离线计划，额外绑定 serial-by-id、flashtool 路径/摘要、
-  8 KiB APP 布局和独立恢复阶段的传输互斥声明；CAN Katapult 的版本化离线计划仍待补齐；
+  8 KiB APP 布局和独立恢复阶段的传输互斥声明；CAN Katapult 离线计划绑定接口、定向
+  Katapult UUID、工具摘要和禁止广播声明，并明确恢复 UUID 不等于运行 APP 设备 UUID；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，
@@ -248,7 +249,9 @@ TMC2209 的 40000 bit/s 单线通信是运动模块的可选专用后端，不�
   被限速设备不阻塞同父总线其他设备；主机准入层已增加按节点/设备隔离的接纳、限速、
   父总线忙与合同不匹配饱和计数，并以稳定健康指标 ID `0x8008`～`0x800b` 汇总发布；
   远端明确回报的 NACK/Timeout/Fault 已按资源隔离累计并以 `0x800c`～`0x800e` 发布，
-  未知状态透明转发且不归类，计数明确不作为实体波形证据。下一步由 Studio 生成经
+  未知状态透明转发且不归类，计数明确不作为实体波形证据；版本 2 总线快照及版本 3
+  Runtime IPC/CLI 已提供最后明确状态与单调时间、当前连续失败和历史峰值，`Ok` 恢复只
+  清当前连续失败，节点代次失效清所属历史。下一步由 Studio 生成经
   实体能力确认的总线静态表并逐板
   实现/验收 HAL；
 - SPI 转 UART/GPIO/I2C 等板级适配器暴露转换后的统一资源，隐藏内部 SPI；

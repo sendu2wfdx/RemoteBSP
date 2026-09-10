@@ -96,7 +96,7 @@ value = json.load(sys.stdin)
 assert value["schema_version"] == 1
 assert value["command"] == "runtime-snapshot"
 data = value["data"]
-assert data["snapshot_version"] == 2
+assert data["snapshot_version"] == 3
 assert data["snapshot_sequence"] > 0
 assert len(data["nodes"]) == 1
 assert len(data["resources"]) == 35
