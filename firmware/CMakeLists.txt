@@ -107,6 +107,7 @@ target_include_directories(remotebsp_embedded_core PUBLIC
     "${GENERATED_DIR}"
 )
 target_compile_options(remotebsp_embedded_core PRIVATE
+    -Os
     -Wall -Wextra -Wpedantic -Werror
     -ffunction-sections -fdata-sections
 )

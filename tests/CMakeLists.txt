@@ -815,3 +815,8 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/firmware/tests/test_genconfig.py"
 )
+add_test(
+    NAME firmware_flash_layout_tests
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/firmware/tests/test_flash_layout.py"
+)

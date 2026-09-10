@@ -16,6 +16,10 @@ build_one() {
         -DCMAKE_TOOLCHAIN_FILE="${root_dir}/cmake/arm-none-eabi-toolchain.cmake" \
         -DRBSP_CONFIG="${root_dir}/${config}"
     cmake --build "${build_dir}" --parallel "${build_jobs}"
+    python3 "${root_dir}/scripts/verify_flash_layout.py" \
+        --config "${root_dir}/${config}" \
+        --elf "${build_dir}/${artifact}.elf" \
+        --map "${build_dir}/${artifact}.map"
     cp "${build_dir}/${artifact}.elf" \
         "${root_dir}/out/${output_artifact}.elf"
     cp "${build_dir}/${artifact}.hex" \
@@ -39,6 +43,10 @@ build_studio_identity() {
         -DRBSP_STATIC_RESOURCE_TABLE="${input_dir}/remotebsp_static_resources.h" \
         -DRBSP_FIRMWARE_INPUT_SHA256="${input_sha}"
     cmake --build "${build_dir}" --parallel "${build_jobs}"
+    python3 "${root_dir}/scripts/verify_flash_layout.py" \
+        --config "${input_dir}/firmware.config" \
+        --elf "${build_dir}/remotebsp-stm32g431cbu6.elf" \
+        --map "${build_dir}/remotebsp-stm32g431cbu6.map"
     for suffix in elf hex bin map; do
         cp "${build_dir}/remotebsp-stm32g431cbu6.${suffix}" \
             "${root_dir}/out/remotebsp-stm32g431-weact-core-studio-identity.${suffix}"
@@ -164,6 +172,10 @@ case "${target}" in
         bash "$0" weact-stm32g431cbu6-core-bus-hal
         bash "$0" stm32f072-bus-hal
         bash "$0" stm32f103-bus-hal
+        bash "$0" mellow-fly-d5-katapult
+        bash "$0" weact-bluepill-plus-katapult
+        bash "$0" weact-stm32g431cbu6-core-katapult
+        bash "$0" weact-stm32g431cbu6-core-usb
         bash "$0" weact-stm32g431cbu6-core-studio-identity
         python3 "${root_dir}/scripts/verify_ci_firmware_matrix.py"
         ;;
