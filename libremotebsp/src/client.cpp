@@ -644,6 +644,31 @@ RuntimeOperationOutcome Client::runtime_bus_resource_reset_operation(
         toolbusd::decode_ipc_runtime_operation_outcome(response.body));
 }
 
+RuntimeOperationOutcome Client::runtime_motion_group_cancel_operation(
+    const std::array<std::uint8_t,16>& daemon_instance_id,
+    const std::array<std::uint8_t,16>& lease_id,
+    const std::string& owner_key_id, const std::string& idempotency_key,
+    std::uint64_t transaction_id, std::uint32_t group_id,
+    std::uint32_t plan_generation, std::uint32_t deadline_ms) const {
+    toolbusd::RuntimeMotionGroupCancelRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    request.idempotency_key = idempotency_key;
+    request.transaction_id = transaction_id;
+    request.group_id = group_id;
+    request.plan_generation = plan_generation;
+    request.deadline_ms = deadline_ms;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_motion_group_cancel_operation_request(
+        socket.get(), request);
+    const auto response = toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok)
+        throw_structured_ipc_error(response, "Runtime 运动组停止操作失败");
+    return public_operation_outcome(
+        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+}
+
 RuntimeOperationOutcome Client::runtime_operation_status(
     const std::array<std::uint8_t, 16>& daemon_instance_id,
     const std::string& owner_key_id,

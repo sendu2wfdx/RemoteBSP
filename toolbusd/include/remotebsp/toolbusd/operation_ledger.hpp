@@ -34,6 +34,7 @@ enum class OperationKind : std::uint8_t {
     RuntimeTimedBitstreamFrame = 6U,
     RuntimeTimedBitstreamStop = 7U,
     RuntimeBusResourceReset = 8U,
+    RuntimeMotionGroupCancel = 9U,
 };
 
 enum class OperationState : std::uint8_t {
@@ -200,6 +201,19 @@ struct RuntimeBusResourceResetOperation {
     std::uint32_t resource_id{};
 };
 
+// 运动组停止的账本身份不借用资源字段。事务三元组进入请求摘要，确保同一
+// owner/lease/idempotency_key 回放到不同运动组时稳定冲突。
+struct RuntimeMotionGroupCancelOperation {
+    OperationIdentity daemon_origin{};
+    OperationIdentity lease_id{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{};
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+};
+
 struct OperationTerminalResult {
     OperationTerminalResult() = default;
     OperationTerminalResult(std::optional<std::uint32_t> object,
@@ -235,6 +249,9 @@ struct OperationRecord {
     std::optional<bool> requested_active_low;
     // v3仅保存定时位流参数或整帧正文的摘要，不持久化帧正文。
     std::optional<OperationDigest> requested_payload_digest;
+    std::uint64_t motion_transaction_id{};
+    std::uint32_t motion_group_id{};
+    std::uint32_t motion_plan_generation{};
     OperationTerminalResult result;
     std::uint64_t sequence{};
     std::uint64_t recorded_at_ms{};
@@ -303,6 +320,8 @@ public:
         const RuntimeTimedBitstreamStopOperation& operation);
     static OperationDigest derive_operation_id(
         const RuntimeBusResourceResetOperation& operation);
+    static OperationDigest derive_operation_id(
+        const RuntimeMotionGroupCancelOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeGpioWriteOperation& operation);
     static OperationDigest derive_request_digest(
@@ -320,6 +339,8 @@ public:
         const RuntimeTimedBitstreamStopOperation& operation);
     static OperationDigest derive_request_digest(
         const RuntimeBusResourceResetOperation& operation);
+    static OperationDigest derive_request_digest(
+        const RuntimeMotionGroupCancelOperation& operation);
 
     OperationBeginResult begin_gpio_write(
         const RuntimeGpioWriteOperation& operation);
@@ -338,6 +359,8 @@ public:
         const RuntimeTimedBitstreamStopOperation& operation);
     OperationBeginResult begin_bus_resource_reset(
         const RuntimeBusResourceResetOperation& operation);
+    OperationBeginResult begin_motion_group_cancel(
+        const RuntimeMotionGroupCancelOperation& operation);
 
     OperationRecord finish(const OperationDigest& operation_id,
                            const OperationDigest& request_digest,

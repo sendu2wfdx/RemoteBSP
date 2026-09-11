@@ -1119,6 +1119,55 @@ void check_bus_resource_reset_v4_identity_and_scope_recovery() {
           operation.resource_id);
 }
 
+void check_motion_group_cancel_identity_contract() {
+    RuntimeMotionGroupCancelOperation operation{
+        identity(0x11U), identity(0x22U), "owner", "stop-7", 1U,
+        0x1122334455667788ULL, 7U, 3U};
+    const auto operation_id = OperationLedger::derive_operation_id(operation);
+    const auto request_digest = OperationLedger::derive_request_digest(operation);
+
+    auto changed_group = operation;
+    changed_group.group_id = 8U;
+    CHECK(OperationLedger::derive_operation_id(changed_group) == operation_id);
+    CHECK(OperationLedger::derive_request_digest(changed_group) != request_digest);
+
+    auto changed_generation = operation;
+    changed_generation.plan_generation = 4U;
+    CHECK(OperationLedger::derive_operation_id(changed_generation) == operation_id);
+    CHECK(OperationLedger::derive_request_digest(changed_generation) !=
+          request_digest);
+
+    auto changed_owner = operation;
+    changed_owner.owner_key_id = "other";
+    CHECK(OperationLedger::derive_operation_id(changed_owner) != operation_id);
+
+    auto invalid = operation;
+    invalid.transaction_id = 0U;
+    check_error(OperationLedgerError::InvalidRequest, [&] {
+        static_cast<void>(OperationLedger::derive_request_digest(invalid));
+    });
+
+    TestDirectory directory;
+    OperationDigest persisted_id{};
+    {
+        OperationLedger ledger(options(directory));
+        const auto begun = ledger.begin_motion_group_cancel(operation);
+        persisted_id = begun.record.operation_id;
+        CHECK(begun.record.kind == OperationKind::RuntimeMotionGroupCancel);
+        CHECK(begun.record.motion_transaction_id == operation.transaction_id);
+        CHECK(begun.record.motion_group_id == operation.group_id);
+        CHECK(begun.record.motion_plan_generation == operation.plan_generation);
+    }
+    OperationLedger recovered(options(directory));
+    const auto found = recovered.lookup(persisted_id, "owner");
+    CHECK(found.disposition == OperationLookupDisposition::Found);
+    CHECK(found.record->state == OperationState::Unknown);
+    CHECK(found.record->recovery == OperationRecovery::ScopeBlocked);
+    CHECK(found.record->motion_transaction_id == operation.transaction_id);
+    CHECK(found.record->motion_group_id == operation.group_id);
+    CHECK(found.record->motion_plan_generation == operation.plan_generation);
+}
+
 }  // namespace
 
 int main() {
@@ -1150,5 +1199,6 @@ int main() {
     check_mid_log_corruption_fails_closed();
     check_timed_bitstream_v3_digest_only_and_recovery();
     check_bus_resource_reset_v4_identity_and_scope_recovery();
+    check_motion_group_cancel_identity_contract();
     return 0;
 }

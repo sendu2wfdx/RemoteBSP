@@ -129,7 +129,11 @@ GpioInputEvent decode_gpio_input_event(const std::vector<std::uint8_t>& payload)
 
 std::vector<std::uint8_t> encode_gpio_input_event_status(
     const GpioInputEventStatus& value) {
-    require_version(value.version);
+    if (value.version != kGpioInputEventPayloadVersion &&
+        value.version != kGpioInputEventStatusVersion) {
+        throw GpioPayloadException(GpioPayloadError::UnsupportedVersion,
+                                   "GPIO 输入事件状态版本不支持");
+    }
     std::vector<std::uint8_t> output{value.version,
         static_cast<std::uint8_t>(value.queued_events),
         static_cast<std::uint8_t>(value.queued_events >> 8U),
@@ -137,12 +141,18 @@ std::vector<std::uint8_t> encode_gpio_input_event_status(
         static_cast<std::uint8_t>(value.queue_capacity >> 8U)};
     append_u32(output, value.dropped_events);
     append_u32(output, value.last_sequence);
+    if (value.version == kGpioInputEventStatusVersion) {
+        output.push_back(value.exti_diagnostics_available ? 1U : 0U);
+        append_u32(output, value.mailbox_dropped);
+        append_u32(output, value.hints_matched);
+        append_u32(output, value.hints_ignored);
+    }
     return output;
 }
 
 GpioInputEventStatus decode_gpio_input_event_status(
     const std::vector<std::uint8_t>& payload) {
-    if (payload.size() != 13U) {
+    if (payload.size() != 13U && payload.size() != 26U) {
         throw GpioPayloadException(GpioPayloadError::InvalidLength,
                                    "GPIO 输入事件状态载荷无效");
     }
@@ -152,7 +162,17 @@ GpioInputEventStatus decode_gpio_input_event_status(
         static_cast<std::uint16_t>(payload[3] |
             (static_cast<std::uint16_t>(payload[4]) << 8U)),
         read_u32(payload.data() + 5U), read_u32(payload.data() + 9U)};
-    require_version(value.version);
+    if (payload.size() == 13U) {
+        require_version(value.version);
+    } else {
+        if (value.version != kGpioInputEventStatusVersion || payload[13] > 1U)
+            throw GpioPayloadException(GpioPayloadError::UnsupportedVersion,
+                                       "GPIO 输入事件状态版本不支持");
+        value.exti_diagnostics_available = payload[13] != 0U;
+        value.mailbox_dropped = read_u32(payload.data() + 14U);
+        value.hints_matched = read_u32(payload.data() + 18U);
+        value.hints_ignored = read_u32(payload.data() + 22U);
+    }
     return value;
 }
 

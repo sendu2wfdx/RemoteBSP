@@ -23,6 +23,7 @@ constexpr std::uint16_t kRuntimePermissionGpioWrite = 0x0001U;
 constexpr std::uint16_t kRuntimePermissionPwmWrite = 0x0002U;
 constexpr std::uint16_t kRuntimePermissionTimedBitstreamWrite = 0x0004U;
 constexpr std::uint16_t kRuntimePermissionBusReset = 0x0008U;
+constexpr std::uint16_t kRuntimePermissionMotionGroupControl = 0x0010U;
 constexpr std::size_t kMaximumRuntimeControlIdentityBytes = 64U;
 constexpr std::size_t kMaximumRuntimeControlIdempotencyBytes = 64U;
 constexpr std::uint32_t kMaximumRuntimeControlTtlMs = 30000U;
@@ -121,6 +122,19 @@ struct RuntimeBusResourceResetRequest {
     std::uint32_t node_id{};
     std::uint32_t resource_id{};
     std::string idempotency_key;
+};
+
+struct RuntimeMotionGroupCancelRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::string owner_key_id;
+    std::string idempotency_key;
+    std::uint16_t permissions{kRuntimePermissionMotionGroupControl};
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+    std::uint32_t deadline_ms{};
 };
 
 struct RuntimeControlReleaseRequest {

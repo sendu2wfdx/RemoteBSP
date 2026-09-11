@@ -169,6 +169,7 @@ bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
            kind == Kind::RuntimeTimedBitstreamFrameOperation ||
            kind == Kind::RuntimeTimedBitstreamStopOperation ||
            kind == Kind::RuntimeBusResourceResetOperation ||
+           kind == Kind::RuntimeMotionGroupCancelOperation ||
            kind == Kind::RuntimeOperationQuery ||
            kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
@@ -303,6 +304,8 @@ remotebsp::toolbusd::RuntimeOperationOutcome operation_outcome(
             outcome.kind = IpcKind::TimedBitstreamStop; break;
         case LedgerKind::RuntimeBusResourceReset:
             outcome.kind = IpcKind::BusResourceReset; break;
+        case LedgerKind::RuntimeMotionGroupCancel:
+            outcome.kind = IpcKind::MotionGroupCancel; break;
     }
     switch (record.state) {
         case LedgerState::Pending: outcome.state = IpcState::Pending; break;

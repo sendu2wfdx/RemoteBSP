@@ -132,6 +132,20 @@ void test_gpio_input_event_payloads() {
     CHECK(decoded_status.queue_capacity == 8U);
     CHECK(decoded_status.dropped_events == 5U);
     CHECK(decoded_status.last_sequence == 17U);
+    CHECK(!decoded_status.exti_diagnostics_available);
+
+    GpioInputEventStatus exti_status;
+    exti_status.version = kGpioInputEventStatusVersion;
+    exti_status.exti_diagnostics_available = true;
+    exti_status.mailbox_dropped = 2U;
+    exti_status.hints_matched = 7U;
+    exti_status.hints_ignored = 3U;
+    const auto decoded_exti = decode_gpio_input_event_status(
+        encode_gpio_input_event_status(exti_status));
+    CHECK(decoded_exti.exti_diagnostics_available);
+    CHECK(decoded_exti.mailbox_dropped == 2U);
+    CHECK(decoded_exti.hints_matched == 7U);
+    CHECK(decoded_exti.hints_ignored == 3U);
 
     for (const auto& invalid : std::vector<GpioInputSubscription>{
              {1U, 0U, 1U, 0U}, {1U, 4U, 1U, 0U},

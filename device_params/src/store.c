@@ -187,6 +187,28 @@ bool rbsp_device_param_store_init(
     store->backend = *backend;
     store->page_size = backend->erase_size;
     store->active_page = RBSP_DEVICE_PARAM_STORE_NO_PAGE;
+    store->commit_budget = RBSP_DEVICE_PARAM_STORE_DEFAULT_COMMIT_BUDGET;
+    return true;
+}
+
+bool rbsp_device_param_store_set_commit_budget(
+    rbsp_device_param_store* store, uint32_t commit_budget) {
+    if (store == NULL || commit_budget == 0U ||
+        commit_budget < store->generation) return false;
+    store->commit_budget = commit_budget;
+    return true;
+}
+
+bool rbsp_device_param_store_health_get(
+    const rbsp_device_param_store* store,
+    rbsp_device_param_store_health* health) {
+    if (store == NULL || health == NULL) return false;
+    health->persistent_commits = store->generation;
+    health->commit_budget = store->commit_budget;
+    health->write_attempts = store->write_attempts;
+    health->successful_commits = store->successful_commits;
+    health->io_failures = store->io_failures;
+    health->bad_page_mask = store->bad_page_mask;
     return true;
 }
 
@@ -338,6 +360,14 @@ bool rbsp_device_param_store_set(
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_WRITE_ONCE;
         return false;
     }
+    if (store->generation >= store->commit_budget) {
+        store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_BUDGET_EXHAUSTED;
+        return false;
+    }
+    if ((store->bad_page_mask & (uint8_t)(1U << target_page)) != 0U) {
+        store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_BAD_PAGE;
+        return false;
+    }
     memset(workspace, 0xFF, RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE);
     workspace[0] = RBSP_PARAM_MAGIC_0;
     workspace[1] = RBSP_PARAM_MAGIC_1;
@@ -389,15 +419,20 @@ bool rbsp_device_param_store_set(
     write_u16(workspace + 10U, record_count);
     write_u32(workspace + 16U, image_crc(workspace, offset));
 
+    ++store->write_attempts;
     if (!store->backend.erase(store->backend.context,
                               (uint32_t)target_page * store->page_size,
                               store->page_size)) {
+        ++store->io_failures;
+        store->bad_page_mask |= (uint8_t)(1U << target_page);
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_IO;
         return false;
     }
     if (!store->backend.program(store->backend.context,
                                 (uint32_t)target_page * store->page_size,
                                 workspace, 24U)) {
+        ++store->io_failures;
+        store->bad_page_mask |= (uint8_t)(1U << target_page);
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_IO;
         return false;
     }
@@ -411,6 +446,8 @@ bool rbsp_device_param_store_set(
                 RBSP_DEVICE_PARAM_STORE_HEADER_SIZE,
             workspace + RBSP_DEVICE_PARAM_STORE_HEADER_SIZE,
             programmed_length)) {
+        ++store->io_failures;
+        store->bad_page_mask |= (uint8_t)(1U << target_page);
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_IO;
         return false;
     }
@@ -418,13 +455,18 @@ bool rbsp_device_param_store_set(
             store->backend.context,
             (uint32_t)target_page * store->page_size + 24U,
             commit_marker, sizeof(commit_marker))) {
+        ++store->io_failures;
+        store->bad_page_mask |= (uint8_t)(1U << target_page);
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_IO;
         return false;
     }
     if (!rbsp_device_param_store_boot(store) ||
         store->active_page != target_page) {
+        ++store->io_failures;
+        store->bad_page_mask |= (uint8_t)(1U << target_page);
         store->last_error = RBSP_DEVICE_PARAM_STORE_ERROR_CORRUPT;
         return false;
     }
+    ++store->successful_commits;
     return true;
 }

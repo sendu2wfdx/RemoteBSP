@@ -90,6 +90,7 @@ enum class RuntimeOperationKind : std::uint8_t {
     TimedBitstreamFrame = 6U,
     TimedBitstreamStop = 7U,
     BusResourceReset = 8U,
+    MotionGroupCancel = 9U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -424,6 +425,12 @@ public:
         const std::array<std::uint8_t, 16>& expected_node_uuid,
         const std::string& owner_key_id, std::uint32_t resource_id,
         const std::string& idempotency_key) const;
+    RuntimeOperationOutcome runtime_motion_group_cancel_operation(
+        const std::array<std::uint8_t, 16>& daemon_instance_id,
+        const std::array<std::uint8_t, 16>& lease_id,
+        const std::string& owner_key_id, const std::string& idempotency_key,
+        std::uint64_t transaction_id, std::uint32_t group_id,
+        std::uint32_t plan_generation, std::uint32_t deadline_ms) const;
     RuntimeOperationOutcome runtime_operation_status(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::string& owner_key_id,

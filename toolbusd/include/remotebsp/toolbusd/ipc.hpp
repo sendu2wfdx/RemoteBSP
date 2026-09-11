@@ -52,6 +52,7 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeTimedBitstreamFrameOperation = 25,
     RuntimeTimedBitstreamStopOperation = 26,
     RuntimeBusResourceResetOperation = 27,
+    RuntimeMotionGroupCancelOperation = 28,
 };
 constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
@@ -120,6 +121,7 @@ enum class RuntimeOperationKind : std::uint8_t {
     TimedBitstreamFrame = 6U,
     TimedBitstreamStop = 7U,
     BusResourceReset = 8U,
+    MotionGroupCancel = 9U,
 };
 
 enum class RuntimeOperationState : std::uint8_t {
@@ -231,6 +233,7 @@ struct IpcRequest {
     RuntimeTimedBitstreamFrameRequest runtime_timed_bitstream_frame;
     RuntimeTimedBitstreamStopRequest runtime_timed_bitstream_stop;
     RuntimeBusResourceResetRequest runtime_bus_resource_reset;
+    RuntimeMotionGroupCancelRequest runtime_motion_group_cancel;
     RuntimeOperationQuery runtime_operation_query;
     RuntimeOperationLookup runtime_operation_lookup;
     std::string logical_recording_name;
@@ -378,6 +381,8 @@ void write_ipc_runtime_timed_bitstream_stop_operation_request(
     int socket, const RuntimeTimedBitstreamStopRequest& request);
 void write_ipc_runtime_bus_resource_reset_operation_request(
     int socket, const RuntimeBusResourceResetRequest& request);
+void write_ipc_runtime_motion_group_cancel_operation_request(
+    int socket, const RuntimeMotionGroupCancelRequest& request);
 void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request);
 void write_ipc_runtime_operation_lookup_request(
@@ -459,6 +464,10 @@ RuntimeTimedBitstreamStopRequest decode_ipc_runtime_timed_bitstream_stop(
 std::vector<std::uint8_t> encode_ipc_runtime_bus_resource_reset(
     const RuntimeBusResourceResetRequest& request);
 RuntimeBusResourceResetRequest decode_ipc_runtime_bus_resource_reset(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_cancel(
+    const RuntimeMotionGroupCancelRequest& request);
+RuntimeMotionGroupCancelRequest decode_ipc_runtime_motion_group_cancel(
     const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
     const RuntimeOperationQuery& query);

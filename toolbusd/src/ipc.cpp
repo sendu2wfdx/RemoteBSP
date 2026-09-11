@@ -244,7 +244,8 @@ bool valid_operation_kind(RuntimeOperationKind kind) noexcept {
            kind == RuntimeOperationKind::TimedBitstreamConfigure ||
            kind == RuntimeOperationKind::TimedBitstreamFrame ||
            kind == RuntimeOperationKind::TimedBitstreamStop ||
-           kind == RuntimeOperationKind::BusResourceReset;
+           kind == RuntimeOperationKind::BusResourceReset ||
+           kind == RuntimeOperationKind::MotionGroupCancel;
 }
 
 bool valid_operation_error(RuntimeOperationError error) noexcept {
@@ -435,7 +436,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::RuntimeBusResourceResetOperation)) {
+                      IpcRequestKind::RuntimeMotionGroupCancelOperation)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -682,6 +683,18 @@ IpcRequest read_ipc_request(int socket) {
         }
         return request;
     }
+    if (kind == IpcRequestKind::RuntimeMotionGroupCancelOperation) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_motion_group_cancel =
+                decode_ipc_runtime_motion_group_cancel(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
     if (kind == IpcRequestKind::RuntimeOperationQuery) {
         IpcRequest request;
         request.kind = kind;
@@ -846,6 +859,14 @@ void write_ipc_runtime_bus_resource_reset_operation_request(
     auto body = encode_ipc_runtime_bus_resource_reset(request);
     body.insert(body.begin(), static_cast<std::uint8_t>(
         IpcRequestKind::RuntimeBusResourceResetOperation));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_motion_group_cancel_operation_request(
+    int socket, const RuntimeMotionGroupCancelRequest& request) {
+    auto body = encode_ipc_runtime_motion_group_cancel(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+        IpcRequestKind::RuntimeMotionGroupCancelOperation));
     send_body(socket, body);
 }
 
@@ -2209,6 +2230,87 @@ RuntimeBusResourceResetRequest decode_ipc_runtime_bus_resource_reset(
     return request;
 }
 
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_cancel(
+    const RuntimeMotionGroupCancelRequest& request) {
+    const auto zero_identity = [](const auto& value) {
+        return std::all_of(value.begin(), value.end(),
+                           [](std::uint8_t byte) { return byte == 0U; });
+    };
+    if (request.version != kRuntimeControlIpcVersion ||
+        zero_identity(request.daemon_instance_id) ||
+        zero_identity(request.lease_id) ||
+        request.permissions != kRuntimePermissionMotionGroupControl ||
+        request.transaction_id == 0U || request.group_id == 0U ||
+        request.plan_generation == 0U || request.deadline_ms == 0U ||
+        request.deadline_ms > kMaximumRuntimeControlTtlMs ||
+        request.owner_key_id.empty() ||
+        request.owner_key_id.size() > kMaximumRuntimeControlIdentityBytes ||
+        request.idempotency_key.empty() ||
+        request.idempotency_key.size() > kMaximumRuntimeControlIdempotencyBytes) {
+        throw IpcException("Runtime运动组停止IPC字段无效或超出上限");
+    }
+    std::vector<std::uint8_t> body;
+    body.reserve(60U + request.owner_key_id.size() +
+                 request.idempotency_key.size());
+    append_u16(body, request.version);
+    append_u16(body, request.permissions);
+    body.insert(body.end(), request.daemon_instance_id.begin(),
+                request.daemon_instance_id.end());
+    body.insert(body.end(), request.lease_id.begin(), request.lease_id.end());
+    append_u64(body, request.transaction_id);
+    append_u32(body, request.group_id);
+    append_u32(body, request.plan_generation);
+    append_u32(body, request.deadline_ms);
+    body.push_back(static_cast<std::uint8_t>(request.owner_key_id.size()));
+    body.push_back(static_cast<std::uint8_t>(request.idempotency_key.size()));
+    append_u16(body, 0U);
+    body.insert(body.end(), request.owner_key_id.begin(),
+                request.owner_key_id.end());
+    body.insert(body.end(), request.idempotency_key.begin(),
+                request.idempotency_key.end());
+    return body;
+}
+
+RuntimeMotionGroupCancelRequest decode_ipc_runtime_motion_group_cancel(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < 60U || get_u16(body.data()) != kRuntimeControlIpcVersion ||
+        get_u16(body.data() + 2U) != kRuntimePermissionMotionGroupControl ||
+        get_u16(body.data() + 58U) != 0U) {
+        throw IpcException("Runtime运动组停止IPC版本、权限、长度或保留位无效");
+    }
+    const auto owner = static_cast<std::size_t>(body[56U]);
+    const auto idem = static_cast<std::size_t>(body[57U]);
+    if (owner == 0U || owner > kMaximumRuntimeControlIdentityBytes ||
+        idem == 0U || idem > kMaximumRuntimeControlIdempotencyBytes ||
+        body.size() != 60U + owner + idem) {
+        throw IpcException("Runtime运动组停止IPC字符串长度无效");
+    }
+    RuntimeMotionGroupCancelRequest request;
+    request.version = get_u16(body.data());
+    request.permissions = get_u16(body.data() + 2U);
+    std::copy_n(body.begin() + 4U, 16U, request.daemon_instance_id.begin());
+    std::copy_n(body.begin() + 20U, 16U, request.lease_id.begin());
+    request.transaction_id = get_u64(body.data() + 36U);
+    request.group_id = get_u32(body.data() + 44U);
+    request.plan_generation = get_u32(body.data() + 48U);
+    request.deadline_ms = get_u32(body.data() + 52U);
+    const auto zero_identity = [](const auto& value) {
+        return std::all_of(value.begin(), value.end(),
+                           [](std::uint8_t byte) { return byte == 0U; });
+    };
+    if (zero_identity(request.daemon_instance_id) ||
+        zero_identity(request.lease_id) || request.transaction_id == 0U ||
+        request.group_id == 0U ||
+        request.plan_generation == 0U || request.deadline_ms == 0U ||
+        request.deadline_ms > kMaximumRuntimeControlTtlMs) {
+        throw IpcException("Runtime运动组停止IPC事务或期限字段无效");
+    }
+    request.owner_key_id.assign(body.begin() + 60U,
+                                body.begin() + 60U + owner);
+    request.idempotency_key.assign(body.begin() + 60U + owner, body.end());
+    return request;
+}
+
 std::vector<std::uint8_t> encode_ipc_runtime_control_release(
     const RuntimeControlReleaseRequest& request) {
     if (request.version != kRuntimeControlIpcVersion ||
@@ -2518,6 +2620,8 @@ const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept {
             return "timed_bitstream_stop";
         case RuntimeOperationKind::BusResourceReset:
             return "bus_resource_reset";
+        case RuntimeOperationKind::MotionGroupCancel:
+            return "motion_group_cancel";
     }
     return "unknown";
 }

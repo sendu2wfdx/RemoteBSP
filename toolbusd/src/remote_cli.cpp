@@ -185,6 +185,7 @@ remotebsp::RuntimeOperationKind parse_runtime_operation_kind(
     if (text == "timed_bitstream_frame") return remotebsp::RuntimeOperationKind::TimedBitstreamFrame;
     if (text == "timed_bitstream_stop") return remotebsp::RuntimeOperationKind::TimedBitstreamStop;
     if (text == "bus_resource_reset") return remotebsp::RuntimeOperationKind::BusResourceReset;
+    if (text == "motion_group_cancel") return remotebsp::RuntimeOperationKind::MotionGroupCancel;
     throw std::invalid_argument(
         "Runtime 操作类型必须是 gpio_write、control_release、pwm_configure 或 pwm_stop");
 }
@@ -1413,7 +1414,15 @@ int run(const std::vector<std::string>& arguments,
         std::cout << "queued=" << status.queued_events
                   << " capacity=" << status.queue_capacity
                   << " dropped=" << status.dropped_events
-                  << " last_sequence=" << status.last_sequence << '\n';
+                  << " last_sequence=" << status.last_sequence;
+        if (status.exti_diagnostics_available) {
+            std::cout << " exti_mailbox_dropped=" << status.mailbox_dropped
+                      << " exti_hints_matched=" << status.hints_matched
+                      << " exti_hints_ignored=" << status.hints_ignored;
+        } else {
+            std::cout << " exti_diagnostics=unavailable";
+        }
+        std::cout << '\n';
         return 0;
     }
     if (name == "pwm-create" &&

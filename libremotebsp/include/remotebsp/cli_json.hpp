@@ -113,6 +113,8 @@ inline const char* runtime_operation_kind(RuntimeOperationKind kind) {
             return "timed_bitstream_stop";
         case RuntimeOperationKind::BusResourceReset:
             return "bus_resource_reset";
+        case RuntimeOperationKind::MotionGroupCancel:
+            return "motion_group_cancel";
     }
     return "unknown";
 }

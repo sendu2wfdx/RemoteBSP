@@ -21,6 +21,7 @@ extern "C" {
 #define RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY (1U << 1U)
 #define RBSP_DEVICE_PARAM_BACKEND_FLAG_BYTE_REWRITABLE (1U << 2U)
 #define RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST (1U << 3U)
+#define RBSP_DEVICE_PARAM_STORE_DEFAULT_COMMIT_BUDGET 10000U
 
 typedef enum {
     RBSP_DEVICE_PARAM_MEDIUM_INTERNAL_FLASH = 1,
@@ -38,6 +39,8 @@ typedef enum {
     RBSP_DEVICE_PARAM_STORE_ERROR_IO,
     RBSP_DEVICE_PARAM_STORE_ERROR_STALE_GENERATION,
     RBSP_DEVICE_PARAM_STORE_ERROR_WRITE_ONCE,
+    RBSP_DEVICE_PARAM_STORE_ERROR_BUDGET_EXHAUSTED,
+    RBSP_DEVICE_PARAM_STORE_ERROR_BAD_PAGE,
 } rbsp_device_param_store_error;
 
 typedef const uint8_t* (*rbsp_device_param_map_fn)(
@@ -77,7 +80,21 @@ typedef struct {
     uint16_t record_count;
     uint8_t active_page;
     rbsp_device_param_store_error last_error;
+    uint32_t commit_budget;
+    uint32_t write_attempts;
+    uint32_t successful_commits;
+    uint32_t io_failures;
+    uint8_t bad_page_mask;
 } rbsp_device_param_store;
+
+typedef struct {
+    uint32_t persistent_commits;
+    uint32_t commit_budget;
+    uint32_t write_attempts;
+    uint32_t successful_commits;
+    uint32_t io_failures;
+    uint8_t bad_page_mask;
+} rbsp_device_param_store_health;
 
 typedef enum {
     RBSP_DEVICE_PARAM_VALUE_ABSENT = 0,
@@ -89,6 +106,11 @@ bool rbsp_device_param_store_init(
     rbsp_device_param_store* store,
     const rbsp_device_param_backend* backend);
 bool rbsp_device_param_store_boot(rbsp_device_param_store* store);
+bool rbsp_device_param_store_set_commit_budget(
+    rbsp_device_param_store* store, uint32_t commit_budget);
+bool rbsp_device_param_store_health_get(
+    const rbsp_device_param_store* store,
+    rbsp_device_param_store_health* health);
 
 bool rbsp_device_param_store_get(
     const rbsp_device_param_store* store, uint16_t id,

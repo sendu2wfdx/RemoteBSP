@@ -86,6 +86,12 @@ static CAN_HandleTypeDef can_handle;
 static rbsp_core_t remote_core;
 #ifdef CONFIG_GPIO_EXTI0_PA0
 static rbsp_gpio_exti_mailbox_t gpio_exti_mailbox;
+static bool board_gpio_input_event_diagnostics(
+    uint16_t pin, uint32_t* mailbox_dropped) {
+    if (pin != 0U || mailbox_dropped == NULL) return false;
+    *mailbox_dropped = gpio_exti_mailbox.dropped;
+    return true;
+}
 static bool board_gpio_input_event_configure(uint16_t pin, bool enabled) {
     if (pin != 0U) return false;
     GPIO_InitTypeDef init = {0};
@@ -1894,6 +1900,7 @@ int main(void) {
         .gpio_read = board_gpio_read,
 #ifdef CONFIG_GPIO_EXTI0_PA0
         .gpio_input_event_configure = board_gpio_input_event_configure,
+        .gpio_input_event_diagnostics = board_gpio_input_event_diagnostics,
 #endif
 #ifdef CONFIG_REMOTEBSP_BUS
         .bus_resources = rbsp_f103_bus_resources(),

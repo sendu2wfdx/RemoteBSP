@@ -118,6 +118,7 @@ enum {
     RBSP_FRAGMENT_LENGTH_SHIFT = 2,
     RBSP_BOOTLOADER_RESET_DELAY_MS = 100,
     RBSP_GPIO_INPUT_EVENT_VERSION = 1,
+    RBSP_GPIO_INPUT_EVENT_STATUS_VERSION = 2,
     RBSP_GPIO_EDGE_RISING = 1U << 0,
     RBSP_GPIO_EDGE_FALLING = 1U << 1,
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
@@ -3876,15 +3877,29 @@ static bool process_request(rbsp_core_t* core,
                     core, request, RBSP_STATUS_ACCESS_DENIED,
                     request->object_id, NULL, 0U);
             } else {
-                uint8_t data[13U] = {0U};
+                uint8_t data[26U] = {0U};
+                uint16_t data_size = 13U;
                 data[0U] = RBSP_GPIO_INPUT_EVENT_VERSION;
                 put_u16(data + 1U, object->input_event_count);
                 put_u16(data + 3U, object->input_queue_capacity);
                 put_u32(data + 5U, object->input_dropped_events);
                 put_u32(data + 9U, object->input_event_sequence);
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+                uint32_t mailbox_dropped = 0U;
+                if (core->hal.gpio_input_event_diagnostics != NULL &&
+                    core->hal.gpio_input_event_diagnostics(
+                        object->pin, &mailbox_dropped)) {
+                    data[0U] = RBSP_GPIO_INPUT_EVENT_STATUS_VERSION;
+                    data[13U] = 1U; /* EXTI诊断字段可用。 */
+                    put_u32(data + 14U, mailbox_dropped);
+                    put_u32(data + 18U, object->input_hint_matched);
+                    put_u32(data + 22U, core->gpio_input_hint_ignored);
+                    data_size = sizeof(data);
+                }
+#endif
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
-                    request->object_id, data, sizeof(data));
+                    request->object_id, data, data_size);
             }
             break;
         }
@@ -5125,6 +5140,8 @@ bool rbsp_core_gpio_input_hint(rbsp_core_t* core, uint16_t pin) {
         if (object->used && object->input_events_enabled &&
             object->pin == pin) {
             object->input_irq_hint = true;
+            if (object->input_hint_matched != UINT32_MAX)
+                ++object->input_hint_matched;
             return true;
         }
     }
@@ -5132,6 +5149,8 @@ bool rbsp_core_gpio_input_hint(rbsp_core_t* core, uint16_t pin) {
     (void)core;
     (void)pin;
 #endif
+    if (core != NULL && core->gpio_input_hint_ignored != UINT32_MAX)
+        ++core->gpio_input_hint_ignored;
     return false;
 }
 #endif

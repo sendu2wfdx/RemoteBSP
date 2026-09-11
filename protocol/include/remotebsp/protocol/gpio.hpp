@@ -9,6 +9,7 @@ namespace remotebsp::protocol {
 // GPIO_CLOSE 使用独立载荷版本，便于未来扩展关闭策略而不改变命令号。
 constexpr std::uint8_t kGpioClosePayloadVersion = 1U;
 constexpr std::uint8_t kGpioInputEventPayloadVersion = 1U;
+constexpr std::uint8_t kGpioInputEventStatusVersion = 2U;
 constexpr std::uint8_t kGpioEdgeRising = 1U << 0U;
 constexpr std::uint8_t kGpioEdgeFalling = 1U << 1U;
 constexpr std::uint16_t kMaximumGpioInputEventQueueCapacity = 64U;
@@ -39,6 +40,10 @@ struct GpioInputEventStatus {
     std::uint16_t queue_capacity{};
     std::uint32_t dropped_events{};
     std::uint32_t last_sequence{};
+    bool exti_diagnostics_available{};
+    std::uint32_t mailbox_dropped{};
+    std::uint32_t hints_matched{};
+    std::uint32_t hints_ignored{};
 };
 
 enum class GpioPayloadError {

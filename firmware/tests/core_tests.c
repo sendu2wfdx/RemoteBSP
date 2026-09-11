@@ -248,6 +248,12 @@ static bool fake_gpio_input_event_configure(uint16_t pin, bool enabled) {
     else ++gpio_exti_disable_count;
     return true;
 }
+static bool fake_gpio_input_event_diagnostics(
+    uint16_t pin, uint32_t* mailbox_dropped) {
+    if (pin != 5U || mailbox_dropped == NULL) return false;
+    *mailbox_dropped = 4U;
+    return true;
+}
 
 #if defined(CONFIG_REMOTEBSP_MOTION)
 static uint64_t fake_nanoseconds(void) {
@@ -620,6 +626,7 @@ static void test_gpio_input_events(const rbsp_hal_t* hal,
     assert(gpio_exti_enable_count == 1U);
     assert(rbsp_core_gpio_input_hint(&core, 5U));
     assert(!rbsp_core_gpio_input_hint(&core, 6U));
+    assert(rbsp_core_gpio_input_hint(&core, 5U));
 
     /* 1 ms 往返抖动不形成稳定边沿。 */
     can_send_must_fail = true;
@@ -658,6 +665,10 @@ static void test_gpio_input_events(const rbsp_hal_t* hal,
     assert(get_u16(response + 28U) == 2U);
     assert(get_u32(response + 30U) == 1U);
     assert(get_u32(response + 34U) == 3U);
+    assert(response[25U] == 2U && response[38U] == 1U);
+    assert(get_u32(response + 39U) == 4U);
+    assert(get_u32(response + 43U) == 2U);
+    assert(get_u32(response + 47U) == 1U);
 
     clear_sent();
     now_ms = 43U;
@@ -842,6 +853,7 @@ int main(void) {
         .gpio_read = fake_gpio_read,
 #ifdef CONFIG_REMOTEBSP_GPIO_EXTI
         .gpio_input_event_configure = fake_gpio_input_event_configure,
+        .gpio_input_event_diagnostics = fake_gpio_input_event_diagnostics,
 #endif
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,

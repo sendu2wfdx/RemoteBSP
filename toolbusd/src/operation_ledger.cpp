@@ -30,7 +30,7 @@ constexpr std::size_t kRecordTrailerBytes = 12U;
 constexpr std::size_t kMaximumRecordBytes = 1024U;
 constexpr std::size_t kManifestBytes = 152U;
 constexpr std::uint16_t kLedgerFormatVersion = 2U;
-constexpr std::uint16_t kRecordFormatVersion = 4U;
+constexpr std::uint16_t kRecordFormatVersion = 5U;
 constexpr std::uint64_t kCommitMarker = 0x314D4F434C4F4252ULL;
 constexpr char kRecordMagic[8] = {'R', 'B', 'O', 'P', 'L', 'G', '1', '\0'};
 constexpr char kManifestMagic[8] = {'R', 'B', 'O', 'L', 'M', 'F', '1', '\0'};
@@ -307,7 +307,8 @@ bool valid_kind(std::uint8_t value) noexcept {
            value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamConfigure) ||
            value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamFrame) ||
            value == static_cast<std::uint8_t>(OperationKind::RuntimeTimedBitstreamStop) ||
-           value == static_cast<std::uint8_t>(OperationKind::RuntimeBusResourceReset);
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeBusResourceReset) ||
+           value == static_cast<std::uint8_t>(OperationKind::RuntimeMotionGroupCancel);
 }
 
 bool parse_segment_name(const std::string& name,
@@ -352,7 +353,8 @@ bool valid_state_recovery(OperationKind kind, OperationState state,
             kind == OperationKind::RuntimeControlRelease ||
             kind == OperationKind::RuntimePwmStop ||
             kind == OperationKind::RuntimeTimedBitstreamStop ||
-            kind == OperationKind::RuntimeBusResourceReset;
+            kind == OperationKind::RuntimeBusResourceReset ||
+            kind == OperationKind::RuntimeMotionGroupCancel;
         return recovery == (closes_scope ? OperationRecovery::SafeClosed
                                          : OperationRecovery::None);
     }
@@ -702,6 +704,24 @@ public:
         record.idempotency_key = operation.idempotency_key;
         record.permissions = operation.permissions;
         record.node_id = operation.node_id;
+        return begin(std::move(record));
+    }
+
+    OperationBeginResult begin_motion_group_cancel(
+        const RuntimeMotionGroupCancelOperation& operation) {
+        const auto digest = OperationLedger::derive_request_digest(operation);
+        OperationRecord record;
+        record.operation_id = OperationLedger::derive_operation_id(operation);
+        record.request_digest = digest;
+        record.kind = OperationKind::RuntimeMotionGroupCancel;
+        record.daemon_origin = operation.daemon_origin;
+        record.lease_id = operation.lease_id;
+        record.owner_key_id = operation.owner_key_id;
+        record.idempotency_key = operation.idempotency_key;
+        record.permissions = operation.permissions;
+        record.motion_transaction_id = operation.transaction_id;
+        record.motion_group_id = operation.group_id;
+        record.motion_plan_generation = operation.plan_generation;
         return begin(std::move(record));
     }
 
@@ -1434,6 +1454,9 @@ private:
         payload.push_back(0U);
         put_u16(payload, 0U);
         put_array(payload, record.requested_payload_digest.value_or(OperationDigest{}));
+        put_u64(payload, record.motion_transaction_id);
+        put_u32(payload, record.motion_group_id);
+        put_u32(payload, record.motion_plan_generation);
         append_text(payload, record.owner_key_id);
         append_text(payload, record.idempotency_key);
         return payload;
@@ -1564,6 +1587,10 @@ private:
             decoded.record.kind == OperationKind::RuntimeBusResourceReset) {
             throw_corrupt("OperationLedger旧版记录包含未定义的总线资源复位类型");
         }
+        if (format_version < 5U &&
+            decoded.record.kind == OperationKind::RuntimeMotionGroupCancel) {
+            throw_corrupt("OperationLedger旧版记录包含未定义的运动组停止类型");
+        }
         if (!valid_state_recovery(decoded.record.kind, decoded.record.state,
                                   decoded.record.recovery)) {
             throw_corrupt("OperationLedger状态与恢复证据组合无效");
@@ -1589,7 +1616,8 @@ private:
     void decode_full_payload(DecodedRecord& decoded, const std::uint8_t* data,
                              std::size_t size, std::uint16_t format_version) const {
         const std::size_t fixed = format_version == 1U ? 78U :
-                                  (format_version == 2U ? 92U : 128U);
+                                  (format_version == 2U ? 92U :
+                                   (format_version < 5U ? 128U : 144U));
         if (size < fixed || !valid_kind(data[0]) ||
             (format_version == 1U && (data[1] & 0xf8U) != 0U) ||
             (format_version >= 2U && (data[1] & 0x80U) != 0U) ||
@@ -1663,6 +1691,17 @@ private:
                            digest.begin(), digest.end(),
                            [](std::uint8_t value) { return value == 0U; })) {
                 throw_corrupt("OperationLedger缺失定时位流摘要标志");
+            }
+        }
+        if (format_version >= 5U) {
+            record.motion_transaction_id = get_u64(data + 128U);
+            record.motion_group_id = get_u32(data + 136U);
+            record.motion_plan_generation = get_u32(data + 140U);
+            if (record.kind != OperationKind::RuntimeMotionGroupCancel &&
+                (record.motion_transaction_id != 0U ||
+                 record.motion_group_id != 0U ||
+                 record.motion_plan_generation != 0U)) {
+                throw_corrupt("OperationLedger非运动记录包含运动组身份");
             }
         }
         }
@@ -1818,6 +1857,24 @@ private:
                 if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
                     OperationLedger::derive_request_digest(operation) != record.request_digest)
                     throw_corrupt("总线资源复位记录身份摘要不匹配");
+            } else if (record.kind == OperationKind::RuntimeMotionGroupCancel) {
+                if (record.requested_payload_digest.has_value() ||
+                    record.requested_value.has_value() ||
+                    record.requested_frequency_hz.has_value() ||
+                    record.requested_duty.has_value() ||
+                    record.requested_active_low.has_value() ||
+                    record.admission_id != 0U || record.node_id != 0U ||
+                    record.scope.resource_id != 0U ||
+                    !is_zero(record.scope.expected_node_uuid))
+                    throw_corrupt("运动组停止记录字段组合无效");
+                RuntimeMotionGroupCancelOperation operation{
+                    record.daemon_origin, record.lease_id,
+                    record.owner_key_id, record.idempotency_key,
+                    record.permissions, record.motion_transaction_id,
+                    record.motion_group_id, record.motion_plan_generation};
+                if (OperationLedger::derive_operation_id(operation) != record.operation_id ||
+                    OperationLedger::derive_request_digest(operation) != record.request_digest)
+                    throw_corrupt("运动组停止记录身份摘要不匹配");
             } else {
                 if (record.requested_value.has_value() ||
                     record.idempotency_key != "release:v1") {
@@ -2533,6 +2590,9 @@ DEFINE_TIMED_OPERATION_ID(RuntimeTimedBitstreamStopOperation,
 DEFINE_TIMED_OPERATION_ID(RuntimeBusResourceResetOperation,
                           OperationKind::RuntimeBusResourceReset,
                           "总线资源复位")
+DEFINE_TIMED_OPERATION_ID(RuntimeMotionGroupCancelOperation,
+                          OperationKind::RuntimeMotionGroupCancel,
+                          "运动组停止")
 #undef DEFINE_TIMED_OPERATION_ID
 
 namespace {
@@ -2619,6 +2679,28 @@ OperationDigest OperationLedger::derive_request_digest(
         operation.expected_node_uuid, operation.owner_key_id,
         operation.permissions, operation.node_id, operation.resource_id,
         0x88U, nullptr);
+}
+
+OperationDigest OperationLedger::derive_request_digest(
+    const RuntimeMotionGroupCancelOperation& operation) {
+    const auto operation_id = derive_operation_id(operation);
+    if (operation.permissions == 0U || operation.transaction_id == 0U ||
+        operation.group_id == 0U || operation.plan_generation == 0U) {
+        throw OperationLedgerException(OperationLedgerError::InvalidRequest,
+                                       "运动组停止请求摘要字段无效");
+    }
+    std::vector<std::uint8_t> canonical;
+    append_domain(canonical);
+    canonical.push_back(0x89U);
+    put_array(canonical, operation_id);
+    put_array(canonical, operation.daemon_origin);
+    put_array(canonical, operation.lease_id);
+    append_text(canonical, operation.owner_key_id);
+    put_u16(canonical, operation.permissions);
+    put_u64(canonical, operation.transaction_id);
+    put_u32(canonical, operation.group_id);
+    put_u32(canonical, operation.plan_generation);
+    return sha256(canonical);
 }
 
 OperationDigest OperationLedger::derive_request_digest(
@@ -2764,6 +2846,11 @@ OperationBeginResult OperationLedger::begin_timed_bitstream_stop(
 OperationBeginResult OperationLedger::begin_bus_resource_reset(
     const RuntimeBusResourceResetOperation& operation) {
     return impl_->begin_bus_resource_reset(operation);
+}
+
+OperationBeginResult OperationLedger::begin_motion_group_cancel(
+    const RuntimeMotionGroupCancelOperation& operation) {
+    return impl_->begin_motion_group_cancel(operation);
 }
 
 OperationRecord OperationLedger::finish(

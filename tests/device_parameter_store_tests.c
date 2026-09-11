@@ -274,6 +274,7 @@ static void test_external_eeprom_contract_and_fault_recovery(void) {
     backend = make_eeprom_backend(&memory);
     assert(rbsp_device_param_store_init(&store, &backend));
     assert(rbsp_device_param_store_boot(&store));
+    assert(rbsp_device_param_store_set_commit_budget(&store, 2U));
     assert(rbsp_device_param_store_set(&store, 0U,
         RBSP_DEVICE_PARAM_DEVICE_NAME, first, sizeof(first) - 1U,
         workspace, sizeof(workspace)));
@@ -288,12 +289,70 @@ static void test_external_eeprom_contract_and_fault_recovery(void) {
         &store, RBSP_DEVICE_PARAM_DEVICE_NAME, &record));
     assert(record.length == sizeof(first) - 1U &&
            memcmp(record.value, first, record.length) == 0);
+    assert(store.bad_page_mask != 0U);
+    assert(!rbsp_device_param_store_set(&store, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(store.last_error == RBSP_DEVICE_PARAM_STORE_ERROR_BAD_PAGE);
+
+    /* EEPROM Mock重启后由持久generation恢复并执行预算门禁。 */
+    assert(rbsp_device_param_store_init(&store, &backend));
+    assert(rbsp_device_param_store_boot(&store));
+    assert(rbsp_device_param_store_set_commit_budget(&store, 1U));
+    assert(!rbsp_device_param_store_set(&store, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(store.last_error == RBSP_DEVICE_PARAM_STORE_ERROR_BUDGET_EXHAUSTED);
 
     backend.contract_version = 0U;
     assert(!rbsp_device_param_store_init(&store, &backend));
     backend = make_eeprom_backend(&memory);
     backend.capability_flags |= RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY;
     assert(!rbsp_device_param_store_init(&store, &backend));
+}
+
+static void test_endurance_budget_and_bad_page_isolation(void) {
+    memory_flash flash;
+    rbsp_device_param_backend backend;
+    rbsp_device_param_store store;
+    rbsp_device_param_store rebooted;
+    rbsp_device_param_store_health health;
+    uint8_t workspace[RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE];
+    static const uint8_t first[] = "budget-a";
+    static const uint8_t second[] = "budget-b";
+    memset(&flash, 0xFF, sizeof(flash));
+    flash.fail_next_program = false;
+    backend = make_backend(&flash);
+    assert(rbsp_device_param_store_init(&store, &backend));
+    assert(rbsp_device_param_store_boot(&store));
+    assert(rbsp_device_param_store_set_commit_budget(&store, 1U));
+    assert(rbsp_device_param_store_set(&store, 0U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, first, sizeof(first) - 1U,
+        workspace, sizeof(workspace)));
+    assert(!rbsp_device_param_store_set(&store, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(store.last_error == RBSP_DEVICE_PARAM_STORE_ERROR_BUDGET_EXHAUSTED);
+    assert(rbsp_device_param_store_health_get(&store, &health));
+    assert(health.persistent_commits == 1U && health.successful_commits == 1U &&
+           health.write_attempts == 1U);
+
+    /* 新实例从介质generation恢复预算事实，但运行时坏页状态不被伪造为持久证据。 */
+    assert(rbsp_device_param_store_init(&rebooted, &backend));
+    assert(rbsp_device_param_store_boot(&rebooted));
+    assert(rbsp_device_param_store_set_commit_budget(&rebooted, 2U));
+    flash.fail_next_program = true;
+    assert(!rbsp_device_param_store_set(&rebooted, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(rebooted.last_error == RBSP_DEVICE_PARAM_STORE_ERROR_IO);
+    assert(rebooted.bad_page_mask == (uint8_t)(1U << 1U));
+    assert(!rbsp_device_param_store_set(&rebooted, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(rebooted.last_error == RBSP_DEVICE_PARAM_STORE_ERROR_BAD_PAGE);
+    assert(rbsp_device_param_store_boot(&rebooted));
+    assert(rebooted.generation == 1U && rebooted.bad_page_mask != 0U);
 }
 
 static void test_compatibility_golden_images(void) {
@@ -414,6 +473,7 @@ int main(void) {
     test_compatibility_golden_images();
     test_adc_calibration_formats();
     test_external_eeprom_contract_and_fault_recovery();
+    test_endurance_budget_and_bad_page_isolation();
 
     memset(&flash, 0xFF, sizeof(flash));
     flash.fail_next_program = false;

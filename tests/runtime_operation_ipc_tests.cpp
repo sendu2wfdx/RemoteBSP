@@ -900,6 +900,56 @@ void test_bus_resource_reset_request_roundtrip_and_dispatch() {
     });
 }
 
+void test_motion_group_cancel_payload_is_strict_and_lossless() {
+    toolbusd::RuntimeMotionGroupCancelRequest request;
+    request.daemon_instance_id = filled<16>(0x11U);
+    request.lease_id = filled<16>(0x22U);
+    request.owner_key_id = "runtime-owner";
+    request.idempotency_key = "motion-stop-7";
+    request.transaction_id = 0x1122334455667788ULL;
+    request.group_id = 7U;
+    request.plan_generation = 3U;
+    request.deadline_ms = 1800U;
+    const auto encoded = toolbusd::encode_ipc_runtime_motion_group_cancel(request);
+    const auto decoded = toolbusd::decode_ipc_runtime_motion_group_cancel(encoded);
+    CHECK(decoded.daemon_instance_id == request.daemon_instance_id);
+    CHECK(decoded.lease_id == request.lease_id);
+    CHECK(decoded.owner_key_id == request.owner_key_id);
+    CHECK(decoded.idempotency_key == request.idempotency_key);
+    CHECK(decoded.transaction_id == request.transaction_id);
+    CHECK(decoded.group_id == request.group_id);
+    CHECK(decoded.plan_generation == request.plan_generation);
+    CHECK(decoded.deadline_ms == request.deadline_ms);
+
+    int sockets[2]{};
+    CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    toolbusd::write_ipc_runtime_motion_group_cancel_operation_request(
+        sockets[0], request);
+    const auto dispatched = toolbusd::read_ipc_request(sockets[1]);
+    CHECK(dispatched.kind ==
+          toolbusd::IpcRequestKind::RuntimeMotionGroupCancelOperation);
+    CHECK(dispatched.runtime_motion_group_cancel.transaction_id ==
+          request.transaction_id);
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+
+    auto malformed = encoded;
+    malformed[58U] = 1U;
+    expect_failure([&] {
+        static_cast<void>(toolbusd::decode_ipc_runtime_motion_group_cancel(malformed));
+    });
+    malformed = encoded;
+    std::fill_n(malformed.begin() + 20U, 16U, 0U);
+    expect_failure([&] {
+        static_cast<void>(toolbusd::decode_ipc_runtime_motion_group_cancel(malformed));
+    });
+    auto invalid = request;
+    invalid.deadline_ms = toolbusd::kMaximumRuntimeControlTtlMs + 1U;
+    expect_failure([&] {
+        static_cast<void>(toolbusd::encode_ipc_runtime_motion_group_cancel(invalid));
+    });
+}
+
 }  // namespace
 
 int main() {
@@ -912,6 +962,7 @@ int main() {
     test_pwm_request_roundtrip_and_strict_decode();
     test_timed_bitstream_request_roundtrip_and_bounds();
     test_bus_resource_reset_request_roundtrip_and_dispatch();
+    test_motion_group_cancel_payload_is_strict_and_lossless();
     if (failures != 0) {
         std::cerr << failures << " 项 Runtime operation IPC 测试失败\n";
         return 1;

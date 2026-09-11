@@ -302,6 +302,8 @@ typedef struct {
 #ifdef CONFIG_REMOTEBSP_GPIO_EXTI
     /* 可选静态 EXTI 生命周期；ISR 只投递hint，Core仍负责采样与去抖。 */
     bool (*gpio_input_event_configure)(uint16_t pin, bool enabled);
+    bool (*gpio_input_event_diagnostics)(uint16_t pin,
+                                         uint32_t* mailbox_dropped);
 #endif
     bool (*uart_configure)(uint8_t port, uint32_t baud_rate,
                            uint8_t data_bits, uint8_t stop_bits,
@@ -441,6 +443,7 @@ typedef struct {
     bool candidate_active;
 #ifdef CONFIG_REMOTEBSP_GPIO_EXTI
     bool input_irq_hint;
+    uint32_t input_hint_matched;
 #endif
     uint64_t candidate_since_us;
     uint32_t input_event_sequence;
@@ -575,6 +578,9 @@ typedef struct {
     bool device_param_restart_required;
 #endif
     uint8_t tx_packet[CONFIG_REMOTE_MAX_PACKET_SIZE];
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+    uint32_t gpio_input_hint_ignored;
+#endif
 } rbsp_core_t;
 
 bool rbsp_core_init(rbsp_core_t* core, const rbsp_hal_t* hal,
