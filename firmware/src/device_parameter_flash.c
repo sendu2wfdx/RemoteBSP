@@ -127,5 +127,12 @@ bool rbsp_device_parameter_flash_backend_init(
     backend->map = flash_map;
     backend->erase = flash_erase;
     backend->program = flash_program;
+    backend->contract_version = RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION;
+    backend->medium = RBSP_DEVICE_PARAM_MEDIUM_INTERNAL_FLASH;
+    backend->erased_value = RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE;
+    backend->capability_flags =
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ERASE_BEFORE_PROGRAM |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST;
     return true;
 }

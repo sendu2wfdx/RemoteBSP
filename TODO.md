@@ -68,6 +68,8 @@
   审计、批次幂等/冲突处理和失败终态均已覆盖Mock；软件完成不冒充实体生产验收；
   发布审批与外部可信时间已形成双信任链：授权approver签署已验签证据，独立time authority
   签署审批摘要与UTC；Studio只导入验证外部时间，不把本机时钟或测试夹具伪装成可信时间；
+  设备参数后端已增加版本化介质几何/擦写/提交能力契约，内部Flash和Mock外部EEPROM共用双页
+  镜像、CRC、代次与最后提交语义；实体EEPROM驱动和电气验收仍未进行；
 - 已用独立版本化 `FirmwareIdentity` 命令贯通 MCU、Mock、`libremotebsp`、`toolbusd`
   CLI 和 Studio，并由 Studio 构建注入工程、配置、固件输入三个 SHA-256；非 Studio
   构建逐字段返回 unavailable。`inspect-runtime-identity` 只读并准确返回完整或缺项，

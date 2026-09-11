@@ -173,7 +173,14 @@ bool rbsp_device_param_store_init(
         backend->region_size != backend->erase_size * 2U ||
         backend->erase_size < RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE ||
         (24U % backend->program_size) != 0U ||
-        (32U % backend->program_size) != 0U) {
+        (32U % backend->program_size) != 0U ||
+        backend->contract_version != RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION ||
+        backend->erased_value != RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE ||
+        backend->medium < RBSP_DEVICE_PARAM_MEDIUM_INTERNAL_FLASH ||
+        backend->medium > RBSP_DEVICE_PARAM_MEDIUM_MOCK ||
+        (backend->capability_flags & RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST) == 0U ||
+        (((backend->capability_flags & RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY) != 0U) ==
+         ((backend->capability_flags & RBSP_DEVICE_PARAM_BACKEND_FLAG_BYTE_REWRITABLE) != 0U))) {
         return false;
     }
     memset(store, 0, sizeof(*store));

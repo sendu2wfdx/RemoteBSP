@@ -10,7 +10,13 @@ DeviceParameterStore::DeviceParameterStore() {
     const rbsp_device_param_backend backend{
         this, static_cast<std::uint32_t>(flash_.size()),
         static_cast<std::uint32_t>(kPageSize), 8U,
-        map, erase, program};
+        map, erase, program,
+        RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION,
+        RBSP_DEVICE_PARAM_MEDIUM_MOCK,
+        RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE,
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ERASE_BEFORE_PROGRAM |
+            RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY |
+            RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST};
     if (!rbsp_device_param_store_init(&store_, &backend) ||
         !rbsp_device_param_store_boot(&store_)) {
         throw std::runtime_error("无法初始化Mock设备参数存储");

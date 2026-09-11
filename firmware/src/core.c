@@ -3770,7 +3770,19 @@ static bool process_request(rbsp_core_t* core,
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_RESOURCE_FAILED,
                     request->object_id, NULL, 0U);
-            } else {
+            }
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+            else if (object->input_events_enabled &&
+                       core->hal.gpio_input_event_configure != NULL &&
+                       !core->hal.gpio_input_event_configure(
+                           object->pin, false)) {
+                /* EXTI仍活跃时保留对象，禁止新会话接管同一静态端点。 */
+                response_size = make_status_response(
+                    core, request, RBSP_STATUS_RESOURCE_FAILED,
+                    request->object_id, NULL, 0U);
+            }
+#endif
+            else {
                 memset(object, 0, sizeof(*object));
                 response_size = make_status_response(
                     core, request, RBSP_STATUS_OK,
@@ -3810,7 +3822,14 @@ static bool process_request(rbsp_core_t* core,
                     request->object_id, NULL, 0U);
             } else {
                 bool value = false;
-                if (!core->hal.gpio_read(object->pin, &value)) {
+                if (!core->hal.gpio_read(object->pin, &value)
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+                    ||
+                    (core->hal.gpio_input_event_configure != NULL &&
+                     !core->hal.gpio_input_event_configure(
+                         object->pin, true))
+#endif
+                    ) {
                     response_size = make_status_response(
                         core, request, RBSP_STATUS_RESOURCE_FAILED,
                         request->object_id, NULL, 0U);
@@ -3823,6 +3842,9 @@ static bool process_request(rbsp_core_t* core,
                     object->stable_value = value;
                     object->candidate_value = value;
                     object->candidate_active = false;
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+                    object->input_irq_hint = false;
+#endif
                     object->candidate_since_us = 0U;
                     object->input_event_sequence = 0U;
                     object->input_dropped_events = 0U;
@@ -5024,6 +5046,9 @@ static void service_gpio_input_events(rbsp_core_t* core, uint32_t now_ms) {
     for (size_t index = 0U; index < CONFIG_GPIO_RESOURCE_COUNT; ++index) {
         rbsp_gpio_object_t* object = &core->gpio_objects[index];
         if (!object->used || !object->input_events_enabled) continue;
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+        object->input_irq_hint = false;
+#endif
         bool raw_value = object->stable_value;
         if (core->hal.gpio_read(object->pin, &raw_value)) {
             if (raw_value == object->stable_value) {
@@ -5090,6 +5115,26 @@ static void service_gpio_input_events(rbsp_core_t* core, uint32_t now_ms) {
     (void)now_ms;
 #endif
 }
+
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+bool rbsp_core_gpio_input_hint(rbsp_core_t* core, uint16_t pin) {
+#if CONFIG_GPIO_RESOURCE_COUNT > 0
+    if (core == NULL) return false;
+    for (size_t index = 0U; index < CONFIG_GPIO_RESOURCE_COUNT; ++index) {
+        rbsp_gpio_object_t* object = &core->gpio_objects[index];
+        if (object->used && object->input_events_enabled &&
+            object->pin == pin) {
+            object->input_irq_hint = true;
+            return true;
+        }
+    }
+#else
+    (void)core;
+    (void)pin;
+#endif
+    return false;
+}
+#endif
 
 
 void rbsp_core_poll(rbsp_core_t* core) {
@@ -5261,6 +5306,13 @@ size_t rbsp_core_release_session(rbsp_core_t* core, uint32_t session_id) {
             /* 无法确认安全低电平时保留所有权和对象，供后续清理重试。 */
             continue;
         }
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+        if (object->input_events_enabled &&
+            core->hal.gpio_input_event_configure != NULL &&
+            !core->hal.gpio_input_event_configure(object->pin, false)) {
+            continue;
+        }
+#endif
         memset(object, 0, sizeof(*object));
         ++released;
     }

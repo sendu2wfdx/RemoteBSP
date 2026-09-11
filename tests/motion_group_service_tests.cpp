@@ -351,6 +351,43 @@ void test_commit_failure_reports_best_effort_abort_boundary() {
             CHECK(snapshot.commit_dispatched);
             CHECK(snapshot.abort_is_best_effort);
             CHECK(snapshot.committed_count == 1U);
+            CHECK(failed.dispatches.size() == 2U);
+
+            // 模拟网络分区：只让已确认COMMIT的节点1收到尽力ABORT，
+            // 节点2的ABORT与后续响应全部丢失。
+            const auto first_abort = fixture.exchange(
+                dispatch_for(failed.dispatches, 1U),
+                kHostNowNs + 5000000ULL);
+            const auto accepted_abort = fixture.service.accept_response(
+                fixture.requests, fixture.registry, 1U, first_abort,
+                kHostNowNs + 5000000ULL,
+                time_zero + std::chrono::milliseconds(5));
+            CHECK(accepted_abort.status ==
+                  toolbusd::MotionGroupServiceStatus::Accepted);
+            CHECK(fixture.first_motion->status().queue_depth == 0U);
+
+            // 运维重复停止是幂等的：处于Aborting时不能创建第二组动作，
+            // 也不能把部分COMMIT误报为成功。
+            const auto repeated_stop = fixture.service.cancel(
+                fixture.requests,
+                time_zero + std::chrono::milliseconds(6));
+            CHECK(repeated_stop.dispatches.empty());
+            CHECK(fixture.service.state() ==
+                  toolbusd::MotionGroupState::Aborting);
+            CHECK(fixture.service.snapshot().committed_count == 1U);
+
+            const auto settled = fixture.service.poll(
+                fixture.requests, fixture.registry, {},
+                kHostNowNs + 30000000ULL,
+                time_zero + std::chrono::milliseconds(30));
+            CHECK(settled.status ==
+                  toolbusd::MotionGroupServiceStatus::Settled);
+            const auto recovery = fixture.service.snapshot();
+            CHECK(recovery.state == toolbusd::MotionGroupState::Aborted);
+            CHECK(recovery.abort_is_best_effort);
+            CHECK(recovery.committed_count == 1U);
+            CHECK(recovery.abort_reason ==
+                  protocol::MotionGroupAbortReason::CommitRejected);
         }
     }
 }

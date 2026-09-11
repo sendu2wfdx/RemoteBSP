@@ -186,7 +186,8 @@ BOARDS = {
             "debounce_ms": 10,
         }],
         "exti": {"endpoints": [{
-            "endpoint_id": "exti0_pa0", "backend_status": "planned",
+            "endpoint_id": "exti0_pa0", "backend_status": "implemented",
+            "kconfig_symbol": "GPIO_EXTI0_PA0",
             "enabled": False, "pin": "PA0", "line": 0,
         }]},
         "uart": {
@@ -327,7 +328,8 @@ BOARDS = {
             "debounce_ms": 10,
         }],
         "exti": {"endpoints": [{
-            "endpoint_id": "exti13_pc13", "backend_status": "planned",
+            "endpoint_id": "exti13_pc13", "backend_status": "implemented",
+            "kconfig_symbol": "GPIO_EXTI13_PC13",
             "enabled": False, "pin": "PC13", "line": 13,
         }]},
         "uart": {

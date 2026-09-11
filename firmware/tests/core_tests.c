@@ -238,6 +238,17 @@ static bool fake_gpio_read(uint16_t pin, bool* value) {
     return true;
 }
 
+static bool gpio_exti_must_fail;
+static uint32_t gpio_exti_enable_count;
+static uint32_t gpio_exti_disable_count;
+static bool fake_gpio_input_event_configure(uint16_t pin, bool enabled) {
+    if (pin >= sizeof(gpio_values) / sizeof(gpio_values[0]) ||
+        gpio_exti_must_fail) return false;
+    if (enabled) ++gpio_exti_enable_count;
+    else ++gpio_exti_disable_count;
+    return true;
+}
+
 #if defined(CONFIG_REMOTEBSP_MOTION)
 static uint64_t fake_nanoseconds(void) {
     return (uint64_t)now_ms * 1000000ULL;
@@ -599,8 +610,16 @@ static void test_gpio_input_events(const rbsp_hal_t* hal,
     const uint32_t object_id = get_u32(response + 12U);
     uint8_t subscribe[8U] = {1U, 3U, 2U, 0U, 0U, 0U, 0U, 0U};
     put_u32(subscribe + 4U, 2000U);
+    gpio_exti_must_fail = true;
+    assert(exchange_status(&core, 0x0104U, OWNER_SESSION, 5001U, object_id,
+                           subscribe, sizeof(subscribe), response) == 7U);
+    assert(!core.gpio_objects[0U].input_events_enabled);
+    gpio_exti_must_fail = false;
     assert(exchange_status(&core, 0x0104U, OWNER_SESSION, 501U, object_id,
                            subscribe, sizeof(subscribe), response) == 0U);
+    assert(gpio_exti_enable_count == 1U);
+    assert(rbsp_core_gpio_input_hint(&core, 5U));
+    assert(!rbsp_core_gpio_input_hint(&core, 6U));
 
     /* 1 ms 往返抖动不形成稳定边沿。 */
     can_send_must_fail = true;
@@ -651,7 +670,12 @@ static void test_gpio_input_events(const rbsp_hal_t* hal,
     assert(response[37U] == 1U && response[38U] == 1U);
     assert(get_u32(response + 39U) == 1U);
 
+    gpio_exti_must_fail = true;
+    assert(rbsp_core_release_session(&core, OWNER_SESSION) == 0U);
+    assert(core.gpio_objects[0U].used);
+    gpio_exti_must_fail = false;
     assert(rbsp_core_release_session(&core, OWNER_SESSION) == 1U);
+    assert(gpio_exti_disable_count == 1U);
     assert(!core.gpio_objects[0U].used);
     gpio_values[5U] = false;
     now_ms = 0U;
@@ -816,6 +840,9 @@ int main(void) {
         .gpio_configure_pull = fake_gpio_configure_pull,
         .gpio_write = fake_gpio_write,
         .gpio_read = fake_gpio_read,
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+        .gpio_input_event_configure = fake_gpio_input_event_configure,
+#endif
         .uart_configure = fake_uart_configure,
         .uart_read = fake_uart_read,
         .uart_write = fake_uart_write,

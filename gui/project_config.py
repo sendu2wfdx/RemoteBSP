@@ -361,6 +361,8 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
 
     interfaces = {item["pin"]: item for item in board.get(
         "gpio_interfaces", [])}
+    exti_catalog = board.get("exti", {}).get("endpoints", [])
+    selected_exti: list[dict] = []
     for index, item in enumerate(gpio):
         owner = f"GPIO {index + 1}"
         pin = claim(item.get("pin"), owner)
@@ -383,6 +385,17 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
                 raise ProjectConfigError(f"{owner}.safe_level必须是布尔值")
         elif safe_level is not None:
             raise ProjectConfigError(f"{owner}输入资源不能设置safe_level")
+        exti_id = item.get("exti_endpoint_id")
+        if exti_id is not None:
+            if item.get("direction") != "input" or not isinstance(exti_id, str):
+                raise ProjectConfigError(f"{owner}只有输入资源可绑定EXTI端点")
+            endpoint = _find(exti_catalog, "endpoint_id", exti_id)
+            if endpoint is None or endpoint.get("pin") != pin:
+                raise ProjectConfigError(f"{owner}的EXTI端点与静态引脚不匹配")
+            if endpoint.get("backend_status") != "implemented":
+                raise ProjectConfigError(f"{owner}的EXTI端点尚未实现")
+            _endpoint_kconfig_symbol(endpoint, f"{owner} EXTI")
+            selected_exti.append(endpoint)
 
     uart_catalog = board.get("uart", {}).get("endpoints", [])
     for index, item in enumerate(uart):
@@ -492,7 +505,8 @@ def _validate_and_collect(draft: dict, catalog: dict, *,
             "I2C/SPI当前仅支持生成Mock数字孪生清单，"
             "STM32 BSP尚未验收")
 
-    return board, {"gpio": gpio, "uart": uart, "axes": axes,
+    return board, {"gpio": gpio, "exti": selected_exti,
+                   "uart": uart, "axes": axes,
                    "pwm": pwm, "strips": strips, **bus}
 
 
@@ -583,9 +597,22 @@ def _generate_static_resource_header(board: dict, resources: dict,
         lines.append(
             "    {0U, RBSP_STARTUP_GPIO_INPUT_FLOATING}, /* 空表占位，不计入数量 */")
     lines.extend(["};", ""])
-
     def encoded_pin(pin: str) -> int:
         return (ord(pin[1]) - ord("A")) * 16 + int(pin[2:])
+
+    exti_entries = sorted(
+        ((encoded_pin(item["pin"]), item["pin"], int(item["line"]))
+         for item in resources.get("exti", [])), key=lambda value: value[2])
+    lines.append(f"#define RBSP_STUDIO_EXTI_RESOURCE_COUNT {len(exti_entries)}U")
+    lines.append(
+        "static const uint16_t rbsp_studio_exti_pins"
+        f"[{max(1, len(exti_entries))}] = {{")
+    if exti_entries:
+        for encoded, pin, _line in exti_entries:
+            lines.append(f"    {encoded}U, /* {pin} */")
+    else:
+        lines.append("    0U, /* 空表占位，不计入数量 */")
+    lines.extend(["};", ""])
 
     lines.extend([
         f"#define RBSP_STUDIO_UART_RESOURCE_COUNT {len(uart_entries)}U",
@@ -695,6 +722,9 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
             for suffix, pins in lists.items():
                 set_value(f"STARTUP_GPIO_{suffix}", ",".join(pins))
             set_value("GPIO_RESOURCE_COUNT", max(1, len(resources["gpio"])))
+            set_value("REMOTEBSP_GPIO_EXTI", bool(resources.get("exti")))
+            for endpoint in resources.get("exti", []):
+                set_value(_endpoint_kconfig_symbol(endpoint, "EXTI"), True)
 
             uart = sorted(resources["uart"], key=lambda item: item["port"])
             ports = [int(item["port"]) for item in uart]

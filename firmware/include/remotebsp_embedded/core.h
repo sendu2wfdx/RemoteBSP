@@ -299,6 +299,10 @@ typedef struct {
                                   rbsp_gpio_direction_t direction);
     bool (*gpio_write)(uint16_t pin, bool value);
     bool (*gpio_read)(uint16_t pin, bool* value);
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+    /* 可选静态 EXTI 生命周期；ISR 只投递hint，Core仍负责采样与去抖。 */
+    bool (*gpio_input_event_configure)(uint16_t pin, bool enabled);
+#endif
     bool (*uart_configure)(uint8_t port, uint32_t baud_rate,
                            uint8_t data_bits, uint8_t stop_bits,
                            uint8_t parity);
@@ -435,6 +439,9 @@ typedef struct {
     bool stable_value;
     bool candidate_value;
     bool candidate_active;
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+    bool input_irq_hint;
+#endif
     uint64_t candidate_since_us;
     uint32_t input_event_sequence;
     uint32_t input_dropped_events;
@@ -578,6 +585,10 @@ bool rbsp_core_device_params_init(
     rbsp_core_t* core, const rbsp_device_param_backend* backend);
 #endif
 void rbsp_core_poll(rbsp_core_t* core);
+/* 板级主循环消费ISR mailbox后调用；未知/未订阅引脚不会改变其他对象。 */
+#ifdef CONFIG_REMOTEBSP_GPIO_EXTI
+bool rbsp_core_gpio_input_hint(rbsp_core_t* core, uint16_t pin);
+#endif
 void rbsp_core_accept_can(rbsp_core_t* core,
                           const rbsp_can_frame_t* frame);
 void rbsp_core_accept_link(rbsp_core_t* core,

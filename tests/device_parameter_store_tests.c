@@ -218,7 +218,82 @@ static rbsp_device_param_backend make_backend(memory_flash* flash) {
     backend.map = memory_map;
     backend.erase = memory_erase;
     backend.program = memory_program;
+    backend.contract_version = RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION;
+    backend.medium = RBSP_DEVICE_PARAM_MEDIUM_MOCK;
+    backend.erased_value = RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE;
+    backend.capability_flags =
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ERASE_BEFORE_PROGRAM |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST;
     return backend;
+}
+
+static bool memory_eeprom_program(void* context, uint32_t offset,
+                                  const uint8_t* data, size_t length) {
+    memory_flash* memory = context;
+    if (memory->fail_next_program) {
+        memory->fail_next_program = false;
+        return false;
+    }
+    if (data == NULL || offset > TEST_REGION_SIZE ||
+        length > TEST_REGION_SIZE - offset) {
+        return false;
+    }
+    memcpy(memory->bytes + offset, data, length);
+    return true;
+}
+
+static rbsp_device_param_backend make_eeprom_backend(memory_flash* memory) {
+    rbsp_device_param_backend backend;
+    memset(&backend, 0, sizeof(backend));
+    backend.context = memory;
+    backend.region_size = TEST_REGION_SIZE;
+    backend.erase_size = TEST_PAGE_SIZE;
+    backend.program_size = 1U;
+    backend.map = memory_map;
+    backend.erase = memory_erase;
+    backend.program = memory_eeprom_program;
+    backend.contract_version = RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION;
+    backend.medium = RBSP_DEVICE_PARAM_MEDIUM_EXTERNAL_EEPROM;
+    backend.erased_value = RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE;
+    backend.capability_flags = RBSP_DEVICE_PARAM_BACKEND_FLAG_BYTE_REWRITABLE |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST;
+    return backend;
+}
+
+static void test_external_eeprom_contract_and_fault_recovery(void) {
+    memory_flash memory;
+    rbsp_device_param_backend backend;
+    rbsp_device_param_store store;
+    rbsp_device_param_record record;
+    uint8_t workspace[RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE];
+    static const uint8_t first[] = "EEPROM-A";
+    static const uint8_t second[] = "EEPROM-B";
+    memset(&memory, 0xFF, sizeof(memory));
+    memory.fail_next_program = false;
+    backend = make_eeprom_backend(&memory);
+    assert(rbsp_device_param_store_init(&store, &backend));
+    assert(rbsp_device_param_store_boot(&store));
+    assert(rbsp_device_param_store_set(&store, 0U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, first, sizeof(first) - 1U,
+        workspace, sizeof(workspace)));
+    assert(store.generation == 1U);
+    memory.fail_next_program = true;
+    assert(!rbsp_device_param_store_set(&store, 1U,
+        RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
+        workspace, sizeof(workspace)));
+    assert(rbsp_device_param_store_boot(&store));
+    assert(store.generation == 1U);
+    assert(rbsp_device_param_store_get(
+        &store, RBSP_DEVICE_PARAM_DEVICE_NAME, &record));
+    assert(record.length == sizeof(first) - 1U &&
+           memcmp(record.value, first, record.length) == 0);
+
+    backend.contract_version = 0U;
+    assert(!rbsp_device_param_store_init(&store, &backend));
+    backend = make_eeprom_backend(&memory);
+    backend.capability_flags |= RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY;
+    assert(!rbsp_device_param_store_init(&store, &backend));
 }
 
 static void test_compatibility_golden_images(void) {
@@ -338,6 +413,7 @@ int main(void) {
 
     test_compatibility_golden_images();
     test_adc_calibration_formats();
+    test_external_eeprom_contract_and_fault_recovery();
 
     memset(&flash, 0xFF, sizeof(flash));
     flash.fail_next_program = false;

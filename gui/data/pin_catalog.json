@@ -415,7 +415,8 @@
         "endpoints": [
           {
             "endpoint_id": "exti0_pa0",
-            "backend_status": "planned",
+            "backend_status": "implemented",
+            "kconfig_symbol": "GPIO_EXTI0_PA0",
             "enabled": false,
             "pin": "PA0",
             "line": 0
@@ -890,7 +891,8 @@
         "endpoints": [
           {
             "endpoint_id": "exti13_pc13",
-            "backend_status": "planned",
+            "backend_status": "implemented",
+            "kconfig_symbol": "GPIO_EXTI13_PC13",
             "enabled": false,
             "pin": "PC13",
             "line": 13

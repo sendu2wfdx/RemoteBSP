@@ -101,6 +101,13 @@ static rbsp_device_param_backend make_backend(memory_flash* flash) {
     backend.map = memory_map;
     backend.erase = memory_erase;
     backend.program = memory_program;
+    backend.contract_version = RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION;
+    backend.medium = RBSP_DEVICE_PARAM_MEDIUM_MOCK;
+    backend.erased_value = RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE;
+    backend.capability_flags =
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ERASE_BEFORE_PROGRAM |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY |
+        RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST;
     return backend;
 }
 

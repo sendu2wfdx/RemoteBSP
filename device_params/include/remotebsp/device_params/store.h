@@ -15,6 +15,18 @@ extern "C" {
 #define RBSP_DEVICE_PARAM_STORE_MAX_IMAGE_SIZE 512U
 #define RBSP_DEVICE_PARAM_STORE_MAX_RECORDS 32U
 #define RBSP_DEVICE_PARAM_STORE_NO_PAGE 0xFFU
+#define RBSP_DEVICE_PARAM_BACKEND_CONTRACT_VERSION 1U
+#define RBSP_DEVICE_PARAM_BACKEND_ERASED_VALUE 0xFFU
+#define RBSP_DEVICE_PARAM_BACKEND_FLAG_ERASE_BEFORE_PROGRAM (1U << 0U)
+#define RBSP_DEVICE_PARAM_BACKEND_FLAG_ONE_TO_ZERO_ONLY (1U << 1U)
+#define RBSP_DEVICE_PARAM_BACKEND_FLAG_BYTE_REWRITABLE (1U << 2U)
+#define RBSP_DEVICE_PARAM_BACKEND_FLAG_COMMIT_MARKER_LAST (1U << 3U)
+
+typedef enum {
+    RBSP_DEVICE_PARAM_MEDIUM_INTERNAL_FLASH = 1,
+    RBSP_DEVICE_PARAM_MEDIUM_EXTERNAL_EEPROM = 2,
+    RBSP_DEVICE_PARAM_MEDIUM_MOCK = 3,
+} rbsp_device_param_backend_medium;
 
 typedef enum {
     RBSP_DEVICE_PARAM_STORE_OK = 0,
@@ -43,6 +55,10 @@ typedef struct {
     rbsp_device_param_map_fn map;
     rbsp_device_param_erase_fn erase;
     rbsp_device_param_program_fn program;
+    uint16_t contract_version;
+    uint8_t medium;
+    uint8_t erased_value;
+    uint32_t capability_flags;
 } rbsp_device_param_backend;
 
 typedef struct {

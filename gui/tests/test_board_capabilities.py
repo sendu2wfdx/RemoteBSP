@@ -55,7 +55,7 @@ class BoardCapabilityTest(unittest.TestCase):
             for endpoint in board["exti"]["endpoints"]]
         self.assertTrue(endpoints)
         self.assertTrue(all(not endpoint["enabled"] for endpoint in endpoints))
-        self.assertTrue(all(endpoint["backend_status"] == "planned"
+        self.assertTrue(all(endpoint["backend_status"] == "implemented"
                             for endpoint in endpoints))
 
         broken = copy.deepcopy(self.catalog)
@@ -78,7 +78,8 @@ class BoardCapabilityTest(unittest.TestCase):
         broken = copy.deepcopy(self.catalog)
         endpoint = broken["boards"][1]["exti"]["endpoints"][0]
         endpoint["enabled"] = True
-        with self.assertRaisesRegex(BoardCapabilityError, "必须已经实现"):
+        endpoint.pop("kconfig_symbol")
+        with self.assertRaisesRegex(BoardCapabilityError, "Kconfig符号"):
             validate_catalog(broken)
 
     def test_project_validation_does_not_trust_tampered_catalog(self):
@@ -98,6 +99,31 @@ class BoardCapabilityTest(unittest.TestCase):
         broken["boards"][1]["reserved"][0]["owner"] = ""
         with self.assertRaisesRegex(ProjectConfigError, "非空owner"):
             validate_project(project, broken)
+
+    def test_project_exti_binding_generates_static_config_and_rejects_mismatch(self):
+        from project_config import (ProjectConfigError,
+                                    generate_project_config)
+
+        board = self.catalog["boards"][1]
+        gpio = copy.deepcopy(board["gpio_defaults"])
+        gpio[0]["exti_endpoint_id"] = "exti0_pa0"
+        project = {
+            "schema_version": 2, "board_id": board["id"],
+            "gpio": {"resources": gpio}, "uart": {"ports": []},
+            "motion": {"axes": []}, "pwm": {"channels": []},
+            "timed_bitstream": {"ws2812": []},
+            "i2c": {"buses": [], "devices": []},
+            "spi": {"buses": [], "devices": []},
+        }
+        generated = generate_project_config(project, self.catalog)
+        self.assertIn("CONFIG_REMOTEBSP_GPIO_EXTI=y", generated.config)
+        self.assertIn("CONFIG_GPIO_EXTI0_PA0=y", generated.config)
+        self.assertIn("RBSP_STUDIO_EXTI_RESOURCE_COUNT 1U",
+                      generated.static_resource_header)
+
+        gpio[0]["exti_endpoint_id"] = "exti13_pc13"
+        with self.assertRaisesRegex(ProjectConfigError, "静态引脚不匹配"):
+            generate_project_config(project, self.catalog)
 
 
 if __name__ == "__main__":

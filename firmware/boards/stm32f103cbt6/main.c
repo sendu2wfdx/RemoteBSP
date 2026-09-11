@@ -6,6 +6,9 @@
 #endif
 #include "remotebsp_embedded/byte_ring.h"
 #include "remotebsp_embedded/core.h"
+#ifdef CONFIG_GPIO_EXTI0_PA0
+#include "remotebsp_embedded/gpio_exti_mailbox.h"
+#endif
 #include "stm32_health_hal.h"
 #ifdef CONFIG_REMOTEBSP_BUS
 #include "board_bus.h"
@@ -81,6 +84,32 @@ _Static_assert(RBSP_STUDIO_RESOURCE_BOARD_TYPE == CONFIG_BOARD_TYPE,
 
 static CAN_HandleTypeDef can_handle;
 static rbsp_core_t remote_core;
+#ifdef CONFIG_GPIO_EXTI0_PA0
+static rbsp_gpio_exti_mailbox_t gpio_exti_mailbox;
+static bool board_gpio_input_event_configure(uint16_t pin, bool enabled) {
+    if (pin != 0U) return false;
+    GPIO_InitTypeDef init = {0};
+    init.Pin = GPIO_PIN_0;
+    init.Mode = enabled ? GPIO_MODE_IT_RISING_FALLING : GPIO_MODE_INPUT;
+    init.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA, &init);
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
+    if (enabled) HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+    else HAL_NVIC_DisableIRQ(EXTI0_IRQn);
+    return true;
+}
+static void board_gpio_exti_drain(void) {
+    uint16_t pin;
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    while (rbsp_gpio_exti_mailbox_pop(&gpio_exti_mailbox, &pin)) {
+        if (primask == 0U) __enable_irq();
+        (void)rbsp_core_gpio_input_hint(&remote_core, pin);
+        __disable_irq();
+    }
+    if (primask == 0U) __enable_irq();
+}
+#endif
 
 
 #ifdef CONFIG_REMOTEBSP_MOTION
@@ -1863,6 +1892,9 @@ int main(void) {
         .gpio_configure_pull = board_gpio_configure_pull,
         .gpio_write = board_gpio_write,
         .gpio_read = board_gpio_read,
+#ifdef CONFIG_GPIO_EXTI0_PA0
+        .gpio_input_event_configure = board_gpio_input_event_configure,
+#endif
 #ifdef CONFIG_REMOTEBSP_BUS
         .bus_resources = rbsp_f103_bus_resources(),
         .bus_resource_count = rbsp_f103_bus_resource_count(),
@@ -1920,6 +1952,9 @@ int main(void) {
     }
 #endif
     for (;;) {
+#ifdef CONFIG_GPIO_EXTI0_PA0
+        board_gpio_exti_drain();
+#endif
 #ifdef CONFIG_BOARD_WEACT_BLUEPILL_PLUS
         board_breathing_led_poll();
 #endif
@@ -1942,6 +1977,15 @@ void TIM2_IRQHandler(void) {
     if ((status & TIM_SR_CC1IF) != 0U) {
         TIM2->DIER &= ~TIM_DIER_CC1IE;
         (void)rbsp_core_motion_service(&remote_core);
+    }
+}
+#endif
+
+#ifdef CONFIG_GPIO_EXTI0_PA0
+void EXTI0_IRQHandler(void) {
+    if (__HAL_GPIO_EXTI_GET_IT(GPIO_PIN_0) != RESET) {
+        __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
+        rbsp_gpio_exti_mailbox_push_isr(&gpio_exti_mailbox, 0U);
     }
 }
 #endif
