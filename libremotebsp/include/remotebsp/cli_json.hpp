@@ -506,6 +506,42 @@ inline void write_gpio_input_event_status(
     output << "}}\n";
 }
 
+inline void write_device_parameter_status(
+    std::ostream& output, std::uint32_t node_id,
+    const protocol::DeviceParameterStatus& status) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"param-status\",\"data\":{"
+           << "\"node_id\":" << node_id
+           << ",\"generation\":" << status.generation
+           << ",\"stored_count\":" << status.stored_count
+           << ",\"definition_count\":" << status.definition_count
+           << ",\"last_error\":" << static_cast<unsigned>(status.last_error)
+           << ",\"storage_health_available\":"
+           << (status.health_available ? "true" : "false");
+    if (status.health_available) {
+        const auto remaining = status.write_attempts >= status.commit_budget
+            ? 0U : status.commit_budget - status.write_attempts;
+        const bool budget_near = status.commit_budget != 0U &&
+            remaining <= (status.commit_budget / 10U);
+        output << ",\"storage_health_version\":"
+               << static_cast<unsigned>(status.health_version)
+               << ",\"commit_budget\":" << status.commit_budget
+               << ",\"write_attempts\":" << status.write_attempts
+               << ",\"successful_commits\":" << status.successful_commits
+               << ",\"io_failures\":" << status.io_failures
+               << ",\"bad_page_mask\":"
+               << static_cast<unsigned>(status.bad_page_mask)
+               << ",\"remaining_commit_attempts\":" << remaining
+               << ",\"commit_budget_near\":"
+               << (budget_near ? "true" : "false")
+               << ",\"bad_page_alert\":"
+               << (status.bad_page_mask != 0U ? "true" : "false")
+               << ",\"io_failure_alert\":"
+               << (status.io_failures != 0U ? "true" : "false");
+    }
+    output << "}}\n";
+}
+
 inline void write_runtime_snapshot(std::ostream& output,
                                    const RuntimeSnapshot& snapshot) {
     output << "{\"schema_version\":" << kSchemaVersion
@@ -579,6 +615,35 @@ inline void write_runtime_snapshot(std::ostream& output,
                << health.peak_consecutive_failures
                << ",\"last_result_time_us\":"
                << health.last_result_time_us << '}';
+    }
+    output << "],\"gpio_input_diagnostics_total_count\":"
+           << snapshot.gpio_input_diagnostics_total_count
+           << ",\"gpio_input_diagnostics_truncated\":"
+           << (snapshot.gpio_input_diagnostics_total_count >
+                       snapshot.gpio_input_diagnostics.size()
+                   ? "true" : "false")
+           << ",\"gpio_input_diagnostics\":[";
+    for (std::size_t index = 0U;
+         index < snapshot.gpio_input_diagnostics.size(); ++index) {
+        if (index != 0U) output << ',';
+        const auto& item = snapshot.gpio_input_diagnostics[index];
+        output << "{\"node_id\":" << item.node_id
+               << ",\"resource_id\":" << item.resource_id
+               << ",\"object_id\":" << item.object_id
+               << ",\"pin\":" << item.pin
+               << ",\"status_valid\":"
+               << (item.status_valid ? "true" : "false")
+               << ",\"status_version\":"
+               << static_cast<unsigned>(item.status.version)
+               << ",\"queued_events\":" << item.status.queued_events
+               << ",\"queue_capacity\":" << item.status.queue_capacity
+               << ",\"dropped_events\":" << item.status.dropped_events
+               << ",\"last_sequence\":" << item.status.last_sequence
+               << ",\"exti_diagnostics_available\":"
+               << (item.status.exti_diagnostics_available ? "true" : "false")
+               << ",\"mailbox_dropped\":" << item.status.mailbox_dropped
+               << ",\"hints_matched\":" << item.status.hints_matched
+               << ",\"hints_ignored\":" << item.status.hints_ignored << '}';
     }
     output << "],\"resources\":[";
     for (std::size_t index = 0U; index < snapshot.resources.size(); ++index) {

@@ -180,7 +180,7 @@ add_test(NAME bus_manifest_tests COMMAND bus_manifest_tests)
 add_executable(device_parameter_protocol_tests
     device_parameter_protocol_tests.cpp)
 target_link_libraries(device_parameter_protocol_tests PRIVATE
-    remotebsp_protocol)
+    remotebsp_protocol remotebsp)
 target_compile_options(device_parameter_protocol_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
 add_test(NAME device_parameter_protocol_tests

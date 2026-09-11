@@ -840,16 +840,27 @@ class RemoteCliIpcClient:
     @staticmethod
     def _json_runtime_snapshot(output: str) -> dict:
         data = RemoteCliIpcClient._document(output, "runtime-snapshot")
-        _exact_fields(data, {
+        base_fields = {
             "snapshot_version", "snapshot_sequence", "traffic", "nodes",
             "resources", "node_issues", "clocks", "bus_health",
-        }, "runtime-snapshot.data")
+        }
         version = _json_integer(
             data["snapshot_version"], "runtime-snapshot.snapshot_version",
             minimum=1, maximum=0xFFFF)
-        if version != 3:
+        if version not in {3, 4}:
             raise ToolbusIpcProtocolError(
                 f"runtime-snapshot版本不受支持：{version}")
+        expected_fields = set(base_fields)
+        gpio_projection_fields = {
+            "gpio_input_diagnostics", "gpio_input_diagnostics_total_count",
+            "gpio_input_diagnostics_truncated",
+        }
+        if version == 4 or any(name in data for name in gpio_projection_fields):
+            expected_fields.update(gpio_projection_fields)
+        _exact_fields(data, expected_fields, "runtime-snapshot.data")
+        if version == 4 and not gpio_projection_fields.issubset(data):
+            raise ToolbusIpcProtocolError(
+                "runtime-snapshot v4缺少GPIO输入诊断")
         sequence = _json_integer(
             data["snapshot_sequence"], "runtime-snapshot.snapshot_sequence",
             minimum=1, maximum=0xFFFFFFFFFFFFFFFF)
@@ -1078,10 +1089,87 @@ class RemoteCliIpcClient:
                 "peak_consecutive_failures": peak,
                 "last_result_time_us": last_time,
             })
+        gpio_diagnostics = []
+        gpio_identities: set[tuple[int, int]] = set()
+        for index, raw in enumerate(_json_array(
+                data.get("gpio_input_diagnostics", []),
+                "runtime-snapshot.gpio_input_diagnostics")):
+            field_name = f"runtime-snapshot.gpio_input_diagnostics[{index}]"
+            item = _json_object(raw, field_name)
+            _exact_fields(item, {
+                "node_id", "resource_id", "object_id", "pin",
+                "status_valid", "status_version", "queued_events",
+                "queue_capacity", "dropped_events", "last_sequence",
+                "exti_diagnostics_available", "mailbox_dropped",
+                "hints_matched", "hints_ignored",
+            }, field_name)
+            node_id = _json_integer(item["node_id"], field_name + ".node_id",
+                                    minimum=1, maximum=127)
+            object_id = _json_integer(
+                item["object_id"], field_name + ".object_id",
+                minimum=1, maximum=0xFFFFFFFF)
+            identity = (node_id, object_id)
+            valid = _json_boolean(item["status_valid"],
+                                  field_name + ".status_valid")
+            status_version = _json_integer(
+                item["status_version"], field_name + ".status_version",
+                maximum=2)
+            queued = _json_integer(item["queued_events"],
+                                   field_name + ".queued_events",
+                                   maximum=0xFFFF)
+            capacity = _json_integer(item["queue_capacity"],
+                                     field_name + ".queue_capacity",
+                                     maximum=0xFFFF)
+            values = {
+                name: _json_integer(item[name], field_name + "." + name,
+                                    maximum=0xFFFFFFFF)
+                for name in ("dropped_events", "last_sequence",
+                             "mailbox_dropped", "hints_matched",
+                             "hints_ignored")
+            }
+            exti_available = _json_boolean(
+                item["exti_diagnostics_available"],
+                field_name + ".exti_diagnostics_available")
+            if node_id not in node_ids or identity in gpio_identities or \
+                    (valid and (status_version not in {1, 2} or
+                                capacity == 0 or queued > capacity)) or \
+                    (not valid and (status_version != 0 or queued != 0 or
+                                    capacity != 0 or exti_available or
+                                    any(values.values()))) or \
+                    exti_available != (valid and status_version >= 2):
+                raise ToolbusIpcProtocolError(
+                    "runtime-snapshot GPIO输入诊断字段不一致")
+            gpio_identities.add(identity)
+            gpio_diagnostics.append({
+                "node_id": node_id,
+                "resource_id": _json_integer(
+                    item["resource_id"], field_name + ".resource_id",
+                    minimum=1, maximum=0xFFFFFFFF),
+                "object_id": object_id,
+                "pin": _json_integer(item["pin"], field_name + ".pin",
+                                      maximum=0xFFFF),
+                "status_valid": valid, "status_version": status_version,
+                "queued_events": queued, "queue_capacity": capacity,
+                "exti_diagnostics_available": exti_available, **values,
+            })
+        gpio_total = _json_integer(
+            data.get("gpio_input_diagnostics_total_count", 0),
+            "runtime-snapshot.gpio_input_diagnostics_total_count",
+            maximum=0xFFFF)
+        gpio_truncated = _json_boolean(
+            data.get("gpio_input_diagnostics_truncated", False),
+            "runtime-snapshot.gpio_input_diagnostics_truncated")
+        if gpio_total < len(gpio_diagnostics) or \
+                gpio_truncated != (gpio_total > len(gpio_diagnostics)):
+            raise ToolbusIpcProtocolError(
+                "runtime-snapshot GPIO输入诊断截断状态不一致")
         return {
             "version": version, "sequence": sequence, "traffic": traffic,
             "nodes": nodes, "resources": resources, "node_issues": issues,
             "clocks": clocks, "bus_health": bus_health,
+            "gpio_input_diagnostics": gpio_diagnostics,
+            "gpio_input_diagnostics_total_count": gpio_total,
+            "gpio_input_diagnostics_truncated": gpio_truncated,
         }
 
     @staticmethod
@@ -2902,6 +2990,9 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         source_sequence: int | None = None
         source_clocks: dict[int, dict] = {}
         source_bus_health: dict[tuple[int, int], dict] = {}
+        source_gpio_diagnostics: dict[int, list[dict]] = {}
+        source_gpio_diagnostics_total_count = 0
+        source_gpio_diagnostics_truncated = False
         snapshot_reader = getattr(self.client, "runtime_snapshot", None)
         structured_output = getattr(self.client, "structured_output", True)
         if callable(snapshot_reader) and structured_output:
@@ -2926,6 +3017,13 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     copy.deepcopy(item)
                 for item in source["bus_health"]
             }
+            for item in source["gpio_input_diagnostics"]:
+                source_gpio_diagnostics.setdefault(
+                    int(item["node_id"]), []).append(copy.deepcopy(item))
+            source_gpio_diagnostics_total_count = int(
+                source["gpio_input_diagnostics_total_count"])
+            source_gpio_diagnostics_truncated = bool(
+                source["gpio_input_diagnostics_truncated"])
             captured_at_ms = self._clock_value()
         try:
             traffic = call_with_deadline(
@@ -2955,6 +3053,7 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
         nodes: list[dict] = []
         alerts: list[dict] = []
         resource_query_count = 0
+        gpio_truncation_alert_emitted = False
         for source_node in source_nodes:
             numeric_id = int(source_node["node_id"])
             uuid = str(source_node["uuid"])
@@ -3104,6 +3203,34 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                 clock_runtime["source_available"] = True
             alerts.extend(self._clock_quality_alerts(
                 node_id, numeric_id, clock_runtime, captured_at_ms))
+            gpio_input_diagnostics = source_gpio_diagnostics.get(
+                numeric_id, [])
+            if source_gpio_diagnostics_truncated and not \
+                    gpio_truncation_alert_emitted:
+                state = "degraded"
+                alerts.append(self._alert(
+                    node_id, "gpio-input-diagnostics-truncated",
+                    "gpio_input_diagnostics_truncated",
+                    "GPIO输入诊断投影达到容量上限，部分对象未包含在快照中",
+                    captured_at_ms, severity="warning"))
+                gpio_truncation_alert_emitted = True
+            for diagnostic in gpio_input_diagnostics:
+                object_id = int(diagnostic["object_id"])
+                if not diagnostic["status_valid"]:
+                    state = "degraded"
+                    alerts.append(self._alert(
+                        node_id, f"gpio-input-status-{numeric_id}-{object_id}",
+                        "gpio_input_diagnostics_unavailable",
+                        f"GPIO输入对象{object_id}诊断读取失败",
+                        captured_at_ms, severity="warning"))
+                elif int(diagnostic["dropped_events"]) > 0 or \
+                        int(diagnostic["mailbox_dropped"]) > 0:
+                    state = "degraded"
+                    alerts.append(self._alert(
+                        node_id, f"gpio-input-drop-{numeric_id}-{object_id}",
+                        "gpio_input_events_dropped",
+                        f"GPIO输入对象{object_id}检测到事件丢失",
+                        captured_at_ms, severity="warning"))
             nodes.append({
                 "node_id": node_id,
                 "board_type": f"board-0x{int(source_node['board_type']):08x}",
@@ -3126,6 +3253,14 @@ class ToolbusdSnapshotProvider(RuntimeProvider):
                     "resource_inventory_error": runtime_error,
                     "health_snapshot": node_health,
                     "clock_sync": clock_runtime,
+                    "gpio_input_diagnostics": gpio_input_diagnostics,
+                    "gpio_input_diagnostics_projection": {
+                        "returned_count": sum(
+                            len(items) for items in
+                            source_gpio_diagnostics.values()),
+                        "total_count": source_gpio_diagnostics_total_count,
+                        "truncated": source_gpio_diagnostics_truncated,
+                    },
                     "traffic": traffic,
                 },
             })

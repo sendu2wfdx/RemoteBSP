@@ -1106,7 +1106,13 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
     if (name == "param-status" && arguments.size() == 1) {
-        print_device_parameter_status(client.device_parameter_status());
+        const auto status = client.device_parameter_status();
+        if (json_output) {
+            remotebsp::cli_json::write_device_parameter_status(
+                std::cout, node_id, status);
+        } else {
+            print_device_parameter_status(status);
+        }
         return 0;
     }
     if (name == "param-list" && arguments.size() == 1) {
@@ -1885,6 +1891,7 @@ int main(int argc, char** argv) {
              arguments[0] != "resource-list" &&
              arguments[0] != "firmware-identity" &&
              arguments[0] != "gpio-input-event-status" &&
+             arguments[0] != "param-status" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(
                 "--json当前仅支持Runtime合同命令");

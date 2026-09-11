@@ -1,7 +1,9 @@
 #include "remotebsp/protocol/device_parameters.hpp"
+#include "remotebsp/cli_json.hpp"
 
 #include <cassert>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 using namespace remotebsp::protocol;
@@ -34,6 +36,19 @@ int main() {
     assert(decoded_observed.health_available);
     assert(decoded_observed.commit_budget == 10000U);
     assert(decoded_observed.bad_page_mask == 2U);
+    std::ostringstream observed_json;
+    remotebsp::cli_json::write_device_parameter_status(
+        observed_json, 5U, decoded_observed);
+    assert(observed_json.str().find("\"remaining_commit_attempts\":9993") !=
+           std::string::npos);
+    assert(observed_json.str().find("\"bad_page_alert\":true") !=
+           std::string::npos);
+    std::ostringstream legacy_json;
+    remotebsp::cli_json::write_device_parameter_status(
+        legacy_json, 5U, decode_device_parameter_status(legacy_status));
+    assert(legacy_json.str().find("\"storage_health_available\":false") !=
+           std::string::npos);
+    assert(legacy_json.str().find("commit_budget") == std::string::npos);
 
     const std::vector<DeviceParameterDescriptor> definitions{{
         RBSP_DEVICE_PARAM_SERIAL_NUMBER, RBSP_DEVICE_PARAM_TYPE_UTF8,

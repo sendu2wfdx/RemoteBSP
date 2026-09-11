@@ -136,6 +136,13 @@ struct RuntimeOperationOutcome {
     std::optional<RuntimeOperationError> error;
 };
 
+struct RuntimeMotionGroupOperationOutcome {
+    RuntimeOperationOutcome operation;
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+};
+
 enum class CanTrafficClass : std::uint8_t {
     Safety = 0,
     Motion = 1,
@@ -194,6 +201,15 @@ struct RuntimeBusHealth {
     std::uint64_t last_result_time_us{};
 };
 
+struct RuntimeGpioInputDiagnostic {
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint32_t object_id{};
+    std::uint16_t pin{};
+    bool status_valid{};
+    protocol::GpioInputEventStatus status;
+};
+
 struct RuntimeNodeIssue {
     std::uint32_t node_id{};
     std::uint8_t code{};
@@ -231,6 +247,8 @@ struct RuntimeSnapshot {
     std::vector<RuntimeNodeIssue> node_issues;
     std::vector<RuntimeClockQuality> clocks;
     std::vector<RuntimeBusHealth> bus_health;
+    std::vector<RuntimeGpioInputDiagnostic> gpio_input_diagnostics;
+    std::uint16_t gpio_input_diagnostics_total_count{};
 };
 
 enum class GpioDirection : std::uint8_t {
@@ -425,7 +443,17 @@ public:
         const std::array<std::uint8_t, 16>& expected_node_uuid,
         const std::string& owner_key_id, std::uint32_t resource_id,
         const std::string& idempotency_key) const;
-    RuntimeOperationOutcome runtime_motion_group_cancel_operation(
+    void runtime_motion_group_lease_acquire(
+        const std::array<std::uint8_t,16>& daemon_instance_id,
+        const std::array<std::uint8_t,16>& lease_id,
+        const std::string& owner_key_id, std::uint64_t transaction_id,
+        std::uint32_t group_id, std::uint32_t plan_generation,
+        std::uint32_t ttl_ms) const;
+    void runtime_motion_group_lease_release(
+        const std::array<std::uint8_t,16>& daemon_instance_id,
+        const std::array<std::uint8_t,16>& lease_id,
+        const std::string& owner_key_id) const;
+    RuntimeMotionGroupOperationOutcome runtime_motion_group_cancel_operation(
         const std::array<std::uint8_t, 16>& daemon_instance_id,
         const std::array<std::uint8_t, 16>& lease_id,
         const std::string& owner_key_id, const std::string& idempotency_key,

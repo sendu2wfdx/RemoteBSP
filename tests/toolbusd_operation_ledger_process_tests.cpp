@@ -660,6 +660,49 @@ void check_startup_block_and_unavailable(const std::string& toolbusd) {
     std::cerr << "阶段: startup-block/unavailable 结束\n";
 }
 
+void check_motion_group_cancel_lease_and_ledger(
+    const std::string& toolbusd, const std::string& mock_mcu) {
+    std::cerr << "阶段: motion-group-runtime 启动\n";
+    TestDirectory directory;
+    const auto usb=directory.child("usb.sock").string();
+    const auto ipc=directory.child("toolbusd.sock").string();
+    auto daemon=start_daemon(toolbusd,directory,"motion-ledger");
+    CHECK(wait_for_path(usb,std::chrono::seconds(5)));
+    ChildProcess node(spawn({mock_mcu,usb,"usb-mock"}));
+    const auto discovered=wait_for_ready_node(ipc,std::chrono::seconds(7));
+    remotebsp::Client client(ipc,discovered.node_id);
+    const auto daemon_id=client.daemon_identity().instance_id;
+    const auto lease=filled<16>(0x79U);
+
+    // 进程级链路首先证明错误 owner 在账本写入前失败关闭。
+    client.runtime_motion_group_lease_acquire(
+        daemon_id,lease,"motion-owner",7001U,91U,5U,30000U);
+    expect_ipc_error(
+        static_cast<std::uint16_t>(remotebsp::toolbusd::IpcErrorCode::PermissionDenied),
+        [&] { static_cast<void>(client.runtime_motion_group_cancel_operation(
+            daemon_id,lease,"wrong-owner","cancel-wrong",7001U,91U,5U,1800U)); });
+
+    const auto outcome=client.runtime_motion_group_cancel_operation(
+        daemon_id,lease,"motion-owner","cancel-1",7001U,91U,5U,1800U);
+    CHECK(outcome.transaction_id==7001U);
+    CHECK(outcome.group_id==91U);
+    CHECK(outcome.plan_generation==5U);
+    CHECK(outcome.operation.kind==remotebsp::RuntimeOperationKind::MotionGroupCancel);
+    CHECK(outcome.operation.state==remotebsp::RuntimeOperationState::Rejected);
+    CHECK(outcome.operation.recovery==remotebsp::RuntimeOperationRecovery::NotSent);
+    const auto queried=client.runtime_operation_status(
+        daemon_id,"motion-owner",outcome.operation.operation_id);
+    CHECK(queried.kind==remotebsp::RuntimeOperationKind::MotionGroupCancel);
+    CHECK(queried.state==remotebsp::RuntimeOperationState::Rejected);
+    CHECK(queried.replayed);
+    const auto replay=client.runtime_motion_group_cancel_operation(
+        daemon_id,lease,"motion-owner","cancel-1",7001U,91U,5U,1800U);
+    CHECK(replay.operation.operation_id==outcome.operation.operation_id);
+    CHECK(replay.operation.replayed);
+    client.runtime_motion_group_lease_release(daemon_id,lease,"motion-owner");
+    std::cerr << "阶段: motion-group-runtime 结束\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -675,6 +718,7 @@ int main(int argc, char** argv) {
         check_gpio_terminal_persistence_failure_flags(argv[1], argv[2]);
         check_release_terminal_persistence_failure_flags(argv[1], argv[2]);
         check_bus_reset_unknown_and_restart(argv[1], argv[2], argv[3]);
+        check_motion_group_cancel_lease_and_ledger(argv[1], argv[2]);
         check_startup_block_and_unavailable(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << "进程测试异常: " << error.what() << '\n';

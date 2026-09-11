@@ -948,6 +948,68 @@ void test_motion_group_cancel_payload_is_strict_and_lossless() {
     expect_failure([&] {
         static_cast<void>(toolbusd::encode_ipc_runtime_motion_group_cancel(invalid));
     });
+
+    toolbusd::RuntimeMotionGroupLeaseAcquireRequest acquire;
+    acquire.daemon_instance_id = request.daemon_instance_id;
+    acquire.lease_id = request.lease_id;
+    acquire.owner_key_id = request.owner_key_id;
+    acquire.transaction_id = request.transaction_id;
+    acquire.group_id = request.group_id;
+    acquire.plan_generation = request.plan_generation;
+    acquire.ttl_ms = 5000U;
+    const auto encoded_acquire =
+        toolbusd::encode_ipc_runtime_motion_group_lease_acquire(acquire);
+    const auto decoded_acquire =
+        toolbusd::decode_ipc_runtime_motion_group_lease_acquire(
+            encoded_acquire);
+    CHECK(decoded_acquire.transaction_id==acquire.transaction_id);
+    CHECK(decoded_acquire.ttl_ms==acquire.ttl_ms);
+
+    toolbusd::RuntimeMotionGroupLeaseReleaseRequest release;
+    release.daemon_instance_id = request.daemon_instance_id;
+    release.lease_id = request.lease_id;
+    release.owner_key_id = request.owner_key_id;
+    CHECK(toolbusd::decode_ipc_runtime_motion_group_lease_release(
+        toolbusd::encode_ipc_runtime_motion_group_lease_release(release)).owner_key_id==release.owner_key_id);
+
+    toolbusd::RuntimeMotionGroupOperationOutcome outcome;
+    outcome.operation.kind = toolbusd::RuntimeOperationKind::MotionGroupCancel;
+    outcome.operation.state = toolbusd::RuntimeOperationState::Committed;
+    outcome.operation.recovery = toolbusd::RuntimeOperationRecovery::SafeClosed;
+    outcome.operation.operation_id = filled<32>(0x33U);
+    outcome.operation.lease_id = request.lease_id;
+    outcome.transaction_id = request.transaction_id;
+    outcome.group_id = request.group_id;
+    outcome.plan_generation = request.plan_generation;
+    const auto encoded_outcome =
+        toolbusd::encode_ipc_runtime_motion_group_operation_outcome(outcome);
+    const auto decoded_outcome =
+        toolbusd::decode_ipc_runtime_motion_group_operation_outcome(
+            encoded_outcome);
+    CHECK(decoded_outcome.transaction_id==request.transaction_id);
+    CHECK(decoded_outcome.group_id==request.group_id);
+
+    auto bad_acquire = encoded_acquire;
+    bad_acquire[57U] = 1U;
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_motion_group_lease_acquire(
+                bad_acquire));
+    });
+    bad_acquire = encoded_acquire;
+    bad_acquire.push_back(0U);
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_motion_group_lease_acquire(
+                bad_acquire));
+    });
+    auto bad_outcome = encoded_outcome;
+    bad_outcome.push_back(0U);
+    expect_failure([&] {
+        static_cast<void>(
+            toolbusd::decode_ipc_runtime_motion_group_operation_outcome(
+                bad_outcome));
+    });
 }
 
 }  // namespace

@@ -35,3 +35,14 @@ successful commits、I/O failures 和 bad-page mask 可通过 health 接口观�
 后介质 generation 仍参与门禁，因此不能靠重启重置预算。设备参数状态保持协议主版本
 1，并在原16字节状态后追加版本1的 health 区（预算、尝试、成功、失败和坏页位图）；
 收到旧节点16字节状态时，客户端明确报告 `store_health=unavailable`，不会当作零计数。
+
+## 主机健康呈现
+
+`remote-cli --json param-status` 对 32 字节状态输出 `commit_budget`、
+`write_attempts`、`successful_commits`、`io_failures` 和 `bad_page_mask`，并给出只读派生值
+`remaining_commit_attempts`。剩余次数按写尝试而不是成功提交计算，防止 I/O 失败掩盖介质消耗；
+进入静态预算最后 10% 时 `commit_budget_near=true`。坏页和历史 I/O 失败分别通过
+`bad_page_alert`、`io_failure_alert` 表示，不能互相替代。
+
+旧固件的 16 字节状态输出 `storage_health_available=false`，且完全省略上述数值和告警，
+不得把未知解释为零。所有字段只用于状态展示和维护决策，不提供运行期修改静态提交预算的路径。

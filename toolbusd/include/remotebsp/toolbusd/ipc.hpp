@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotebsp/protocol/health.hpp"
+#include "remotebsp/protocol/gpio.hpp"
 #include "remotebsp/protocol/bus_stream.hpp"
 #include "remotebsp/protocol/packet.hpp"
 #include "remotebsp/protocol/resource.hpp"
@@ -53,12 +54,15 @@ enum class IpcRequestKind : std::uint8_t {
     RuntimeTimedBitstreamStopOperation = 26,
     RuntimeBusResourceResetOperation = 27,
     RuntimeMotionGroupCancelOperation = 28,
+    RuntimeMotionGroupLeaseAcquire = 29,
+    RuntimeMotionGroupLeaseRelease = 30,
 };
 constexpr std::uint16_t kLogicalRecordingIpcVersion = 1U;
 
 constexpr std::uint16_t kDaemonIdentityIpcVersion = 1U;
 constexpr std::uint16_t kHealthSnapshotIpcVersion = 2U;
-constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 3U;
+constexpr std::uint16_t kRuntimeSnapshotIpcVersion = 4U;
+constexpr std::uint16_t kPreviousRuntimeSnapshotIpcVersion = 3U;
 constexpr std::uint16_t kMaximumRuntimeSnapshotResources = 128U;
 constexpr std::uint32_t kMaximumRuntimeSnapshotTimeoutMs = 5000U;
 constexpr std::uint16_t kMotionGroupIpcVersion = 1U;
@@ -187,6 +191,13 @@ struct RuntimeOperationOutcome {
     bool active_low{};
 };
 
+struct RuntimeMotionGroupOperationOutcome {
+    RuntimeOperationOutcome operation;
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+};
+
 struct IpcResponse {
     IpcStatus status{IpcStatus::Error};
     std::vector<std::uint8_t> body;
@@ -213,6 +224,7 @@ struct IpcToolbusdHealthSnapshot {
 
 struct IpcRequest {
     IpcRequestKind kind{IpcRequestKind::RemotePacket};
+    std::uint16_t requested_version{};
     std::uint32_t node_id{};
     protocol::Packet packet;
     std::uint32_t object_id{};
@@ -234,6 +246,8 @@ struct IpcRequest {
     RuntimeTimedBitstreamStopRequest runtime_timed_bitstream_stop;
     RuntimeBusResourceResetRequest runtime_bus_resource_reset;
     RuntimeMotionGroupCancelRequest runtime_motion_group_cancel;
+    RuntimeMotionGroupLeaseAcquireRequest runtime_motion_group_lease_acquire;
+    RuntimeMotionGroupLeaseReleaseRequest runtime_motion_group_lease_release;
     RuntimeOperationQuery runtime_operation_query;
     RuntimeOperationLookup runtime_operation_lookup;
     std::string logical_recording_name;
@@ -286,6 +300,15 @@ struct IpcRuntimeBusHealth {
     std::uint64_t last_result_time_us{};
 };
 
+struct IpcRuntimeGpioInputDiagnostic {
+    std::uint32_t node_id{};
+    std::uint32_t resource_id{};
+    std::uint32_t object_id{};
+    std::uint16_t pin{};
+    bool status_valid{};
+    protocol::GpioInputEventStatus status;
+};
+
 enum class IpcRuntimeNodeError : std::uint8_t {
     ResourceInventoryUnavailable = 1U,
 };
@@ -321,6 +344,8 @@ struct IpcRuntimeSnapshot {
     std::vector<IpcRuntimeNodeIssue> node_issues;
     std::vector<IpcRuntimeClockQuality> clocks;
     std::vector<IpcRuntimeBusHealth> bus_health;
+    std::vector<IpcRuntimeGpioInputDiagnostic> gpio_input_diagnostics;
+    std::uint16_t gpio_input_diagnostics_total_count{};
 };
 
 class IpcException : public std::runtime_error {
@@ -348,7 +373,8 @@ void write_ipc_stream_read_request(
     std::uint32_t expected_sequence, std::uint32_t timeout_ms);
 void write_ipc_runtime_snapshot_request(
     int socket, std::uint16_t maximum_resources,
-    std::uint32_t timeout_ms);
+    std::uint32_t timeout_ms,
+    std::uint16_t requested_version = kRuntimeSnapshotIpcVersion);
 void write_ipc_motion_group_submit_request(
     int socket, const MotionGroupPlan& plan);
 void write_ipc_motion_group_status_request(
@@ -383,6 +409,10 @@ void write_ipc_runtime_bus_resource_reset_operation_request(
     int socket, const RuntimeBusResourceResetRequest& request);
 void write_ipc_runtime_motion_group_cancel_operation_request(
     int socket, const RuntimeMotionGroupCancelRequest& request);
+void write_ipc_runtime_motion_group_lease_acquire_request(
+    int socket, const RuntimeMotionGroupLeaseAcquireRequest& request);
+void write_ipc_runtime_motion_group_lease_release_request(
+    int socket, const RuntimeMotionGroupLeaseReleaseRequest& request);
 void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request);
 void write_ipc_runtime_operation_lookup_request(
@@ -469,6 +499,14 @@ std::vector<std::uint8_t> encode_ipc_runtime_motion_group_cancel(
     const RuntimeMotionGroupCancelRequest& request);
 RuntimeMotionGroupCancelRequest decode_ipc_runtime_motion_group_cancel(
     const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_lease_acquire(
+    const RuntimeMotionGroupLeaseAcquireRequest& request);
+RuntimeMotionGroupLeaseAcquireRequest decode_ipc_runtime_motion_group_lease_acquire(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_lease_release(
+    const RuntimeMotionGroupLeaseReleaseRequest& request);
+RuntimeMotionGroupLeaseReleaseRequest decode_ipc_runtime_motion_group_lease_release(
+    const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_runtime_operation_query(
     const RuntimeOperationQuery& query);
 RuntimeOperationQuery decode_ipc_runtime_operation_query(
@@ -480,6 +518,10 @@ RuntimeOperationLookup decode_ipc_runtime_operation_lookup(
 std::vector<std::uint8_t> encode_ipc_runtime_operation_outcome(
     const RuntimeOperationOutcome& outcome);
 RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
+    const std::vector<std::uint8_t>& body);
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_operation_outcome(
+    const RuntimeMotionGroupOperationOutcome& outcome);
+RuntimeMotionGroupOperationOutcome decode_ipc_runtime_motion_group_operation_outcome(
     const std::vector<std::uint8_t>& body);
 std::vector<std::uint8_t> encode_ipc_logical_recording_status(
     const IpcLogicalRecordingStatus& status);

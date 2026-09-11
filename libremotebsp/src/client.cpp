@@ -165,8 +165,11 @@ RuntimeOperationOutcome public_operation_outcome(
     const toolbusd::RuntimeOperationOutcome& source) {
     RuntimeOperationOutcome result;
     result.operation_id = source.operation_id;
-    if (source.resource_id != 0U) {
+    if (source.resource_id != 0U ||
+        source.kind == toolbusd::RuntimeOperationKind::MotionGroupCancel) {
         result.lease_id = source.lease_id;
+    }
+    if (source.resource_id != 0U) {
         result.expected_node_uuid = source.expected_node_uuid;
         result.resource_id = source.resource_id;
     }
@@ -644,7 +647,51 @@ RuntimeOperationOutcome Client::runtime_bus_resource_reset_operation(
         toolbusd::decode_ipc_runtime_operation_outcome(response.body));
 }
 
-RuntimeOperationOutcome Client::runtime_motion_group_cancel_operation(
+void Client::runtime_motion_group_lease_acquire(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id, std::uint64_t transaction_id,
+    std::uint32_t group_id, std::uint32_t plan_generation,
+    std::uint32_t ttl_ms) const {
+    toolbusd::RuntimeMotionGroupLeaseAcquireRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    request.transaction_id = transaction_id;
+    request.group_id = group_id;
+    request.plan_generation = plan_generation;
+    request.ttl_ms = ttl_ms;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_motion_group_lease_acquire_request(socket.get(),request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime运动组租约登记失败");
+    }
+    if (!response.body.empty()) {
+        throw ClientException("Runtime运动组租约登记响应载荷无效");
+    }
+}
+
+void Client::runtime_motion_group_lease_release(
+    const std::array<std::uint8_t, 16>& daemon_instance_id,
+    const std::array<std::uint8_t, 16>& lease_id,
+    const std::string& owner_key_id) const {
+    toolbusd::RuntimeMotionGroupLeaseReleaseRequest request;
+    request.daemon_instance_id = daemon_instance_id;
+    request.lease_id = lease_id;
+    request.owner_key_id = owner_key_id;
+    SocketHandle socket(connect_socket(socket_path_));
+    toolbusd::write_ipc_runtime_motion_group_lease_release_request(socket.get(),request);
+    const auto response=toolbusd::read_ipc_response(socket.get());
+    if (response.status != toolbusd::IpcStatus::Ok) {
+        throw_structured_ipc_error(response, "Runtime运动组租约释放失败");
+    }
+    if (!response.body.empty()) {
+        throw ClientException("Runtime运动组租约释放响应载荷无效");
+    }
+}
+
+RuntimeMotionGroupOperationOutcome Client::runtime_motion_group_cancel_operation(
     const std::array<std::uint8_t,16>& daemon_instance_id,
     const std::array<std::uint8_t,16>& lease_id,
     const std::string& owner_key_id, const std::string& idempotency_key,
@@ -665,8 +712,12 @@ RuntimeOperationOutcome Client::runtime_motion_group_cancel_operation(
     const auto response = toolbusd::read_ipc_response(socket.get());
     if (response.status != toolbusd::IpcStatus::Ok)
         throw_structured_ipc_error(response, "Runtime 运动组停止操作失败");
-    return public_operation_outcome(
-        toolbusd::decode_ipc_runtime_operation_outcome(response.body));
+    const auto decoded =
+        toolbusd::decode_ipc_runtime_motion_group_operation_outcome(
+            response.body);
+    return {public_operation_outcome(decoded.operation),
+            decoded.transaction_id, decoded.group_id,
+            decoded.plan_generation};
 }
 
 RuntimeOperationOutcome Client::runtime_operation_status(
@@ -847,6 +898,15 @@ RuntimeSnapshot Client::runtime_snapshot(
             health.peak_consecutive_failures,
             health.last_result_time_us});
     }
+    result.gpio_input_diagnostics.reserve(
+        source.gpio_input_diagnostics.size());
+    for (const auto& item : source.gpio_input_diagnostics) {
+        result.gpio_input_diagnostics.push_back({
+            item.node_id, item.resource_id, item.object_id, item.pin,
+            item.status_valid, item.status});
+    }
+    result.gpio_input_diagnostics_total_count =
+        source.gpio_input_diagnostics_total_count;
     return result;
 }
 

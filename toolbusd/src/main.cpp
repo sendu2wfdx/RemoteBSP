@@ -171,6 +171,8 @@ bool uses_structured_error(remotebsp::toolbusd::IpcRequestKind kind) {
            kind == Kind::RuntimeTimedBitstreamStopOperation ||
            kind == Kind::RuntimeBusResourceResetOperation ||
            kind == Kind::RuntimeMotionGroupCancelOperation ||
+           kind == Kind::RuntimeMotionGroupLeaseAcquire ||
+           kind == Kind::RuntimeMotionGroupLeaseRelease ||
            kind == Kind::RuntimeOperationQuery ||
            kind == Kind::RuntimeOperationLookup ||
            kind == Kind::HealthSnapshot;
@@ -1109,7 +1111,8 @@ private:
     std::vector<std::uint8_t> request_snapshot_resource(
         std::uint32_t node_id, remotebsp::protocol::Command command,
         std::vector<std::uint8_t> payload,
-        std::chrono::steady_clock::time_point deadline) {
+        std::chrono::steady_clock::time_point deadline,
+        std::uint32_t object_id = 0U) {
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error("Runtime 快照达到总时间上限");
         }
@@ -1117,7 +1120,7 @@ private:
         request.header.message_type =
             remotebsp::protocol::MessageType::Request;
         request.header.command = static_cast<std::uint16_t>(command);
-        request.header.object_id = 0U;
+        request.header.object_id = object_id;
         request.header.session_id = session_id_;
         request.payload = std::move(payload);
 
@@ -2290,6 +2293,63 @@ private:
         }
     }
 
+    remotebsp::toolbusd::RuntimeMotionGroupOperationOutcome
+    runtime_motion_group_cancel_operation(
+        const remotebsp::toolbusd::RuntimeMotionGroupCancelRequest& request) {
+        using namespace remotebsp::toolbusd;
+        RuntimeMotionGroupCancelOperation operation{
+            request.daemon_instance_id, request.lease_id, request.owner_key_id,
+            request.idempotency_key, request.permissions, request.transaction_id,
+            request.group_id, request.plan_generation};
+        const auto operation_id=OperationLedger::derive_operation_id(operation);
+        const auto digest=OperationLedger::derive_request_digest(operation);
+        const auto wrap=[&](const OperationRecord& record,bool replayed) {
+            return RuntimeMotionGroupOperationOutcome{operation_outcome(record,replayed),
+                request.transaction_id,request.group_id,request.plan_generation}; };
+        const auto old=operation_ledger_.lookup(operation_id,request.owner_key_id);
+        if(old.disposition==OperationLookupDisposition::Found) {
+            if(old.record->request_digest!=digest) throw OperationLedgerException(
+                OperationLedgerError::IdempotencyConflict,"相同运动组停止选择器绑定了不同请求");
+            return wrap(*old.record,true);
+        }
+        runtime_control_.authorize_motion_group_cancel(request,daemon_instance_id_);
+        OperationBeginResult begun;
+        { std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+          begun=operation_ledger_.begin_motion_group_cancel(operation); }
+        if(begun.disposition!=OperationBeginDisposition::StartedDurablePending)
+            return wrap(begun.record,true);
+        const auto finish=[&](OperationState state,OperationRecovery recovery,
+                              RuntimeOperationError error) {
+            std::lock_guard<std::mutex> lock(runtime_operation_policy_mutex_);
+            return operation_ledger_.finish(operation_id,digest,state,recovery,
+                {std::nullopt,std::nullopt,static_cast<std::uint16_t>(error)}); };
+        try {
+            auto guard=motion_dispatch_gate_.lock();
+            std::vector<MotionGroupDispatch> dispatches;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                const auto snapshot=motion_group_.snapshot();
+                if(snapshot.transaction_id!=request.transaction_id ||
+                   snapshot.group_id!=request.group_id ||
+                   snapshot.plan_generation!=request.plan_generation)
+                    return wrap(finish(OperationState::Rejected,OperationRecovery::NotSent,
+                                       RuntimeOperationError::Rejected),false);
+                const auto state=motion_group_.state();
+                if(state==MotionGroupState::Preparing || state==MotionGroupState::Ready ||
+                   state==MotionGroupState::Committing)
+                    dispatches=motion_group_.cancel(requests_).dispatches;
+            }
+            const bool sent=send_motion_dispatches(dispatches);
+            guard.unlock();
+            return wrap(finish(sent?OperationState::Committed:OperationState::Unknown,
+                sent?OperationRecovery::SafeClosed:OperationRecovery::ScopeBlocked,
+                sent?RuntimeOperationError::None:RuntimeOperationError::Backend),false);
+        } catch(...) {
+            return wrap(finish(OperationState::Unknown,OperationRecovery::ScopeBlocked,
+                               RuntimeOperationError::Backend),false);
+        }
+    }
+
     remotebsp::toolbusd::RuntimeOperationOutcome runtime_operation_query(
         const remotebsp::toolbusd::RuntimeOperationQuery& request) {
         using namespace remotebsp::toolbusd;
@@ -2760,6 +2820,43 @@ private:
                 item.peak_consecutive_remote_failures,
                 item.last_remote_result_time_us});
         }
+        // 每个对象独立读取；一个对象超时或返回坏载荷只把该对象标记为
+        // unavailable，不能使同节点其他对象或整个 Runtime 快照失效。
+        std::vector<remotebsp::toolbusd::GpioInputDiagnosticTarget>
+            gpio_targets;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            gpio_targets = gpio_input_diagnostics_.snapshot();
+        }
+        snapshot.gpio_input_diagnostics_total_count =
+            static_cast<std::uint16_t>(std::min<std::size_t>(
+                gpio_targets.size(),
+                std::numeric_limits<std::uint16_t>::max()));
+        for (const auto& target : gpio_targets) {
+            if (snapshot.gpio_input_diagnostics.size() >=
+                remotebsp::toolbusd::kMaximumRuntimeSnapshotResources) {
+                break;
+            }
+            remotebsp::toolbusd::IpcRuntimeGpioInputDiagnostic item;
+            item.node_id = target.node_id;
+            item.resource_id = target.resource_id;
+            item.object_id = target.object_id;
+            item.pin = target.pin;
+            item.status.version = 0U;
+            try {
+                const auto body = request_snapshot_resource(
+                    target.node_id,
+                    remotebsp::protocol::Command::GpioInputEventStatus, {},
+                    deadline, target.object_id);
+                item.status =
+                    remotebsp::protocol::decode_gpio_input_event_status(body);
+                item.status_valid = true;
+            } catch (const std::exception&) {
+                item.status = {};
+                item.status.version = 0U;
+            }
+            snapshot.gpio_input_diagnostics.push_back(item);
+        }
         snapshot.sequence = next_runtime_snapshot_sequence_++;
         if (snapshot.sequence == 0U) {
             snapshot.sequence = next_runtime_snapshot_sequence_++;
@@ -2848,6 +2945,20 @@ private:
                 runtime_control_acquire(ipc_request.runtime_control_acquire);
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok, {});
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::RuntimeMotionGroupLeaseAcquire) {
+                runtime_control_.acquire_motion_group(
+                    ipc_request.runtime_motion_group_lease_acquire, daemon_instance_id_);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok, {});
+                return;
+            }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::RuntimeMotionGroupLeaseRelease) {
+                runtime_control_.release_motion_group(
+                    ipc_request.runtime_motion_group_lease_release, daemon_instance_id_);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok, {});
                 return;
             }
             if (ipc_request.kind ==
@@ -3020,6 +3131,14 @@ private:
                     remotebsp::toolbusd::encode_ipc_runtime_operation_outcome(outcome));
                 return;
             }
+            if (ipc_request.kind == remotebsp::toolbusd::IpcRequestKind::RuntimeMotionGroupCancelOperation) {
+                const auto outcome=runtime_motion_group_cancel_operation(
+                    ipc_request.runtime_motion_group_cancel);
+                remotebsp::toolbusd::write_ipc_response(client,
+                    remotebsp::toolbusd::IpcStatus::Ok,
+                    remotebsp::toolbusd::encode_ipc_runtime_motion_group_operation_outcome(outcome));
+                return;
+            }
             if (ipc_request.kind ==
                 remotebsp::toolbusd::IpcRequestKind::
                     RuntimeOperationQuery) {
@@ -3063,10 +3182,16 @@ private:
                              std::chrono::duration_cast<
                                  std::chrono::milliseconds>(
                                  snapshot_deadline - now));
-                const auto snapshot = build_runtime_snapshot(
+                auto snapshot = build_runtime_snapshot(
                     static_cast<std::uint16_t>(
                         ipc_request.maximum_length),
                     remaining);
+                snapshot.version = ipc_request.requested_version;
+                if (snapshot.version == remotebsp::toolbusd::
+                                            kPreviousRuntimeSnapshotIpcVersion) {
+                    snapshot.gpio_input_diagnostics.clear();
+                    snapshot.gpio_input_diagnostics_total_count = 0U;
+                }
                 remotebsp::toolbusd::write_ipc_response(
                     client, remotebsp::toolbusd::IpcStatus::Ok,
                     remotebsp::toolbusd::encode_ipc_runtime_snapshot(

@@ -24,6 +24,11 @@ STM32F072RBT6、STM32F103CBT6、STM32G431CBU6 当前共用 Remote Core 的周期
 - 这些计数属于运行期 GPIO 对象，不等同于静态 GPIO 资源。Runtime 快照只有在守护进程
   已登记成功订阅并能校验节点代次的对象时才允许投影；对象查询失败必须保持局部未知，
   不得污染同节点其他资源。
+- RuntimeSnapshot v4 对每个已登记对象执行独立只读状态查询，并以 128 项 IPC 上限截断
+  投影容量；响应同时携带已登记总数，总数大于返回数时 CLI、HTTP/SSE 和告警均明确标记
+  截断。v3 快照仍可读取，但其诊断数组为空代表“旧版本未提供”。Runtime HTTP 与
+  SSE 在节点 `runtime.gpio_input_diagnostics` 暴露原始对象状态，并针对状态不可用、公共
+  事件队列丢弃或 EXTI mailbox 丢弃生成稳定告警。
 
 ## EXTI 与验证边界
 

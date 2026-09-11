@@ -45,6 +45,19 @@ toolbusd::IpcRuntimeSnapshot make_snapshot() {
     snapshot.bus_health.push_back({
         3U, 0x0C000001U, true, protocol::BusTransactionStatus::Timeout,
         2U, 5U, 123456U});
+    protocol::GpioInputEventStatus gpio_status;
+    gpio_status.version = 2U;
+    gpio_status.queued_events = 2U;
+    gpio_status.queue_capacity = 8U;
+    gpio_status.dropped_events = 3U;
+    gpio_status.last_sequence = 9U;
+    gpio_status.exti_diagnostics_available = true;
+    gpio_status.mailbox_dropped = 4U;
+    gpio_status.hints_matched = 12U;
+    gpio_status.hints_ignored = 1U;
+    snapshot.gpio_input_diagnostics.push_back(
+        {3U, 0x01000002U, 17U, 2U, true, gpio_status});
+    snapshot.gpio_input_diagnostics_total_count = 2U;
     return snapshot;
 }
 
@@ -54,8 +67,20 @@ void test_request_round_trip() {
     toolbusd::write_ipc_runtime_snapshot_request(sockets[0], 64U, 1500U);
     const auto request = toolbusd::read_ipc_request(sockets[1]);
     assert(request.kind == toolbusd::IpcRequestKind::RuntimeSnapshot);
+    assert(request.requested_version == toolbusd::kRuntimeSnapshotIpcVersion);
     assert(request.maximum_length == 64U);
     assert(request.timeout_ms == 1500U);
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    toolbusd::write_ipc_runtime_snapshot_request(
+        sockets[0], 32U, 900U,
+        toolbusd::kPreviousRuntimeSnapshotIpcVersion);
+    const auto legacy_request = toolbusd::read_ipc_request(sockets[1]);
+    assert(legacy_request.requested_version ==
+           toolbusd::kPreviousRuntimeSnapshotIpcVersion);
+    assert(legacy_request.maximum_length == 32U);
     ::close(sockets[0]);
     ::close(sockets[1]);
 }
@@ -86,9 +111,13 @@ void test_snapshot_round_trip_and_strict_flags() {
            protocol::BusTransactionStatus::Timeout);
     assert(decoded.bus_health[0].consecutive_failures == 2U);
     assert(decoded.bus_health[0].peak_consecutive_failures == 5U);
+    assert(decoded.gpio_input_diagnostics.size() == 1U);
+    assert(decoded.gpio_input_diagnostics[0].object_id == 17U);
+    assert(decoded.gpio_input_diagnostics[0].status.mailbox_dropped == 4U);
+    assert(decoded.gpio_input_diagnostics_total_count == 2U);
 
     auto invalid = encoded;
-    constexpr std::size_t header_size = 28U;
+    constexpr std::size_t header_size = 32U;
     constexpr std::size_t node_body_size = 35U;
     constexpr std::size_t traffic_body_size = 268U;
     invalid[header_size + node_body_size + traffic_body_size + 4U] = 2U;
@@ -97,6 +126,17 @@ void test_snapshot_round_trip_and_strict_flags() {
         assert(false);
     } catch (const toolbusd::IpcException&) {
     }
+
+    auto legacy_snapshot = make_snapshot();
+    legacy_snapshot.version = toolbusd::kPreviousRuntimeSnapshotIpcVersion;
+    legacy_snapshot.gpio_input_diagnostics.clear();
+    legacy_snapshot.gpio_input_diagnostics_total_count = 0U;
+    const auto v3 = toolbusd::encode_ipc_runtime_snapshot(legacy_snapshot);
+    const auto decoded_v3 = toolbusd::decode_ipc_runtime_snapshot(v3);
+    assert(decoded_v3.version ==
+           toolbusd::kPreviousRuntimeSnapshotIpcVersion);
+    assert(decoded_v3.gpio_input_diagnostics.empty());
+    assert(decoded_v3.gpio_input_diagnostics_total_count == 0U);
 
     constexpr std::size_t resources_size = 2U * 50U;
     constexpr std::size_t issue_size = 8U;

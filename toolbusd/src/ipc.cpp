@@ -18,11 +18,13 @@ constexpr std::size_t kMaximumIpcBodySize = 64U * 1024U;
 constexpr std::size_t kNodeInfoSize = 33;
 constexpr std::size_t kTrafficStatusHeaderSize = 76;
 constexpr std::size_t kTrafficClassCounterSize = 32;
-constexpr std::size_t kRuntimeSnapshotHeaderSize = 28U;
+constexpr std::size_t kRuntimeSnapshotV3HeaderSize = 28U;
+constexpr std::size_t kRuntimeSnapshotHeaderSize = 32U;
 constexpr std::size_t kRuntimeResourceSize = 50U;
 constexpr std::size_t kRuntimeNodeIssueSize = 8U;
 constexpr std::size_t kRuntimeClockQualitySize = 68U;
 constexpr std::size_t kRuntimeBusHealthSize = 28U;
+constexpr std::size_t kRuntimeGpioInputDiagnosticSize = 40U;
 constexpr std::size_t kMotionGroupPlanHeaderSize = 64U;
 constexpr std::size_t kMotionGroupMemberHeaderSize = 8U;
 constexpr std::size_t kMotionGroupSnapshotSize = 32U;
@@ -270,6 +272,11 @@ bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
     const bool empty_scope = !nonzero_id(outcome.lease_id) &&
                              !nonzero_id(outcome.expected_node_uuid) &&
                              outcome.resource_id == 0U;
+    const bool motion_group_scope =
+        outcome.kind == RuntimeOperationKind::MotionGroupCancel &&
+        nonzero_id(outcome.lease_id) &&
+        !nonzero_id(outcome.expected_node_uuid) && outcome.resource_id == 0U;
+    const bool valid_scope = has_scope || motion_group_scope;
     if (outcome.kind == RuntimeOperationKind::Unknown) {
         return outcome.state == RuntimeOperationState::ExpiredUnknown &&
                outcome.recovery == RuntimeOperationRecovery::None &&
@@ -281,30 +288,30 @@ bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
     switch (outcome.state) {
         case RuntimeOperationState::Pending:
             return outcome.recovery == RuntimeOperationRecovery::None &&
-                   has_scope && !has_result && !has_error && !outcome.value;
+                   valid_scope && !has_result && !has_error && !outcome.value;
         case RuntimeOperationState::Committed:
             if (outcome.kind == RuntimeOperationKind::GpioWrite ||
                 outcome.kind == RuntimeOperationKind::PwmConfigure ||
                 outcome.kind == RuntimeOperationKind::TimedBitstreamConfigure ||
                 outcome.kind == RuntimeOperationKind::TimedBitstreamFrame) {
                 return outcome.recovery == RuntimeOperationRecovery::None &&
-                       has_scope && has_result && !has_error;
+                       valid_scope && has_result && !has_error;
             }
             if (outcome.kind == RuntimeOperationKind::PwmStop ||
                 outcome.kind == RuntimeOperationKind::TimedBitstreamStop) {
                 return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
-                       has_scope && has_result && !has_error && !outcome.value;
+                       valid_scope && has_result && !has_error && !outcome.value;
             }
             if (outcome.kind == RuntimeOperationKind::BusResourceReset) {
                 return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
-                       has_scope && !has_result && !has_error && !outcome.value;
+                       valid_scope && !has_result && !has_error && !outcome.value;
             }
             return outcome.recovery == RuntimeOperationRecovery::SafeClosed &&
-                   has_scope && !has_result && !has_error && !outcome.value;
+                   valid_scope && !has_result && !has_error && !outcome.value;
         case RuntimeOperationState::Rejected:
             return (outcome.recovery == RuntimeOperationRecovery::NotSent ||
                     outcome.recovery == RuntimeOperationRecovery::SafeClosed) &&
-                   has_scope && !has_result && has_error &&
+                   valid_scope && !has_result && has_error &&
                    outcome.error != RuntimeOperationError::HistoryExpired &&
                    !outcome.value;
         case RuntimeOperationState::Unknown:
@@ -313,7 +320,7 @@ bool valid_operation_outcome(const RuntimeOperationOutcome& outcome) noexcept {
                     outcome.recovery == RuntimeOperationRecovery::AwaitingReboot ||
                     outcome.recovery ==
                         RuntimeOperationRecovery::NodeRebootConfirmed) &&
-                   has_scope && !has_result &&
+                   valid_scope && !has_result &&
                    (outcome.error == RuntimeOperationError::Deadline ||
                     outcome.error == RuntimeOperationError::Backend ||
                     outcome.error == RuntimeOperationError::Persistence) &&
@@ -436,7 +443,7 @@ IpcRequest read_ipc_request(int socket) {
     const auto body = receive_body(socket);
     if (body.empty() ||
         body[0] > static_cast<std::uint8_t>(
-                      IpcRequestKind::RuntimeMotionGroupCancelOperation)) {
+                      IpcRequestKind::RuntimeMotionGroupLeaseRelease)) {
         throw IpcException("本地 IPC 请求类型无效");
     }
     const auto kind = static_cast<IpcRequestKind>(body[0]);
@@ -527,8 +534,11 @@ IpcRequest read_ipc_request(int socket) {
         return request;
     }
     if (kind == IpcRequestKind::RuntimeSnapshot) {
-        if (body.size() != 9U || get_u16(body.data() + 1U) !=
-                                    kRuntimeSnapshotIpcVersion) {
+        const auto requested_version = body.size() == 9U
+            ? get_u16(body.data() + 1U) : 0U;
+        if (body.size() != 9U ||
+            (requested_version != kRuntimeSnapshotIpcVersion &&
+             requested_version != kPreviousRuntimeSnapshotIpcVersion)) {
             throw IpcException("Runtime 快照请求版本或长度无效");
         }
         const auto maximum_resources = get_u16(body.data() + 3U);
@@ -541,6 +551,7 @@ IpcRequest read_ipc_request(int socket) {
         }
         IpcRequest request;
         request.kind = kind;
+        request.requested_version = requested_version;
         request.maximum_length = maximum_resources;
         request.timeout_ms = timeout_ms;
         return request;
@@ -689,6 +700,30 @@ IpcRequest read_ipc_request(int socket) {
         try {
             request.runtime_motion_group_cancel =
                 decode_ipc_runtime_motion_group_cancel(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeMotionGroupLeaseAcquire) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_motion_group_lease_acquire =
+                decode_ipc_runtime_motion_group_lease_acquire(
+                    {body.begin() + 1U, body.end()});
+        } catch (const IpcException& error) {
+            throw IpcException(error.what(), kind);
+        }
+        return request;
+    }
+    if (kind == IpcRequestKind::RuntimeMotionGroupLeaseRelease) {
+        IpcRequest request;
+        request.kind = kind;
+        try {
+            request.runtime_motion_group_lease_release =
+                decode_ipc_runtime_motion_group_lease_release(
                     {body.begin() + 1U, body.end()});
         } catch (const IpcException& error) {
             throw IpcException(error.what(), kind);
@@ -870,6 +905,22 @@ void write_ipc_runtime_motion_group_cancel_operation_request(
     send_body(socket, body);
 }
 
+void write_ipc_runtime_motion_group_lease_acquire_request(
+    int socket, const RuntimeMotionGroupLeaseAcquireRequest& request) {
+    auto body = encode_ipc_runtime_motion_group_lease_acquire(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeMotionGroupLeaseAcquire));
+    send_body(socket, body);
+}
+
+void write_ipc_runtime_motion_group_lease_release_request(
+    int socket, const RuntimeMotionGroupLeaseReleaseRequest& request) {
+    auto body = encode_ipc_runtime_motion_group_lease_release(request);
+    body.insert(body.begin(), static_cast<std::uint8_t>(
+                                  IpcRequestKind::RuntimeMotionGroupLeaseRelease));
+    send_body(socket, body);
+}
+
 void write_ipc_runtime_operation_query_request(
     int socket, const RuntimeOperationQuery& request) {
     auto body = encode_ipc_runtime_operation_query(request);
@@ -941,16 +992,18 @@ void write_ipc_stream_read_request(
 
 void write_ipc_runtime_snapshot_request(
     int socket, std::uint16_t maximum_resources,
-    std::uint32_t timeout_ms) {
+    std::uint32_t timeout_ms, std::uint16_t requested_version) {
     if (maximum_resources == 0U ||
         maximum_resources > kMaximumRuntimeSnapshotResources ||
         timeout_ms == 0U ||
-        timeout_ms > kMaximumRuntimeSnapshotTimeoutMs) {
+        timeout_ms > kMaximumRuntimeSnapshotTimeoutMs ||
+        (requested_version != kRuntimeSnapshotIpcVersion &&
+         requested_version != kPreviousRuntimeSnapshotIpcVersion)) {
         throw IpcException("Runtime 快照请求参数超出上限");
     }
     std::vector<std::uint8_t> body{
         static_cast<std::uint8_t>(IpcRequestKind::RuntimeSnapshot)};
-    append_u16(body, kRuntimeSnapshotIpcVersion);
+    append_u16(body, requested_version);
     append_u16(body, maximum_resources);
     append_u32(body, timeout_ms);
     send_body(socket, body);
@@ -1319,11 +1372,19 @@ TrafficSnapshot decode_ipc_traffic_status(
 
 std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
     const IpcRuntimeSnapshot& snapshot) {
-    if (snapshot.version != kRuntimeSnapshotIpcVersion ||
+    if ((snapshot.version != kRuntimeSnapshotIpcVersion &&
+         snapshot.version != kPreviousRuntimeSnapshotIpcVersion) ||
         snapshot.sequence == 0U || snapshot.nodes.size() > 127U ||
         snapshot.resources.size() > kMaximumRuntimeSnapshotResources ||
         snapshot.node_issues.size() > 127U ||
         snapshot.bus_health.size() > kMaximumRuntimeSnapshotResources ||
+        snapshot.gpio_input_diagnostics.size() >
+            kMaximumRuntimeSnapshotResources ||
+        snapshot.gpio_input_diagnostics_total_count <
+            snapshot.gpio_input_diagnostics.size() ||
+        (snapshot.version == kPreviousRuntimeSnapshotIpcVersion &&
+         (!snapshot.gpio_input_diagnostics.empty() ||
+          snapshot.gpio_input_diagnostics_total_count != 0U)) ||
         snapshot.clocks.size() != snapshot.nodes.size()) {
         throw IpcException("Runtime 快照版本、序号或条目数量无效");
     }
@@ -1339,13 +1400,17 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         }
         node_ids.push_back(node.node_id);
     }
-    const auto expected_size = kRuntimeSnapshotHeaderSize +
+    const auto header_size = snapshot.version == kRuntimeSnapshotIpcVersion
+        ? kRuntimeSnapshotHeaderSize : kRuntimeSnapshotV3HeaderSize;
+    const auto expected_size = header_size +
         node_body.size() + traffic_body.size() +
         snapshot.resources.size() * kRuntimeResourceSize +
         snapshot.node_issues.size() * kRuntimeNodeIssueSize;
     const auto total_size = expected_size +
         snapshot.clocks.size() * kRuntimeClockQualitySize +
-        snapshot.bus_health.size() * kRuntimeBusHealthSize;
+        snapshot.bus_health.size() * kRuntimeBusHealthSize +
+        snapshot.gpio_input_diagnostics.size() *
+            kRuntimeGpioInputDiagnosticSize;
     if (total_size > kMaximumIpcBodySize) {
         throw IpcException("Runtime 快照超过本地 IPC 字节上限");
     }
@@ -1360,6 +1425,11 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
     append_u16(body, static_cast<std::uint16_t>(snapshot.clocks.size()));
     append_u32(body, static_cast<std::uint32_t>(node_body.size()));
     append_u32(body, static_cast<std::uint32_t>(traffic_body.size()));
+    if (snapshot.version == kRuntimeSnapshotIpcVersion) {
+        append_u16(body, static_cast<std::uint16_t>(
+            snapshot.gpio_input_diagnostics.size()));
+        append_u16(body, snapshot.gpio_input_diagnostics_total_count);
+    }
     body.insert(body.end(), node_body.begin(), node_body.end());
     body.insert(body.end(), traffic_body.begin(), traffic_body.end());
     std::vector<std::uint64_t> identities;
@@ -1486,17 +1556,63 @@ std::vector<std::uint8_t> encode_ipc_runtime_snapshot(
         append_u32(body, health.peak_consecutive_failures);
         append_u64(body, health.last_result_time_us);
     }
+    std::vector<std::uint64_t> gpio_identities;
+    for (const auto& item : snapshot.gpio_input_diagnostics) {
+        const auto identity = (static_cast<std::uint64_t>(item.node_id) << 32U) |
+                              item.object_id;
+        const bool status_empty = item.status.version == 0U &&
+            item.status.queued_events == 0U && item.status.queue_capacity == 0U &&
+            item.status.dropped_events == 0U && item.status.last_sequence == 0U &&
+            !item.status.exti_diagnostics_available &&
+            item.status.mailbox_dropped == 0U && item.status.hints_matched == 0U &&
+            item.status.hints_ignored == 0U;
+        if (item.node_id == 0U || item.node_id > 127U ||
+            item.resource_id == 0U || item.object_id == 0U ||
+            std::find(node_ids.begin(), node_ids.end(), item.node_id) ==
+                node_ids.end() ||
+            std::find(gpio_identities.begin(), gpio_identities.end(), identity) !=
+                gpio_identities.end() ||
+            (!item.status_valid && !status_empty) ||
+            (item.status_valid &&
+             (item.status.version > protocol::kGpioInputEventStatusVersion ||
+              item.status.version == 0U || item.status.queue_capacity == 0U ||
+              item.status.queued_events > item.status.queue_capacity ||
+              (item.status.version < 2U &&
+               (item.status.exti_diagnostics_available ||
+                item.status.mailbox_dropped != 0U ||
+                item.status.hints_matched != 0U ||
+                item.status.hints_ignored != 0U))))) {
+            throw IpcException("Runtime GPIO 输入诊断项无效");
+        }
+        gpio_identities.push_back(identity);
+        append_u32(body, item.node_id);
+        append_u32(body, item.resource_id);
+        append_u32(body, item.object_id);
+        append_u16(body, item.pin);
+        body.push_back(static_cast<std::uint8_t>(item.status_valid));
+        body.push_back(item.status.version);
+        append_u16(body, item.status.queued_events);
+        append_u16(body, item.status.queue_capacity);
+        append_u32(body, item.status.dropped_events);
+        append_u32(body, item.status.last_sequence);
+        append_u32(body, item.status.mailbox_dropped);
+        append_u32(body, item.status.hints_matched);
+        append_u32(body, item.status.hints_ignored);
+    }
     return body;
 }
 
 IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
     const std::vector<std::uint8_t>& body) {
-    if (body.size() < kRuntimeSnapshotHeaderSize ||
-        get_u16(body.data()) != kRuntimeSnapshotIpcVersion) {
+    if (body.size() < kRuntimeSnapshotV3HeaderSize ||
+        (get_u16(body.data()) != kRuntimeSnapshotIpcVersion &&
+         get_u16(body.data()) != kPreviousRuntimeSnapshotIpcVersion)) {
         throw IpcException("Runtime 快照响应版本或头部无效");
     }
     IpcRuntimeSnapshot snapshot;
     snapshot.version = get_u16(body.data());
+    const auto header_size = snapshot.version == kRuntimeSnapshotIpcVersion
+        ? kRuntimeSnapshotHeaderSize : kRuntimeSnapshotV3HeaderSize;
     const auto bus_health_count = get_u16(body.data() + 2U);
     snapshot.sequence = get_u64(body.data() + 4U);
     const auto node_count = get_u16(body.data() + 12U);
@@ -1505,22 +1621,31 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
     const auto clock_count = get_u16(body.data() + 18U);
     const std::size_t node_size = get_u32(body.data() + 20U);
     const std::size_t traffic_size = get_u32(body.data() + 24U);
-    const auto expected_size = kRuntimeSnapshotHeaderSize + node_size +
+    const auto gpio_count = snapshot.version == kRuntimeSnapshotIpcVersion
+        ? get_u16(body.data() + 28U) : 0U;
+    snapshot.gpio_input_diagnostics_total_count =
+        snapshot.version == kRuntimeSnapshotIpcVersion
+            ? get_u16(body.data() + 30U) : 0U;
+    const auto expected_size = header_size + node_size +
         traffic_size + static_cast<std::size_t>(resource_count) *
                            kRuntimeResourceSize +
         static_cast<std::size_t>(node_issue_count) * kRuntimeNodeIssueSize;
     const auto total_size = expected_size +
         static_cast<std::size_t>(clock_count) * kRuntimeClockQualitySize +
-        static_cast<std::size_t>(bus_health_count) * kRuntimeBusHealthSize;
+        static_cast<std::size_t>(bus_health_count) * kRuntimeBusHealthSize +
+        static_cast<std::size_t>(gpio_count) *
+            kRuntimeGpioInputDiagnosticSize;
     if (snapshot.sequence == 0U || node_count > 127U ||
         resource_count > kMaximumRuntimeSnapshotResources ||
         node_issue_count > 127U || clock_count != node_count ||
         bus_health_count > kMaximumRuntimeSnapshotResources ||
+        gpio_count > kMaximumRuntimeSnapshotResources ||
+        snapshot.gpio_input_diagnostics_total_count < gpio_count ||
         total_size != body.size()) {
         throw IpcException("Runtime 快照响应长度或条目数量无效");
     }
     auto cursor = body.begin() +
-                  static_cast<std::ptrdiff_t>(kRuntimeSnapshotHeaderSize);
+                  static_cast<std::ptrdiff_t>(header_size);
     const std::vector<std::uint8_t> node_body(
         cursor, cursor + static_cast<std::ptrdiff_t>(node_size));
     cursor += static_cast<std::ptrdiff_t>(node_size);
@@ -1687,6 +1812,53 @@ IpcRuntimeSnapshot decode_ipc_runtime_snapshot(
         bus_identities.push_back(identity);
         snapshot.bus_health.push_back(health);
         cursor += static_cast<std::ptrdiff_t>(kRuntimeBusHealthSize);
+    }
+    std::vector<std::uint64_t> gpio_identities;
+    snapshot.gpio_input_diagnostics.reserve(gpio_count);
+    for (std::size_t index = 0U; index < gpio_count; ++index) {
+        IpcRuntimeGpioInputDiagnostic item;
+        item.node_id = get_u32(&*cursor);
+        item.resource_id = get_u32(&cursor[4]);
+        item.object_id = get_u32(&cursor[8]);
+        item.pin = get_u16(&cursor[12]);
+        const auto valid = cursor[14];
+        item.status_valid = valid != 0U;
+        item.status.version = cursor[15];
+        item.status.queued_events = get_u16(&cursor[16]);
+        item.status.queue_capacity = get_u16(&cursor[18]);
+        item.status.dropped_events = get_u32(&cursor[20]);
+        item.status.last_sequence = get_u32(&cursor[24]);
+        item.status.mailbox_dropped = get_u32(&cursor[28]);
+        item.status.hints_matched = get_u32(&cursor[32]);
+        item.status.hints_ignored = get_u32(&cursor[36]);
+        item.status.exti_diagnostics_available = item.status.version >= 2U;
+        const auto identity = (static_cast<std::uint64_t>(item.node_id) << 32U) |
+                              item.object_id;
+        const bool status_empty = item.status.version == 0U &&
+            item.status.queued_events == 0U && item.status.queue_capacity == 0U &&
+            item.status.dropped_events == 0U && item.status.last_sequence == 0U &&
+            item.status.mailbox_dropped == 0U && item.status.hints_matched == 0U &&
+            item.status.hints_ignored == 0U;
+        if (valid > 1U || item.node_id == 0U || item.node_id > 127U ||
+            item.resource_id == 0U || item.object_id == 0U ||
+            std::find(node_ids.begin(), node_ids.end(), item.node_id) ==
+                node_ids.end() ||
+            std::find(gpio_identities.begin(), gpio_identities.end(), identity) !=
+                gpio_identities.end() ||
+            (!item.status_valid && !status_empty) ||
+            (item.status_valid &&
+             (item.status.version > protocol::kGpioInputEventStatusVersion ||
+              item.status.version == 0U || item.status.queue_capacity == 0U ||
+              item.status.queued_events > item.status.queue_capacity ||
+              (item.status.version < 2U &&
+               (item.status.mailbox_dropped != 0U ||
+                item.status.hints_matched != 0U ||
+                item.status.hints_ignored != 0U))))) {
+            throw IpcException("Runtime GPIO 输入诊断项无效");
+        }
+        gpio_identities.push_back(identity);
+        snapshot.gpio_input_diagnostics.push_back(item);
+        cursor += static_cast<std::ptrdiff_t>(kRuntimeGpioInputDiagnosticSize);
     }
     return snapshot;
 }
@@ -2311,6 +2483,71 @@ RuntimeMotionGroupCancelRequest decode_ipc_runtime_motion_group_cancel(
     return request;
 }
 
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_lease_acquire(
+    const RuntimeMotionGroupLeaseAcquireRequest& request) {
+    RuntimeMotionGroupCancelRequest wire;
+    wire.daemon_instance_id = request.daemon_instance_id;
+    wire.lease_id = request.lease_id;
+    wire.owner_key_id = request.owner_key_id;
+    wire.idempotency_key = "lease";
+    wire.permissions = request.permissions;
+    wire.transaction_id = request.transaction_id;
+    wire.group_id = request.group_id;
+    wire.plan_generation = request.plan_generation;
+    wire.deadline_ms = request.ttl_ms;
+    auto body = encode_ipc_runtime_motion_group_cancel(wire);
+    body[57U] = 0U;
+    body.resize(60U + request.owner_key_id.size());
+    return body;
+}
+
+RuntimeMotionGroupLeaseAcquireRequest decode_ipc_runtime_motion_group_lease_acquire(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() < 60U || body[57U] != 0U ||
+        get_u16(body.data() + 58U) != 0U) {
+        throw IpcException("Runtime运动组租约登记IPC长度或保留位无效");
+    }
+    const auto owner_length = static_cast<std::size_t>(body[56U]);
+    if (owner_length == 0U ||
+        owner_length > kMaximumRuntimeControlIdentityBytes ||
+        body.size() != 60U + owner_length) {
+        throw IpcException("Runtime运动组租约登记IPC owner长度无效");
+    }
+    auto expanded = body;
+    expanded[57U] = 5U;
+    expanded.insert(expanded.end(), {'l', 'e', 'a', 's', 'e'});
+    const auto wire = decode_ipc_runtime_motion_group_cancel(expanded);
+    RuntimeMotionGroupLeaseAcquireRequest result;
+    result.daemon_instance_id = wire.daemon_instance_id;
+    result.lease_id = wire.lease_id;
+    result.owner_key_id = wire.owner_key_id;
+    result.permissions = wire.permissions;
+    result.transaction_id = wire.transaction_id;
+    result.group_id = wire.group_id;
+    result.plan_generation = wire.plan_generation;
+    result.ttl_ms = wire.deadline_ms;
+    return result;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_lease_release(
+    const RuntimeMotionGroupLeaseReleaseRequest& request) {
+    RuntimeControlReleaseRequest wire;
+    wire.daemon_instance_id = request.daemon_instance_id;
+    wire.lease_id = request.lease_id;
+    wire.owner_key_id = request.owner_key_id;
+    return encode_ipc_runtime_control_release(wire);
+}
+
+RuntimeMotionGroupLeaseReleaseRequest decode_ipc_runtime_motion_group_lease_release(
+    const std::vector<std::uint8_t>& body) {
+    const auto wire = decode_ipc_runtime_control_release(body);
+    RuntimeMotionGroupLeaseReleaseRequest result;
+    result.daemon_instance_id = wire.daemon_instance_id;
+    result.lease_id = wire.lease_id;
+    result.owner_key_id = wire.owner_key_id;
+    return result;
+}
+
 std::vector<std::uint8_t> encode_ipc_runtime_control_release(
     const RuntimeControlReleaseRequest& request) {
     if (request.version != kRuntimeControlIpcVersion ||
@@ -2603,6 +2840,39 @@ RuntimeOperationOutcome decode_ipc_runtime_operation_outcome(
         throw IpcException("Runtime 操作结果标志或状态组合无效");
     }
     return outcome;
+}
+
+std::vector<std::uint8_t> encode_ipc_runtime_motion_group_operation_outcome(
+    const RuntimeMotionGroupOperationOutcome& outcome) {
+    if (outcome.operation.kind != RuntimeOperationKind::MotionGroupCancel ||
+        outcome.transaction_id == 0U || outcome.group_id == 0U ||
+        outcome.plan_generation == 0U)
+        throw IpcException("Runtime运动组操作结果身份无效");
+    auto body = encode_ipc_runtime_operation_outcome(outcome.operation);
+    append_u64(body, outcome.transaction_id);
+    append_u32(body, outcome.group_id);
+    append_u32(body, outcome.plan_generation);
+    return body;
+}
+
+RuntimeMotionGroupOperationOutcome decode_ipc_runtime_motion_group_operation_outcome(
+    const std::vector<std::uint8_t>& body) {
+    if (body.size() != kRuntimeOperationOutcomeSize + 16U) {
+        throw IpcException("Runtime运动组操作结果长度无效");
+    }
+    RuntimeMotionGroupOperationOutcome result;
+    result.operation = decode_ipc_runtime_operation_outcome(
+        {body.begin(), body.begin() + kRuntimeOperationOutcomeSize});
+    result.transaction_id = get_u64(body.data() + kRuntimeOperationOutcomeSize);
+    result.group_id = get_u32(body.data() + kRuntimeOperationOutcomeSize + 8U);
+    result.plan_generation =
+        get_u32(body.data() + kRuntimeOperationOutcomeSize + 12U);
+    if (result.operation.kind != RuntimeOperationKind::MotionGroupCancel ||
+        result.transaction_id == 0U || result.group_id == 0U ||
+        result.plan_generation == 0U) {
+        throw IpcException("Runtime运动组操作结果身份无效");
+    }
+    return result;
 }
 
 const char* runtime_operation_kind_name(RuntimeOperationKind kind) noexcept {

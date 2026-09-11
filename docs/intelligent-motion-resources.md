@@ -512,10 +512,12 @@ G431各保留4 KiB；Katapult APP写入上界已避开该区域。
 `remote-cli --json motion-group-status`、`motion-group-cancel` 和提交结果使用同一版本化状态
 合同，公开事务身份、状态、成员/就绪/已提交数量、待处理请求数、原始 `abort_reason`、
 `abort_is_best_effort` 和 `result_unknown`。Runtime 后端严格校验字段、计数和未知结果语义，
-避免看板把部分提交误报为成功。当前 daemon 的运动组取消命令尚未携带控制租约和调用者
-身份，因此 HTTP 只准备了后端查询/取消适配，不得在权限边界补齐前直接开放写入口；后续
-必须复用现有鉴权、控制租约、幂等键和审计链路，再投影到 API、SSE、告警及运维看板。
-这项限制是失败关闭，不允许用本机 IPC 可达性代替授权。
+避免看板把部分提交误报为成功。daemon 现已提供独立的运动组控制租约登记/释放 IPC；租约
+绑定 toolbusd 实例、owner、权限、事务 ID、组 ID、计划代次和 TTL，停止请求必须完整匹配。
+停止在发送前写入持久操作账本，重复幂等键回放同一结果；首次 ABORT 发送失败或进程在
+pending 后重启时结果保持 Unknown/ScopeBlocked。专用结果载荷同时返回操作状态和事务三元组，
+避免通用资源字段冒充运动组身份。普通无租约 `motion-group-cancel` 仅保留为开发诊断入口；
+HTTP 写入口仍须在 Runtime 鉴权、审计和 API 投影完成后才开放，不能用本机 IPC 可达性代替授权。
 
 MCU 节点级指标至少包括：
 

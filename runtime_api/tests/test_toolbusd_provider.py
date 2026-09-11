@@ -230,6 +230,43 @@ class RemoteCliIpcClientTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][-3:], ["runtime-snapshot", "64", "1400"])
 
+    def test_runtime_snapshot_v4_gpio_diagnostics_and_v3_compatibility(self):
+        legacy = RemoteCliIpcClient._json_runtime_snapshot(
+            self._runtime_snapshot_document())
+        self.assertEqual(legacy["version"], 3)
+        self.assertEqual(legacy["gpio_input_diagnostics"], [])
+
+        document = json.loads(self._runtime_snapshot_document())
+        document["data"]["snapshot_version"] = 4
+        document["data"]["gpio_input_diagnostics_total_count"] = 2
+        document["data"]["gpio_input_diagnostics_truncated"] = True
+        document["data"]["gpio_input_diagnostics"] = [{
+            "node_id": 1, "resource_id": 0x01000001,
+            "object_id": 17, "pin": 1, "status_valid": True,
+            "status_version": 2, "queued_events": 2,
+            "queue_capacity": 8, "dropped_events": 3,
+            "last_sequence": 9, "exti_diagnostics_available": True,
+            "mailbox_dropped": 4, "hints_matched": 12,
+            "hints_ignored": 1,
+        }]
+        parsed = RemoteCliIpcClient._json_runtime_snapshot(
+            json.dumps(document))
+        self.assertEqual(parsed["gpio_input_diagnostics"][0]
+                         ["mailbox_dropped"], 4)
+        self.assertTrue(parsed["gpio_input_diagnostics_truncated"])
+
+        unavailable = document["data"]["gpio_input_diagnostics"][0]
+        unavailable.update({
+            "status_valid": False, "status_version": 0,
+            "queued_events": 0, "queue_capacity": 0,
+            "dropped_events": 0, "last_sequence": 0,
+            "exti_diagnostics_available": False, "mailbox_dropped": 0,
+            "hints_matched": 0, "hints_ignored": 0,
+        })
+        parsed = RemoteCliIpcClient._json_runtime_snapshot(
+            json.dumps(document))
+        self.assertFalse(parsed["gpio_input_diagnostics"][0]["status_valid"])
+
     def test_daemon_identity_is_strict_and_normalized(self):
         calls = []
 
@@ -779,6 +816,47 @@ class ToolbusdSnapshotProviderTest(unittest.TestCase):
         self.assertFalse(resource["available"])
         self.assertIn("resource_status_unavailable",
                       {alert["code"] for alert in snapshot["alerts"]})
+
+    def test_gpio_input_diagnostics_are_projected_and_isolated(self):
+        document = json.loads(
+            RemoteCliIpcClientTest._runtime_snapshot_document())
+        document["data"]["snapshot_version"] = 4
+        document["data"]["gpio_input_diagnostics_total_count"] = 3
+        document["data"]["gpio_input_diagnostics_truncated"] = True
+        document["data"]["gpio_input_diagnostics"] = [{
+            "node_id": 1, "resource_id": 0x01000001,
+            "object_id": 17, "pin": 1, "status_valid": True,
+            "status_version": 2, "queued_events": 1,
+            "queue_capacity": 8, "dropped_events": 2,
+            "last_sequence": 9, "exti_diagnostics_available": True,
+            "mailbox_dropped": 0, "hints_matched": 12,
+            "hints_ignored": 1,
+        }, {
+            "node_id": 1, "resource_id": 0x01000001,
+            "object_id": 18, "pin": 1, "status_valid": False,
+            "status_version": 0, "queued_events": 0,
+            "queue_capacity": 0, "dropped_events": 0,
+            "last_sequence": 0, "exti_diagnostics_available": False,
+            "mailbox_dropped": 0, "hints_matched": 0,
+            "hints_ignored": 0,
+        }]
+        parsed = RemoteCliIpcClient._json_runtime_snapshot(
+            json.dumps(document))
+
+        class AtomicClient:
+            def runtime_snapshot(self, maximum_resources):
+                return parsed
+
+        snapshot = ToolbusdSnapshotProvider(
+            AtomicClient(), clock_ms=lambda: 123).get_snapshot()
+        node = snapshot["nodes"][0]
+        self.assertEqual(len(node["runtime"]["gpio_input_diagnostics"]), 2)
+        codes = {alert["code"] for alert in snapshot["alerts"]}
+        self.assertIn("gpio_input_events_dropped", codes)
+        self.assertIn("gpio_input_diagnostics_unavailable", codes)
+        self.assertIn("gpio_input_diagnostics_truncated", codes)
+        self.assertEqual(node["runtime"]["gpio_input_diagnostics_projection"]
+                         ["total_count"], 3)
 
     def test_maps_nodes_resources_health_and_link_state(self):
         provider = ToolbusdSnapshotProvider(
