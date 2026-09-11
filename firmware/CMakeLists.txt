@@ -45,15 +45,22 @@ file(STRINGS "${RBSP_CONFIG}" RBSP_DEVICE_PARAM_DISABLED_LINES
      REGEX "^# CONFIG_REMOTEBSP_DEVICE_PARAMS is not set$")
 file(STRINGS "${RBSP_CONFIG}" RBSP_F103_BOARD_LINES
      REGEX "^CONFIG_BOARD_STM32F103CBT6=y$")
+file(STRINGS "${RBSP_CONFIG}" RBSP_DEVICE_PARAM_EEPROM_LINES
+     REGEX "^CONFIG_REMOTEBSP_DEVICE_PARAM_EXTERNAL_EEPROM=y$")
 if(NOT RBSP_DEVICE_PARAM_DISABLED_LINES)
     list(APPEND RBSP_OPTIONAL_CORE_SOURCES
          "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/schema.c"
          "${CMAKE_CURRENT_SOURCE_DIR}/../device_params/src/store.c")
-    list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_flash.c)
-    if(RBSP_F103_BOARD_LINES)
+    list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_backend.c)
+    if(RBSP_DEVICE_PARAM_EEPROM_LINES)
+        list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_eeprom.c)
+        set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x0)
+    elseif(RBSP_F103_BOARD_LINES)
+        list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_flash.c)
         # F103中密度器件的擦除页为1KiB。
         set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x800)
     else()
+        list(APPEND RBSP_OPTIONAL_BOARD_SOURCES src/device_parameter_flash.c)
         # F072和G431的擦除页均为2KiB。
         set(RBSP_DEVICE_PARAM_FLASH_SIZE 0x1000)
     endif()

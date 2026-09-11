@@ -68,6 +68,27 @@ class FlashLayoutTests(unittest.TestCase):
     def test_f103_katapult_valid_layout(self) -> None:
         self.run_verify()
 
+    def test_external_eeprom_does_not_reserve_internal_flash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, elf, map_path, bootloader, objdump = self.make_fixture(
+                root, boot_end=0x0801F000)
+            config.write_text(config.read_text(encoding="utf-8") +
+                              "CONFIG_REMOTEBSP_DEVICE_PARAM_EXTERNAL_EEPROM=y\n",
+                              encoding="utf-8")
+            map_path.write_text(
+                " 0x0801f000 PROVIDE (__rbsp_motion_epoch_flash_start__ = x)\n"
+                " 0x0801f800 PROVIDE (__rbsp_motion_epoch_flash_end__ = x)\n"
+                " 0x0801f800 PROVIDE (__rbsp_health_epoch_flash_start__ = x)\n"
+                " 0x08020000 PROVIDE (__rbsp_health_epoch_flash_end__ = x)\n"
+                " 0x08020000 PROVIDE (__rbsp_device_param_flash_start__ = x)\n"
+                " 0x08020000 PROVIDE (__rbsp_device_param_flash_end__ = x)\n",
+                encoding="utf-8")
+            with mock.patch.object(layout.subprocess, "check_output",
+                                   return_value=objdump):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    layout.verify(config, elf, map_path, bootloader)
+
     def test_rejects_katapult_overwriting_health_pages(self) -> None:
         with self.assertRaisesRegex(SystemExit, "未停在 motion epoch 前"):
             self.run_verify(boot_end=0x0801F800)

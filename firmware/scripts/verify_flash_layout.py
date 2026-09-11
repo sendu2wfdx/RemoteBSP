@@ -58,7 +58,7 @@ def parse_int(value: str, field: str) -> int:
         fail(f"{field} 不是合法整数：{value}")
 
 
-def map_symbols(path: Path) -> dict[str, int]:
+def map_symbols(path: Path, *, require_device_params: bool = True) -> dict[str, int]:
     wanted = {
         "__rbsp_health_epoch_flash_start__",
         "__rbsp_health_epoch_flash_end__",
@@ -67,6 +67,9 @@ def map_symbols(path: Path) -> dict[str, int]:
         "__rbsp_motion_epoch_flash_start__",
         "__rbsp_motion_epoch_flash_end__",
     }
+    if not require_device_params:
+        wanted -= {"__rbsp_device_param_flash_start__",
+                   "__rbsp_device_param_flash_end__"}
     values: dict[str, int] = {}
     pattern = re.compile(r"^\s*(0x[0-9a-fA-F]+)\s+.*\b(" +
                          "|".join(re.escape(x) for x in wanted) + r")\b")
@@ -129,7 +132,10 @@ def verify(config_path: Path, elf: Path, map_path: Path,
     app_start = FLASH_BASE + app_offset
     # 该选项在 Kconfig 中默认启用，defconfig 可只记录显式关闭项。
     params_enabled = config.get("CONFIG_REMOTEBSP_DEVICE_PARAMS", "y") == "y"
-    param_size = 2 * board.page_size if params_enabled else 0
+    external_eeprom = (
+        config.get("CONFIG_REMOTEBSP_DEVICE_PARAM_EXTERNAL_EEPROM") == "y")
+    param_size = 2 * board.page_size if (
+        params_enabled and not external_eeprom) else 0
     health_size = 2 * board.page_size
     motion_size = 2 * board.page_size
     health_start = flash_end - param_size - health_size
@@ -150,7 +156,8 @@ def verify(config_path: Path, elf: Path, map_path: Path,
             fail(f"{left[0]} 与 {right[0]} 边界不连续")
     if health_size != 2 * board.page_size:
         fail("health epoch 未保留两个擦除页")
-    if params_enabled and param_size != 2 * board.page_size:
+    if params_enabled and not external_eeprom and \
+            param_size != 2 * board.page_size:
         fail("device params 未保留两个擦除页")
     if app_start >= health_start:
         fail("应用 Flash 区间为空或越过持久化区域")
@@ -163,7 +170,11 @@ def verify(config_path: Path, elf: Path, map_path: Path,
         "__rbsp_motion_epoch_flash_start__": motion_start,
         "__rbsp_motion_epoch_flash_end__": health_start,
     }
-    actual_symbols = map_symbols(map_path)
+    if external_eeprom:
+        expected_symbols.pop("__rbsp_device_param_flash_start__")
+        expected_symbols.pop("__rbsp_device_param_flash_end__")
+    actual_symbols = map_symbols(
+        map_path, require_device_params=not external_eeprom)
     for name, expected in expected_symbols.items():
         if actual_symbols[name] != expected:
             fail(f"{name} 为 0x{actual_symbols[name]:08x}，预期 0x{expected:08x}")

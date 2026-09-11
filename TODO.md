@@ -10,6 +10,8 @@
 协议、总线和可靠性工作继续依次推进。
 
 - RemoteBSP Studio 保存板卡工程并生成完整 Kconfig `.config`。
+- Studio 工程 schema/界面尚未提供设备参数存储后端选择；在接入板级 EEPROM
+  几何与回调实现后，增加内部 Flash/外部 EEPROM 选项并生成对应 Kconfig choice。
 - Kconfig 负责硬件基础参数、功能裁剪、静态预算和具体 IO/外设映射。
 - 固件烧录并重启后建立固定资源表；运行中不动态申请 IO 或改变复用关系。
 - SN、UUID、制造信息和 ADC 校准等少量参数使用独立 EEPROM/Flash 仿 EEPROM。

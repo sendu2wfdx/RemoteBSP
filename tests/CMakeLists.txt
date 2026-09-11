@@ -195,6 +195,18 @@ target_compile_options(device_parameter_store_tests PRIVATE
 add_test(NAME device_parameter_store_tests
     COMMAND device_parameter_store_tests)
 
+add_executable(device_parameter_eeprom_backend_tests
+    device_parameter_eeprom_backend_tests.c
+    ../firmware/src/device_parameter_eeprom.c)
+target_include_directories(device_parameter_eeprom_backend_tests PRIVATE
+    ../firmware/include ../device_params/include ../protocol/include)
+target_link_libraries(device_parameter_eeprom_backend_tests PRIVATE
+    remotebsp_device_params)
+target_compile_options(device_parameter_eeprom_backend_tests PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME device_parameter_eeprom_backend_tests
+    COMMAND device_parameter_eeprom_backend_tests)
+
 add_executable(boot_epoch_journal_tests
     boot_epoch_journal_tests.c)
 target_link_libraries(boot_epoch_journal_tests PRIVATE
@@ -893,4 +905,9 @@ add_test(
     NAME firmware_flash_layout_tests
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/firmware/tests/test_flash_layout.py"
+)
+add_test(
+    NAME firmware_device_parameter_backend_selection_tests
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/firmware/tests/test_device_parameter_backend_selection.py"
 )

@@ -829,6 +829,8 @@ class GuiTest(unittest.TestCase):
                     "result": "data.operation.result",
                 })
                 script = urlopen(base + "/app.js").read()
+                self.assertIn(b"exti_endpoint_id", script)
+                self.assertIn("EXTI".encode(), script)
                 self.assertIn(b"/api/deployment/preflight", script)
                 self.assertIn(
                     b"/api/deployment/can-katapult/preflight", script)

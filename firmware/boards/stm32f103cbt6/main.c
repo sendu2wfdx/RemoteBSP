@@ -14,7 +14,7 @@
 #include "board_bus.h"
 #endif
 #ifdef CONFIG_REMOTEBSP_DEVICE_PARAMS
-#include "remotebsp_embedded/device_parameter_flash.h"
+#include "remotebsp_embedded/device_parameter_backend.h"
 #endif
 #ifdef CONFIG_REMOTEBSP_SOFT_HALF_DUPLEX_UART
 #include "remotebsp_embedded/soft_half_duplex_uart.h"
@@ -1944,7 +1944,7 @@ int main(void) {
     }
 #ifdef CONFIG_REMOTEBSP_DEVICE_PARAMS
     rbsp_device_param_backend device_param_backend;
-    if (!rbsp_device_parameter_flash_backend_init(
+    if (!rbsp_device_parameter_backend_init(
             &device_param_backend) ||
         !rbsp_core_device_params_init(
             &remote_core, &device_param_backend)) {

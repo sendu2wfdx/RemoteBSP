@@ -91,6 +91,7 @@ def build_resource_entries(board: dict, resources: dict) -> list[dict]:
                 "active_low": bool(item.get("active_low", False)),
                 "safe_level": item.get("safe_level"),
                 "debounce_ms": item.get("debounce_ms", 0),
+                "exti_endpoint_id": item.get("exti_endpoint_id"),
             }))
 
     uart_endpoints = board.get("uart", {}).get("endpoints", [])
@@ -242,6 +243,7 @@ def _markdown_cell(value: object) -> str:
 
 def _parameter_text(parameters: dict) -> str:
     preferred = (
+        ("exti_endpoint_id", "输入捕获"),
         ("baud_rate", "波特率"),
         ("frequency_hz", "频率"),
         ("maximum_clock_hz", "最高时钟"),

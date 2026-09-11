@@ -98,7 +98,7 @@ class ProjectArtifactsTest(unittest.TestCase):
         mixed["gpio"]["resources"].append({
             "name": "button", "pin": "PA0", "direction": "input",
             "pull": "down", "active_low": False, "safe_level": None,
-            "debounce_ms": 10,
+            "debounce_ms": 10, "exti_endpoint_id": "exti0_pa0",
         })
         bundle = generate_project_reports(mixed, self.catalog)
         summary_name = next(
@@ -110,6 +110,18 @@ class ProjectArtifactsTest(unittest.TestCase):
         self.assertEqual(len(summary["mock_only_resource_keys"]), 4)
         self.assertIn("PA0", {item["pin"]
                               for item in summary["pin_usage"]})
+        manifest_name = next(
+            name for name in self._files(bundle)
+            if name.endswith("稳定资源清单.json"))
+        manifest = json.loads(self._files(bundle)[manifest_name])
+        gpio = next(item for item in manifest["resources"]
+                    if item["kind"] == "gpio")
+        self.assertEqual(gpio["parameters"]["exti_endpoint_id"],
+                         "exti0_pa0")
+        wiring_name = next(name for name in self._files(bundle)
+                           if name.endswith("接线表.md"))
+        self.assertIn("exti0_pa0",
+                      self._files(bundle)[wiring_name].decode("utf-8"))
 
 
 if __name__ == "__main__":

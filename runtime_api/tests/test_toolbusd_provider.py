@@ -14,6 +14,38 @@ from runtime_api.toolbusd_provider import (
 )
 
 
+class MotionGroupStatusContractTests(unittest.TestCase):
+    def _document(self, **changes):
+        data = {
+            "transaction_id": 21, "group_id": 7, "plan_generation": 3,
+            "state": "aborting", "abort_reason": 9, "member_count": 2,
+            "ready_count": 2, "committed_count": 1,
+            "pending_request_count": 1, "commit_dispatched": True,
+            "abort_is_best_effort": True, "result_unknown": True,
+        }
+        data.update(changes)
+        return json.dumps({"schema_version": 1,
+                           "command": "motion-group-status", "data": data})
+
+    def test_partial_commit_preserves_original_error_and_unknown_result(self):
+        status = RemoteCliIpcClient._json_motion_group_status(self._document())
+        self.assertEqual(status["state"], "aborting")
+        self.assertEqual(status["committed_count"], 1)
+        self.assertEqual(status["abort_reason"], 9)
+        self.assertTrue(status["abort_is_best_effort"])
+        self.assertTrue(status["result_unknown"])
+
+    def test_rejects_inconsistent_unknown_result(self):
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "未知结果语义"):
+            RemoteCliIpcClient._json_motion_group_status(
+                self._document(result_unknown=False))
+
+    def test_rejects_invalid_original_error_type(self):
+        with self.assertRaisesRegex(ToolbusIpcProtocolError, "abort_reason"):
+            RemoteCliIpcClient._json_motion_group_status(
+                self._document(abort_reason="9"))
+
+
 class FakeToolbusClient:
     def traffic_status(self):
         return {"mode": "fd", "available_permille": 900}

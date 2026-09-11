@@ -1436,6 +1436,54 @@ class RemoteCliIpcClient:
             raise ToolbusIpcProtocolError("PWM提交结果与请求配置不一致")
         return outcome
 
+    @staticmethod
+    def _json_motion_group_status(output: str) -> dict:
+        data = RemoteCliIpcClient._document(output, "motion-group-status")
+        fields = {"transaction_id", "group_id", "plan_generation", "state",
+                  "abort_reason", "member_count", "ready_count",
+                  "committed_count", "pending_request_count",
+                  "commit_dispatched", "abort_is_best_effort",
+                  "result_unknown"}
+        _exact_fields(data, fields, "motion-group-status.data")
+        state = _json_string(data["state"], "motion-group-status.state")
+        if state not in {"idle", "preparing", "ready", "committing",
+                         "committed", "aborting", "aborted"}:
+            raise ToolbusIpcProtocolError("motion-group-status状态无效")
+        for name in ("transaction_id", "group_id", "plan_generation",
+                     "member_count", "ready_count", "committed_count",
+                     "pending_request_count"):
+            data[name] = _json_integer(data[name], f"motion-group-status.{name}",
+                                       maximum=0xFFFFFFFFFFFFFFFF)
+        if data["abort_reason"] is not None:
+            data["abort_reason"] = _json_integer(
+                data["abort_reason"], "motion-group-status.abort_reason",
+                maximum=0xFF)
+        for name in ("commit_dispatched", "abort_is_best_effort",
+                     "result_unknown"):
+            if type(data[name]) is not bool:
+                raise ToolbusIpcProtocolError(f"motion-group-status.{name}必须为布尔值")
+        if data["committed_count"] > data["member_count"] or \
+                data["ready_count"] > data["member_count"]:
+            raise ToolbusIpcProtocolError("motion-group-status成员计数无效")
+        if data["result_unknown"] != (data["abort_is_best_effort"] and
+                state != "committed"):
+            raise ToolbusIpcProtocolError("motion-group-status未知结果语义无效")
+        return data
+
+    def motion_group_status(self, transaction_id: int, group_id: int,
+                            plan_generation: int, *, deadline=None) -> dict:
+        output = self._run("motion-group-status", arguments=(
+            str(transaction_id), str(group_id), str(plan_generation)),
+            deadline=deadline)
+        return self._json_motion_group_status(output)
+
+    def motion_group_cancel(self, transaction_id: int, group_id: int,
+                            plan_generation: int, *, deadline=None) -> dict:
+        output = self._run("motion-group-cancel", arguments=(
+            str(transaction_id), str(group_id), str(plan_generation)),
+            deadline=deadline)
+        return self._json_motion_group_status(output)
+
     def runtime_pwm_stop_operation(self, daemon_instance_id: str, lease_id: str,
             expected_node_uuid: str, owner_key_id: str, node_id: int,
             resource_id: int, idempotency_key: str, *,

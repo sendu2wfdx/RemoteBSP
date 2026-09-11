@@ -362,7 +362,28 @@ config REMOTEBSP_DEVICE_PARAMS
       在芯片内部Flash末尾保留两个擦除页，使用掉电安全的快照日志保存
       SN、UUID、硬件版本、制造批次、设备名称和ADC校准值。这里不保存
       GPIO、UART、运动轴等资源映射；资源映射由Studio生成并编译进固件。
-      存储接口与介质无关，后续可替换为外部EEPROM而不修改远程协议。
+      存储接口与介质无关，可替换为外部EEPROM而不修改远程协议。
+
+choice REMOTEBSP_DEVICE_PARAM_BACKEND
+    prompt "设备参数存储后端"
+    depends on REMOTEBSP_DEVICE_PARAMS
+    default REMOTEBSP_DEVICE_PARAM_INTERNAL_FLASH
+
+config REMOTEBSP_DEVICE_PARAM_INTERNAL_FLASH
+    bool "内部Flash双页（默认）"
+
+config REMOTEBSP_DEVICE_PARAM_EXTERNAL_EEPROM
+    bool "板级注入的外部EEPROM"
+    help
+      仅启用通用read/write/erase-or-fill回调适配层；板级代码必须提供实际
+      介质回调。本选项不包含I2C、SPI或厂商器件协议。
+endchoice
+
+config REMOTEBSP_DEVICE_PARAM_EEPROM_PAGE_SIZE
+    int "外部EEPROM逻辑页大小"
+    depends on REMOTEBSP_DEVICE_PARAM_EXTERNAL_EEPROM
+    range 512 4096
+    default 512
 
 endmenu
 

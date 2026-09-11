@@ -375,7 +375,28 @@ const char* motion_group_state_name(
 }
 
 void print_motion_group_status(
-    const remotebsp::MotionGroupTransactionStatus& status) {
+    const remotebsp::MotionGroupTransactionStatus& status,
+    bool json_output = false) {
+    if (json_output) {
+        std::cout << "{\"schema_version\":1,\"command\":\"motion-group-status\",\"data\":{"
+                  << "\"transaction_id\":" << status.transaction_id
+                  << ",\"group_id\":" << status.group_id
+                  << ",\"plan_generation\":" << status.plan_generation
+                  << ",\"state\":\"" << motion_group_state_name(status.state) << "\""
+                  << ",\"abort_reason\":";
+        if (status.abort_reason.has_value()) std::cout << static_cast<unsigned>(*status.abort_reason);
+        else std::cout << "null";
+        std::cout << ",\"member_count\":" << status.member_count
+                  << ",\"ready_count\":" << status.ready_count
+                  << ",\"committed_count\":" << status.committed_count
+                  << ",\"pending_request_count\":" << status.pending_request_count
+                  << ",\"commit_dispatched\":" << (status.commit_dispatched ? "true" : "false")
+                  << ",\"abort_is_best_effort\":" << (status.abort_is_best_effort ? "true" : "false")
+                  << ",\"result_unknown\":"
+                  << ((status.abort_is_best_effort && status.state != remotebsp::MotionGroupTransactionState::Committed) ? "true" : "false")
+                  << "}}\n";
+        return;
+    }
     std::cout << "transaction_id=" << status.transaction_id
               << " group_id=" << status.group_id
               << " plan_generation=" << status.plan_generation
@@ -1663,21 +1684,21 @@ int run(const std::vector<std::string>& arguments,
             plan.members.push_back(parse_motion_group_member(
                 arguments[index], plan.host_start_time_ns));
         }
-        print_motion_group_status(client.motion_group_submit(plan));
+        print_motion_group_status(client.motion_group_submit(plan), json_output);
         return 0;
     }
     if (name == "motion-group-status" && arguments.size() == 4U) {
         print_motion_group_status(client.motion_group_status(
             parse_u64(arguments[1], "运动组事务 ID"),
             parse_u32(arguments[2], "运动组 ID"),
-            parse_u32(arguments[3], "运动组计划代数")));
+            parse_u32(arguments[3], "运动组计划代数")), json_output);
         return 0;
     }
     if (name == "motion-group-cancel" && arguments.size() == 4U) {
         print_motion_group_status(client.motion_group_cancel(
             parse_u64(arguments[1], "运动组事务 ID"),
             parse_u32(arguments[2], "运动组 ID"),
-            parse_u32(arguments[3], "运动组计划代数")));
+            parse_u32(arguments[3], "运动组计划代数")), json_output);
         return 0;
     }
     if (name == "motion-enqueue" && arguments.size() >= 6) {
