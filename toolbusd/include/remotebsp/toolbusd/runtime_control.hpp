@@ -137,6 +137,25 @@ struct RuntimeMotionGroupCancelRequest {
     std::uint32_t deadline_ms{};
 };
 
+struct RuntimeMotionGroupLeaseAcquireRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::string owner_key_id;
+    std::uint16_t permissions{kRuntimePermissionMotionGroupControl};
+    std::uint64_t transaction_id{};
+    std::uint32_t group_id{};
+    std::uint32_t plan_generation{};
+    std::uint32_t ttl_ms{};
+};
+
+struct RuntimeMotionGroupLeaseReleaseRequest {
+    std::uint16_t version{kRuntimeControlIpcVersion};
+    std::array<std::uint8_t, 16> daemon_instance_id{};
+    std::array<std::uint8_t, 16> lease_id{};
+    std::string owner_key_id;
+};
+
 struct RuntimeControlReleaseRequest {
     std::uint16_t version{kRuntimeControlIpcVersion};
     std::array<std::uint8_t, 16> daemon_instance_id{};
@@ -292,6 +311,15 @@ public:
     void bind_pwm_remote_lease(
         const std::array<std::uint8_t, 16>& lease_id,
         std::uint64_t remote_lease_id, PwmLeaseReleaser releaser);
+    void acquire_motion_group(
+        const RuntimeMotionGroupLeaseAcquireRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
+    void authorize_motion_group_cancel(
+        const RuntimeMotionGroupCancelRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
+    void release_motion_group(
+        const RuntimeMotionGroupLeaseReleaseRequest& request,
+        const std::array<std::uint8_t, 16>& current_daemon_instance_id);
 
     RuntimeGpioWriteResult gpio_write(
         const RuntimeGpioWriteRequest& request,
@@ -366,6 +394,16 @@ public:
     std::size_t shutdown();
 
 private:
+    struct MotionGroupLeaseState {
+        std::array<std::uint8_t, 16> daemon_instance_id{};
+        std::array<std::uint8_t, 16> lease_id{};
+        std::string owner_key_id;
+        std::uint16_t permissions{};
+        std::uint64_t transaction_id{};
+        std::uint32_t group_id{};
+        std::uint32_t plan_generation{};
+        std::uint64_t deadline_ns{};
+    };
     struct LeaseState {
         std::array<std::uint8_t, 16> lease_id{};
         std::array<std::uint8_t, 16> expected_node_uuid{};
@@ -482,6 +520,7 @@ private:
     std::mutex mutex_;
     std::condition_variable scope_available_;
     std::unordered_map<std::string, LeaseState> leases_;
+    std::unordered_map<std::string, MotionGroupLeaseState> motion_group_leases_;
     std::unordered_map<std::uint64_t, std::string> leases_by_scope_;
     std::unordered_map<std::string, CompletedCommand> completed_;
     std::unordered_map<std::string, CompletedPwmCommand> pwm_completed_;

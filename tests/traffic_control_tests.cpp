@@ -233,6 +233,27 @@ void test_versioned_cli_json() {
     CHECK(resource_status.str().find("\"rx_overruns\":5") !=
           std::string::npos);
 
+    protocol::GpioInputEventStatus gpio_status;
+    gpio_status.queued_events = 2U;
+    gpio_status.queue_capacity = 8U;
+    gpio_status.dropped_events = 3U;
+    gpio_status.last_sequence = 12U;
+    std::ostringstream gpio_v1;
+    cli_json::write_gpio_input_event_status(gpio_v1, 7U, 41U, gpio_status);
+    CHECK(gpio_v1.str().find("\"exti_diagnostics_available\":false") !=
+          std::string::npos);
+    CHECK(gpio_v1.str().find("exti_mailbox_dropped") == std::string::npos);
+    gpio_status.exti_diagnostics_available = true;
+    gpio_status.mailbox_dropped = 4U;
+    gpio_status.hints_matched = 5U;
+    gpio_status.hints_ignored = 6U;
+    std::ostringstream gpio_v2;
+    cli_json::write_gpio_input_event_status(gpio_v2, 7U, 41U, gpio_status);
+    CHECK(gpio_v2.str().find("\"exti_mailbox_dropped\":4") !=
+          std::string::npos);
+    CHECK(gpio_v2.str().find("\"event_queue_dropped\":3") !=
+          std::string::npos);
+
     const IpcErrorException ipc_error(
         toolbusd::kIpcErrorEnvelopeVersion,
         static_cast<std::uint16_t>(toolbusd::IpcErrorCode::LeaseNotFound),

@@ -18,6 +18,12 @@ STM32F072RBT6、STM32F103CBT6、STM32G431CBU6 当前共用 Remote Core 的周期
   `hints_matched` 和 `hints_ignored`。计数均饱和、不回绕；旧固件的 v1 状态明确报告 EXTI
   诊断不可用，主机不得用零填充。`dropped_events` 仍只表示该 GPIO 的公共事件队列溢出，
   不与 ISR mailbox 丢弃数混为一谈。
+- `remote-cli --json gpio-input-event-status <object_id>` 始终单独输出
+  `event_queue_dropped`。旧固件或未覆盖板级诊断时输出
+  `exti_diagnostics_available=false`，并省略 mailbox/hint 数值字段，禁止用零代替未知。
+- 这些计数属于运行期 GPIO 对象，不等同于静态 GPIO 资源。Runtime 快照只有在守护进程
+  已登记成功订阅并能校验节点代次的对象时才允许投影；对象查询失败必须保持局部未知，
+  不得污染同节点其他资源。
 
 ## EXTI 与验证边界
 

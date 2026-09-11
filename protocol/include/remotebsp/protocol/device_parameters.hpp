@@ -22,6 +22,13 @@ struct DeviceParameterStatus {
     std::uint16_t stored_count{};
     std::uint16_t definition_count{};
     std::uint8_t last_error{};
+    bool health_available{};
+    std::uint8_t health_version{};
+    std::uint8_t bad_page_mask{};
+    std::uint32_t commit_budget{};
+    std::uint32_t write_attempts{};
+    std::uint32_t successful_commits{};
+    std::uint32_t io_failures{};
 };
 
 struct DeviceParameterDescriptor {

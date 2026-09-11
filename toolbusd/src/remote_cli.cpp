@@ -253,7 +253,15 @@ void print_device_parameter_status(
               << " restart_required="
               << ((status.flags & restart) != 0U ? "yes" : "no")
               << " store_error=" << static_cast<unsigned>(status.last_error)
-              << '\n';
+              << " store_health=" << (status.health_available ? "available" : "unavailable");
+    if (status.health_available) {
+        std::cout << " commit_budget=" << status.commit_budget
+                  << " write_attempts=" << status.write_attempts
+                  << " successful_commits=" << status.successful_commits
+                  << " io_failures=" << status.io_failures
+                  << " bad_page_mask=" << static_cast<unsigned>(status.bad_page_mask);
+    }
+    std::cout << '\n';
 }
 
 const char* resource_type(remotebsp::protocol::ResourceType type) {
@@ -1409,8 +1417,13 @@ int run(const std::vector<std::string>& arguments,
         return 0;
     }
     if (name == "gpio-input-event-status" && arguments.size() == 2) {
-        const auto status = client.gpio_input_event_status(
-            parse_u32(arguments[1], "GPIO 对象 ID"));
+        const auto object_id = parse_u32(arguments[1], "GPIO 对象 ID");
+        const auto status = client.gpio_input_event_status(object_id);
+        if (json_output) {
+            remotebsp::cli_json::write_gpio_input_event_status(
+                std::cout, node_id, object_id, status);
+            return 0;
+        }
         std::cout << "queued=" << status.queued_events
                   << " capacity=" << status.queue_capacity
                   << " dropped=" << status.dropped_events
@@ -1871,6 +1884,7 @@ int main(int argc, char** argv) {
              arguments[0] != "runtime-operation-lookup" &&
              arguments[0] != "resource-list" &&
              arguments[0] != "firmware-identity" &&
+             arguments[0] != "gpio-input-event-status" &&
              arguments[0] != "resource-status"))) {
             throw std::invalid_argument(
                 "--json当前仅支持Runtime合同命令");

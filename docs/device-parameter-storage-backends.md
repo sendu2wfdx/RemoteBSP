@@ -30,3 +30,8 @@ successful commits、I/O failures 和 bad-page mask 可通过 health 接口观�
 创建新 store 后可根据介质事实重新尝试，防止一次瞬态故障永久锁死。坏页标记目前不
 持久化，也不代表厂商耐久指标或实体寿命检测结果。
 
+该上限由 `CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET` 静态注入，合法范围
+1～10000，Studio 当前生成保守默认值 10000。运行期接口只能收紧，不能放宽；重启
+后介质 generation 仍参与门禁，因此不能靠重启重置预算。设备参数状态保持协议主版本
+1，并在原16字节状态后追加版本1的 health 区（预算、尝试、成功、失败和坏页位图）；
+收到旧节点16字节状态时，客户端明确报告 `store_health=unavailable`，不会当作零计数。

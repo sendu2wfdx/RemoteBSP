@@ -484,6 +484,28 @@ inline void write_resource_status(
            << ",\"tx_overruns\":" << status.tx_overruns << "}}}\n";
 }
 
+inline void write_gpio_input_event_status(
+    std::ostream& output, std::uint32_t node_id, std::uint32_t object_id,
+    const protocol::GpioInputEventStatus& status) {
+    output << "{\"schema_version\":" << kSchemaVersion
+           << ",\"command\":\"gpio-input-event-status\",\"data\":{"
+           << "\"node_id\":" << node_id
+           << ",\"object_id\":" << object_id
+           << ",\"queued_events\":" << status.queued_events
+           << ",\"queue_capacity\":" << status.queue_capacity
+           << ",\"event_queue_dropped\":" << status.dropped_events
+           << ",\"last_sequence\":" << status.last_sequence
+           << ",\"exti_diagnostics_available\":"
+           << (status.exti_diagnostics_available ? "true" : "false");
+    // v1/未覆盖固件没有这些观测值，省略字段以免把未知伪装成零。
+    if (status.exti_diagnostics_available) {
+        output << ",\"exti_mailbox_dropped\":" << status.mailbox_dropped
+               << ",\"exti_hints_matched\":" << status.hints_matched
+               << ",\"exti_hints_ignored\":" << status.hints_ignored;
+    }
+    output << "}}\n";
+}
+
 inline void write_runtime_snapshot(std::ostream& output,
                                    const RuntimeSnapshot& snapshot) {
     output << "{\"schema_version\":" << kSchemaVersion

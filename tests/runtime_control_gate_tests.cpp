@@ -1862,6 +1862,49 @@ void check_timed_bitstream_configure_frame_stop() {
     });
 }
 
+void check_motion_group_lease_scope_expiry_release_and_restart() {
+    std::uint64_t now = 1000U;
+    std::array<std::uint8_t, 16> daemon{}; daemon[0] = 0x11U;
+    std::array<std::uint8_t, 16> lease{}; lease[0] = 0x22U;
+    toolbusd::RuntimeControlGate gate(2U, [&] { return now; }, false);
+    toolbusd::RuntimeMotionGroupLeaseAcquireRequest acquire;
+    acquire.daemon_instance_id = daemon; acquire.lease_id = lease;
+    acquire.owner_key_id = "operator-a"; acquire.transaction_id = 9U;
+    acquire.group_id = 7U; acquire.plan_generation = 3U; acquire.ttl_ms = 1U;
+    gate.acquire_motion_group(acquire, daemon);
+    gate.acquire_motion_group(acquire, daemon);
+
+    toolbusd::RuntimeMotionGroupCancelRequest cancel;
+    cancel.daemon_instance_id = daemon; cancel.lease_id = lease;
+    cancel.owner_key_id = acquire.owner_key_id; cancel.idempotency_key = "stop-1";
+    cancel.transaction_id = 9U; cancel.group_id = 7U;
+    cancel.plan_generation = 3U; cancel.deadline_ms = 500U;
+    gate.authorize_motion_group_cancel(cancel, daemon);
+    auto cross_group = cancel; cross_group.group_id = 8U;
+    expect_error(toolbusd::RuntimeControlError::PermissionDenied, [&] {
+        gate.authorize_motion_group_cancel(cross_group, daemon);
+    });
+    now += 1000000ULL;
+    expect_error(toolbusd::RuntimeControlError::LeaseExpired, [&] {
+        gate.authorize_motion_group_cancel(cancel, daemon);
+    });
+
+    now = 1000U;
+    gate.acquire_motion_group(acquire, daemon);
+    toolbusd::RuntimeMotionGroupLeaseReleaseRequest release;
+    release.daemon_instance_id = daemon; release.lease_id = lease;
+    release.owner_key_id = acquire.owner_key_id;
+    gate.release_motion_group(release, daemon);
+    expect_error(toolbusd::RuntimeControlError::LeaseNotFound, [&] {
+        gate.authorize_motion_group_cancel(cancel, daemon);
+    });
+
+    toolbusd::RuntimeControlGate restarted(2U, [&] { return now; }, false);
+    expect_error(toolbusd::RuntimeControlError::LeaseNotFound, [&] {
+        restarted.authorize_motion_group_cancel(cancel, daemon);
+    });
+}
+
 }  // namespace
 
 int main() {
@@ -1895,4 +1938,5 @@ int main() {
     check_pwm_failed_stop_retains_retryable_object();
     check_pwm_old_stop_then_precreate_expiry_is_safe_closed();
     check_timed_bitstream_configure_frame_stop();
+    check_motion_group_lease_scope_expiry_release_and_restart();
 }

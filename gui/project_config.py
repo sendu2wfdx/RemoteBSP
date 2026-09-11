@@ -701,6 +701,7 @@ def generate_project_config(draft: dict, catalog: dict) -> ProjectConfigResult:
                     expected_y.append(name)
 
             set_value("REMOTEBSP_DEVICE_PARAMS", True)
+            set_value("REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET", 10000)
             set_value("REMOTEBSP_STATIC_GPIO_MAP", True)
             for name in ("WEACT_BLUEPILL_PLUS_PB2_BREATHING_LED",
                          "WEACT_G431_PC6_PWM_BREATHING_LED"):

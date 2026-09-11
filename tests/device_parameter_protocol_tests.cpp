@@ -16,6 +16,24 @@ int main() {
         encode_device_parameter_status(status));
     assert(decoded_status.generation == 42U);
     assert(decoded_status.stored_count == 3U);
+    assert(!decoded_status.health_available);
+    const std::vector<std::uint8_t> legacy_status{
+        1U, 0U, 0U, 0U, 42U, 0U, 0U, 0U,
+        3U, 0U, 22U, 0U, 0U, 0U, 0U, 0U};
+    assert(!decode_device_parameter_status(legacy_status).health_available);
+    DeviceParameterStatus observed = status;
+    observed.health_available = true;
+    observed.health_version = 1U;
+    observed.bad_page_mask = 2U;
+    observed.commit_budget = 10000U;
+    observed.write_attempts = 7U;
+    observed.successful_commits = 6U;
+    observed.io_failures = 1U;
+    const auto decoded_observed = decode_device_parameter_status(
+        encode_device_parameter_status(observed));
+    assert(decoded_observed.health_available);
+    assert(decoded_observed.commit_budget == 10000U);
+    assert(decoded_observed.bad_page_mask == 2U);
 
     const std::vector<DeviceParameterDescriptor> definitions{{
         RBSP_DEVICE_PARAM_SERIAL_NUMBER, RBSP_DEVICE_PARAM_TYPE_UTF8,

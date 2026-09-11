@@ -896,6 +896,15 @@ target_compile_options(link_recording_control_tests PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
 add_test(NAME link_recording_control_tests COMMAND link_recording_control_tests)
 
+add_executable(gpio_input_diagnostics_registry_tests
+    gpio_input_diagnostics_registry_tests.cpp)
+target_link_libraries(gpio_input_diagnostics_registry_tests PRIVATE
+    remotebsp_request_manager)
+target_compile_options(gpio_input_diagnostics_registry_tests PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>)
+add_test(NAME gpio_input_diagnostics_registry_tests
+         COMMAND gpio_input_diagnostics_registry_tests)
+
 add_test(
     NAME firmware_config_tests
     COMMAND "${Python3_EXECUTABLE}"

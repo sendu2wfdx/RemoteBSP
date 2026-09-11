@@ -2,6 +2,12 @@
 
 #include <string.h>
 
+#if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS) && \
+    !defined(CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET)
+#define CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET \
+    RBSP_DEVICE_PARAM_STORE_DEFAULT_COMMIT_BUDGET
+#endif
+
 #ifdef RBSP_STUDIO_STATIC_RESOURCE_TABLE
 #include "remotebsp_static_resources.h"
 #endif
@@ -123,7 +129,7 @@ enum {
     RBSP_GPIO_EDGE_FALLING = 1U << 1,
 #if defined(CONFIG_REMOTEBSP_DEVICE_PARAMS)
     RBSP_DEVICE_PARAM_PROTOCOL_VERSION = 1,
-    RBSP_DEVICE_PARAM_STATUS_SIZE = 16,
+    RBSP_DEVICE_PARAM_STATUS_SIZE = 32,
     RBSP_DEVICE_PARAM_UNLOCK_CONFIRMATION = 0x50564252,
     RBSP_DEVICE_PARAM_UNLOCK_TIME_MS = 60000,
     RBSP_DEVICE_PARAM_STATUS_UNLOCKED = 1U << 0,
@@ -363,6 +369,12 @@ static void encode_device_param_status(const rbsp_core_t* core,
     put_u16(output + 10U,
             (uint16_t)rbsp_device_param_definition_count());
     output[12U] = (uint8_t)core->device_params.last_error;
+    output[13U] = 1U; /* store health字段版本 */
+    output[14U] = core->device_params.bad_page_mask;
+    put_u32(output + 16U, core->device_params.commit_budget);
+    put_u32(output + 20U, core->device_params.write_attempts);
+    put_u32(output + 24U, core->device_params.successful_commits);
+    put_u32(output + 28U, core->device_params.io_failures);
 }
 #endif
 
@@ -5037,7 +5049,10 @@ bool rbsp_core_device_params_init(
     rbsp_device_param_record uuid;
     if (core == NULL || backend == NULL ||
         !rbsp_device_param_store_init(&core->device_params, backend) ||
-        !rbsp_device_param_store_boot(&core->device_params)) {
+        !rbsp_device_param_store_boot(&core->device_params) ||
+        !rbsp_device_param_store_set_commit_budget(
+            &core->device_params,
+            CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET)) {
         return false;
     }
     core->device_params_ready = true;

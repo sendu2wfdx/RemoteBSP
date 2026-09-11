@@ -4,6 +4,7 @@
 #include "remotebsp/toolbusd/bus_runtime.hpp"
 #include "remotebsp/toolbusd/clock_sync_manager.hpp"
 #include "remotebsp/toolbusd/health_producer.hpp"
+#include "remotebsp/toolbusd/gpio_input_diagnostics_registry.hpp"
 #include "remotebsp/toolbusd/ipc.hpp"
 #include "remotebsp/toolbusd/link_recording.hpp"
 #include "remotebsp/toolbusd/motion_group_service.hpp"
@@ -2378,6 +2379,11 @@ private:
             ++generation;
         }
         bus_runtime_.invalidate_node(node_id);
+        gpio_input_diagnostics_.invalidate_node(node_id);
+        for (auto entry = gpio_objects_.begin(); entry != gpio_objects_.end();) {
+            if (entry->second.node_id == node_id) entry = gpio_objects_.erase(entry);
+            else ++entry;
+        }
         const auto credit_prefix = std::to_string(node_id) + ":";
         for (auto entry = stream_credit_history_.begin();
              entry != stream_credit_history_.end();) {
@@ -3566,6 +3572,44 @@ private:
             });
             const auto response = responses_.find(key);
             if (response != responses_.end()) {
+                const bool remote_ok =
+                    (response->second.header.flags &
+                     remotebsp::protocol::kErrorResponseFlag) == 0U &&
+                    !response->second.payload.empty() &&
+                    response->second.payload.front() == 0U;
+                if (remote_ok &&
+                    command == remotebsp::protocol::Command::GpioCreate &&
+                    submission.packet.payload.size() == 4U &&
+                    response->second.header.object_id != 0U) {
+                    const auto pin = static_cast<std::uint16_t>(
+                        submission.packet.payload[0] |
+                        (static_cast<std::uint16_t>(submission.packet.payload[1]) << 8U));
+                    const auto* node = nodes_.find_by_node_id(ipc_request.node_id);
+                    if (node != nullptr && gpio_objects_.size() < 256U) {
+                        remotebsp::toolbusd::GpioInputDiagnosticTarget target;
+                        target.daemon_session_id = session_id_;
+                        target.node_uuid = node->identity.uuid;
+                        target.node_generation = bus_node_generations_[ipc_request.node_id];
+                        target.node_id = ipc_request.node_id;
+                        target.resource_id = 0x01000000U | pin;
+                        target.object_id = response->second.header.object_id;
+                        target.pin = pin;
+                        gpio_objects_[request_key(target.node_id, target.object_id)] = target;
+                    }
+                } else if (remote_ok && command ==
+                           remotebsp::protocol::Command::GpioInputSubscribe) {
+                    const auto found = gpio_objects_.find(request_key(
+                        ipc_request.node_id, submission.packet.header.object_id));
+                    if (found != gpio_objects_.end()) {
+                        static_cast<void>(gpio_input_diagnostics_.remember(found->second));
+                    }
+                } else if (remote_ok && command ==
+                           remotebsp::protocol::Command::GpioClose) {
+                    const auto object_id = submission.packet.header.object_id;
+                    static_cast<void>(gpio_input_diagnostics_.erase(
+                        ipc_request.node_id, object_id));
+                    gpio_objects_.erase(request_key(ipc_request.node_id, object_id));
+                }
                 if (command == remotebsp::protocol::Command::StreamCredit &&
                     !response->second.payload.empty() &&
                     response->second.payload.front() == 0U &&
@@ -3933,6 +3977,11 @@ private:
     std::unordered_set<std::string> stream_credit_history_;
     std::unordered_map<std::uint64_t, UartStreamBuffer>
         uart_stream_buffers_;
+    // 仅为只读诊断保存已创建对象元数据；成功订阅后才进入正式诊断注册表。
+    std::unordered_map<std::uint64_t,
+        remotebsp::toolbusd::GpioInputDiagnosticTarget> gpio_objects_;
+    remotebsp::toolbusd::GpioInputDiagnosticsRegistry
+        gpio_input_diagnostics_{256U};
     std::atomic<std::uint16_t> next_transfer_id_{1};
     std::uint32_t next_control_request_id_{0x80000000U};
     std::uint32_t next_node_id_{1};

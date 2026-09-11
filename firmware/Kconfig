@@ -385,6 +385,15 @@ config REMOTEBSP_DEVICE_PARAM_EEPROM_PAGE_SIZE
     range 512 4096
     default 512
 
+config REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET
+    int "设备参数终身提交预算"
+    depends on REMOTEBSP_DEVICE_PARAMS
+    range 1 10000
+    default 10000
+    help
+      固件允许的持久快照generation上限。只能在构建时选择，运行期只能进一步
+      收紧，不能放宽；设备参数禁止承载高频遥测。
+
 endmenu
 
 menu "通用硬件资源"

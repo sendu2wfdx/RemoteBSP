@@ -65,6 +65,9 @@ class GuiTest(unittest.TestCase):
                 self.assertGreaterEqual(result.resource_count, 1)
                 self.assertIn("CONFIG_REMOTEBSP_DEVICE_PARAMS=y",
                               result.config)
+                self.assertIn(
+                    "CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET=10000",
+                    result.config)
                 self.assertIn("CONFIG_REMOTEBSP_STATIC_GPIO_MAP=y",
                               result.config)
                 self.assertIn(
@@ -743,6 +746,9 @@ class GuiTest(unittest.TestCase):
                 self.assertRegex(generated["config_sha256"],
                                  r"^[0-9a-f]{64}$")
                 self.assertIn("CONFIG_REMOTEBSP_DEVICE_PARAMS=y", config)
+                self.assertIn(
+                    "CONFIG_REMOTEBSP_DEVICE_PARAM_COMMIT_BUDGET=10000",
+                    config)
                 fake_result = FirmwareBuildResult(
                     "test-board-0123456789abcdef", board["id"],
                     "mellow-fly-d5", "0" * 64, Path(directory),

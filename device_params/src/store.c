@@ -194,7 +194,8 @@ bool rbsp_device_param_store_init(
 bool rbsp_device_param_store_set_commit_budget(
     rbsp_device_param_store* store, uint32_t commit_budget) {
     if (store == NULL || commit_budget == 0U ||
-        commit_budget < store->generation) return false;
+        commit_budget < store->generation ||
+        commit_budget > store->commit_budget) return false;
     store->commit_budget = commit_budget;
     return true;
 }

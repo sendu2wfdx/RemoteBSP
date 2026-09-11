@@ -357,6 +357,93 @@ void RuntimeControlGate::bind_pwm_remote_lease(
     found->second.remote_lease_releaser = std::move(releaser);
 }
 
+void RuntimeControlGate::acquire_motion_group(
+    const RuntimeMotionGroupLeaseAcquireRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !valid_identity(request.owner_key_id) ||
+        request.permissions != kRuntimePermissionMotionGroupControl ||
+        request.transaction_id == 0U || request.group_id == 0U ||
+        request.plan_generation == 0U || request.ttl_ms == 0U ||
+        request.ttl_ms > kMaximumRuntimeControlTtlMs)
+        reject(RuntimeControlError::InvalidRequest,
+               "Runtime运动组租约登记字段无效");
+    if (request.daemon_instance_id != current_daemon_instance_id)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime运动组租约绑定了其他toolbusd实例");
+    const auto now = monotonic_ns_();
+    const auto key = binary_id(request.lease_id);
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = motion_group_leases_.begin(); it != motion_group_leases_.end();) {
+        if (it->second.deadline_ns <= now) it = motion_group_leases_.erase(it);
+        else ++it;
+    }
+    const auto existing = motion_group_leases_.find(key);
+    if (existing != motion_group_leases_.end()) {
+        const auto& old = existing->second;
+        if (old.daemon_instance_id == request.daemon_instance_id &&
+            old.owner_key_id == request.owner_key_id &&
+            old.transaction_id == request.transaction_id &&
+            old.group_id == request.group_id &&
+            old.plan_generation == request.plan_generation) return;
+        reject(RuntimeControlError::LeaseConflict,
+               "Runtime运动组租约ID已绑定其他作用域");
+    }
+    if (motion_group_leases_.size() >= capacity_)
+        reject(RuntimeControlError::CapacityExceeded,
+               "Runtime运动组租约容量已满");
+    motion_group_leases_.emplace(key, MotionGroupLeaseState{
+        request.daemon_instance_id, request.lease_id, request.owner_key_id,
+        request.permissions, request.transaction_id, request.group_id,
+        request.plan_generation,
+        now + static_cast<std::uint64_t>(request.ttl_ms) * 1000000ULL});
+}
+
+void RuntimeControlGate::authorize_motion_group_cancel(
+    const RuntimeMotionGroupCancelRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id) {
+    if (request.daemon_instance_id != current_daemon_instance_id)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime运动组停止绑定了其他toolbusd实例");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = motion_group_leases_.find(binary_id(request.lease_id));
+    if (found == motion_group_leases_.end())
+        reject(RuntimeControlError::LeaseNotFound, "Runtime运动组租约不存在");
+    if (found->second.deadline_ns <= monotonic_ns_()) {
+        motion_group_leases_.erase(found);
+        reject(RuntimeControlError::LeaseExpired, "Runtime运动组租约已过期");
+    }
+    const auto& lease = found->second;
+    if (lease.daemon_instance_id != request.daemon_instance_id ||
+        lease.owner_key_id != request.owner_key_id ||
+        lease.permissions != request.permissions ||
+        lease.transaction_id != request.transaction_id ||
+        lease.group_id != request.group_id ||
+        lease.plan_generation != request.plan_generation)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime运动组停止超出租约作用域");
+}
+
+void RuntimeControlGate::release_motion_group(
+    const RuntimeMotionGroupLeaseReleaseRequest& request,
+    const std::array<std::uint8_t, 16>& current_daemon_instance_id) {
+    if (request.version != kRuntimeControlIpcVersion ||
+        !nonzero(request.lease_id) || !valid_identity(request.owner_key_id))
+        reject(RuntimeControlError::InvalidRequest,
+               "Runtime运动组租约释放字段无效");
+    if (request.daemon_instance_id != current_daemon_instance_id)
+        reject(RuntimeControlError::DaemonIdentityMismatch,
+               "Runtime运动组租约释放绑定了其他toolbusd实例");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = motion_group_leases_.find(binary_id(request.lease_id));
+    if (found == motion_group_leases_.end())
+        reject(RuntimeControlError::LeaseNotFound, "Runtime运动组租约不存在");
+    if (found->second.owner_key_id != request.owner_key_id)
+        reject(RuntimeControlError::PermissionDenied,
+               "Runtime运动组租约不属于当前owner");
+    motion_group_leases_.erase(found);
+}
+
 void RuntimeControlGate::acquire(
     const RuntimeControlAcquireRequest& request,
     const std::array<std::uint8_t, 16>& current_daemon_instance_id,

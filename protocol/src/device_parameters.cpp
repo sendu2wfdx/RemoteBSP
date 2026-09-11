@@ -34,20 +34,30 @@ std::uint32_t read_u32(const std::uint8_t* input) {
 std::vector<std::uint8_t> encode_device_parameter_status(
     const DeviceParameterStatus& status) {
     std::vector<std::uint8_t> output;
-    output.reserve(16U);
+    output.reserve(32U);
     append_u16(output, status.version);
     append_u16(output, status.flags);
     append_u32(output, status.generation);
     append_u16(output, status.stored_count);
     append_u16(output, status.definition_count);
     output.push_back(status.last_error);
-    output.insert(output.end(), 3U, 0U);
+    output.push_back(status.health_available ? status.health_version : 0U);
+    output.push_back(status.health_available ? status.bad_page_mask : 0U);
+    output.push_back(0U);
+    if (status.health_available) {
+        append_u32(output, status.commit_budget);
+        append_u32(output, status.write_attempts);
+        append_u32(output, status.successful_commits);
+        append_u32(output, status.io_failures);
+    } else {
+        output.insert(output.end(), 16U, 0U);
+    }
     return output;
 }
 
 DeviceParameterStatus decode_device_parameter_status(
     const std::vector<std::uint8_t>& payload) {
-    if (payload.size() != 16U) {
+    if (payload.size() != 16U && payload.size() != 32U) {
         throw std::invalid_argument("设备参数状态长度无效");
     }
     DeviceParameterStatus status;
@@ -60,6 +70,15 @@ DeviceParameterStatus decode_device_parameter_status(
     status.stored_count = read_u16(payload.data() + 8U);
     status.definition_count = read_u16(payload.data() + 10U);
     status.last_error = payload[12U];
+    if (payload.size() == 32U) {
+        status.health_version = payload[13U];
+        status.health_available = status.health_version == 1U;
+        status.bad_page_mask = payload[14U];
+        status.commit_budget = read_u32(payload.data() + 16U);
+        status.write_attempts = read_u32(payload.data() + 20U);
+        status.successful_commits = read_u32(payload.data() + 24U);
+        status.io_failures = read_u32(payload.data() + 28U);
+    }
     return status;
 }
 

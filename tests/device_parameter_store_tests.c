@@ -299,6 +299,7 @@ static void test_external_eeprom_contract_and_fault_recovery(void) {
     assert(rbsp_device_param_store_init(&store, &backend));
     assert(rbsp_device_param_store_boot(&store));
     assert(rbsp_device_param_store_set_commit_budget(&store, 1U));
+    assert(!rbsp_device_param_store_set_commit_budget(&store, 2U));
     assert(!rbsp_device_param_store_set(&store, 1U,
         RBSP_DEVICE_PARAM_DEVICE_NAME, second, sizeof(second) - 1U,
         workspace, sizeof(workspace)));
