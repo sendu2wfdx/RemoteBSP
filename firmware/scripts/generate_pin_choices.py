@@ -103,6 +103,7 @@ BOARDS = {
             ["PC5", "PC4", "PB0", "PA7", None],
         ],
         "gpio_interfaces": [],
+        "exti": {"endpoints": []},
         "uart": {"endpoints": []},
         "bus": {
             "i2c": {"endpoints": []},
@@ -184,6 +185,10 @@ BOARDS = {
             "safe_level": None,
             "debounce_ms": 10,
         }],
+        "exti": {"endpoints": [{
+            "endpoint_id": "exti0_pa0", "backend_status": "planned",
+            "enabled": False, "pin": "PA0", "line": 0,
+        }]},
         "uart": {
             "endpoints": [
                 {
@@ -321,6 +326,10 @@ BOARDS = {
             "safe_level": None,
             "debounce_ms": 10,
         }],
+        "exti": {"endpoints": [{
+            "endpoint_id": "exti13_pc13", "backend_status": "planned",
+            "enabled": False, "pin": "PC13", "line": 13,
+        }]},
         "uart": {
             "endpoints": [
                 {
@@ -708,6 +717,7 @@ def generate_catalog() -> str:
                 }
                 for interface in board.get("gpio_interfaces", [])
             ],
+            "exti": board.get("exti", {"endpoints": []}),
             "uart": board.get("uart", {"endpoints": []}),
             "uart_defaults": [
                 endpoint

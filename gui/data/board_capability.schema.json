@@ -27,7 +27,7 @@
     },
     "board": {
       "type": "object",
-      "required": ["id", "board_type", "label", "mcu", "pins", "reserved", "uart", "uart_defaults", "waveform"],
+      "required": ["id", "board_type", "label", "mcu", "pins", "reserved", "exti", "uart", "uart_defaults", "waveform"],
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "board_type": {"type": "string", "pattern": "^0x[0-9A-Fa-f]+$"},
@@ -41,6 +41,23 @@
             "additionalProperties": false,
             "required": ["pin", "owner"],
             "properties": {"pin": {"$ref": "#/$defs/pin"}, "owner": {"type": "string", "minLength": 1}}
+          }
+        },
+        "exti": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoints"],
+          "properties": {
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "allOf": [
+                  {"$ref": "#/$defs/endpointBase"},
+                  {"type": "object", "required": ["pin", "line"],
+                   "properties": {"pin": {"$ref": "#/$defs/pin"}, "line": {"type": "integer", "minimum": 0, "maximum": 15}}}
+                ]
+              }
+            }
           }
         },
         "uart": {"type": "object", "required": ["endpoints"], "properties": {"endpoints": {"type": "array", "items": {"$ref": "#/$defs/endpointBase"}}}},

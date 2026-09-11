@@ -160,6 +160,7 @@ function(rbsp_common_target target cpu linker_script)
         -Wl,--defsym=RBSP_APP_FLASH_OFFSET=${RBSP_APP_FLASH_OFFSET}
         -Wl,--defsym=RBSP_DEVICE_PARAM_FLASH_SIZE=${RBSP_DEVICE_PARAM_FLASH_SIZE}
         -Wl,--defsym=RBSP_HEALTH_EPOCH_FLASH_SIZE=${RBSP_HEALTH_EPOCH_FLASH_SIZE}
+        -Wl,--defsym=RBSP_MOTION_EPOCH_FLASH_SIZE=${RBSP_MOTION_EPOCH_FLASH_SIZE}
         --specs=nano.specs --specs=nosys.specs
         -Wl,--gc-sections
         -Wl,-Map=${target}.map
@@ -179,6 +180,7 @@ endfunction()
 if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
     # F072页为2KiB，代际日志固定使用双页。
     set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x1000)
+    set(RBSP_MOTION_EPOCH_FLASH_SIZE 0x1000)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32f072rbt6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-f0")
     set(HAL_DIR "${VENDOR_DIR}/stm32f0xx-hal-driver")
@@ -232,6 +234,7 @@ if(RBSP_BOARD_LINES MATCHES "STM32F072RBT6")
 elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
     # F103中密度器件页为1KiB，代际日志固定使用双页。
     set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x800)
+    set(RBSP_MOTION_EPOCH_FLASH_SIZE 0x800)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32f103cbt6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-f1")
     set(HAL_DIR "${VENDOR_DIR}/stm32f1xx-hal-driver")
@@ -279,6 +282,7 @@ elseif(RBSP_BOARD_LINES MATCHES "STM32F103CBT6")
 elseif(RBSP_BOARD_LINES MATCHES "STM32G431CBU6")
     # G431页为2KiB，代际日志固定使用双页。
     set(RBSP_HEALTH_EPOCH_FLASH_SIZE 0x1000)
+    set(RBSP_MOTION_EPOCH_FLASH_SIZE 0x1000)
     set(BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/boards/stm32g431cbu6")
     set(DEVICE_DIR "${VENDOR_DIR}/cmsis-device-g4")
     set(HAL_DIR "${VENDOR_DIR}/stm32g4xx-hal-driver")

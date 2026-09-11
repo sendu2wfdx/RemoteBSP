@@ -424,6 +424,22 @@ config GPIO_INPUT_EVENT_QUEUE_CAPACITY
       输入去抖后的稳定边沿先进入固定容量本地队列，再由主循环上报。
       队列满时丢弃最新事件并累计溢出计数，不在中断中解析或发送协议。
 
+config REMOTEBSP_GPIO_EXTI
+    bool "启用显式静态 GPIO EXTI 端点"
+    default n
+    depends on REMOTEBSP_STATIC_GPIO_MAP && GPIO_RESOURCE_COUNT > 0
+    help
+      仅供能力目录标记为implemented并由Studio生成的独立EXTI端点使用。
+      不会把普通GPIO输入隐式改为中断输入；未启用时不编译mailbox或板级IRQ状态。
+
+config GPIO_EXTI_MAILBOX_CAPACITY
+    int "GPIO EXTI ISR mailbox容量"
+    range 1 16
+    default 2
+    depends on REMOTEBSP_GPIO_EXTI
+    help
+      ISR只投递静态编码引脚，满时丢弃最新提示并饱和累计计数。
+
 config HARDWARE_UART_RESOURCE_COUNT
     int "编译期最大硬件 UART 资源数"
     range 0 3 if BOARD_STM32F103CBT6 || BOARD_STM32G431CBU6

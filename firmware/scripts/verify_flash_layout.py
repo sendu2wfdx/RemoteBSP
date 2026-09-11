@@ -64,6 +64,8 @@ def map_symbols(path: Path) -> dict[str, int]:
         "__rbsp_health_epoch_flash_end__",
         "__rbsp_device_param_flash_start__",
         "__rbsp_device_param_flash_end__",
+        "__rbsp_motion_epoch_flash_start__",
+        "__rbsp_motion_epoch_flash_end__",
     }
     values: dict[str, int] = {}
     pattern = re.compile(r"^\s*(0x[0-9a-fA-F]+)\s+.*\b(" +
@@ -129,12 +131,15 @@ def verify(config_path: Path, elf: Path, map_path: Path,
     params_enabled = config.get("CONFIG_REMOTEBSP_DEVICE_PARAMS", "y") == "y"
     param_size = 2 * board.page_size if params_enabled else 0
     health_size = 2 * board.page_size
+    motion_size = 2 * board.page_size
     health_start = flash_end - param_size - health_size
+    motion_start = health_start - motion_size
     param_start = flash_end - param_size
 
     regions = [
         ("Bootloader", FLASH_BASE, app_start),
-        ("应用", app_start, health_start),
+        ("应用", app_start, motion_start),
+        ("motion epoch 双页", motion_start, health_start),
         ("health epoch 双页", health_start, param_start),
         ("device params 双页", param_start, flash_end),
     ]
@@ -155,6 +160,8 @@ def verify(config_path: Path, elf: Path, map_path: Path,
         "__rbsp_health_epoch_flash_end__": param_start,
         "__rbsp_device_param_flash_start__": param_start,
         "__rbsp_device_param_flash_end__": flash_end,
+        "__rbsp_motion_epoch_flash_start__": motion_start,
+        "__rbsp_motion_epoch_flash_end__": health_start,
     }
     actual_symbols = map_symbols(map_path)
     for name, expected in expected_symbols.items():
@@ -163,7 +170,7 @@ def verify(config_path: Path, elf: Path, map_path: Path,
 
     sections = loaded_flash_sections(elf)
     for name, start, end in sections:
-        if start < app_start or end > health_start:
+        if start < app_start or end > motion_start:
             fail(f"ELF 段 {name} [0x{start:08x}, 0x{end:08x}) 越过应用区间")
     vector = [section for section in sections if section[0] == ".isr_vector"]
     if len(vector) != 1 or vector[0][1] != app_start:
@@ -175,11 +182,12 @@ def verify(config_path: Path, elf: Path, map_path: Path,
         boot_end = parse_int(
             boot_config.get("CONFIG_FLASH_APPLICATION_END_ADDRESS", ""),
             "CONFIG_FLASH_APPLICATION_END_ADDRESS")
-        if boot_end != health_start:
-            fail(f"Katapult 写入上限 0x{boot_end:08x} 未停在 health epoch 前 "
-                 f"0x{health_start:08x}")
+        if boot_end != motion_start:
+            fail(f"Katapult 写入上限 0x{boot_end:08x} 未停在 motion epoch 前 "
+                 f"0x{motion_start:08x}")
 
     print(f"Flash 布局通过：{board.key}，应用 [0x{app_start:08x}, "
+          f"0x{motion_start:08x})，motion [0x{motion_start:08x}, "
           f"0x{health_start:08x})，health [0x{health_start:08x}, "
           f"0x{param_start:08x})，参数 [0x{param_start:08x}, "
           f"0x{flash_end:08x})")

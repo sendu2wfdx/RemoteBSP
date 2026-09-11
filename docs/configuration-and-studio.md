@@ -309,6 +309,35 @@ studio_cli.py provisioning-batch-execute --policy policy.json --batch batch.json
   --audit-dir audits --audit-key-file audit.key
 ```
 
+## 发布审批与外部可信时间
+
+`REMOTEBSP_RELEASE_AUTHORITY_POLICY_V1` 是自哈希、封闭字段的公钥策略，将 Ed25519 公钥明确
+限定为 `release_approver` 或 `time_authority`，并支持 active/revoked 状态。发布审批首先按
+现有证据信任策略验证生产批次/部署记录签名，再由已授权审批者签署证据 subject 与原签名信封
+SHA-256，形成 `REMOTEBSP_RELEASE_APPROVAL_V1`。审批中的本机时间只声明
+`host_system_clock/trusted=false`，不能作为发布日期证明。
+
+可信时间只能导入 `REMOTEBSP_EXTERNAL_TIME_ATTESTATION_V1`：它由策略中独立的
+`time_authority` 对审批 SHA-256 和 UTC 时间签名。Studio 只提供导入/验签，不提供签发命令；
+只有公钥角色、状态、自哈希、审批绑定、UTC 和 Ed25519 签名全部通过，结果才返回
+`time_trusted=true`。本地测试签发辅助函数不暴露 CLI，仅用于模拟外部权威。
+权威策略最多 32 项、整体最多 128 KiB、单个 PEM 最多 4096 字符；审批备注最多 512 字符，
+Ed25519 Base64 签名和时间字符串也有固定上限。所有上限在 PEM 或密码学解析前检查。外部时间
+必须是解析后可逐字重建的规范 UTC（`Z`）格式；时间验证会完整复核审批字段集合、决定、备注、
+不可信本机时间声明、自哈希及审批者签名，而不是只接受一个审批摘要。
+
+```text
+studio_cli.py release-authority-policy-create --source authorities.json --output authorities-policy.json
+studio_cli.py release-approve --evidence evidence.json --signature evidence.sig.json \
+  --trust-policy signer-policy.json --private-key approver.key \
+  --authority-policy authorities-policy.json --decision approved --output approval.json
+studio_cli.py release-verify --evidence evidence.json --signature evidence.sig.json \
+  --trust-policy signer-policy.json --approval approval.json \
+  --authority-policy authorities-policy.json
+studio_cli.py external-time-verify --approval approval.json \
+  --attestation external-time.json --authority-policy authorities-policy.json
+```
+
 CI/发布候选不能以复用旧 `build/` 的结果作为证据。顶层 CMake 在进入任何测试子目录前
 显式解析 Python 解释器，并注册 `clean_build_registration_tests`：它在临时空目录重新配置
 工程，通过 CTest JSON 清单确认 GUI、Runtime、固件配置、OperationLedger、BusReset 真实

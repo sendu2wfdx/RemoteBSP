@@ -49,6 +49,38 @@ class BoardCapabilityTest(unittest.TestCase):
         with self.assertRaisesRegex(BoardCapabilityError, "固定占用引脚重复"):
             validate_catalog(broken)
 
+    def test_exti_endpoints_are_explicit_disabled_and_line_unique(self):
+        endpoints = [
+            endpoint for board in self.catalog["boards"]
+            for endpoint in board["exti"]["endpoints"]]
+        self.assertTrue(endpoints)
+        self.assertTrue(all(not endpoint["enabled"] for endpoint in endpoints))
+        self.assertTrue(all(endpoint["backend_status"] == "planned"
+                            for endpoint in endpoints))
+
+        broken = copy.deepcopy(self.catalog)
+        duplicate = copy.deepcopy(broken["boards"][1]["exti"]["endpoints"][0])
+        duplicate["endpoint_id"] = "duplicate-line"
+        # PB0 与 PA0 是不同引脚，但共享 EXTI0，必须在生成前失败关闭。
+        duplicate["pin"] = "PB0"
+        broken["boards"][1]["gpio_interfaces"].append({
+            "id": "test_pb0", "pin": "PB0",
+            "allowed_directions": ["input"], "allowed_pulls": ["none"]})
+        broken["boards"][1]["exti"]["endpoints"].append(duplicate)
+        with self.assertRaisesRegex(BoardCapabilityError, "line必须唯一"):
+            validate_catalog(broken)
+
+        broken = copy.deepcopy(self.catalog)
+        broken["boards"][2]["exti"]["endpoints"][0]["line"] = 12
+        with self.assertRaisesRegex(BoardCapabilityError, "与引脚号一致"):
+            validate_catalog(broken)
+
+        broken = copy.deepcopy(self.catalog)
+        endpoint = broken["boards"][1]["exti"]["endpoints"][0]
+        endpoint["enabled"] = True
+        with self.assertRaisesRegex(BoardCapabilityError, "必须已经实现"):
+            validate_catalog(broken)
+
     def test_project_validation_does_not_trust_tampered_catalog(self):
         from project_config import ProjectConfigError, validate_project
 

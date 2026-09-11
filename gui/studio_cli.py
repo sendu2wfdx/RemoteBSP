@@ -81,6 +81,9 @@ from project_compare import MAX_PROJECT_BYTES
 from project_config import ProjectConfigError, validate_project
 from production_provisioning import (
     ProvisioningBatchController, create_policy, validate_policy)
+from release_approval import (
+    approve_release, create_authority_policy, verify_external_time_attestation,
+    verify_release_approval)
 
 
 GUI_ROOT = Path(__file__).resolve().parent
@@ -646,6 +649,49 @@ def _run_provisioning_batch_execute(args) -> dict:
         manager_factory=lambda _: _parameter_manager(args),
         audit_factory=lambda _: _parameter_audit(args))
     return controller.execute(_read_json(args.batch, "批量烧号请求", 256 * 1024))
+
+
+def _run_release_authority_policy_create(args) -> dict:
+    source = _read_json(args.source, "发布权威策略源", 128 * 1024)
+    if not isinstance(source, dict) or set(source) != {"authorities"}:
+        raise ProjectConfigError("发布权威策略源字段无效")
+    value = create_authority_policy(source["authorities"])
+    written = _atomic_output(args.output, (json.dumps(value, ensure_ascii=False,
+        sort_keys=True, indent=2)+"\n").encode(), force=args.force)
+    return {"ok": True, "policy_sha256": value["sha256"], "output": str(written)}
+
+
+def _release_inputs(args):
+    return (_read_json(args.evidence, "发布证据", MAX_BATCH_MANIFEST_BYTES),
+            _read_json(args.signature, "证据签名", MAX_SIGNATURE_BYTES),
+            _read_json(args.trust_policy, "证据信任策略", MAX_TRUST_POLICY_BYTES))
+
+
+def _run_release_approve(args) -> dict:
+    evidence, signature, trust = _release_inputs(args)
+    value = approve_release(evidence, signature, trust,
+        _bounded_path(args.private_key, "审批私钥"),
+        _read_json(args.authority_policy, "发布权威策略", 128 * 1024),
+        decision=args.decision,
+        note=args.note)
+    written = _atomic_output(args.output, (json.dumps(value, ensure_ascii=False,
+        sort_keys=True, indent=2)+"\n").encode(), force=args.force)
+    return {"ok": True, "approval": value, "output": str(written),
+            "time_trusted": False}
+
+
+def _run_release_verify(args) -> dict:
+    evidence, signature, trust = _release_inputs(args)
+    return verify_release_approval(evidence, signature, trust,
+        _read_json(args.approval, "发布审批", 64 * 1024),
+        _read_json(args.authority_policy, "发布权威策略", 128 * 1024))
+
+
+def _run_external_time_verify(args) -> dict:
+    return verify_external_time_attestation(
+        _read_json(args.approval, "发布审批", 64 * 1024),
+        _read_json(args.attestation, "外部时间证明", 64 * 1024),
+        _read_json(args.authority_policy, "发布权威策略", 128 * 1024))
 
 
 def _run_parameter_restore(args) -> dict:
@@ -1217,6 +1263,34 @@ def _parser() -> StrictParser:
     evidence_verify.add_argument("--signature", required=True)
     evidence_verify.add_argument("--trust-policy", required=True)
     evidence_verify.set_defaults(handler=_run_evidence_verify)
+
+    authority_create = sub.add_parser(
+        "release-authority-policy-create", help="创建发布审批与外部时间权威策略")
+    authority_create.add_argument("--source", required=True)
+    authority_create.add_argument("--output", required=True)
+    authority_create.add_argument("--force", action="store_true")
+    authority_create.set_defaults(handler=_run_release_authority_policy_create)
+    release_approve = sub.add_parser(
+        "release-approve", help="由授权审批者签署已验签的发布证据")
+    for option in ("evidence", "signature", "trust-policy"):
+        release_approve.add_argument("--" + option, required=True)
+    release_approve.add_argument("--private-key", required=True)
+    release_approve.add_argument("--authority-policy", required=True)
+    release_approve.add_argument("--decision", choices=("approved", "rejected"), required=True)
+    release_approve.add_argument("--note", default="")
+    release_approve.add_argument("--output", required=True)
+    release_approve.add_argument("--force", action="store_true")
+    release_approve.set_defaults(handler=_run_release_approve)
+    release_verify = sub.add_parser("release-verify", help="离线验签发布审批")
+    for option in ("evidence", "signature", "trust-policy", "approval", "authority-policy"):
+        release_verify.add_argument("--" + option, required=True)
+    release_verify.set_defaults(handler=_run_release_verify)
+    time_verify = sub.add_parser(
+        "external-time-verify", help="导入并离线验证外部签发的可信时间证明")
+    time_verify.add_argument("--approval", required=True)
+    time_verify.add_argument("--attestation", required=True)
+    time_verify.add_argument("--authority-policy", required=True)
+    time_verify.set_defaults(handler=_run_external_time_verify)
 
     save = sub.add_parser("history-save", help="保存已校验批次到本地历史")
     save.add_argument("--manifest", required=True)

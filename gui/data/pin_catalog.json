@@ -85,6 +85,9 @@
       ],
       "gpio_interfaces": [],
       "gpio_defaults": [],
+      "exti": {
+        "endpoints": []
+      },
       "uart": {
         "endpoints": []
       },
@@ -408,6 +411,17 @@
           "debounce_ms": 10
         }
       ],
+      "exti": {
+        "endpoints": [
+          {
+            "endpoint_id": "exti0_pa0",
+            "backend_status": "planned",
+            "enabled": false,
+            "pin": "PA0",
+            "line": 0
+          }
+        ]
+      },
       "uart": {
         "endpoints": [
           {
@@ -872,6 +886,17 @@
           "debounce_ms": 10
         }
       ],
+      "exti": {
+        "endpoints": [
+          {
+            "endpoint_id": "exti13_pc13",
+            "backend_status": "planned",
+            "enabled": false,
+            "pin": "PC13",
+            "line": 13
+          }
+        ]
+      },
       "uart": {
         "endpoints": [
           {

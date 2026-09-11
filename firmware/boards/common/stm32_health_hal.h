@@ -10,5 +10,7 @@ bool rbsp_stm32_health_init(void);
 
 /* 只上报公共板层能够证明的字段；CPU/ISR/栈指标保持 unavailable。 */
 bool rbsp_stm32_health_sample(rbsp_mcu_health_sample_t* sample);
+bool rbsp_stm32_motion_epoch_init(void);
+uint64_t rbsp_stm32_motion_boot_epoch(void);
 
 #endif

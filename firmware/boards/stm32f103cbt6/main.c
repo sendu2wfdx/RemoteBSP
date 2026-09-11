@@ -1846,12 +1846,18 @@ int main(void) {
 #endif
 
     (void)rbsp_stm32_health_init();
+#ifdef CONFIG_REMOTEBSP_MOTION
+    if (!rbsp_stm32_motion_epoch_init()) { fatal_error(); }
+#endif
     rbsp_node_info_t info;
     make_node_info(&info);
     const rbsp_hal_t hal = {
         .can_send = board_can_send,
         .milliseconds = HAL_GetTick,
         .health_sample = rbsp_stm32_health_sample,
+#ifdef CONFIG_REMOTEBSP_MOTION
+        .motion_boot_epoch = rbsp_stm32_motion_boot_epoch,
+#endif
         .microseconds = board_monotonic_microseconds,
         .gpio_configure = board_gpio_configure,
         .gpio_configure_pull = board_gpio_configure_pull,

@@ -22,7 +22,7 @@ SPEC.loader.exec_module(layout)
 
 
 class FlashLayoutTests(unittest.TestCase):
-    def make_fixture(self, root: Path, *, boot_end: int = 0x0801F000,
+    def make_fixture(self, root: Path, *, boot_end: int = 0x0801E800,
                      text_end: int = 0x08018000) -> tuple[Path, Path, Path, Path]:
         config = root / "firmware.config"
         config.write_text(
@@ -34,6 +34,8 @@ class FlashLayoutTests(unittest.TestCase):
         elf.write_bytes(b"ELF fixture")
         map_path = root / "firmware.map"
         map_path.write_text(
+            " 0x0801e800 PROVIDE (__rbsp_motion_epoch_flash_start__ = x)\n"
+            " 0x0801f000 PROVIDE (__rbsp_motion_epoch_flash_end__ = x)\n"
             " 0x0801f000 PROVIDE (__rbsp_health_epoch_flash_start__ = x)\n"
             " 0x0801f800 PROVIDE (__rbsp_health_epoch_flash_end__ = x)\n"
             " 0x0801f800 PROVIDE (__rbsp_device_param_flash_start__ = x)\n"
@@ -52,7 +54,7 @@ class FlashLayoutTests(unittest.TestCase):
             "                  CONTENTS, ALLOC, LOAD, READONLY, CODE\n")
         return config, elf, map_path, root / "bootloader", objdump
 
-    def run_verify(self, *, boot_end: int = 0x0801F000,
+    def run_verify(self, *, boot_end: int = 0x0801E800,
                    text_end: int = 0x08018000) -> None:
         with tempfile.TemporaryDirectory() as directory:
             args = self.make_fixture(Path(directory), boot_end=boot_end,
@@ -67,7 +69,7 @@ class FlashLayoutTests(unittest.TestCase):
         self.run_verify()
 
     def test_rejects_katapult_overwriting_health_pages(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "未停在 health epoch 前"):
+        with self.assertRaisesRegex(SystemExit, "未停在 motion epoch 前"):
             self.run_verify(boot_end=0x0801F800)
 
     def test_rejects_loaded_section_crossing_application_end(self) -> None:

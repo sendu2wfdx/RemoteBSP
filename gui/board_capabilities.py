@@ -63,6 +63,40 @@ def validate_catalog(catalog: object) -> dict:
                 _fail(rp, "固定占用引脚重复")
             reserved_pins.add(item["pin"])
 
+        exti = board.get("exti")
+        if not isinstance(exti, dict):
+            _fail(f"{path}.exti", "必须是对象")
+        exti_ids: set[str] = set()
+        exti_lines: set[int] = set()
+        gpio_inputs = {
+            item.get("pin") for item in board.get("gpio_interfaces", [])
+            if "input" in item.get("allowed_directions", [])
+        }
+        for ei, endpoint in enumerate(_objects(
+                exti.get("endpoints"), f"{path}.exti.endpoints")):
+            ep = f"{path}.exti.endpoints[{ei}]"
+            _validate_endpoint_identity(endpoint, ep, exti_ids)
+            _validate_pins(endpoint, ("pin",), pin_set, ep)
+            _validate_backend(endpoint, ep)
+            line = endpoint.get("line")
+            if isinstance(line, bool) or not isinstance(line, int) or \
+                    not 0 <= line <= 15 or int(endpoint["pin"][2:]) != line:
+                _fail(f"{ep}.line", "必须为与引脚号一致的0～15")
+            if line in exti_lines:
+                _fail(f"{ep}.line", "同一板卡EXTI line必须唯一")
+            exti_lines.add(line)
+            if endpoint["pin"] not in gpio_inputs:
+                _fail(f"{ep}.pin", "必须引用允许输入的GPIO接口")
+            if endpoint["pin"] in reserved_pins:
+                _fail(f"{ep}.pin", "不得引用板级保留或AF占用引脚")
+            if endpoint.get("enabled") is True:
+                if endpoint["backend_status"] != "implemented":
+                    _fail(f"{ep}.enabled", "默认端点必须已经实现")
+                _validate_symbol(endpoint, ep)
+            elif endpoint["backend_status"] == "planned" and \
+                    "kconfig_symbol" in endpoint:
+                _fail(f"{ep}.kconfig_symbol", "未实现端点不得绑定固件符号")
+
         uart = board.get("uart")
         if not isinstance(uart, dict):
             _fail(f"{path}.uart", "必须是对象")

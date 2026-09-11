@@ -18,16 +18,20 @@
 
 extern uint8_t __rbsp_health_epoch_flash_start__;
 extern uint8_t __rbsp_health_epoch_flash_end__;
+extern uint8_t __rbsp_motion_epoch_flash_start__;
+extern uint8_t __rbsp_motion_epoch_flash_end__;
 
 static uint64_t producer_generation;
+static uint64_t motion_boot_epoch;
+static uintptr_t active_region_start;
+static uintptr_t active_region_end;
 
 static uintptr_t region_start(void) {
-    return (uintptr_t)&__rbsp_health_epoch_flash_start__;
+    return active_region_start;
 }
 
 static size_t region_size(void) {
-    return (size_t)((uintptr_t)&__rbsp_health_epoch_flash_end__ -
-                    region_start());
+    return (size_t)(active_region_end - region_start());
 }
 
 static const uint8_t* flash_map(void* context, uint32_t offset,
@@ -118,6 +122,8 @@ bool rbsp_stm32_health_init(void) {
     rbsp_boot_epoch_journal journal;
     memset(&backend, 0, sizeof(backend));
     producer_generation = 0U;
+    active_region_start = (uintptr_t)&__rbsp_health_epoch_flash_start__;
+    active_region_end = (uintptr_t)&__rbsp_health_epoch_flash_end__;
     backend.region_size = (uint32_t)region_size();
     backend.erase_size = FLASH_PAGE_SIZE;
 #if defined(CONFIG_BOARD_STM32G431CBU6)
@@ -131,6 +137,31 @@ bool rbsp_stm32_health_init(void) {
     return rbsp_boot_epoch_journal_init(&journal, &backend) &&
            rbsp_boot_epoch_journal_advance(&journal,
                                            &producer_generation);
+}
+
+bool rbsp_stm32_motion_epoch_init(void) {
+    rbsp_device_param_backend backend;
+    rbsp_boot_epoch_journal journal;
+    memset(&backend, 0, sizeof(backend));
+    motion_boot_epoch = 0U;
+    active_region_start = (uintptr_t)&__rbsp_motion_epoch_flash_start__;
+    active_region_end = (uintptr_t)&__rbsp_motion_epoch_flash_end__;
+    backend.region_size = (uint32_t)region_size();
+    backend.erase_size = FLASH_PAGE_SIZE;
+#if defined(CONFIG_BOARD_STM32G431CBU6)
+    backend.program_size = 8U;
+#else
+    backend.program_size = 2U;
+#endif
+    backend.map = flash_map;
+    backend.erase = flash_erase;
+    backend.program = flash_program;
+    return rbsp_boot_epoch_journal_init(&journal, &backend) &&
+           rbsp_boot_epoch_journal_advance(&journal, &motion_boot_epoch);
+}
+
+uint64_t rbsp_stm32_motion_boot_epoch(void) {
+    return motion_boot_epoch;
 }
 
 bool rbsp_stm32_health_sample(rbsp_mcu_health_sample_t* sample) {
